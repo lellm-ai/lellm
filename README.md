@@ -12,17 +12,16 @@ Rust 版本的 LangChain / LangGraph / AutoGen。
 
 ## 安装
 
+默认启用 `provider` feature：
+
 ```toml
 [dependencies]
-lellm = { version = "0.1", features = ["provider"] }
+lellm = "0.1"
 ```
 
 按需加载：
 
 ```toml
-# 只用 Provider
-lellm = { version = "0.1", default-features = false, features = ["provider"] }
-
 # 启用 Agent
 lellm = { version = "0.1", features = ["agent"] }
 

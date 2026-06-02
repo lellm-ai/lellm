@@ -1,9 +1,14 @@
 //! LeLLM — Rust LLM orchestration framework.
 //!
-//! ```toml
-//! # 只用 Provider
-//! lellm = { version = "0.1", default-features = false, features = ["provider"] }
+//! 默认启用 `provider` feature：
 //!
+//! ```toml
+//! lellm = "0.1"
+//! ```
+//!
+//! 按需加载：
+//!
+//! ```toml
 //! # 启用 Agent
 //! lellm = { version = "0.1", features = ["agent"] }
 //!
