@@ -124,8 +124,7 @@ impl ToolUseLoop {
             };
 
             let mut tool_calls_executed = 0usize;
-            let mut last_text = String::new();
-            let mut last_usage = lellm_core::TokenUsage::default();
+            let mut last_response: Option<ChatResponse> = None;
             let mut completed = false;
 
             for iteration in 1..=max_iterations {
@@ -142,6 +141,7 @@ impl ToolUseLoop {
                         use futures_util::StreamExt;
                         let mut stream = stream;
                         let mut text_buffer = String::new();
+                        let mut pending_tool_calls = Vec::<lellm_core::ToolCall>::new();
 
                         let mut iteration_over = false;
 
@@ -165,23 +165,32 @@ impl ToolUseLoop {
                                         .await;
                                 }
                                 Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
-                                    last_text = text_buffer.clone();
-                                    last_usage = usage.unwrap_or_default();
+                                    pending_tool_calls = tool_calls;
+                                    let usage_val = usage.unwrap_or_default();
 
-                                    if !tool_calls.is_empty() {
-                                        let content: Vec<lellm_core::ContentBlock> =
-                                            lellm_core::text_block(text_buffer.clone())
-                                                .into_iter()
-                                                .chain(tool_calls.iter().map(|tc| {
-                                                    lellm_core::ContentBlock::ToolCall(tc.clone())
-                                                }))
-                                                .collect();
+                                    // 统一构建 ChatResponse — 无论有无 tool_calls
+                                    let content: Vec<lellm_core::ContentBlock> =
+                                        lellm_core::text_block(text_buffer.clone())
+                                            .into_iter()
+                                            .chain(pending_tool_calls.iter().map(|tc| {
+                                                lellm_core::ContentBlock::ToolCall(tc.clone())
+                                            }))
+                                            .collect();
 
-                                        req.messages.push(Message::Assistant { content });
-                                        tool_calls_executed += tool_calls.len();
+                                    let response = ChatResponse::new(
+                                        content,
+                                        usage_val,
+                                        serde_json::json!(null),
+                                    );
+
+                                    if !pending_tool_calls.is_empty() {
+                                        req.messages.push(Message::Assistant {
+                                            content: response.content.clone(),
+                                        });
+                                        tool_calls_executed += pending_tool_calls.len();
 
                                         let mut tool_results = Vec::new();
-                                        for tc in &tool_calls {
+                                        for tc in &pending_tool_calls {
                                             let _ = tx
                                                 .send(Ok(AgentEvent::ToolStart {
                                                     tool_call_id: tc.id.clone(),
@@ -212,18 +221,15 @@ impl ToolUseLoop {
                                         }
                                         req.messages.extend(tool_results);
 
+                                        // 保存为 last_response，供 MaxIterationsReached 使用
+                                        last_response = Some(response);
+
                                         tracing::debug!(
                                             iteration,
-                                            tool_calls = tool_calls.len(),
+                                            tool_calls = pending_tool_calls.len(),
                                             "tool-use stream iteration"
                                         );
                                     } else {
-                                        let response = ChatResponse::new(
-                                            lellm_core::text_block(text_buffer.clone()),
-                                            last_usage,
-                                            serde_json::Value::Null,
-                                        );
-
                                         let _ = tx
                                             .send(Ok(AgentEvent::Provider(
                                                 lellm_provider::ProviderEvent::Done {
@@ -271,11 +277,13 @@ impl ToolUseLoop {
 
             // 达到最大轮次 — 仅在未完成时发送
             if !completed {
-                let response = ChatResponse::new(
-                    lellm_core::text_block(last_text),
-                    last_usage,
-                    serde_json::Value::Null,
-                );
+                let response = last_response.unwrap_or_else(|| {
+                    ChatResponse::new(
+                        lellm_core::text_block(String::new()),
+                        lellm_core::TokenUsage::default(),
+                        serde_json::Value::Null,
+                    )
+                });
                 let _ = tx
                     .send(Ok(AgentEvent::LoopEnd {
                         result: ToolUseResult {
