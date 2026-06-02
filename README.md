@@ -14,9 +14,10 @@ Rust 版本的 LangChain / LangGraph / AutoGen。
 
 ```toml
 [dependencies]
-lellm-core = "0.1"
 lellm-provider = "0.1"
 ```
+
+`lellm-core` 会作为传递依赖自动引入。
 
 ## 快速开始
 
