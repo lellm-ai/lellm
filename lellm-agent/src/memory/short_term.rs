@@ -1,62 +1,58 @@
-//! 短期记忆 — 环形缓冲区，默认 200 条容量。
+//! 短期记忆 — 基于 VecDeque 的对话历史窗口。
 
-use super::{MemoryEntry, MemoryType};
+use std::collections::VecDeque;
 
-#[derive(Debug)]
+use lellm_core::Message;
+
+/// 短期记忆 — 环形缓冲区，默认 200 条容量。
 pub struct ShortTermMemory {
-    buffer: Vec<MemoryEntry>,
+    messages: VecDeque<Message>,
     capacity: usize,
-    next_id: u64,
 }
 
 impl ShortTermMemory {
     pub fn new(capacity: usize) -> Self {
         Self {
-            buffer: Vec::new(),
+            messages: VecDeque::with_capacity(capacity),
             capacity,
-            next_id: 1,
         }
     }
 
-    pub fn add(&mut self, content: String, r#type: MemoryType) {
-        if self.buffer.len() >= self.capacity {
-            self.buffer.remove(0);
+    pub fn push(&mut self, msg: Message) {
+        if self.messages.len() >= self.capacity {
+            self.messages.pop_front();
         }
-
-        let entry = MemoryEntry {
-            id: self.next_id,
-            content,
-            r#type: r#type.clone(),
-            timestamp: chrono::Utc::now(),
-            score: r#type.default_score(),
-        };
-
-        self.next_id += 1;
-        self.buffer.push(entry);
+        self.messages.push_back(msg);
     }
 
-    pub fn recent(&self, n: usize) -> &[MemoryEntry] {
-        if n >= self.buffer.len() {
-            &self.buffer
+    /// 获取最近 n 条消息
+    pub fn recent(&self, n: usize) -> Vec<Message> {
+        if n >= self.messages.len() {
+            self.messages.iter().cloned().collect()
         } else {
-            &self.buffer[self.buffer.len() - n..]
+            self.messages
+                .iter()
+                .skip(self.messages.len() - n)
+                .cloned()
+                .collect()
         }
     }
 
-    pub fn entries(&self) -> &[MemoryEntry] {
-        &self.buffer
+    /// 获取所有消息
+    pub fn messages(&self) -> Vec<Message> {
+        self.messages.iter().cloned().collect()
     }
 
     pub fn len(&self) -> usize {
-        self.buffer.len()
+        self.messages.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+        self.messages.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.buffer.clear();
+        self.messages.clear();
     }
 }
 

@@ -6,7 +6,7 @@
 pub mod memory;
 pub mod tools;
 
-pub use memory::{LongTermMemory, MemoryEntry, MemoryStore, MemoryType, ShortTermMemory};
+pub use memory::ShortTermMemory;
 pub use tools::{
     BackoffStrategy, DefaultFallback, FallbackContext, FallbackReason, FallbackResult,
     FallbackStrategy, LoopDetector, LoopIntervention, NegativeSignal, ParallelSafety, RetryPolicy,

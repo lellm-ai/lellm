@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = ["sqlite"]
-sqlite = ["dep:sqlx"]
-
 [dependencies]
 lellm-core.workspace = true
 lellm-provider.workspace = true
@@ -18,5 +14,4 @@ tokio.workspace = true
 tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-chrono.workspace = true
-sqlx = { workspace = true, optional = true }
+futures-core.workspace = true
