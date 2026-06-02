@@ -77,6 +77,27 @@ pub enum Message {
 }
 
 impl Message {
+    /// 返回适合 API 序列化的 role 字符串。
+    /// OpenAI / Anthropic 统一使用 `role` 字段。
+    pub fn role(&self) -> &str {
+        match self {
+            Message::System { .. } => "system",
+            Message::User { .. } => "user",
+            Message::Assistant { .. } => "assistant",
+            Message::ToolResult { .. } => "tool_result",
+        }
+    }
+
+    /// 返回内容块的引用（用于 provider 适配器序列化）
+    pub fn content(&self) -> &Vec<ContentBlock> {
+        match self {
+            Message::System { content }
+            | Message::User { content }
+            | Message::Assistant { content }
+            | Message::ToolResult { content, .. } => content,
+        }
+    }
+
     /// 提取所有文本块拼接为字符串
     pub fn extract_text(&self) -> String {
         match self {

@@ -106,9 +106,10 @@ impl ToolUseLoop {
 
     /// 流式执行，返回事件接收器
     ///
-    /// 契约：
-    /// - 成功路径：发送事件（含 `LoopEnd`），然后 channel 关闭
-    /// - 失败路径：发送 `Err(LlmError)`，然后 channel 关闭
+    /// 终态契约：
+    /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
+    /// - 异常结束：`LoopError` 恰好一次，然后 channel 关闭
+    /// - 终态事件后不再发送任何事件
     /// - 绝不会发送伪造的 `ToolEnd { tool_call_id: "", .. }`
     pub fn execute_stream(self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -129,11 +130,9 @@ impl ToolUseLoop {
 
             for iteration in 1..=max_iterations {
                 let _ = tx
-                    .send(Ok(AgentEvent::Provider(
-                        lellm_provider::ProviderEvent::Start {
-                            model: model.model.clone(),
-                        },
-                    )))
+                    .send(AgentEvent::Provider(lellm_provider::ProviderEvent::Start {
+                        model: model.model.clone(),
+                    }))
                     .await;
 
                 match model.provider.stream(&req).await {
@@ -149,19 +148,19 @@ impl ToolUseLoop {
                             match event {
                                 Ok(lellm_provider::ProviderEvent::Start { .. }) => {
                                     let _ = tx
-                                        .send(Ok(AgentEvent::Provider(
+                                        .send(AgentEvent::Provider(
                                             lellm_provider::ProviderEvent::Start {
                                                 model: model.model.clone(),
                                             },
-                                        )))
+                                        ))
                                         .await;
                                 }
                                 Ok(lellm_provider::ProviderEvent::Token { token }) => {
                                     text_buffer.push_str(&token);
                                     let _ = tx
-                                        .send(Ok(AgentEvent::Provider(
+                                        .send(AgentEvent::Provider(
                                             lellm_provider::ProviderEvent::Token { token },
-                                        )))
+                                        ))
                                         .await;
                                 }
                                 Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
@@ -192,19 +191,19 @@ impl ToolUseLoop {
                                         let mut tool_results = Vec::new();
                                         for tc in &pending_tool_calls {
                                             let _ = tx
-                                                .send(Ok(AgentEvent::ToolStart {
+                                                .send(AgentEvent::ToolStart {
                                                     tool_call_id: tc.id.clone(),
                                                     name: tc.name.clone(),
-                                                }))
+                                                })
                                                 .await;
 
                                             let result = executor.execute(tc).await;
 
                                             let _ = tx
-                                                .send(Ok(AgentEvent::ToolEnd {
+                                                .send(AgentEvent::ToolEnd {
                                                     tool_call_id: tc.id.clone(),
                                                     result: result.clone(),
-                                                }))
+                                                })
                                                 .await;
 
                                             let content_str = match &result {
@@ -231,16 +230,16 @@ impl ToolUseLoop {
                                         );
                                     } else {
                                         let _ = tx
-                                            .send(Ok(AgentEvent::Provider(
+                                            .send(AgentEvent::Provider(
                                                 lellm_provider::ProviderEvent::Done {
                                                     tool_calls: Vec::new(),
                                                     usage: Some(response.usage),
                                                 },
-                                            )))
+                                            ))
                                             .await;
 
                                         let _ = tx
-                                            .send(Ok(AgentEvent::LoopEnd {
+                                            .send(AgentEvent::LoopEnd {
                                                 result: ToolUseResult {
                                                     stop_reason: StopReason::Complete,
                                                     response,
@@ -248,7 +247,7 @@ impl ToolUseLoop {
                                                     iterations: iteration,
                                                     tool_calls_executed,
                                                 },
-                                            }))
+                                            })
                                             .await;
 
                                         completed = true;
@@ -257,7 +256,13 @@ impl ToolUseLoop {
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(Err(e)).await;
+                                    let _ = tx
+                                        .send(AgentEvent::LoopError {
+                                            error: e,
+                                            iterations: iteration,
+                                            messages: req.messages.clone(),
+                                        })
+                                        .await;
                                     iteration_over = true;
                                     break;
                                 }
@@ -269,7 +274,13 @@ impl ToolUseLoop {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(e)).await;
+                        let _ = tx
+                            .send(AgentEvent::LoopError {
+                                error: e,
+                                iterations: iteration,
+                                messages: req.messages.clone(),
+                            })
+                            .await;
                         break;
                     }
                 }
@@ -285,7 +296,7 @@ impl ToolUseLoop {
                     )
                 });
                 let _ = tx
-                    .send(Ok(AgentEvent::LoopEnd {
+                    .send(AgentEvent::LoopEnd {
                         result: ToolUseResult {
                             stop_reason: StopReason::MaxIterationsReached,
                             response,
@@ -293,7 +304,7 @@ impl ToolUseLoop {
                             iterations: max_iterations,
                             tool_calls_executed,
                         },
-                    }))
+                    })
                     .await;
             }
         });

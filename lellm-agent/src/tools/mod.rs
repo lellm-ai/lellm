@@ -22,8 +22,13 @@ pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
 pub use retry::{BackoffStrategy, RetryPolicy, ToolErrorKind};
 pub use signal_voter::{NegativeSignal, SignalVoter};
 
-/// Agent 层流式事件
-#[derive(Debug, Clone)]
+/// Agent 层流式事件 — 封闭、强类型、exhaustive match
+///
+/// 终态契约：
+/// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
+/// - 异常结束：`LoopError` 恰好一次，然后 channel 关闭
+/// - 终态事件后不再发送任何事件
+#[derive(Debug)]
 pub enum AgentEvent {
     /// Provider 层事件
     Provider(lellm_provider::ProviderEvent),
@@ -34,10 +39,21 @@ pub enum AgentEvent {
         tool_call_id: String,
         result: ToolCallResult,
     },
-    /// Agent loop 正常结束（发送且仅发送一次，然后 channel 关闭）
+    /// 工具重试
+    Retry {
+        tool_call_id: String,
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
+    /// Agent loop 正常结束（恰好一次，后不再发送）
     LoopEnd { result: ToolUseResult },
-    /// 自定义事件
-    Custom { data: serde_json::Value },
+    /// Agent loop 异常结束（恰好一次，后不再发送）
+    LoopError {
+        error: lellm_core::LlmError,
+        iterations: usize,
+        messages: Vec<lellm_core::Message>,
+    },
 }
 
 /// Agent loop 停止原因 — 描述"为什么停止"，而非"响应长什么样"
@@ -54,4 +70,4 @@ pub enum StopReason {
 }
 
 /// Agent 层流式事件通道类型别名
-pub type AgentStream = tokio::sync::mpsc::Receiver<Result<AgentEvent, lellm_core::LlmError>>;
+pub type AgentStream = tokio::sync::mpsc::Receiver<AgentEvent>;
