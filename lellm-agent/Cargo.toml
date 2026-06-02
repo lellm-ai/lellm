@@ -3,6 +3,9 @@ name = "lellm-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Agent Runtime for LeLLM — ToolUseLoop, Executor, Fallback"
+documentation = "https://docs.rs/lellm-agent"
+repository = "https://github.com/pengh/lellm"
 
 [dependencies]
 lellm-core.workspace = true

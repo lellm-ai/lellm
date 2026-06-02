@@ -3,6 +3,9 @@ name = "lellm-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Provider adapters for LeLLM — OpenAI, Anthropic, and more"
+documentation = "https://docs.rs/lellm-provider"
+repository = "https://github.com/pengh/lellm"
 
 [features]
 default = ["openai", "anthropic", "openai-compat"]
