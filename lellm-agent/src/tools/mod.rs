@@ -40,19 +40,17 @@ pub enum AgentEvent {
     Custom { data: serde_json::Value },
 }
 
-/// Agent loop 停止原因
+/// Agent loop 停止原因 — 描述"为什么停止"，而非"响应长什么样"
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
-    /// LLM 返回纯文本，无 tool_calls
+    /// Agent 已获得最终答案并正常结束
     Complete,
     /// 达到最大轮次
     MaxIterationsReached,
-    /// 循环检测触发
+    /// 检测到循环
     LoopDetected,
-    /// Fallback 降级完成
+    /// Fallback 主动给出最终结果
     FallbackComplete,
-    /// 用户取消
-    Cancelled,
 }
 
 /// Agent 层流式事件通道类型别名
