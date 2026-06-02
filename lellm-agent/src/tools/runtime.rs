@@ -1,4 +1,4 @@
-//! ToolUseLoop — LLM ↔ 工具调用闭环。
+//! Agent Runtime — LLM ↔ 工具调用闭环。
 //!
 //! 负责 LLM 返回 tool_calls → 执行工具 → 结果注入 → 再次调用 LLM 的循环，
 //! 直到 LLM 返回纯文本或达到最大轮次。

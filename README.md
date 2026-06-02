@@ -14,17 +14,20 @@ Rust 版本的 LangChain / LangGraph / AutoGen。
 
 ```toml
 [dependencies]
-lellm = "0.1"
+lellm = { version = "0.1", features = ["provider"] }
 ```
 
-默认启用 `provider` feature。按需加载：
+按需加载：
 
 ```toml
-# 仅 provider（默认）
-lellm = "0.1"
+# 只用 Provider
+lellm = { version = "0.1", default-features = false, features = ["provider"] }
 
-# 启用 agent（进行中）
-lellm = { version = "0.1", features = ["provider", "agent"] }
+# 启用 Agent
+lellm = { version = "0.1", features = ["agent"] }
+
+# 全部启用
+lellm = { version = "0.1", features = ["full"] }
 ```
 
 ## 快速开始
@@ -160,8 +163,9 @@ cargo run -p lellm-provider --example streaming
 
 ```
 lellm/
-├── lellm-core/          # 核心类型（Message, ChatRequest, LlmError 等）
+├── lellm/               # Facade 统一入口
+├── lellm-core/          # 协议（Message, ChatRequest, LlmError 等）
 ├── lellm-provider/      # Provider 适配层（OpenAI, Anthropic, ...）
-├── lellm-agent/         # Agent 编排层（进行中）
-└── lellm-macros/        # 宏（进行中）
+├── lellm-agent/         # Agent Runtime（ToolUseLoop, Executor, ...）
+└── lellm-macros/        # Derive 宏
 ```

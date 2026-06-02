@@ -6,10 +6,11 @@ license.workspace = true
 description = "Rust LLM orchestration framework — LangChain / LangGraph / AutoGen in Rust"
 
 [features]
-default = ["provider"]
+default = []
 provider = ["dep:lellm-core", "dep:lellm-provider"]
 agent = ["dep:lellm-core", "dep:lellm-agent"]
 macros = ["dep:lellm-macros"]
+full = ["provider", "agent", "macros"]
 
 [dependencies]
 lellm-core = { workspace = true, optional = true }

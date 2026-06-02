@@ -5,10 +5,10 @@
 
 pub mod executor;
 pub mod fallback;
-pub mod loop_;
 pub mod loop_detector;
 pub mod registry;
 pub mod retry;
+pub mod runtime;
 pub mod signal_voter;
 
 pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
@@ -16,10 +16,10 @@ pub use fallback::{
     DefaultFallback, FallbackAction, FallbackContext, FallbackReason, FallbackStrategy,
 };
 pub use lellm_provider::ResolvedModel;
-pub use loop_::{ToolCallResult, ToolUseLoop, ToolUseResult};
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
 pub use retry::{BackoffStrategy, RetryPolicy, ToolErrorKind};
+pub use runtime::{ToolCallResult, ToolUseLoop, ToolUseResult};
 pub use signal_voter::{NegativeSignal, SignalVoter};
 
 /// Agent 层流式事件 — 封闭、强类型、exhaustive match
