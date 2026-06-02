@@ -32,10 +32,28 @@ pub enum AgentEvent {
     /// 工具执行完成
     ToolEnd {
         tool_call_id: String,
-        result: String,
+        result: ToolCallResult,
     },
-    /// 重试
-    Retry { reason: String },
+    /// Agent loop 正常结束（发送且仅发送一次，然后 channel 关闭）
+    LoopEnd { result: ToolUseResult },
     /// 自定义事件
     Custom { data: serde_json::Value },
 }
+
+/// Agent loop 停止原因
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// LLM 返回纯文本，无 tool_calls
+    Complete,
+    /// 达到最大轮次
+    MaxIterationsReached,
+    /// 循环检测触发
+    LoopDetected,
+    /// Fallback 降级完成
+    FallbackComplete,
+    /// 用户取消
+    Cancelled,
+}
+
+/// Agent 层流式事件通道类型别名
+pub type AgentStream = tokio::sync::mpsc::Receiver<Result<AgentEvent, lellm_core::LlmError>>;
