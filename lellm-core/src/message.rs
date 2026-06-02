@@ -33,13 +33,6 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
-/// 工具调用结果。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    pub content: String,
-}
-
 /// 内容块 — Message 和 ChatResponse 的基本组成单元。
 /// 核心层极简，无 provider 特有标记。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,7 +42,6 @@ pub enum ContentBlock {
     Thinking(ThinkingBlock),
     Image { source: ImageSource },
     ToolCall(ToolCall),
-    ToolResult(ToolResult),
 }
 
 impl ContentBlock {
@@ -63,13 +55,6 @@ impl ContentBlock {
             _ => None,
         }
     }
-}
-
-/// 缓存控制标记（provider 层使用，此处仅做前向声明）
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum CacheControl {
-    #[serde(rename = "ephemeral_buffer")]
-    EphemeralBuffer,
 }
 
 /// 对话中的单条消息。

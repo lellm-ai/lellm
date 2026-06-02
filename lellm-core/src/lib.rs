@@ -13,8 +13,7 @@ pub mod response;
 
 pub use error::{LellmError, LlmError, MemoryError, ParseError, ToolError};
 pub use message::{
-    CacheControl, ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall,
-    ToolResult, text_block,
+    ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall, text_block,
 };
 pub use request::{ChatRequest, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};

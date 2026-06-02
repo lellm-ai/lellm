@@ -9,38 +9,27 @@ use super::{ContentBlock, ToolCall};
 pub struct ChatResponse {
     /// 响应内容块列表，与 `Message::Assistant` 的 content 类型对齐。
     pub content: Vec<ContentBlock>,
+    /// 冗余缓存，从 content 中提取的 tool_calls，方便访问。
+    pub tool_calls: Vec<ToolCall>,
     pub usage: TokenUsage,
     pub raw: serde_json::Value,
 }
 
 impl ChatResponse {
-    /// 提取所有文本块拼接为字符串（便捷方法）。
-    pub fn extract_text(&self) -> String {
-        self.content
+    /// 构造函数 — 自动从 content 中提取 tool_calls
+    pub fn new(
+        content: Vec<ContentBlock>,
+        usage: TokenUsage,
+        raw: serde_json::Value,
+    ) -> Self {
+        let tool_calls = content
             .iter()
-            .filter_map(|b| b.as_text().map(|s| s.to_string()))
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    /// 提取所有 ToolCall。
-    pub fn extract_tool_calls(&self) -> Vec<ToolCall> {
-        self.content
-            .iter()
-            .filter_map(|b| {
-                if let ContentBlock::ToolCall(tc) = b {
-                    Some(tc.clone())
-                } else {
-                    None
-                }
+            .filter_map(|b| match b {
+                ContentBlock::ToolCall(tc) => Some(tc.clone()),
+                _ => None,
             })
-            .collect()
-    }
-
-    pub fn has_tool_calls(&self) -> bool {
-        self.content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolCall(_)))
+            .collect();
+        Self { content, tool_calls, usage, raw }
     }
 }
 
