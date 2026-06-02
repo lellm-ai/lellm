@@ -14,18 +14,26 @@ Rust 版本的 LangChain / LangGraph / AutoGen。
 
 ```toml
 [dependencies]
-lellm-provider = "0.1"
+lellm = "0.1"
 ```
 
-`lellm-core` 会作为传递依赖自动引入。
+默认启用 `provider` feature。按需加载：
+
+```toml
+# 仅 provider（默认）
+lellm = "0.1"
+
+# 启用 agent（进行中）
+lellm = { version = "0.1", features = ["provider", "agent"] }
+```
 
 ## 快速开始
 
 ### 初始化 Provider
 
 ```rust
-use lellm_provider::providers::base::{GenericProvider, ProviderConfig};
-use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
+use lellm::provider::providers::base::{GenericProvider, ProviderConfig};
+use lellm::provider::providers::openai_compat::OpenAICompatAdapter;
 
 let provider = GenericProvider::new(
     OpenAICompatAdapter::openai(),
@@ -41,8 +49,8 @@ let provider = GenericProvider::new(
 ### 单条消息调用
 
 ```rust
-use lellm_core::{ChatRequest, ContentBlock};
-use lellm_provider::LlmProvider;
+use lellm::core::{ChatRequest, ContentBlock};
+use lellm::provider::LlmProvider;
 
 let request = ChatRequest::user_prompt("为什么鹦鹉有五颜六色的羽毛？".into())
     .with_temperature(0.7);
@@ -64,7 +72,7 @@ println!(
 ### 多轮对话
 
 ```rust
-use lellm_core::{ChatRequest, Message, text_block};
+use lellm::core::{ChatRequest, Message, text_block};
 
 let messages: Vec<Message> = vec![
     Message::System {
@@ -93,7 +101,7 @@ let response = provider.call(&request).await?;
 
 ```rust
 use futures_util::StreamExt;
-use lellm_provider::{LlmProvider, ProviderEvent};
+use lellm::provider::{LlmProvider, ProviderEvent};
 
 let request = ChatRequest::user_prompt("用三句话介绍 Rust。".into());
 let mut stream = provider.stream(&request).await?;

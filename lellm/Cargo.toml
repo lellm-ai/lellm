@@ -1,0 +1,18 @@
+[package]
+name = "lellm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust LLM orchestration framework — LangChain / LangGraph / AutoGen in Rust"
+
+[features]
+default = ["provider"]
+provider = ["dep:lellm-core", "dep:lellm-provider"]
+agent = ["dep:lellm-core", "dep:lellm-agent"]
+macros = ["dep:lellm-macros"]
+
+[dependencies]
+lellm-core = { workspace = true, optional = true }
+lellm-provider = { workspace = true, optional = true }
+lellm-agent = { workspace = true, optional = true }
+lellm-macros = { workspace = true, optional = true }

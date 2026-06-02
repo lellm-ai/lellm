@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "lellm",
     "lellm-core",
     "lellm-provider",
     "lellm-agent",

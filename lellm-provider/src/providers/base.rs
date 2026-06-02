@@ -80,7 +80,7 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
     pub fn new(adapter: A, config: ProviderConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .user_agent(format!("lellm/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("LeLLM/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();
 
