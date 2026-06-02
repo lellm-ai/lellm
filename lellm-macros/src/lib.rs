@@ -12,7 +12,9 @@ use syn::{DeriveInput, parse_macro_input};
 /// - `from_args(&serde_json::Value) -> Result<Self, ToolError>` — 参数反序列化
 ///
 /// # 示例
-/// ```ignore
+/// ```rust
+/// use lellm_macros::ToolDefinition;
+///
 /// #[derive(ToolDefinition)]
 /// pub struct ReadFile {
 ///     /// 文件路径
