@@ -59,7 +59,7 @@ impl ToolUseLoop {
         for iteration in 1..=self.max_iterations {
             let response = self.provider.llm_call(&req).await?;
 
-            if !response.has_tool_calls() {
+            if response.tool_calls.is_empty() {
                 return Ok(ToolUseResult {
                     response,
                     messages: req.messages,
@@ -67,7 +67,7 @@ impl ToolUseLoop {
                 });
             }
 
-            let tool_calls = response.extract_tool_calls();
+            let tool_calls = response.tool_calls.clone();
 
             req.messages.push(Message::Assistant {
                 content: response.content.clone(),
@@ -83,9 +83,8 @@ impl ToolUseLoop {
             );
         }
 
-        Err(LlmError::ApiError {
-            status: 0,
-            body: format!(
+        Err(LlmError::Other {
+            message: format!(
                 "tool-use loop exceeded max iterations ({})",
                 self.max_iterations
             ),

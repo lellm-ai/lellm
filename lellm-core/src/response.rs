@@ -17,11 +17,7 @@ pub struct ChatResponse {
 
 impl ChatResponse {
     /// 构造函数 — 自动从 content 中提取 tool_calls
-    pub fn new(
-        content: Vec<ContentBlock>,
-        usage: TokenUsage,
-        raw: serde_json::Value,
-    ) -> Self {
+    pub fn new(content: Vec<ContentBlock>, usage: TokenUsage, raw: serde_json::Value) -> Self {
         let tool_calls = content
             .iter()
             .filter_map(|b| match b {
@@ -29,7 +25,12 @@ impl ChatResponse {
                 _ => None,
             })
             .collect();
-        Self { content, tool_calls, usage, raw }
+        Self {
+            content,
+            tool_calls,
+            usage,
+            raw,
+        }
     }
 }
 
