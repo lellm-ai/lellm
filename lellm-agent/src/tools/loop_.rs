@@ -3,19 +3,10 @@
 //! 负责 LLM 返回 tool_calls → 执行工具 → 结果注入 → 再次调用 LLM 的循环，
 //! 直到 LLM 返回纯文本或达到最大轮次。
 
-use std::sync::Arc;
-
 use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
-use lellm_provider::LlmProvider;
+use lellm_provider::ResolvedModel;
 
 use super::executor::ToolExecutor;
-
-/// 解析后的模型 — 绑定 provider + model
-#[derive(Clone)]
-pub struct ResolvedModel {
-    pub provider: Arc<dyn LlmProvider>,
-    pub model: String,
-}
 
 /// 工具执行结果
 #[derive(Debug, Clone)]

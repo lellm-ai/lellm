@@ -15,7 +15,8 @@ pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration}
 pub use fallback::{
     DefaultFallback, FallbackAction, FallbackContext, FallbackReason, FallbackStrategy,
 };
-pub use loop_::{ResolvedModel, ToolCallResult, ToolUseLoop, ToolUseResult};
+pub use lellm_provider::ResolvedModel;
+pub use loop_::{ToolCallResult, ToolUseLoop, ToolUseResult};
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
 pub use retry::{BackoffStrategy, RetryPolicy, ToolErrorKind};

@@ -3,8 +3,8 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use futures_core::Stream;
-use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage};
+use futures_util::stream;
+use lellm_core::{ChatRequest, ChatResponse, LlmError};
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
@@ -75,7 +75,7 @@ impl LlmProvider for MockProvider {
             }),
         ];
 
-        let stream = futures_core::stream::iter(events);
+        let stream = stream::iter(events);
         Ok(Box::pin(stream))
     }
 

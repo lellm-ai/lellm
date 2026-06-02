@@ -1,7 +1,14 @@
 //! ModelRouter — 任务分级路由。
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use lellm_core::LlmError;
+
+use crate::LlmProvider;
+
 /// 任务级别。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskLevel {
     /// 快速/便宜，如简单问答、格式转换
     Flash,
@@ -11,45 +18,87 @@ pub enum TaskLevel {
     Pro,
 }
 
-/// Provider 的模型映射。
+/// 路由条目 — Provider + Model 的组合
 #[derive(Debug, Clone)]
-pub struct ProviderModels {
-    pub flash: String,
-    pub standard: String,
-    pub pro: String,
+pub struct RouteEntry {
+    pub provider_id: String,
+    pub model: String,
 }
 
-/// ModelRouter 配置。
-#[derive(Debug, Clone)]
-pub struct ModelRouterConfig {
-    pub providers: Vec<(String, ProviderModels)>,
-    pub default_level: TaskLevel,
+/// 解析后的模型 — 从 Registry 中解析 RouteEntry 得到
+#[derive(Clone)]
+pub struct ResolvedModel {
+    pub provider: Arc<dyn LlmProvider>,
+    pub model: String,
 }
 
-impl Default for ModelRouterConfig {
-    fn default() -> Self {
-        Self {
-            providers: Vec::new(),
-            default_level: TaskLevel::Standard,
-        }
-    }
-}
-
-/// 模型路由器 — 根据任务级别选择模型。
+/// 模型路由器 — 根据任务级别选择路由。
 pub struct ModelRouter {
-    #[allow(dead_code)]
-    config: ModelRouterConfig,
+    routes: HashMap<TaskLevel, RouteEntry>,
 }
 
 impl ModelRouter {
-    pub fn new(config: ModelRouterConfig) -> Self {
-        Self { config }
+    pub fn new() -> Self {
+        Self {
+            routes: HashMap::new(),
+        }
     }
 
-    /// 根据任务级别解析模型名称
-    pub fn resolve_model(&self, level: TaskLevel) -> Option<&str> {
-        // TODO: 根据 level 查找对应的模型
-        let _ = level;
-        None
+    pub fn add_route(&mut self, level: TaskLevel, entry: RouteEntry) {
+        self.routes.insert(level, entry);
+    }
+
+    /// 根据任务级别解析路由
+    pub fn resolve(&self, level: TaskLevel) -> Option<&RouteEntry> {
+        self.routes.get(&level)
+    }
+}
+
+impl Default for ModelRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Provider 注册表 — 持有所有 Provider 实例。
+pub struct ProviderRegistry {
+    providers: HashMap<String, Arc<dyn LlmProvider>>,
+}
+
+impl ProviderRegistry {
+    pub fn new() -> Self {
+        Self {
+            providers: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, id: &str, provider: Arc<dyn LlmProvider>) {
+        self.providers.insert(id.to_string(), provider);
+    }
+
+    pub fn get(&self, id: &str) -> Option<Arc<dyn LlmProvider>> {
+        self.providers.get(id).cloned()
+    }
+
+    /// 从 RouteEntry 解析为 ResolvedModel
+    pub fn resolve(&self, route: &RouteEntry) -> Result<ResolvedModel, LlmError> {
+        let provider = self
+            .get(&route.provider_id)
+            .ok_or_else(|| LlmError::ApiError {
+                provider: route.provider_id.clone(),
+                status: 0,
+                code: None,
+                message: format!("provider not registered: {}", route.provider_id),
+            })?;
+        Ok(ResolvedModel {
+            provider,
+            model: route.model.clone(),
+        })
+    }
+}
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -15,7 +15,7 @@ pub mod router;
 #[cfg(feature = "mock")]
 pub use providers::mock::*;
 pub use providers::{anthropic::*, base::*, openai_compat::*};
-pub use router::{ModelRouter, ModelRouterConfig, ProviderModels, TaskLevel};
+pub use router::{ModelRouter, ProviderRegistry, ResolvedModel, RouteEntry, TaskLevel};
 
 /// 流式调用返回的 Stream 类型别名。
 pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ProviderEvent, LlmError>> + Send>>;

@@ -21,4 +21,5 @@ tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 reqwest = { version = "0.12", features = ["json", "stream"] }
-futures-core = "0.3"
+futures-core.workspace = true
+futures-util.workspace = true
