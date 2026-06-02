@@ -99,12 +99,125 @@ impl ToolUseLoop {
         })
     }
 
-    /// 流式执行，返回事件接收器（P4 实现）
+    /// 流式执行，返回事件接收器
     pub fn execute_stream(
         self,
+        messages: Vec<Message>,
     ) -> tokio::sync::mpsc::Receiver<Result<super::AgentEvent, LlmError>> {
-        // TODO: P4 — 实现流式执行
-        let (_tx, rx) = tokio::sync::mpsc::channel(32);
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let model = self.model.clone();
+        let executor = self.executor;
+        let max_iterations = self.max_iterations;
+
+        tokio::spawn(async move {
+            let mut req = ChatRequest {
+                model: model.model.clone(),
+                messages,
+                ..Default::default()
+            };
+
+            for _iteration in 1..=max_iterations {
+                let _ = tx.send(Ok(super::AgentEvent::Provider(
+                    lellm_provider::ProviderEvent::Start {
+                        model: model.model.clone(),
+                    }
+                ))).await;
+
+                match model.provider.stream(&req).await {
+                    Ok(stream) => {
+                        use futures_util::StreamExt;
+                        let mut stream = stream;
+                        let mut text_buffer = String::new();
+
+                        while let Some(event) = stream.next().await {
+                            match event {
+                                Ok(lellm_provider::ProviderEvent::Start { .. }) => {
+                                    let _ = tx.send(Ok(super::AgentEvent::Provider(
+                                        lellm_provider::ProviderEvent::Start {
+                                            model: model.model.clone(),
+                                        }
+                                    ))).await;
+                                }
+                                Ok(lellm_provider::ProviderEvent::Token { token }) => {
+                                    text_buffer.push_str(&token);
+                                    let _ = tx.send(Ok(super::AgentEvent::Provider(
+                                        lellm_provider::ProviderEvent::Token { token }
+                                    ))).await;
+                                }
+                                Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
+                                    if !tool_calls.is_empty() {
+                                        let content: Vec<lellm_core::ContentBlock> =
+                                            lellm_core::text_block(text_buffer.clone())
+                                                .into_iter()
+                                                .chain(tool_calls.iter().map(|tc| {
+                                                    lellm_core::ContentBlock::ToolCall(tc.clone())
+                                                }))
+                                                .collect();
+
+                                        req.messages.push(Message::Assistant { content });
+
+                                        let mut tool_results = Vec::new();
+                                        for tc in &tool_calls {
+                                            let _ = tx.send(Ok(super::AgentEvent::ToolStart {
+                                                tool_call_id: tc.id.clone(),
+                                                name: tc.name.clone(),
+                                            })).await;
+
+                                            let result = executor.execute(tc).await;
+                                            let result_str = match &result {
+                                                super::ToolCallResult::Ok(s) => s.clone(),
+                                                super::ToolCallResult::Err(e) => format!("tool error: {e}"),
+                                            };
+
+                                            let _ = tx.send(Ok(super::AgentEvent::ToolEnd {
+                                                tool_call_id: tc.id.clone(),
+                                                result: result_str.clone(),
+                                            })).await;
+
+                                            tool_results.push(Message::ToolResult {
+                                                tool_call_id: tc.id.clone(),
+                                                content: lellm_core::text_block(result_str),
+                                            });
+                                        }
+                                        req.messages.extend(tool_results);
+                                    } else {
+                                        let usage_val = usage.unwrap_or_default();
+                                        let response = ChatResponse::new(
+                                            lellm_core::text_block(text_buffer.clone()),
+                                            usage_val,
+                                            serde_json::Value::Null,
+                                        );
+
+                                        let _ = tx.send(Ok(super::AgentEvent::Provider(
+                                            lellm_provider::ProviderEvent::Done {
+                                                tool_calls: Vec::new(),
+                                                usage: Some(response.usage),
+                                            }
+                                        ))).await;
+
+                                        let _ = tx.send(Ok(super::AgentEvent::ToolEnd {
+                                            tool_call_id: String::new(),
+                                            result: text_buffer,
+                                        })).await;
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(Err(e)).await;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                    }
+                }
+
+                tracing::debug!("tool-use stream iteration");
+            }
+        });
+
         rx
     }
 }

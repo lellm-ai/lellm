@@ -15,3 +15,4 @@ tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 futures-core.workspace = true
+futures-util.workspace = true
