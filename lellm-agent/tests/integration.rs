@@ -1,4 +1,4 @@
-use lellm_agent::{ToolCategory, ToolCallResult, ToolExecutor, ToolRegistration, ToolUseLoop};
+use lellm_agent::{ToolCallResult, ToolCategory, ToolExecutor, ToolRegistration, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;

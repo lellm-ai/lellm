@@ -25,6 +25,7 @@ pub struct HttpResponse {
 }
 
 /// 流式 chunk — Adapter 解析协议后返回
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum StreamChunk {
     TextDelta(String),
@@ -38,6 +39,7 @@ pub(crate) enum StreamChunk {
 }
 
 /// 流式解析结果 — 三态
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum StreamParseResult {
     Chunk(StreamChunk),
@@ -46,6 +48,7 @@ pub(crate) enum StreamParseResult {
 }
 
 /// Provider 适配器 trait — 各 provider 只需实现此 trait。
+#[allow(dead_code)]
 pub(crate) trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &str;
     fn build_request(&self, req: &ChatRequest) -> Result<HttpRequest, LlmError>;
@@ -64,6 +67,7 @@ pub struct GenericProvider<A: ProviderAdapter> {
     config: ProviderConfig,
 }
 
+#[allow(private_bounds)]
 impl<A: ProviderAdapter> GenericProvider<A> {
     pub fn new(adapter: A, config: ProviderConfig) -> Self {
         let client = reqwest::Client::builder()
@@ -100,15 +104,18 @@ impl Default for ProviderConfig {
 }
 
 /// ToolCall 增量组装器（GenericProvider 内部使用）
+#[allow(dead_code)]
 pub(crate) struct ToolCallAccumulator {
     current: HashMap<String, PendingToolCall>,
 }
 
+#[allow(dead_code)]
 struct PendingToolCall {
     name: Option<String>,
     arguments: String,
 }
 
+#[allow(dead_code)]
 impl ToolCallAccumulator {
     pub fn new() -> Self {
         Self {
@@ -137,7 +144,7 @@ impl ToolCallAccumulator {
         for (id, pending) in self.current {
             let name = pending.name.unwrap_or_else(|| "unknown".to_string());
             let arguments: serde_json::Value = serde_json::from_str(&pending.arguments)
-                .unwrap_or_else(|_| serde_json::Value::String(pending.arguments));
+                .unwrap_or(serde_json::Value::String(pending.arguments));
             result.push(ToolCall {
                 id,
                 name,

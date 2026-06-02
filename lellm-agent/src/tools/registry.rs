@@ -53,7 +53,7 @@ impl ToolRegistry {
         self.tools.insert(name.to_string(), result);
         self.categories
             .entry(category)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(name.to_string());
     }
 
@@ -61,7 +61,7 @@ impl ToolRegistry {
         for syn in synonyms {
             self.synonyms
                 .entry(syn.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(tool_name.to_string());
         }
     }
@@ -79,10 +79,10 @@ impl ToolRegistry {
 
         if let Some(names) = self.synonyms.get(&query_lower) {
             for name in names {
-                if seen.insert(name) {
-                    if let Some(result) = self.tools.get(name) {
-                        results.push(result.clone());
-                    }
+                if seen.insert(name)
+                    && let Some(result) = self.tools.get(name)
+                {
+                    results.push(result.clone());
                 }
             }
         }

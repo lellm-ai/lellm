@@ -108,11 +108,13 @@ impl ToolUseLoop {
             };
 
             for _iteration in 1..=max_iterations {
-                let _ = tx.send(Ok(super::AgentEvent::Provider(
-                    lellm_provider::ProviderEvent::Start {
-                        model: model.model.clone(),
-                    }
-                ))).await;
+                let _ = tx
+                    .send(Ok(super::AgentEvent::Provider(
+                        lellm_provider::ProviderEvent::Start {
+                            model: model.model.clone(),
+                        },
+                    )))
+                    .await;
 
                 match model.provider.stream(&req).await {
                     Ok(stream) => {
@@ -123,17 +125,21 @@ impl ToolUseLoop {
                         while let Some(event) = stream.next().await {
                             match event {
                                 Ok(lellm_provider::ProviderEvent::Start { .. }) => {
-                                    let _ = tx.send(Ok(super::AgentEvent::Provider(
-                                        lellm_provider::ProviderEvent::Start {
-                                            model: model.model.clone(),
-                                        }
-                                    ))).await;
+                                    let _ = tx
+                                        .send(Ok(super::AgentEvent::Provider(
+                                            lellm_provider::ProviderEvent::Start {
+                                                model: model.model.clone(),
+                                            },
+                                        )))
+                                        .await;
                                 }
                                 Ok(lellm_provider::ProviderEvent::Token { token }) => {
                                     text_buffer.push_str(&token);
-                                    let _ = tx.send(Ok(super::AgentEvent::Provider(
-                                        lellm_provider::ProviderEvent::Token { token }
-                                    ))).await;
+                                    let _ = tx
+                                        .send(Ok(super::AgentEvent::Provider(
+                                            lellm_provider::ProviderEvent::Token { token },
+                                        )))
+                                        .await;
                                 }
                                 Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
                                     if !tool_calls.is_empty() {
@@ -149,21 +155,27 @@ impl ToolUseLoop {
 
                                         let mut tool_results = Vec::new();
                                         for tc in &tool_calls {
-                                            let _ = tx.send(Ok(super::AgentEvent::ToolStart {
-                                                tool_call_id: tc.id.clone(),
-                                                name: tc.name.clone(),
-                                            })).await;
+                                            let _ = tx
+                                                .send(Ok(super::AgentEvent::ToolStart {
+                                                    tool_call_id: tc.id.clone(),
+                                                    name: tc.name.clone(),
+                                                }))
+                                                .await;
 
                                             let result = executor.execute(tc).await;
                                             let result_str = match &result {
                                                 super::ToolCallResult::Ok(s) => s.clone(),
-                                                super::ToolCallResult::Err(e) => format!("tool error: {e}"),
+                                                super::ToolCallResult::Err(e) => {
+                                                    format!("tool error: {e}")
+                                                }
                                             };
 
-                                            let _ = tx.send(Ok(super::AgentEvent::ToolEnd {
-                                                tool_call_id: tc.id.clone(),
-                                                result: result_str.clone(),
-                                            })).await;
+                                            let _ = tx
+                                                .send(Ok(super::AgentEvent::ToolEnd {
+                                                    tool_call_id: tc.id.clone(),
+                                                    result: result_str.clone(),
+                                                }))
+                                                .await;
 
                                             tool_results.push(Message::ToolResult {
                                                 tool_call_id: tc.id.clone(),
@@ -179,17 +191,21 @@ impl ToolUseLoop {
                                             serde_json::Value::Null,
                                         );
 
-                                        let _ = tx.send(Ok(super::AgentEvent::Provider(
-                                            lellm_provider::ProviderEvent::Done {
-                                                tool_calls: Vec::new(),
-                                                usage: Some(response.usage),
-                                            }
-                                        ))).await;
+                                        let _ = tx
+                                            .send(Ok(super::AgentEvent::Provider(
+                                                lellm_provider::ProviderEvent::Done {
+                                                    tool_calls: Vec::new(),
+                                                    usage: Some(response.usage),
+                                                },
+                                            )))
+                                            .await;
 
-                                        let _ = tx.send(Ok(super::AgentEvent::ToolEnd {
-                                            tool_call_id: String::new(),
-                                            result: text_buffer,
-                                        })).await;
+                                        let _ = tx
+                                            .send(Ok(super::AgentEvent::ToolEnd {
+                                                tool_call_id: String::new(),
+                                                result: text_buffer,
+                                            }))
+                                            .await;
                                         break;
                                     }
                                 }

@@ -38,7 +38,10 @@ async fn test_mock_provider_stream() {
 
     assert!(events.len() >= 3);
     assert!(matches!(events[0], ProviderEvent::Start { .. }));
-    assert!(matches!(events[events.len() - 1], ProviderEvent::Done { .. }));
+    assert!(matches!(
+        events[events.len() - 1],
+        ProviderEvent::Done { .. }
+    ));
 }
 
 #[tokio::test]
