@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 description = "Rust LLM orchestration framework — LangChain / LangGraph / AutoGen in Rust"
 documentation = "https://docs.rs/lellm"
-repository = "https://github.com/pengh/lellm"
+repository = "https://github.com/penghcn/lellm"
 
 [features]
 default = []
