@@ -16,3 +16,6 @@ anyhow.workspace = true
 tracing.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+
+[dev-dependencies]
+lellm-provider = { path = "../lellm-provider", features = ["mock"] }

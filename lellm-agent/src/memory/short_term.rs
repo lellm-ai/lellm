@@ -61,3 +61,54 @@ impl Default for ShortTermMemory {
         Self::new(200)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_short_term_memory_push_and_messages() {
+        let mut memory = ShortTermMemory::new(10);
+        memory.push(Message::User {
+            content: lellm_core::text_block("hello".to_string()),
+        });
+        assert_eq!(memory.len(), 1);
+        assert!(!memory.is_empty());
+    }
+
+    #[test]
+    fn test_short_term_memory_capacity() {
+        let mut memory = ShortTermMemory::new(2);
+        for i in 0..5 {
+            memory.push(Message::User {
+                content: lellm_core::text_block(format!("msg{}", i)),
+            });
+        }
+        assert_eq!(memory.len(), 2);
+        let recent = memory.recent(2);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].extract_text(), "msg3");
+        assert_eq!(recent[1].extract_text(), "msg4");
+    }
+
+    #[test]
+    fn test_short_term_memory_clear() {
+        let mut memory = ShortTermMemory::new(10);
+        memory.push(Message::User {
+            content: lellm_core::text_block("hello".to_string()),
+        });
+        memory.clear();
+        assert!(memory.is_empty());
+    }
+
+    #[test]
+    fn test_short_term_memory_default_capacity() {
+        let mut memory = ShortTermMemory::default();
+        for i in 0..205 {
+            memory.push(Message::User {
+                content: lellm_core::text_block(format!("msg{}", i)),
+            });
+        }
+        assert_eq!(memory.len(), 200);
+    }
+}

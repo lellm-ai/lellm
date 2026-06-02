@@ -9,7 +9,7 @@ pub mod tools;
 pub use memory::ShortTermMemory;
 pub use tools::{
     BackoffStrategy, DefaultFallback, FallbackAction, FallbackContext, FallbackReason,
-    FallbackStrategy, LoopDetector, LoopIntervention, NegativeSignal, ParallelSafety, RetryPolicy,
-    SignalVoter, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry, ToolSearchResult,
-    ToolSource, ToolUseLoop, ToolUseResult,
+    FallbackStrategy, LoopDetector, LoopIntervention, NegativeSignal, ParallelSafety, ResolvedModel,
+    RetryPolicy, SignalVoter, ToolCallResult, ToolCategory, ToolErrorKind, ToolExecutor,
+    ToolRegistration, ToolRegistry, ToolSearchResult, ToolSource, ToolUseLoop, ToolUseResult,
 };

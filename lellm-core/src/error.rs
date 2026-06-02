@@ -74,3 +74,39 @@ pub enum MemoryError {
 pub struct ParseError {
     pub detail: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_llm_error_display() {
+        let err = LlmError::Timeout;
+        assert_eq!(format!("{}", err), "request timeout");
+    }
+
+    #[test]
+    fn test_llm_error_api_error_display() {
+        let err = LlmError::ApiError {
+            provider: "openai".into(),
+            status: 429,
+            code: Some("rate_limit".into()),
+            message: "Too many requests".into(),
+        };
+        assert!(format!("{}", err).contains("openai"));
+        assert!(format!("{}", err).contains("429"));
+    }
+
+    #[test]
+    fn test_tool_error_display() {
+        let err = ToolError::NotFound("read_file".into());
+        assert_eq!(format!("{}", err), "tool not found: read_file");
+    }
+
+    #[test]
+    fn test_lellm_error_from_llm_error() {
+        let llm_err = LlmError::Timeout;
+        let top_err: LellmError = llm_err.into();
+        assert!(format!("{}", top_err).contains("LLM error"));
+    }
+}

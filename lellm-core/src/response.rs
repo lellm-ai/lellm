@@ -41,3 +41,32 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     pub total_tokens: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentBlock, ToolCall};
+
+    #[test]
+    fn test_chat_response_new_extracts_tool_calls() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "test".into(),
+            arguments: serde_json::json!({}),
+        };
+        let content = vec![
+            ContentBlock::text("hello".to_string()),
+            ContentBlock::ToolCall(tc.clone()),
+        ];
+        let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "1");
+    }
+
+    #[test]
+    fn test_chat_response_no_tool_calls() {
+        let content = vec![ContentBlock::text("hello".to_string())];
+        let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
+        assert!(resp.tool_calls.is_empty());
+    }
+}

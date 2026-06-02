@@ -117,3 +117,47 @@ impl Message {
 pub fn text_block(s: String) -> Vec<ContentBlock> {
     vec![ContentBlock::text(s)]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_content_block_text() {
+        let block = ContentBlock::text("hello".to_string());
+        assert_eq!(block.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_content_block_tool_call_no_as_text() {
+        let block = ContentBlock::ToolCall(ToolCall {
+            id: "1".into(),
+            name: "test".into(),
+            arguments: serde_json::json!({}),
+        });
+        assert_eq!(block.as_text(), None);
+    }
+
+    #[test]
+    fn test_message_extract_text() {
+        let msg = Message::User {
+            content: text_block("hello world".to_string()),
+        };
+        assert_eq!(msg.extract_text(), "hello world");
+    }
+
+    #[test]
+    fn test_message_extract_tool_calls() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "test".into(),
+            arguments: serde_json::json!({}),
+        };
+        let msg = Message::Assistant {
+            content: vec![ContentBlock::ToolCall(tc.clone())],
+        };
+        let calls = msg.extract_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "test");
+    }
+}
