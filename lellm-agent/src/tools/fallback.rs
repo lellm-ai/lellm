@@ -1,96 +1,83 @@
 //! 降级策略 — 可注入的 Fallback 回调。
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use lellm_core::{ChatRequest, Message};
+use lellm_core::{ChatResponse, LlmError, Message, ToolError};
 
 /// 降级原因
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FallbackReason {
-    SignalEscalation,
-    LoopDetected,
-    MaxIterationsExceeded,
-    Timeout,
-}
-
-impl std::fmt::Display for FallbackReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FallbackReason::SignalEscalation => write!(f, "signal escalation"),
-            FallbackReason::LoopDetected => write!(f, "loop detected"),
-            FallbackReason::MaxIterationsExceeded => write!(f, "max iterations exceeded"),
-            FallbackReason::Timeout => write!(f, "timeout"),
-        }
-    }
-}
-
-/// 降级执行结果
 #[derive(Debug)]
-pub struct FallbackResult {
-    pub success: bool,
-    pub output: String,
-    pub reason: Option<FallbackReason>,
-    pub token_usage: u32,
+pub enum FallbackReason {
+    LlmError(LlmError),
+    ToolError(ToolError),
+    LoopDetected,
+    MaxIterationsReached,
 }
 
-impl FallbackResult {
-    pub fn success(output: impl Into<String>, token_usage: u32) -> Self {
-        Self {
-            success: true,
-            output: output.into(),
-            reason: None,
-            token_usage,
-        }
-    }
-
-    pub fn failure(output: impl Into<String>, reason: FallbackReason) -> Self {
-        Self {
-            success: false,
-            output: output.into(),
-            reason: Some(reason),
-            token_usage: 0,
-        }
-    }
-}
-
-/// Fallback 上下文 — 传递给回调的信息
+/// Fallback 上下文
 pub struct FallbackContext {
-    pub original_request: ChatRequest,
-    pub iterations: usize,
-    pub error: Option<String>,
-    pub messages: Vec<Message>,
+    pub reason: FallbackReason,
+    pub conversation: Arc<[Message]>,
+    pub attempt: usize,
+    pub max_attempts: usize,
 }
 
-/// Fallback 策略 trait — 可注入的回调
+/// Fallback 动作
+#[derive(Debug, Clone)]
+pub enum FallbackAction {
+    Retry,
+    RetryWithMessages(Vec<Message>),
+    SwitchProvider(String),
+    Complete(ChatResponse),
+    Abort,
+}
+
+/// Fallback 策略 trait
 #[async_trait]
 pub trait FallbackStrategy: Send + Sync {
-    fn reason(&self) -> FallbackReason;
-    async fn handle(&self, context: &FallbackContext) -> FallbackResult;
+    async fn handle(&self, ctx: &FallbackContext) -> FallbackAction;
 }
 
-/// 默认 fallback — 将错误信息注入回对话
+/// 默认 fallback 策略
 pub struct DefaultFallback {
-    reason: FallbackReason,
+    max_retries: usize,
 }
 
 impl DefaultFallback {
-    pub fn new(reason: FallbackReason) -> Self {
-        Self { reason }
+    pub fn new(max_retries: usize) -> Self {
+        Self { max_retries }
+    }
+
+    /// 判断错误是否可重试
+    fn is_retriable(error: &LlmError) -> bool {
+        match error {
+            LlmError::Timeout | LlmError::Network { .. } => true,
+            LlmError::ApiError { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
+}
+
+impl Default for DefaultFallback {
+    fn default() -> Self {
+        Self::new(3)
     }
 }
 
 #[async_trait]
 impl FallbackStrategy for DefaultFallback {
-    fn reason(&self) -> FallbackReason {
-        self.reason
-    }
-
-    async fn handle(&self, ctx: &FallbackContext) -> FallbackResult {
-        FallbackResult::failure(
-            format!(
-                "tool loop failed: {:?}, executed {} iterations",
-                ctx.error, ctx.iterations
-            ),
-            self.reason,
-        )
+    async fn handle(&self, ctx: &FallbackContext) -> FallbackAction {
+        match &ctx.reason {
+            FallbackReason::LlmError(error) => {
+                if Self::is_retriable(error) && ctx.attempt < self.max_retries {
+                    FallbackAction::Retry
+                } else {
+                    FallbackAction::Abort
+                }
+            }
+            FallbackReason::ToolError(_)
+            | FallbackReason::LoopDetected
+            | FallbackReason::MaxIterationsReached => FallbackAction::Abort,
+        }
     }
 }

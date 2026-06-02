@@ -13,7 +13,7 @@ pub mod signal_voter;
 
 pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
 pub use fallback::{
-    DefaultFallback, FallbackContext, FallbackReason, FallbackResult, FallbackStrategy,
+    DefaultFallback, FallbackAction, FallbackContext, FallbackReason, FallbackStrategy,
 };
 pub use loop_::{ResolvedModel, ToolCallResult, ToolUseLoop, ToolUseResult};
 pub use loop_detector::{LoopDetector, LoopIntervention};
