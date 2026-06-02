@@ -1,5 +1,6 @@
 //! 工具执行器 — 注册、分派、批量执行、并行安全分级。
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -8,26 +9,42 @@ use lellm_core::{Message, ToolCall};
 
 use super::ToolCallResult;
 
+/// 工具安全分级
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParallelSafety {
+    Safe,
+    CategoryExclusive,
+    Exclusive,
+}
+
+/// 工具类别 — 用于 CategoryExclusive 的分组
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ToolCategory(pub Cow<'static, str>);
+
+impl ToolCategory {
+    pub const FILE_IO: Self = Self(Cow::Borrowed("file_io"));
+    pub const NETWORK: Self = Self(Cow::Borrowed("network"));
+    pub const DATABASE: Self = Self(Cow::Borrowed("database"));
+
+    pub fn custom(name: impl Into<Cow<'static, str>>) -> Self {
+        Self(name.into())
+    }
+}
+
+/// 工具注册信息（包含安全分级 + 执行函数）。
+pub struct ToolRegistration {
+    safety: ParallelSafety,
+    #[allow(dead_code)]
+    category: Option<ToolCategory>,
+    func: ToolFn,
+}
+
 /// 异步工具函数类型
 type ToolFn = Arc<
     dyn Fn(&serde_json::Value) -> Pin<Box<dyn std::future::Future<Output = ToolCallResult> + Send>>
         + Send
         + Sync,
 >;
-
-/// 工具安全分级
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParallelSafety {
-    Safe,
-    CategoryExclusive(&'static str),
-    Exclusive,
-}
-
-/// 工具注册信息（包含安全分级 + 执行函数）。
-pub struct ToolRegistration {
-    safety: ParallelSafety,
-    func: ToolFn,
-}
 
 impl ToolRegistration {
     pub fn safe<F, Fut>(f: F) -> Self
@@ -37,17 +54,19 @@ impl ToolRegistration {
     {
         Self {
             safety: ParallelSafety::Safe,
+            category: None,
             func: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
         }
     }
 
-    pub fn category_exclusive<F, Fut>(category: &'static str, f: F) -> Self
+    pub fn category_exclusive<F, Fut>(category: ToolCategory, f: F) -> Self
     where
         F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ToolCallResult> + Send + 'static,
     {
         Self {
-            safety: ParallelSafety::CategoryExclusive(category),
+            safety: ParallelSafety::CategoryExclusive,
+            category: Some(category),
             func: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
         }
     }
@@ -59,6 +78,7 @@ impl ToolRegistration {
     {
         Self {
             safety: ParallelSafety::Exclusive,
+            category: None,
             func: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
         }
     }
@@ -122,7 +142,7 @@ impl ToolExecutor {
             let safety = self.safety_for(&call.name);
             match safety {
                 ParallelSafety::Safe => safe.push(call.clone()),
-                ParallelSafety::CategoryExclusive(_) | ParallelSafety::Exclusive => {
+                ParallelSafety::CategoryExclusive | ParallelSafety::Exclusive => {
                     exclusive.push(call.clone());
                 }
             }

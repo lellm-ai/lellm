@@ -6,9 +6,16 @@
 use std::sync::Arc;
 
 use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
-use lellm_provider::{LlmProvider, StreamEvent, StreamMode};
+use lellm_provider::LlmProvider;
 
 use super::executor::ToolExecutor;
+
+/// 解析后的模型 — 绑定 provider + model
+#[derive(Clone)]
+pub struct ResolvedModel {
+    pub provider: Arc<dyn LlmProvider>,
+    pub model: String,
+}
 
 /// 工具执行结果
 #[derive(Debug, Clone)]
@@ -25,39 +32,37 @@ pub struct ToolUseResult {
     pub iterations: usize,
 }
 
-/// 管理 LLM ↔ 工具调用闭环
+/// 管理 LLM 与工具调用闭环
 pub struct ToolUseLoop {
-    provider: Arc<dyn LlmProvider>,
+    model: ResolvedModel,
     executor: ToolExecutor,
-    request: ChatRequest,
     max_iterations: usize,
 }
 
 impl ToolUseLoop {
-    pub fn new(
-        provider: Arc<dyn LlmProvider>,
-        executor: ToolExecutor,
-        request: ChatRequest,
-    ) -> Self {
+    pub fn new(model: ResolvedModel, executor: ToolExecutor) -> Self {
         Self {
-            provider,
+            model,
             executor,
-            request,
             max_iterations: 15,
         }
     }
 
-    pub fn set_max_iterations(&mut self, max: usize) -> &mut Self {
+    pub fn set_max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
         self
     }
 
     /// 非流式执行
-    pub async fn execute(self) -> Result<ToolUseResult, LlmError> {
-        let mut req = self.request;
+    pub async fn execute(self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
+        let mut req = ChatRequest {
+            model: self.model.model.clone(),
+            messages,
+            ..Default::default()
+        };
 
         for iteration in 1..=self.max_iterations {
-            let response = self.provider.llm_call(&req).await?;
+            let response = self.model.provider.call(&req).await?;
 
             if response.tool_calls.is_empty() {
                 return Ok(ToolUseResult {
@@ -83,7 +88,10 @@ impl ToolUseLoop {
             );
         }
 
-        Err(LlmError::Other {
+        Err(LlmError::ApiError {
+            provider: self.model.provider.provider_id().to_string(),
+            status: 0,
+            code: None,
             message: format!(
                 "tool-use loop exceeded max iterations ({})",
                 self.max_iterations
@@ -91,14 +99,12 @@ impl ToolUseLoop {
         })
     }
 
-    /// 流式执行，返回事件接收器
+    /// 流式执行，返回事件接收器（P4 实现）
     pub fn execute_stream(
         self,
-        _mode: StreamMode,
-    ) -> tokio::sync::mpsc::Receiver<Result<StreamEvent, LlmError>> {
-        // TODO: 实现流式执行
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let _ = tx;
+    ) -> tokio::sync::mpsc::Receiver<Result<super::AgentEvent, LlmError>> {
+        // TODO: P4 — 实现流式执行
+        let (_tx, rx) = tokio::sync::mpsc::channel(32);
         rx
     }
 }
