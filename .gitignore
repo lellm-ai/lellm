@@ -1,0 +1,48 @@
+# Environment variables
+.env
+.env.local
+.env.production
+.env.*.local
+.env.*.local.example
+config.toml
+
+# Rust build artifacts
+target/
+**/target/
+Cargo.lock
+
+# IDE / editor
+.idea/
+*.swp
+*.swo
+*~
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Logs
+logs/
+
+# Claude Code
+.claude/
+
+# Plans (internal temporary files)
+.planning/
+.codegraph/
+
+superpowers/
+**/superpowers/
+
+# Secret / key files
+*.pem
+*.key
+*.p12
+*.crt
+*.pfx
+credentials.json
+*.secret
+
+# OS generated
+Thumbs.db

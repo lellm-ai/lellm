@@ -1,0 +1,24 @@
+[package]
+name = "lellm-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["openai", "anthropic", "openai-compat"]
+openai = []
+anthropic = []
+openai-compat = []
+mock = []
+
+[dependencies]
+lellm-core.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-core = "0.3"
