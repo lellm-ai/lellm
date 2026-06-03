@@ -5,8 +5,8 @@ use lellm_core::{
 };
 
 use super::base::{
-    HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, StreamChunk, StreamParseResult,
-    ToolCallDelta,
+    HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, SseEvent, StreamChunk,
+    StreamParseResult, ToolCallDelta,
 };
 
 /// Anthropic 适配器。
@@ -24,7 +24,11 @@ impl ProviderAdapter for AnthropicAdapter {
         config: &ProviderConfig,
         stream: bool,
     ) -> Result<HttpRequest, LlmError> {
-        let url = format!("{}/v1/messages", config.base_url);
+        let url = config
+            .base_url
+            .join("/v1/messages")
+            .unwrap_or_else(|_| config.base_url.clone())
+            .to_string();
 
         // Anthropic 需要 {"role": "...", "content": [...]} 格式
         // system 消息必须放在单独的 system 字段，不能在 messages 数组中
@@ -92,7 +96,10 @@ impl ProviderAdapter for AnthropicAdapter {
 
         // 构建 Anthropic 请求 body
         let mut body = serde_json::Map::new();
-        body.insert("model".into(), config.model.clone().into());
+        body.insert(
+            "model".into(),
+            config.effective_model(&req.model).to_string().into(),
+        );
         if !system_text.is_empty() {
             body.insert("system".into(), system_text.into());
         }
@@ -122,14 +129,18 @@ impl ProviderAdapter for AnthropicAdapter {
             detail: format!("Failed to serialize request body: {}", e),
         })?;
 
+        let mut headers = vec![
+            ("Content-Type".into(), "application/json".into()),
+            ("anthropic-version".into(), "2023-06-01".into()),
+        ];
+        if let Some((name, value)) = config.auth.get_header() {
+            headers.push((name.to_string(), value));
+        }
+
         Ok(HttpRequest {
             url,
             method: "POST".into(),
-            headers: vec![
-                ("Content-Type".into(), "application/json".into()),
-                ("x-api-key".into(), config.api_key.clone()),
-                ("anthropic-version".into(), "2023-06-01".into()),
-            ],
+            headers,
             body: Some(body_bytes.into_bytes()),
             stream,
         })
@@ -204,101 +215,83 @@ impl ProviderAdapter for AnthropicAdapter {
         Ok(ChatResponse::new(content, usage, raw))
     }
 
-    fn parse_stream_chunk(&self, chunk: &[u8]) -> Result<StreamParseResult, LlmError> {
-        let text = std::str::from_utf8(chunk).map_err(|e| LlmError::ParseError {
-            detail: format!("Invalid UTF-8: {}", e),
-        })?;
+    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError> {
+        let data = &event.data;
+        if data.is_empty() {
+            return Ok(StreamParseResult::empty());
+        }
 
-        // Anthropic SSE 格式 — 每行独立处理
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("event:") {
-                continue;
+        let val: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| LlmError::ParseError {
+                detail: format!("Invalid SSE JSON: {}", e),
+            })?;
+
+        let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match event_type {
+            "content_block_start" => {
+                // tool_use 类型在此事件中携带 id + name
+                let block = val.get("content_block").unwrap_or(&serde_json::Value::Null);
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if block_type == "tool_use" {
+                    let index = val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let id = block.get("id").and_then(|v| v.as_str()).map(|s| s.into());
+                    let name = block.get("name").and_then(|v| v.as_str()).map(|s| s.into());
+                    return Ok(StreamParseResult::chunk(StreamChunk::ToolCallDelta(
+                        ToolCallDelta {
+                            index,
+                            id,
+                            name,
+                            arguments_delta: None,
+                        },
+                    )));
+                }
             }
+            "content_block_delta" => {
+                let delta = val.get("delta").unwrap_or(&serde_json::Value::Null);
+                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let index = val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-            let json_str = if let Some(stripped) = line.strip_prefix("data: ") {
-                stripped
-            } else {
-                line
-            };
-
-            let json_str = json_str.trim();
-            if json_str.is_empty() {
-                continue;
-            }
-
-            let val: serde_json::Value =
-                serde_json::from_str(json_str).map_err(|e| LlmError::ParseError {
-                    detail: format!("Invalid SSE JSON: {}", e),
-                })?;
-
-            let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            match event_type {
-                "content_block_start" => {
-                    // tool_use 类型在此事件中携带 id + name
-                    let block = val.get("content_block").unwrap_or(&serde_json::Value::Null);
-                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if block_type == "tool_use" {
-                        let index = val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let id = block.get("id").and_then(|v| v.as_str()).map(|s| s.into());
-                        let name = block.get("name").and_then(|v| v.as_str()).map(|s| s.into());
+                if delta_type == "text_delta" {
+                    if let Some(text) = delta.get("text").and_then(|t| t.as_str())
+                        && !text.is_empty()
+                    {
+                        return Ok(StreamParseResult::chunk(StreamChunk::TextDelta(
+                            text.into(),
+                        )));
+                    }
+                } else if delta_type == "input_json_delta" {
+                    let partial = delta
+                        .get("partial_json")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    if partial.is_some() {
                         return Ok(StreamParseResult::chunk(StreamChunk::ToolCallDelta(
                             ToolCallDelta {
                                 index,
-                                id,
-                                name,
-                                arguments_delta: None,
+                                id: None,
+                                name: None,
+                                arguments_delta: partial,
                             },
                         )));
                     }
                 }
-                "content_block_delta" => {
-                    let delta = val.get("delta").unwrap_or(&serde_json::Value::Null);
-                    let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    let index = val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-                    if delta_type == "text_delta" {
-                        if let Some(text) = delta.get("text").and_then(|t| t.as_str())
-                            && !text.is_empty()
-                        {
-                            return Ok(StreamParseResult::chunk(StreamChunk::TextDelta(
-                                text.into(),
-                            )));
-                        }
-                    } else if delta_type == "input_json_delta" {
-                        let partial = delta
-                            .get("partial_json")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        if partial.is_some() {
-                            return Ok(StreamParseResult::chunk(StreamChunk::ToolCallDelta(
-                                ToolCallDelta {
-                                    index,
-                                    id: None,
-                                    name: None,
-                                    arguments_delta: partial,
-                                },
-                            )));
-                        }
-                    }
-                }
-                "message_delta" => {
-                    // 提取 usage
-                    if let Some(usage_val) = val.get("usage") {
-                        let usage = TokenUsage {
-                            prompt_tokens: 0,
-                            completion_tokens: usage_val
-                                .get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32,
-                            total_tokens: 0,
-                        };
-                        return Ok(StreamParseResult::chunk(StreamChunk::Usage(usage)));
-                    }
-                    return Ok(StreamParseResult::chunk(StreamChunk::Done));
-                }
-                _ => {}
             }
+            "message_delta" => {
+                // 提取 usage
+                if let Some(usage_val) = val.get("usage") {
+                    let usage = TokenUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: usage_val
+                            .get("output_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        total_tokens: 0,
+                    };
+                    return Ok(StreamParseResult::chunk(StreamChunk::Usage(usage)));
+                }
+                return Ok(StreamParseResult::chunk(StreamChunk::Done));
+            }
+            _ => {}
         }
 
         Ok(StreamParseResult::empty())

@@ -7,8 +7,8 @@ use lellm_core::{
 };
 
 use super::base::{
-    HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, StreamChunk, StreamParseResult,
-    ToolCallDelta,
+    HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, SseEvent, StreamChunk,
+    StreamParseResult, ToolCallDelta,
 };
 
 /// OpenAI 兼容适配器 — 一个实现覆盖所有 OpenAI 兼容 provider。
@@ -61,7 +61,11 @@ impl ProviderAdapter for OpenAICompatAdapter {
         config: &ProviderConfig,
         stream: bool,
     ) -> Result<HttpRequest, LlmError> {
-        let url = format!("{}/chat/completions", config.base_url);
+        let url = config
+            .base_url
+            .join("/v1/chat/completions")
+            .unwrap_or_else(|_| config.base_url.clone())
+            .to_string();
 
         // 构建请求 body
         // OpenAI 需要 {"role": "...", "content": "..."} 格式
@@ -110,7 +114,10 @@ impl ProviderAdapter for OpenAICompatAdapter {
             .collect();
 
         let mut body = serde_json::Map::new();
-        body.insert("model".into(), config.model.clone().into());
+        body.insert(
+            "model".into(),
+            config.effective_model(&req.model).to_string().into(),
+        );
         body.insert(
             "messages".into(),
             serde_json::to_value(messages).map_err(|e| LlmError::ParseError {
@@ -136,13 +143,15 @@ impl ProviderAdapter for OpenAICompatAdapter {
             detail: format!("Failed to serialize request body: {}", e),
         })?;
 
+        let mut headers = vec![("Content-Type".into(), "application/json".into())];
+        if let Some((name, value)) = config.auth.get_header() {
+            headers.push((name.to_string(), value));
+        }
+
         Ok(HttpRequest {
             url,
             method: "POST".into(),
-            headers: vec![
-                ("Content-Type".into(), "application/json".into()),
-                ("Authorization".into(), format!("Bearer {}", config.api_key)),
-            ],
+            headers,
             body: Some(body_bytes.into_bytes()),
             stream,
         })
@@ -216,104 +225,87 @@ impl ProviderAdapter for OpenAICompatAdapter {
         Ok(ChatResponse::new(content, usage, raw))
     }
 
-    fn parse_stream_chunk(&self, chunk: &[u8]) -> Result<StreamParseResult, LlmError> {
-        let text = std::str::from_utf8(chunk).map_err(|e| LlmError::ParseError {
-            detail: format!("Invalid UTF-8: {}", e),
-        })?;
+    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError> {
+        let data = &event.data;
+        if data.is_empty() {
+            return Ok(StreamParseResult::empty());
+        }
+
+        if data == "[DONE]" {
+            return Ok(StreamParseResult::chunk(StreamChunk::Done));
+        }
+
+        let val: serde_json::Value =
+            serde_json::from_str(data).map_err(|e| LlmError::ParseError {
+                detail: format!("Invalid SSE JSON: {}", e),
+            })?;
 
         let mut results: Vec<StreamChunk> = Vec::new();
 
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with("event:") {
-                continue;
-            }
+        let choices = val.get("choices").and_then(|c| c.as_array());
+        if let Some(choices) = choices {
+            for choice in choices {
+                let delta = choice.get("delta");
+                let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
 
-            let json_str = if let Some(stripped) = line.strip_prefix("data: ") {
-                stripped
-            } else {
-                line
-            };
-
-            let json_str = json_str.trim();
-            if json_str.is_empty() {
-                continue;
-            }
-
-            if json_str == "[DONE]" {
-                return Ok(StreamParseResult::chunk(StreamChunk::Done));
-            }
-
-            let val: serde_json::Value =
-                serde_json::from_str(json_str).map_err(|e| LlmError::ParseError {
-                    detail: format!("Invalid SSE JSON: {}", e),
-                })?;
-
-            let choices = val.get("choices").and_then(|c| c.as_array());
-            if let Some(choices) = choices {
-                for choice in choices {
-                    let delta = choice.get("delta");
-                    let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
-
-                    if let Some(d) = delta {
-                        // 文本增量
-                        if let Some(content_text) = d.get("content").and_then(|c| c.as_str())
-                            && !content_text.is_empty()
-                        {
-                            results.push(StreamChunk::TextDelta(content_text.into()));
-                        }
-
-                        // 工具调用增量 — 统一为 ToolCallDelta(index, id, name, arguments_delta)
-                        if let Some(tc_arr) = d.get("tool_calls").and_then(|a| a.as_array()) {
-                            for tc in tc_arr {
-                                let index =
-                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.into());
-                                let name = tc
-                                    .get("function")
-                                    .and_then(|f| f.get("name"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.into());
-                                let args_delta = tc
-                                    .get("function")
-                                    .and_then(|f| f.get("arguments"))
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-
-                                results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
-                                    index,
-                                    id,
-                                    name,
-                                    arguments_delta: args_delta,
-                                }));
-                            }
-                        }
+                if let Some(d) = delta {
+                    // 文本增量
+                    if let Some(content_text) = d.get("content").and_then(|c| c.as_str())
+                        && !content_text.is_empty()
+                    {
+                        results.push(StreamChunk::TextDelta(content_text.into()));
                     }
 
-                    if finish_reason.is_some() {
-                        results.push(StreamChunk::Done);
+                    // 工具调用增量 — 统一为 ToolCallDelta(index, id, name, arguments_delta)
+                    if let Some(tc_arr) = d.get("tool_calls").and_then(|a| a.as_array()) {
+                        for tc in tc_arr {
+                            let index =
+                                tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                            let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.into());
+                            let name = tc
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.into());
+                            let args_delta = tc
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
+                                index,
+                                id,
+                                name,
+                                arguments_delta: args_delta,
+                            }));
+                        }
                     }
                 }
-            }
 
-            // 解析 usage
-            if let Some(usage_val) = val.get("usage") {
-                let usage = TokenUsage {
-                    prompt_tokens: usage_val
-                        .get("prompt_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    completion_tokens: usage_val
-                        .get("completion_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    total_tokens: usage_val
-                        .get("total_tokens")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                };
-                results.push(StreamChunk::Usage(usage));
+                if finish_reason.is_some() {
+                    results.push(StreamChunk::Done);
+                }
             }
+        }
+
+        // 解析 usage
+        if let Some(usage_val) = val.get("usage") {
+            let usage = TokenUsage {
+                prompt_tokens: usage_val
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                completion_tokens: usage_val
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+                total_tokens: usage_val
+                    .get("total_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32,
+            };
+            results.push(StreamChunk::Usage(usage));
         }
 
         if results.is_empty() {

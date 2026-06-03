@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage, ToolCall};
+use secrecy::ExposeSecret;
 use std::collections::HashMap;
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream};
@@ -73,6 +74,15 @@ impl StreamParseResult {
     }
 }
 
+/// SSE 事件 — 由 GenericProvider 统一解析 SSE 协议后传递给 Adapter。
+#[derive(Debug, Clone)]
+pub(crate) struct SseEvent {
+    /// SSE event 类型（如 "content_block_delta"），可能为空
+    pub event: Option<String>,
+    /// SSE data 内容（通常是 JSON 字符串）
+    pub data: String,
+}
+
 /// Provider 适配器 trait — 各 provider 只需实现此 trait。
 #[allow(dead_code)]
 pub(crate) trait ProviderAdapter: Send + Sync {
@@ -84,7 +94,9 @@ pub(crate) trait ProviderAdapter: Send + Sync {
         stream: bool,
     ) -> Result<HttpRequest, LlmError>;
     fn parse_response(&self, resp: &HttpResponse) -> Result<ChatResponse, LlmError>;
-    fn parse_stream_chunk(&self, chunk: &[u8]) -> Result<StreamParseResult, LlmError>;
+    /// 解析单个 SSE 事件的 data 字段（JSON 字符串），返回解析后的 chunk。
+    /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 GenericProvider 统一处理。
+    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError>;
 }
 
 /// 通用 Provider，适配任何 ProviderAdapter。
@@ -101,7 +113,7 @@ pub struct GenericProvider<A: ProviderAdapter> {
 impl<A: ProviderAdapter + Clone> GenericProvider<A> {
     pub fn new(adapter: A, config: ProviderConfig) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .timeout(config.timeout)
             .user_agent(format!("LeLLM/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();
@@ -220,8 +232,9 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
             let mut is_done = false;
 
             // SSE 缓冲区 — bytes_stream() 可能截断单条 SSE 消息
-            // 按行累积，只将完整行交给 adapter 解析
             let mut sse_buffer = String::new();
+            // 当前 SSE 事件的 event 类型
+            let mut current_event: Option<String> = None;
 
             while let Some(result) = boxed_stream.next().await {
                 match result {
@@ -229,45 +242,64 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
                         let chunk_str = String::from_utf8_lossy(&bytes).to_string();
                         sse_buffer.push_str(&chunk_str);
 
-                        // 提取所有完整行
                         loop {
                             match sse_buffer.find('\n') {
                                 Some(end_pos) => {
-                                    let line = sse_buffer[..=end_pos].to_string();
+                                    let line = sse_buffer[..end_pos].to_string();
                                     sse_buffer.replace_range(..=end_pos, "");
-                                    let line_bytes = line.as_bytes();
 
-                                    match adapter.parse_stream_chunk(line_bytes) {
-                                        Ok(result) => {
-                                            for c in result.chunks {
-                                                match c {
-                                                    StreamChunk::TextDelta(text) => {
-                                                        let _ = tx
-                                                            .send(Ok(ProviderEvent::Token {
-                                                                token: text,
-                                                            }))
-                                                            .await;
-                                                    }
-                                                    StreamChunk::ToolCallDelta(delta) => {
-                                                        accumulator.feed(&delta);
-                                                    }
-                                                    StreamChunk::Usage(u) => {
-                                                        usage = Some(u);
-                                                    }
-                                                    StreamChunk::Done => {
-                                                        is_done = true;
+                                    let line_trimmed = line.trim();
+
+                                    if line_trimmed.is_empty() {
+                                        // 空行表示一条 SSE 消息结束，重置 event
+                                        current_event = None;
+                                        continue;
+                                    }
+
+                                    if let Some(value) = line_trimmed.strip_prefix("event:") {
+                                        current_event = Some(value.trim().to_string());
+                                        continue;
+                                    }
+
+                                    if let Some(data) = line_trimmed.strip_prefix("data:") {
+                                        let data = data.trim().to_string();
+                                        let sse_event = SseEvent {
+                                            event: current_event.take(),
+                                            data,
+                                        };
+
+                                        match adapter.parse_stream_chunk(&sse_event) {
+                                            Ok(result) => {
+                                                for c in result.chunks {
+                                                    match c {
+                                                        StreamChunk::TextDelta(text) => {
+                                                            let _ = tx
+                                                                .send(Ok(ProviderEvent::Token {
+                                                                    token: text,
+                                                                }))
+                                                                .await;
+                                                        }
+                                                        StreamChunk::ToolCallDelta(delta) => {
+                                                            accumulator.feed(&delta);
+                                                        }
+                                                        StreamChunk::Usage(u) => {
+                                                            usage = Some(u);
+                                                        }
+                                                        StreamChunk::Done => {
+                                                            is_done = true;
+                                                        }
                                                     }
                                                 }
                                             }
-                                        }
-                                        Err(e) => {
-                                            let _ = tx.send(Err(e)).await;
-                                            break;
+                                            Err(e) => {
+                                                let _ = tx.send(Err(e)).await;
+                                                break;
+                                            }
                                         }
                                     }
+                                    // 其他字段（如 id:, retry:）忽略
                                 }
                                 None => {
-                                    // 不完整行，继续累积
                                     break;
                                 }
                             }
@@ -288,8 +320,6 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
                 }
             }
 
-            // 发送 Done 事件（无论是否正常结束，都要发送）
-
             let tool_calls = accumulator.finalize().unwrap_or_default();
             let _ = tx.send(Ok(ProviderEvent::Done { tool_calls, usage })).await;
         });
@@ -305,21 +335,134 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
 }
 
 /// Provider 配置。
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct ProviderConfig {
-    pub base_url: String,
-    pub api_key: String,
+    /// Provider 标识（如 "openai"、"anthropic"）
+    pub provider_id: String,
+    /// API 基础地址
+    pub base_url: url::Url,
+    /// 认证配置
+    pub auth: AuthConfig,
+    /// 默认模型名称
     pub model: String,
-    pub timeout_secs: u64,
+    /// 请求超时
+    pub timeout: std::time::Duration,
+}
+
+impl ProviderConfig {
+    /// 获取有效模型名 — 优先使用 request.model，回退到 config.model
+    pub fn effective_model<'a>(&'a self, request_model: &'a str) -> std::borrow::Cow<'a, str> {
+        if request_model.is_empty() {
+            std::borrow::Cow::Borrowed(&self.model)
+        } else {
+            std::borrow::Cow::Borrowed(request_model)
+        }
+    }
+
+    /// 便捷构造 — Bearer 认证（OpenAI 等大多数 Provider）
+    pub fn bearer(
+        provider_id: impl Into<String>,
+        base_url: impl AsRef<str>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, url::ParseError> {
+        Ok(Self {
+            provider_id: provider_id.into(),
+            base_url: url::Url::parse(base_url.as_ref())?,
+            auth: AuthConfig::Bearer {
+                api_key: secrecy::SecretString::new(api_key.into()),
+            },
+            model: model.into(),
+            timeout: std::time::Duration::from_secs(120),
+        })
+    }
+
+    /// 便捷构造 — 自定义 Header 认证（Anthropic 等）
+    pub fn header(
+        provider_id: impl Into<String>,
+        base_url: impl AsRef<str>,
+        header: impl Into<String>,
+        value: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, url::ParseError> {
+        Ok(Self {
+            provider_id: provider_id.into(),
+            base_url: url::Url::parse(base_url.as_ref())?,
+            auth: AuthConfig::Header {
+                header: header.into(),
+                value: secrecy::SecretString::new(value.into()),
+            },
+            model: model.into(),
+            timeout: std::time::Duration::from_secs(120),
+        })
+    }
+
+    /// 便捷构造 — 无认证（本地调试）
+    pub fn none(
+        provider_id: impl Into<String>,
+        base_url: impl AsRef<str>,
+        model: impl Into<String>,
+    ) -> Result<Self, url::ParseError> {
+        Ok(Self {
+            provider_id: provider_id.into(),
+            base_url: url::Url::parse(base_url.as_ref())?,
+            auth: AuthConfig::None,
+            model: model.into(),
+            timeout: std::time::Duration::from_secs(120),
+        })
+    }
+
+    /// 修改认证配置
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// 修改超时
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            base_url: String::new(),
-            api_key: String::new(),
+            provider_id: String::new(),
+            base_url: url::Url::parse("http://localhost").unwrap(),
+            auth: AuthConfig::None,
             model: String::new(),
-            timeout_secs: 120,
+            timeout: std::time::Duration::from_secs(120),
+        }
+    }
+}
+
+/// 认证配置。
+#[derive(Clone, Debug)]
+pub enum AuthConfig {
+    /// Bearer Token 认证（OpenAI 等）
+    Bearer { api_key: secrecy::SecretString },
+    /// 自定义 Header 认证（Anthropic 等）
+    Header {
+        header: String,
+        value: secrecy::SecretString,
+    },
+    /// 无认证（本地调试等）
+    None,
+}
+
+impl AuthConfig {
+    /// 获取认证 header，返回 `(header_name, header_value)`
+    pub fn get_header(&self) -> Option<(String, String)> {
+        match self {
+            AuthConfig::Bearer { api_key } => Some((
+                "Authorization".to_string(),
+                format!("Bearer {}", api_key.expose_secret()),
+            )),
+            AuthConfig::Header { header, value } => {
+                Some((header.clone(), value.expose_secret().to_string()))
+            }
+            AuthConfig::None => None,
         }
     }
 }
