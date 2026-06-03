@@ -337,8 +337,6 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
 /// Provider 配置。
 #[derive(Clone, Debug)]
 pub struct ProviderConfig {
-    /// Provider 标识（如 "openai"、"anthropic"）
-    pub provider_id: String,
     /// API 基础地址
     pub base_url: url::Url,
     /// 认证配置
@@ -361,13 +359,11 @@ impl ProviderConfig {
 
     /// 便捷构造 — Bearer 认证（OpenAI 等大多数 Provider）
     pub fn bearer(
-        provider_id: impl Into<String>,
         base_url: impl AsRef<str>,
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
         Ok(Self {
-            provider_id: provider_id.into(),
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Bearer {
                 api_key: secrecy::SecretString::new(api_key.into()),
@@ -379,14 +375,12 @@ impl ProviderConfig {
 
     /// 便捷构造 — 自定义 Header 认证（Anthropic 等）
     pub fn header(
-        provider_id: impl Into<String>,
         base_url: impl AsRef<str>,
         header: impl Into<String>,
         value: impl Into<String>,
         model: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
         Ok(Self {
-            provider_id: provider_id.into(),
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Header {
                 header: header.into(),
@@ -399,12 +393,10 @@ impl ProviderConfig {
 
     /// 便捷构造 — 无认证（本地调试）
     pub fn none(
-        provider_id: impl Into<String>,
         base_url: impl AsRef<str>,
         model: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
         Ok(Self {
-            provider_id: provider_id.into(),
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::None,
             model: model.into(),
@@ -428,7 +420,6 @@ impl ProviderConfig {
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            provider_id: String::new(),
             base_url: url::Url::parse("http://localhost").unwrap(),
             auth: AuthConfig::None,
             model: String::new(),
