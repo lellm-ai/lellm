@@ -58,50 +58,15 @@ impl ProviderAdapter for OpenAICompatAdapter {
     }
 
     fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {
-        // 构建请求 body
-        // OpenAI 需要 {"role": "...", "content": "..."} 格式
-        let messages: Vec<serde_json::Map<String, serde_json::Value>> = req
+        let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
-            .map(|m| match m {
-                Message::System { content: _ } => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("role".into(), "system".into());
-                    map.insert("content".into(), m.extract_text().into());
-                    map
-                }
-                Message::User { content: _ } => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("role".into(), "user".into());
-                    map.insert("content".into(), m.extract_text().into());
-                    map
-                }
-                Message::Assistant { content: _ } => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("role".into(), "assistant".into());
-                    map.insert("content".into(), m.extract_text().into());
-                    map
-                }
-                Message::ToolResult {
-                    tool_call_id,
-                    content,
-                } => {
-                    let mut map = serde_json::Map::new();
-                    map.insert("role".into(), "tool".into());
-                    map.insert("tool_call_id".into(), tool_call_id.clone().into());
-                    map.insert(
-                        "content".into(),
-                        content
-                            .iter()
-                            .filter_map(|b| b.as_text().map(|s| s.to_string()))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            .into(),
-                    );
-                    map
-                }
+            .map(|m| {
+                serialize_openai_message(m).map_err(|e| LlmError::ParseError {
+                    detail: format!("Failed to serialize message: {}", e),
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         let mut body = serde_json::Map::new();
         body.insert("model".into(), req.model.clone().into());
@@ -322,4 +287,103 @@ fn parse_openai_usage(raw: &serde_json::Value) -> TokenUsage {
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
     }
+}
+
+/// 将 Message 序列化为 OpenAI 格式的消息对象。
+///
+/// 关键：Assistant 消息中的 ToolCall 必须放入 `tool_calls` 数组，不能丢失。
+fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, serde_json::Error> {
+    match msg {
+        Message::System { content } => {
+            let mut map = serde_json::Map::new();
+            map.insert("role".into(), "system".into());
+            map.insert(
+                "content".into(),
+                serialize_openai_text_blocks(content).into(),
+            );
+            Ok(serde_json::Value::Object(map))
+        }
+        Message::User { content } => {
+            let mut map = serde_json::Map::new();
+            map.insert("role".into(), "user".into());
+            map.insert("content".into(), serialize_openai_content_blocks(content)?);
+            Ok(serde_json::Value::Object(map))
+        }
+        Message::Assistant { content } => {
+            let mut map = serde_json::Map::new();
+            map.insert("role".into(), "assistant".into());
+
+            // 提取文本
+            let text: String = content
+                .iter()
+                .filter_map(|b| b.as_text().map(|s| s.to_string()))
+                .collect();
+            if !text.is_empty() {
+                map.insert("content".into(), text.into());
+            }
+
+            // 提取 ToolCall → tool_calls 数组
+            let tool_calls: Vec<_> = content
+                .iter()
+                .filter_map(|b| {
+                    if let ContentBlock::ToolCall(tc) = b {
+                        Some(serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.arguments.to_string()
+                            }
+                        }))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if !tool_calls.is_empty() {
+                map.insert("tool_calls".into(), serde_json::Value::Array(tool_calls));
+            }
+
+            Ok(serde_json::Value::Object(map))
+        }
+        Message::ToolResult {
+            tool_call_id,
+            content,
+        } => {
+            let mut map = serde_json::Map::new();
+            map.insert("role".into(), "tool".into());
+            map.insert("tool_call_id".into(), tool_call_id.clone().into());
+            map.insert(
+                "content".into(),
+                content
+                    .iter()
+                    .filter_map(|b| b.as_text().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into(),
+            );
+            Ok(serde_json::Value::Object(map))
+        }
+    }
+}
+
+/// 将 ContentBlock 序列化为 OpenAI user 消息的 content（当前只支持 Text）
+fn serialize_openai_content_blocks(
+    blocks: &[ContentBlock],
+) -> Result<serde_json::Value, serde_json::Error> {
+    // v0.1: 只支持纯文本 user 消息
+    let text: String = blocks
+        .iter()
+        .filter_map(|b| b.as_text().map(|s| s.to_string()))
+        .collect();
+    Ok(serde_json::json!(text))
+}
+
+/// 将 ContentBlock 中的文本拼接为字符串（用于 System 消息）
+fn serialize_openai_text_blocks(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| b.as_text().map(|s| s.to_string()))
+        .collect::<Vec<_>>()
+        .join("")
 }

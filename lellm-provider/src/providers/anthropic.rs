@@ -36,7 +36,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     map.insert("role".into(), "user".into());
                     map.insert(
                         "content".into(),
-                        serde_json::to_value(content.as_slice()).map_err(|e| {
+                        serialize_anthropic_content_blocks(content).map_err(|e| {
                             LlmError::ParseError {
                                 detail: format!("Failed to serialize content: {}", e),
                             }
@@ -49,7 +49,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     map.insert("role".into(), "assistant".into());
                     map.insert(
                         "content".into(),
-                        serde_json::to_value(content.as_slice()).map_err(|e| {
+                        serialize_anthropic_content_blocks(content).map_err(|e| {
                             LlmError::ParseError {
                                 detail: format!("Failed to serialize content: {}", e),
                             }
@@ -69,7 +69,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     block.insert("tool_use_id".into(), tool_call_id.clone().into());
                     block.insert(
                         "content".into(),
-                        serde_json::to_value(content.as_slice()).map_err(|e| {
+                        serialize_anthropic_content_blocks(content).map_err(|e| {
                             LlmError::ParseError {
                                 detail: format!("Failed to serialize tool result content: {}", e),
                             }
@@ -279,4 +279,47 @@ impl ProviderAdapter for AnthropicAdapter {
 
         Ok(StreamParseResult::empty())
     }
+}
+
+/// 将 ContentBlock 序列化为 Anthropic 格式的内容数组。
+///
+/// 关键映射：
+/// - `Text` → `{"type": "text", "text": "..."}`
+/// - `ToolCall` → `{"type": "tool_use", "id": ..., "name": ..., "input": {...}}`
+/// - `Thinking` → `{"type": "thinking", "thinking": "..."}`
+/// - `Image` → 暂不支持，返回空数组（v0.2 补齐）
+fn serialize_anthropic_content_blocks(
+    blocks: &[ContentBlock],
+) -> Result<serde_json::Value, serde_json::Error> {
+    let arr: Vec<serde_json::Value> = blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(tb) => serde_json::json!({
+                "type": "text",
+                "text": tb.text
+            }),
+            ContentBlock::Thinking(tb) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".into(), "thinking".into());
+                obj.insert("thinking".into(), serde_json::json!(tb.thinking));
+                if let Some(ref redacted) = tb.redacted {
+                    obj.insert("redacted_thinking".into(), serde_json::json!(redacted));
+                }
+                serde_json::Value::Object(obj)
+            }
+            ContentBlock::ToolCall(tc) => serde_json::json!({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.name,
+                "input": tc.arguments
+            }),
+            ContentBlock::Image { source: _ } => {
+                // v0.1 不支持图片，跳过
+                serde_json::json!(null)
+            }
+        })
+        .filter(|v| !v.is_null())
+        .collect();
+
+    Ok(serde_json::Value::Array(arr))
 }
