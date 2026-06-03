@@ -1,6 +1,7 @@
 # lellm v0.1 产品蓝图
 
-> 版本：v0.1 | 日期：2026-06-02 | 状态：代码已对齐
+> 版本：v0.1 | 日期：2026-06-03 | 状态：代码已对齐
+> 设计决策详见 [DESIGN.md](./DESIGN.md)
 
 ## 一、项目愿景
 
@@ -36,7 +37,8 @@
 lellm/
 ├── Cargo.toml                  # workspace root, edition 2024
 ├── docs/
-│   └── BLUEPRINT.md            # 本文件
+│   ├── BLUEPRINT.md            # 产品蓝图 + API 契约
+│   └── DESIGN.md               # 关键设计决策的为什么
 ├── lellm-core/                 # 协议对象，零运行时依赖
 │   ├── Cargo.toml              # deps: serde, serde_json, thiserror
 │   └── src/
@@ -70,7 +72,7 @@ lellm/
 │       │   ├── mod.rs          # AgentEvent, StopReason, AgentStream
 │       │   ├── registry.rs     # ToolRegistry, ToolSource, ToolSearchResult
 │       │   ├── executor.rs     # ToolExecutor, ParallelSafety, ToolCategory, ToolRegistration
-│       │   ├── loop_.rs        # ToolUseLoop, ToolUseResult, ToolCallResult
+│       │   ├── runtime.rs      # ToolUseLoop, ToolUseResult, ToolCallResult, ResolvedModel (→ lellm-provider)
 │       │   ├── retry.rs        # ToolErrorKind, RetryPolicy, BackoffStrategy
 │       │   ├── loop_detector.rs # LoopDetector, ToolCallFingerprint, LoopIntervention
 │       │   ├── fallback.rs     # FallbackStrategy trait, FallbackReason, FallbackContext, FallbackAction, DefaultFallback
@@ -159,10 +161,11 @@ pub enum AgentEvent {
 ```
 
 **终态契约：**
-- 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
-- 异常结束：`LoopError` 恰好一次，然后 channel 关闭
-- 终态事件后不再发送任何事件
-- `MaxIterationsReached` 视为 Agent 层正常终止（返回 `Ok(ToolUseResult)`），非 Provider 错误
+1. 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
+2. 业务错误：`LoopError` 恰好一次，然后 channel 关闭
+3. 终态事件后不再发送任何事件
+4. 如果 channel 关闭前未收到 `LoopEnd` 或 `LoopError`，视为 Agent Runtime 异常中断（panic / abort / OOM / runtime shutdown 等）
+5. `MaxIterationsReached` 视为 Agent 层正常终止（`LoopEnd`），非 Provider 错误
 
 ToolUseLoop 提供两个接口：
 
@@ -210,6 +213,16 @@ pub struct ChatResponse {
 
 ### 4.6 工具执行 — 按 ParallelSafety 分级
 
+**v0.1 实现状态（A' 降级方案）：**
+
+| 安全级别 | v0.1 实现 | v0.2 目标 |
+|----------|-----------|-----------|
+| `Safe` | ✅ 并发执行（`tokio::join!`） | 不变 |
+| `CategoryExclusive` | ⚠️ 降级为串行 | 组内串行、组间并行 |
+| `Exclusive` | ⚠️ 串行 | 不变 |
+| ExecutionPlanner | ❌ 未实现 | 依赖感知执行图 |
+| Dynamic Locking | ❌ 未实现 | 动态资源锁 |
+
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParallelSafety {
@@ -247,14 +260,15 @@ impl ToolExecutor {
     pub fn register(&mut self, name: &str, reg: ToolRegistration);
     pub async fn execute(&self, call: &ToolCall) -> ToolCallResult;
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> Vec<Message>;
-    pub fn partition_calls(&self, calls: &[ToolCall]) -> (Vec<ToolCall>, Vec<ToolCall>);
 }
 ```
 
-执行器逻辑：
-- `Safe` → 可 `tokio::join!` 并行（partition_calls 分组）
-- `CategoryExclusive` → 按 category 分组，组内串行、组间并行
-- `Exclusive` → 全局逐个串行
+`execute_batch` 执行逻辑（v0.1）：
+1. 将 calls 分为 Safe 组和串行组（CategoryExclusive + Exclusive）
+2. Safe 组 `tokio::join!` 并发执行
+3. 串行组逐个执行
+
+v0.2 目标：`CategoryExclusive` 按 category 分组，组内串行、组间并行。
 
 ### 4.7 Provider 架构 — 三层分离
 
@@ -602,10 +616,10 @@ MockProvider 通过 `feature = "mock"` 提供，支持预设响应和 tool_call 
 |--------|------|------|------|
 | P1-H | AnthropicAdapter | 🔴 Stub | build_request/parse_response/parse_stream_chunk 均未实现 |
 | P1-H | OpenAICompatAdapter | 🔴 Stub | 同上 |
-| P2 | GenericProvider impl LlmProvider | 🟡 缺失 | 当前仅有 new() 构造器，未实现 call/stream |
+| P2 | GenericProvider impl LlmProvider | ✅ 完成 | call/stream/provider_id 均已实现，含 SSE 行缓冲 + ToolCallAccumulator |
 | P3 | lellm-macros derive | 🟡 Stub | 解析输入但返回空 TokenStream |
 | P4 | examples/ | 🟡 部分 | 5 个 example 已创建，mock_test 可运行；其余待 Adapter 实现 |
-| P5 | 集成测试 | 🟡 缺失 | 跨 crate E2E 测试 |
+| P5 | 集成测试 | 🟡 部分 | 有 unit tests + integration tests，覆盖率待提升 |
 
 ## 六、版本路线图
 

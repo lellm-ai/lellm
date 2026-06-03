@@ -8,6 +8,7 @@ use lellm_core::{
 
 use super::base::{
     HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, StreamChunk, StreamParseResult,
+    ToolCallDelta,
 };
 
 /// OpenAI 兼容适配器 — 一个实现覆盖所有 OpenAI 兼容 provider。
@@ -68,30 +69,43 @@ impl ProviderAdapter for OpenAICompatAdapter {
         let messages: Vec<serde_json::Map<String, serde_json::Value>> = req
             .messages
             .iter()
-            .map(|m| {
-                let mut map = serde_json::Map::new();
-                map.insert("role".into(), m.role().into());
-                match m {
-                    Message::ToolResult {
-                        tool_call_id,
-                        content,
-                    } => {
-                        map.insert("tool_call_id".into(), tool_call_id.clone().into());
-                        map.insert(
-                            "content".into(),
-                            content
-                                .iter()
-                                .filter_map(|b| b.as_text().map(|s| s.to_string()))
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                                .into(),
-                        );
-                    }
-                    _ => {
-                        map.insert("content".into(), m.extract_text().into());
-                    }
+            .map(|m| match m {
+                Message::System { content: _ } => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("role".into(), "system".into());
+                    map.insert("content".into(), m.extract_text().into());
+                    map
                 }
-                map
+                Message::User { content: _ } => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("role".into(), "user".into());
+                    map.insert("content".into(), m.extract_text().into());
+                    map
+                }
+                Message::Assistant { content: _ } => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("role".into(), "assistant".into());
+                    map.insert("content".into(), m.extract_text().into());
+                    map
+                }
+                Message::ToolResult {
+                    tool_call_id,
+                    content,
+                } => {
+                    let mut map = serde_json::Map::new();
+                    map.insert("role".into(), "tool".into());
+                    map.insert("tool_call_id".into(), tool_call_id.clone().into());
+                    map.insert(
+                        "content".into(),
+                        content
+                            .iter()
+                            .filter_map(|b| b.as_text().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                            .into(),
+                    );
+                    map
+                }
             })
             .collect();
 
@@ -207,21 +221,14 @@ impl ProviderAdapter for OpenAICompatAdapter {
             detail: format!("Invalid UTF-8: {}", e),
         })?;
 
-        // SSE 格式：逐行解析 data: ...
         let mut results: Vec<StreamChunk> = Vec::new();
 
         for line in text.lines() {
             let line = line.trim();
-            if line.is_empty() {
+            if line.is_empty() || line.starts_with("event:") {
                 continue;
             }
 
-            // 跳过 event: 行
-            if line.starts_with("event:") {
-                continue;
-            }
-
-            // 解析 data: 行
             let json_str = if let Some(stripped) = line.strip_prefix("data: ") {
                 stripped
             } else {
@@ -233,9 +240,8 @@ impl ProviderAdapter for OpenAICompatAdapter {
                 continue;
             }
 
-            // [DONE] 标记
             if json_str == "[DONE]" {
-                return Ok(StreamParseResult::Chunk(StreamChunk::Done));
+                return Ok(StreamParseResult::chunk(StreamChunk::Done));
             }
 
             let val: serde_json::Value =
@@ -249,17 +255,19 @@ impl ProviderAdapter for OpenAICompatAdapter {
                     let delta = choice.get("delta");
                     let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
 
-                    // 文本增量
                     if let Some(d) = delta {
+                        // 文本增量
                         if let Some(content_text) = d.get("content").and_then(|c| c.as_str())
                             && !content_text.is_empty()
                         {
                             results.push(StreamChunk::TextDelta(content_text.into()));
                         }
 
-                        // 工具调用增量
+                        // 工具调用增量 — 统一为 ToolCallDelta(index, id, name, arguments_delta)
                         if let Some(tc_arr) = d.get("tool_calls").and_then(|a| a.as_array()) {
                             for tc in tc_arr {
+                                let index =
+                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                                 let id = tc.get("id").and_then(|v| v.as_str()).map(|s| s.into());
                                 let name = tc
                                     .get("function")
@@ -270,26 +278,25 @@ impl ProviderAdapter for OpenAICompatAdapter {
                                     .get("function")
                                     .and_then(|f| f.get("arguments"))
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
+                                    .map(|s| s.to_string());
 
-                                results.push(StreamChunk::ToolCallDelta {
+                                results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
+                                    index,
                                     id,
                                     name,
                                     arguments_delta: args_delta,
-                                });
+                                }));
                             }
                         }
                     }
 
-                    // 结束标记
                     if finish_reason.is_some() {
                         results.push(StreamChunk::Done);
                     }
                 }
             }
 
-            // 解析 usage（可能在最后一个 chunk 中）
+            // 解析 usage
             if let Some(usage_val) = val.get("usage") {
                 let usage = TokenUsage {
                     prompt_tokens: usage_val
@@ -310,14 +317,10 @@ impl ProviderAdapter for OpenAICompatAdapter {
         }
 
         if results.is_empty() {
-            return Ok(StreamParseResult::Empty);
+            Ok(StreamParseResult::empty())
+        } else {
+            Ok(StreamParseResult { chunks: results })
         }
-
-        // 返回第一个 chunk（GenericProvider 会多次调用 parse_stream_chunk）
-        // 但为了简单，返回第一个有意义的结果
-        Ok(StreamParseResult::Chunk(
-            results.into_iter().next().unwrap_or(StreamChunk::Done),
-        ))
     }
 }
 

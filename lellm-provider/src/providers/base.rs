@@ -28,27 +28,49 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// 工具调用增量 — 统一格式，吸收所有 Provider 差异
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct ToolCallDelta {
+    /// 工具调用在消息中的位置索引（用于聚合）
+    pub index: usize,
+    /// 工具调用 ID（可能延迟出现）
+    pub id: Option<String>,
+    /// 工具名称（可能延迟出现）
+    pub name: Option<String>,
+    /// 参数增量片段（最终拼接为完整 JSON）
+    pub arguments_delta: Option<String>,
+}
+
 /// 流式 chunk — Adapter 解析协议后返回
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum StreamChunk {
     TextDelta(String),
-    ToolCallDelta {
-        id: Option<String>,
-        name: Option<String>,
-        arguments_delta: String,
-    },
+    ToolCallDelta(ToolCallDelta),
     Usage(TokenUsage),
     Done,
 }
 
-/// 流式解析结果 — 三态
+/// 流式解析结果 — 可能包含多个 chunk（OpenAI 单行可能有多个 tool_call delta）
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(crate) enum StreamParseResult {
-    Chunk(StreamChunk),
-    Empty,
-    Done,
+pub(crate) struct StreamParseResult {
+    pub chunks: Vec<StreamChunk>,
+}
+
+impl StreamParseResult {
+    pub fn empty() -> Self {
+        Self { chunks: Vec::new() }
+    }
+
+    pub fn chunk(c: StreamChunk) -> Self {
+        Self { chunks: vec![c] }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
 }
 
 /// Provider 适配器 trait — 各 provider 只需实现此 trait。
@@ -216,32 +238,28 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
                                     let line_bytes = line.as_bytes();
 
                                     match adapter.parse_stream_chunk(line_bytes) {
-                                        Ok(StreamParseResult::Chunk(
-                                            StreamChunk::TextDelta(text),
-                                        )) => {
-                                            let _ =
-                                                tx.send(Ok(ProviderEvent::Token { token: text }))
-                                                    .await;
-                                        }
-                                        Ok(StreamParseResult::Chunk(
-                                            StreamChunk::ToolCallDelta {
-                                                id,
-                                                name,
-                                                arguments_delta,
-                                            },
-                                        )) => {
-                                            if let Some(ref call_id) = id {
-                                                accumulator.feed(call_id, name, arguments_delta);
+                                        Ok(result) => {
+                                            for c in result.chunks {
+                                                match c {
+                                                    StreamChunk::TextDelta(text) => {
+                                                        let _ = tx
+                                                            .send(Ok(ProviderEvent::Token {
+                                                                token: text,
+                                                            }))
+                                                            .await;
+                                                    }
+                                                    StreamChunk::ToolCallDelta(delta) => {
+                                                        accumulator.feed(&delta);
+                                                    }
+                                                    StreamChunk::Usage(u) => {
+                                                        usage = Some(u);
+                                                    }
+                                                    StreamChunk::Done => {
+                                                        is_done = true;
+                                                    }
+                                                }
                                             }
                                         }
-                                        Ok(StreamParseResult::Chunk(StreamChunk::Usage(u))) => {
-                                            usage = Some(u);
-                                        }
-                                        Ok(StreamParseResult::Chunk(StreamChunk::Done))
-                                        | Ok(StreamParseResult::Done) => {
-                                            is_done = true;
-                                        }
-                                        Ok(StreamParseResult::Empty) => {}
                                         Err(e) => {
                                             let _ = tx.send(Err(e)).await;
                                             break;
@@ -306,14 +324,17 @@ impl Default for ProviderConfig {
     }
 }
 
-/// ToolCall 增量组装器（GenericProvider 内部使用）
+/// ToolCall 增量组装器 — 按 index 聚合（GenericProvider 内部使用）
+///
+/// 以 index 为 key，因为很多 Provider 的第一批 delta 只有 index 而没有 id。
 #[allow(dead_code)]
 pub(crate) struct ToolCallAccumulator {
-    current: HashMap<String, PendingToolCall>,
+    current: HashMap<usize, PendingToolCall>,
 }
 
 #[allow(dead_code)]
 struct PendingToolCall {
+    id: Option<String>,
     name: Option<String>,
     arguments: String,
 }
@@ -326,28 +347,43 @@ impl ToolCallAccumulator {
         }
     }
 
-    /// 接收增量数据并组装
-    pub fn feed(&mut self, id: &str, name: Option<String>, arguments_delta: String) {
+    /// 接收统一的 ToolCallDelta 增量并组装
+    pub fn feed(&mut self, delta: &ToolCallDelta) {
         let entry = self
             .current
-            .entry(id.to_string())
+            .entry(delta.index)
             .or_insert_with(|| PendingToolCall {
+                id: None,
                 name: None,
                 arguments: String::new(),
             });
-        if let Some(n) = name {
-            entry.name = Some(n);
+
+        if let Some(ref id) = delta.id {
+            entry.id = Some(id.clone());
         }
-        entry.arguments.push_str(&arguments_delta);
+        if let Some(ref name) = delta.name {
+            entry.name = Some(name.clone());
+        }
+        if let Some(ref d) = delta.arguments_delta {
+            entry.arguments.push_str(d);
+        }
     }
 
-    /// 完成组装，返回完整的 ToolCall 列表
+    /// 完成组装，返回完整的 ToolCall 列表（按 index 排序）
     pub fn finalize(self) -> Result<Vec<ToolCall>, LlmError> {
+        let mut entries: Vec<_> = self.current.into_iter().collect();
+        entries.sort_by_key(|&(idx, _)| idx);
+
         let mut result = Vec::new();
-        for (id, pending) in self.current {
+        for (_index, pending) in entries {
+            let id = pending.id.unwrap_or_else(|| "unknown".to_string());
             let name = pending.name.unwrap_or_else(|| "unknown".to_string());
-            let arguments: serde_json::Value = serde_json::from_str(&pending.arguments)
-                .unwrap_or(serde_json::Value::String(pending.arguments));
+            let arguments: serde_json::Value = if pending.arguments.is_empty() {
+                serde_json::Value::Object(Default::default())
+            } else {
+                serde_json::from_str(&pending.arguments)
+                    .unwrap_or(serde_json::Value::String(pending.arguments))
+            };
             result.push(ToolCall {
                 id,
                 name,
