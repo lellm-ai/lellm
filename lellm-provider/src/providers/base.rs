@@ -334,41 +334,28 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     }
 }
 
-/// Provider 配置。
+/// Provider 配置 — 只管连接（base_url, auth, timeout），不含 model。
 #[derive(Clone, Debug)]
 pub struct ProviderConfig {
     /// API 基础地址
     pub base_url: url::Url,
     /// 认证配置
     pub auth: AuthConfig,
-    /// 默认模型名称
-    pub model: String,
     /// 请求超时
     pub timeout: std::time::Duration,
 }
 
 impl ProviderConfig {
-    /// 获取有效模型名 — 优先使用 request.model，回退到 config.model
-    pub fn effective_model<'a>(&'a self, request_model: &'a str) -> std::borrow::Cow<'a, str> {
-        if request_model.is_empty() {
-            std::borrow::Cow::Borrowed(&self.model)
-        } else {
-            std::borrow::Cow::Borrowed(request_model)
-        }
-    }
-
     /// 便捷构造 — Bearer 认证（OpenAI 等大多数 Provider）
     pub fn bearer(
         base_url: impl AsRef<str>,
         api_key: impl Into<String>,
-        model: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Bearer {
                 api_key: secrecy::SecretString::new(api_key.into()),
             },
-            model: model.into(),
             timeout: std::time::Duration::from_secs(120),
         })
     }
@@ -378,7 +365,6 @@ impl ProviderConfig {
         base_url: impl AsRef<str>,
         header: impl Into<String>,
         value: impl Into<String>,
-        model: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
@@ -386,20 +372,15 @@ impl ProviderConfig {
                 header: header.into(),
                 value: secrecy::SecretString::new(value.into()),
             },
-            model: model.into(),
             timeout: std::time::Duration::from_secs(120),
         })
     }
 
     /// 便捷构造 — 无认证（本地调试）
-    pub fn none(
-        base_url: impl AsRef<str>,
-        model: impl Into<String>,
-    ) -> Result<Self, url::ParseError> {
+    pub fn none(base_url: impl AsRef<str>) -> Result<Self, url::ParseError> {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::None,
-            model: model.into(),
             timeout: std::time::Duration::from_secs(120),
         })
     }
@@ -422,7 +403,6 @@ impl Default for ProviderConfig {
         Self {
             base_url: url::Url::parse("http://localhost").unwrap(),
             auth: AuthConfig::None,
-            model: String::new(),
             timeout: std::time::Duration::from_secs(120),
         }
     }

@@ -96,10 +96,7 @@ impl ProviderAdapter for AnthropicAdapter {
 
         // 构建 Anthropic 请求 body
         let mut body = serde_json::Map::new();
-        body.insert(
-            "model".into(),
-            config.effective_model(&req.model).to_string().into(),
-        );
+        body.insert("model".into(), req.model.clone().into());
         if !system_text.is_empty() {
             body.insert("system".into(), system_text.into());
         }

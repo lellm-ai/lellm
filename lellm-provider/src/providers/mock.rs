@@ -70,7 +70,7 @@ impl LlmProvider for MockProvider {
                     .collect::<String>(),
             }),
             Ok(ProviderEvent::Done {
-                tool_calls: response.tool_calls.clone(),
+                tool_calls: response.tool_calls().cloned().collect(),
                 usage: Some(response.usage),
             }),
         ];

@@ -9,28 +9,31 @@ use super::{ContentBlock, ToolCall};
 pub struct ChatResponse {
     /// 响应内容块列表，与 `Message::Assistant` 的 content 类型对齐。
     pub content: Vec<ContentBlock>,
-    /// 冗余缓存，从 content 中提取的 tool_calls，方便访问。
-    pub tool_calls: Vec<ToolCall>,
     pub usage: TokenUsage,
     pub raw: serde_json::Value,
 }
 
 impl ChatResponse {
-    /// 构造函数 — 自动从 content 中提取 tool_calls
+    /// 构造函数
     pub fn new(content: Vec<ContentBlock>, usage: TokenUsage, raw: serde_json::Value) -> Self {
-        let tool_calls = content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::ToolCall(tc) => Some(tc.clone()),
-                _ => None,
-            })
-            .collect();
         Self {
             content,
-            tool_calls,
             usage,
             raw,
         }
+    }
+
+    /// 借用视图 — 零分配、零拷贝的 tool_call 迭代器
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
+        self.content.iter().filter_map(|block| match block {
+            ContentBlock::ToolCall(call) => Some(call),
+            _ => None,
+        })
+    }
+
+    /// 是否存在 tool_calls
+    pub fn has_tool_calls(&self) -> bool {
+        self.tool_calls().next().is_some()
     }
 }
 
@@ -48,7 +51,7 @@ mod tests {
     use crate::{ContentBlock, ToolCall};
 
     #[test]
-    fn test_chat_response_new_extracts_tool_calls() {
+    fn test_chat_response_tool_calls_iterator() {
         let tc = ToolCall {
             id: "1".into(),
             name: "test".into(),
@@ -59,14 +62,30 @@ mod tests {
             ContentBlock::ToolCall(tc.clone()),
         ];
         let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
-        assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0].id, "1");
+        let calls: Vec<_> = resp.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "1");
+    }
+
+    #[test]
+    fn test_chat_response_has_tool_calls() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "test".into(),
+            arguments: serde_json::json!({}),
+        };
+        let content = vec![
+            ContentBlock::text("hello".to_string()),
+            ContentBlock::ToolCall(tc),
+        ];
+        let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
+        assert!(resp.has_tool_calls());
     }
 
     #[test]
     fn test_chat_response_no_tool_calls() {
         let content = vec![ContentBlock::text("hello".to_string())];
         let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
-        assert!(resp.tool_calls.is_empty());
+        assert!(!resp.has_tool_calls());
     }
 }

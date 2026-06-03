@@ -114,10 +114,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
             .collect();
 
         let mut body = serde_json::Map::new();
-        body.insert(
-            "model".into(),
-            config.effective_model(&req.model).to_string().into(),
-        );
+        body.insert("model".into(), req.model.clone().into());
         body.insert(
             "messages".into(),
             serde_json::to_value(messages).map_err(|e| LlmError::ParseError {

@@ -29,7 +29,7 @@ async fn test_tool_use_loop_no_tool_calls() {
         .unwrap();
 
     assert_eq!(result.iterations, 1);
-    assert!(result.response.tool_calls.is_empty());
+    assert!(!result.response.has_tool_calls());
 }
 
 #[tokio::test]

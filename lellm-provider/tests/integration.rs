@@ -14,7 +14,7 @@ async fn test_mock_provider_call() {
     let result = provider.call(&request).await.unwrap();
 
     assert_eq!(result.content.len(), 1);
-    assert!(result.tool_calls.is_empty());
+    assert!(!result.has_tool_calls());
 }
 
 #[tokio::test]

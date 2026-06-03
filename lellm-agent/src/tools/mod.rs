@@ -48,11 +48,10 @@ pub enum AgentEvent {
     },
     /// Agent loop 正常结束（恰好一次，后不再发送）
     LoopEnd { result: ToolUseResult },
-    /// Agent loop 异常结束（恰好一次，后不再发送）
+    /// Agent loop 异常结束（恰好一次，后不再发送）— 不含 messages，消费者自行维护
     LoopError {
         error: lellm_core::LlmError,
         iterations: usize,
-        messages: Vec<lellm_core::Message>,
     },
 }
 

@@ -18,6 +18,7 @@
 
 | Crate | 职责 | 核心内容 |
 |-------|------|----------|
+| `lellm` | **门面 crate** | Feature-gated re-export 所有子 crate；用户统一入口 |
 | `lellm-core` | 协议对象 | Message, ContentBlock(Text/Thinking/Image/ToolCall), ChatRequest/Response, ToolDefinition, TokenUsage, LlmError, ToolError, MemoryError, ParseError, LellmError |
 | `lellm-provider` | Provider trait + 适配器 | LlmProvider trait (call/stream), ProviderEvent, ProviderAdapter (pub(crate)), GenericProvider<A>, ModelRouter, ProviderRegistry, ResolvedModel, MockProvider |
 | `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, StopReason, ParallelSafety, ToolCategory, ToolRegistry, RetryPolicy, LoopDetector, FallbackStrategy, ShortTermMemory, SignalVoter |
@@ -39,6 +40,10 @@ lellm/
 ├── docs/
 │   ├── BLUEPRINT.md            # 产品蓝图 + API 契约
 │   └── DESIGN.md               # 关键设计决策的为什么
+├── lellm/                      # 门面 crate — feature-gated re-export
+│   ├── Cargo.toml              # features: provider(default), agent, macros, full
+│   └── src/
+│       └── lib.rs              # pub use lellm_core as core; pub use lellm_provider as provider; ...
 ├── lellm-core/                 # 协议对象，零运行时依赖
 │   ├── Cargo.toml              # deps: serde, serde_json, thiserror
 │   └── src/
@@ -60,7 +65,7 @@ lellm/
 │       ├── router.rs           # ModelRouter, ProviderRegistry, ResolvedModel, RouteEntry, TaskLevel
 │       └── providers/
 │           ├── mod.rs
-│           ├── base.rs         # GenericProvider<A>, ProviderAdapter trait, HttpRequest, HttpResponse, StreamChunk, StreamParseResult, ToolCallAccumulator, ProviderConfig
+│           ├── base.rs         # GenericProvider<A>, ProviderAdapter trait, ProviderConfig, ProviderRequest, ToolCallAccumulator
 │           ├── anthropic.rs    # AnthropicAdapter (Stub, feature = "anthropic")
 │           ├── openai_compat.rs # OpenAI兼容适配器 (Stub, 覆盖 OpenAI/NVIDIA/DeepSeek/VLLM/LLaMA)
 │           └── mock.rs         # MockProvider (feature = "mock", 测试用)
@@ -98,11 +103,12 @@ lellm/
 - 尽量少 Feature
 - 能被所有 crate 引用
 
-**v0.1 选择 4 个 crate 而非 5 个的原因：**
+**v0.1 选择 5 个 crate 的原因：**
 
-1. **Memory 不单独 crate** — ShortTermMemory 本质是 `VecDeque<Message>`。与 Agent Loop 高度耦合，很少被单独引用。
-2. **Tool System 不单独 crate** — ToolRegistry、ToolExecutor、ToolUseLoop、Fallback、LoopDetector 全部是 Agent Runtime 的组成部分。LangChain、AutoGen、OpenAI Agents SDK 都没有将 Tool 独立成包。
-3. **真正独立的是协议对象** — ToolDefinition、ToolCall、Message 等放在 `lellm-core`，作为统一抽象层（类似 openai-types / anthropic-types 的统一版）。
+1. **`lellm` 门面 crate** — 统一入口，feature-gated re-export。用户 `cargo add lellm` 即可使用，无需知道子 crate 名称。访问方式：`lellm::core::Message`、`lellm::provider::*`、`lellm::agent::*`。也可精准依赖子 crate（如 `cargo add lellm-agent`）。
+2. **Memory 不单独 crate** — ShortTermMemory 本质是 `VecDeque<Message>`。与 Agent Loop 高度耦合，很少被单独引用。
+3. **Tool System 不单独 crate** — ToolRegistry、ToolExecutor、ToolUseLoop、Fallback、LoopDetector 全部是 Agent Runtime 的组成部分。LangChain、AutoGen、OpenAI Agents SDK 都没有将 Tool 独立成包。
+4. **真正独立的是协议对象** — ToolDefinition、ToolCall、Message 等放在 `lellm-core`，作为统一抽象层（类似 openai-types / anthropic-types 的统一版）。
 
 ### 4.2 发布策略 — 分阶段
 
@@ -155,14 +161,20 @@ pub enum AgentEvent {
     ToolStart { tool_call_id, name },
     ToolEnd { tool_call_id, result },
     Retry { tool_call_id, attempt, max_attempts, reason },
-    LoopEnd { result: ToolUseResult }, // 终态 — 正常结束, 恰好一次
-    LoopError { error, iterations, messages }, // 终态 — 异常结束, 恰好一次
+    LoopEnd { result: ToolUseResult },  // 终态 — 正常结束，恰好一次，含完整结果
+    LoopError { error, iterations },    // 终态 — 异常结束，恰好一次，不含 messages
 }
 ```
 
+**设计原则：**
+- 成功路径 — `LoopEnd` 返回完整 `ToolUseResult`（response + messages + iterations + stop_reason）
+- 错误路径 — `LoopError` 只返回错误原因与迭代次数，不含 messages
+- 历史状态 — 需要诊断的消费者自行累积 `Vec<Message>`
+- 防止 `partial_*` 字段蔓延（partial_messages → partial_response → partial_state → ...）
+
 **终态契约：**
-1. 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
-2. 业务错误：`LoopError` 恰好一次，然后 channel 关闭
+1. 正常结束：`LoopEnd` 恰好一次（含完整 `ToolUseResult`），然后 channel 关闭
+2. 业务错误：`LoopError` 恰好一次（仅 `error` + `iterations`），然后 channel 关闭
 3. 终态事件后不再发送任何事件
 4. 如果 channel 关闭前未收到 `LoopEnd` 或 `LoopError`，视为 Agent Runtime 异常中断（panic / abort / OOM / runtime shutdown 等）
 5. `MaxIterationsReached` 视为 Agent 层正常终止（`LoopEnd`），非 Provider 错误
@@ -176,6 +188,11 @@ impl ToolUseLoop {
 
     // 流式 — 返回事件接收器
     pub fn execute_stream(self, messages: Vec<Message>) -> AgentStream;
+}
+
+impl ToolUseResult {
+    /// 仅 StopReason::Complete 返回 true
+    pub fn is_success(&self) -> bool;
 }
 ```
 
@@ -203,23 +220,27 @@ pub enum ContentBlock {
 ```rust
 pub struct ChatResponse {
     pub content: Vec<ContentBlock>,   // 与 Message::Assistant 一致
-    pub tool_calls: Vec<ToolCall>,    // 冗余缓存，从 content 中自动提取
     pub usage: TokenUsage,
     pub raw: serde_json::Value,       // provider 特有字段兜底
 }
+
+impl ChatResponse {
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall>; // 零分配借用视图
+    pub fn has_tool_calls(&self) -> bool;                        // 是否存在 tool_calls
+}
 ```
 
-`ChatResponse::new(content, usage, raw)` 构造函数自动从 content 中提取 tool_calls 到冗余缓存，方便访问。
+单一事实来源 — `tool_calls` 不冗余存储，通过 `tool_calls()` 迭代器按需提取。调用方需要所有权时 `response.tool_calls().cloned().collect()`。
 
 ### 4.6 工具执行 — 按 ParallelSafety 分级
 
-**v0.1 实现状态（A' 降级方案）：**
+**v0.1 实现状态：**
 
 | 安全级别 | v0.1 实现 | v0.2 目标 |
 |----------|-----------|-----------|
-| `Safe` | ✅ 并发执行（`tokio::join!`） | 不变 |
-| `CategoryExclusive` | ⚠️ 降级为串行 | 组内串行、组间并行 |
-| `Exclusive` | ⚠️ 串行 | 不变 |
+| `Safe` | ✅ 并发执行（`join_all`） | 不变 |
+| `CategoryExclusive` | ✅ 组内串行、组间并发 | 不变 |
+| `Exclusive` | ✅ 串行 | 不变 |
 | ExecutionPlanner | ❌ 未实现 | 依赖感知执行图 |
 | Dynamic Locking | ❌ 未实现 | 动态资源锁 |
 
@@ -289,16 +310,31 @@ pub trait LlmProvider: Send + Sync {
     fn provider_id(&self) -> &str;
 }
 
-// ─── 内部 SPI (pub(crate)) ───
+// ─── 中间表示 — Adapter 与 GenericProvider 的桥梁 ───
+pub(crate) struct ProviderRequest {
+    pub path: &'static str,
+    pub headers: HeaderMap,
+    pub body: serde_json::Value,
+}
+
+// ─── 内部 SPI (pub(crate)) — 只负责协议适配，不知 ProviderConfig ───
 pub(crate) trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &str;
-    fn build_request(&self, req: &ChatRequest) -> Result<HttpRequest, LlmError>;
-    fn parse_response(&self, resp: &HttpResponse) -> Result<ChatResponse, LlmError>;
+    fn build_request(
+        &self,
+        req: &ChatRequest,
+        stream: bool,
+    ) -> Result<ProviderRequest, LlmError>;
+    fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError>;
     fn parse_stream_chunk(&self, chunk: &[u8]) -> Result<StreamParseResult, LlmError>;
 }
 
-// ─── GenericProvider<A> — 封装通用逻辑（重试、超时、流式解析）
-// 注意：当前未 impl LlmProvider，仅作为 Adapter 容器
+// ─── GenericProvider<A> — 持有 config + client，统一组装 HTTP 请求 ───
+pub struct GenericProvider<A: ProviderAdapter> {
+    adapter: A,
+    config: ProviderConfig,
+    client: reqwest::Client,
+}
 ```
 
 `OpenAICompatAdapter` 一个实现覆盖 7+ provider（OpenAI, NVIDIA, DeepSeek, VLLM, LLaMA, LM Studio, Ollama, OpenRouter），仅 `base_url` 不同。
@@ -357,33 +393,59 @@ pub struct ResolvedModel {
 
 ### 4.8.2 使用模式
 
+**直接调用 Provider（手动注入 model）：**
 ```rust
 let route = router.resolve(TaskLevel::Flash)?;
 let resolved = registry.resolve(route)?;  // -> ResolvedModel
-resolved.provider.call(request.with_model(resolved.model.clone()));
+let mut request = ChatRequest { model: resolved.model.clone(), .. };
+resolved.provider.call(&request).await?;
 ```
 
-或直接在 Agent 层使用：
-
+**Agent 层使用（自动注入 model）：**
 ```rust
-let loop_ = ToolUseLoop::new(resolved_model, tool_executor)
-    .set_max_iterations(10);
-let result = loop_.execute(messages).await?;
+let route = router.resolve(TaskLevel::Flash)?;
+let resolved = registry.resolve(route)?;
+ToolUseLoop::new(resolved, executor).execute(messages).await?;
+// ↑ 只需传 messages，model 由 ResolvedModel 自动注入
 ```
 
 ### 4.9 配置管理
 
 ```rust
-let config = ProviderConfig {
-    base_url: "https://api.openai.com".into(),
-    api_key: "sk-...".into(),
-    model: "gpt-4".into(),
-    timeout_secs: 120,
-};
+let config = ProviderConfig::bearer(
+    "https://api.openai.com",
+    "sk-...",
+)?;
 let provider = GenericProvider::new(adapter, config);
 ```
 
-库不读配置文件，配置加载留给上层应用。
+**`ChatRequest` 自包含 model —— `ProviderConfig` 不含 model：**
+```rust
+let request = ChatRequest {
+    model: "gpt-4".into(),
+    messages: vec![...],
+    temperature: Some(0.7),
+    max_tokens: None,
+    tools: vec![...],
+};
+```
+
+**职责划分：** `ProviderConfig` 管连接（base_url, auth, timeout），`ChatRequest` 管请求体（model, messages, temperature, tools）。`model` 不在 `ProviderConfig` 中——每次请求显式指定。库不读配置文件，配置加载留给上层应用。
+
+**model 单向流动：**
+
+```
+ResolvedModel.model  ← 路由层唯一来源
+       ↓ (ToolUseLoop 注入)
+ChatRequest.model    ← 实际发送给 Provider 的模型
+       ↓
+GenericProvider      ← 只读取 ChatRequest.model
+```
+
+- `ResolvedModel.model` — 路由结果，唯一来源
+- `ToolUseLoop` — 自动注入 `ChatRequest.model`，用户无需碰 model
+- `GenericProvider` — 只读 `ChatRequest.model`，从不读 config
+- 无覆盖机制，无二义性
 
 ### 4.10 Tool 声明 — Schema 与 Runtime 分离
 
