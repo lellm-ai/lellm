@@ -8,8 +8,9 @@ use lellm_core::{
 use std::borrow::Cow;
 
 use super::base::{
-    ProviderAdapter, ProviderRequest, SseEvent, StreamChunk, StreamParseResult, ToolCallDelta,
+    ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
 };
+use super::stream::sse_frame::SseFrame;
 
 /// Anthropic 适配器。
 #[derive(Debug, Clone)]
@@ -200,8 +201,8 @@ impl ProviderAdapter for AnthropicAdapter {
         Ok(ChatResponse::new(content, usage, raw))
     }
 
-    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError> {
-        let data = &event.data;
+    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError> {
+        let data = &frame.data;
         if data.is_empty() {
             return Ok(StreamParseResult::empty());
         }

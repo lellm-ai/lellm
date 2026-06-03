@@ -5,13 +5,15 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::StreamExt;
 use http::HeaderMap;
-use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage, ToolCall};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage};
 use secrecy::ExposeSecret;
 use std::borrow::Cow;
 
-use crate::{LlmProvider, ProviderEvent, ProviderStream};
+use crate::{LlmProvider, ProviderStream};
+
+use super::stream::sse_frame::SseFrame;
+pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
 
 // ─── Adapter → GenericProvider 的中间表示 ───
 
@@ -34,22 +36,9 @@ pub(crate) struct RawResponse {
     pub body: Bytes,
 }
 
-// ─── 流式解析中间表示 ───
+// ─── 流式解析中间表示（Adapter SPI） ───
 
-/// 工具调用增量 — 统一格式，吸收所有 Provider 差异
-#[derive(Debug)]
-pub(crate) struct ToolCallDelta {
-    /// 工具调用在消息中的位置索引（用于聚合）
-    pub index: usize,
-    /// 工具调用 ID（可能延迟出现）
-    pub id: Option<String>,
-    /// 工具名称（可能延迟出现）
-    pub name: Option<String>,
-    /// 参数增量片段（最终拼接为完整 JSON）
-    pub arguments_delta: Option<String>,
-}
-
-/// 流式 chunk — Adapter 解析协议后返回
+/// 流式 chunk — Adapter 解析 SseFrame 后返回。
 #[derive(Debug)]
 pub(crate) enum StreamChunk {
     TextDelta(String),
@@ -58,16 +47,7 @@ pub(crate) enum StreamChunk {
     Done,
 }
 
-/// SSE 事件 — GenericProvider 从字节流中构建，Adapter 只解析 data 字段。
-#[derive(Debug, Clone)]
-pub(crate) struct SseEvent {
-    /// event 字段（可选），如 "message_start", "content_block_delta"
-    pub event: Option<String>,
-    /// data 字段内容（通常是 JSON 字符串或标记如 "[DONE]"）
-    pub data: String,
-}
-
-/// 流式解析结果 — 可能包含多个 chunk
+/// 流式解析结果 — 可能包含多个 chunk。
 #[derive(Debug)]
 pub(crate) struct StreamParseResult {
     pub chunks: Vec<StreamChunk>,
@@ -98,9 +78,9 @@ pub(crate) trait ProviderAdapter: Send + Sync {
     /// 解析成功响应 body（2xx）为 ChatResponse
     fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError>;
 
-    /// 解析单个 SSE 事件的 data 字段。
-    /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 GenericProvider 统一处理，构建 SseEvent。
-    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError>;
+    /// 解析单个 SSE 帧的 data 字段。
+    /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 GenericProvider 统一处理，构建 SseFrame。
+    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
 }
 
 // ─── GenericProvider — 持有 config + client，统一 HTTP 传输 ───
@@ -247,148 +227,10 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         let model = request.model.clone();
         let adapter = self.adapter.clone();
 
-        // 使用 mpsc channel 桥接 reqwest Stream 到 ProviderStream
+        // 使用 stream_processor 处理 SSE 字节流
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let stream = resp.bytes_stream();
-        let mut boxed_stream = Box::pin(stream);
-
         tokio::spawn(async move {
-            let _ = tx.send(Ok(ProviderEvent::Start { model })).await;
-
-            let mut accumulator = ToolCallAccumulator::new();
-            let mut usage: Option<TokenUsage> = None;
-            let mut is_done = false;
-
-            // SSE 行缓冲区 — bytes_stream() 可能截断单条 SSE 消息
-            let mut sse_buffer = String::new();
-
-            // 解析一行 SSE 字段
-            fn parse_sse_line(line: &str) -> Option<(&str, &str)> {
-                if let Some(pos) = line.find(':') {
-                    let key = line[..pos].trim();
-                    let value = line[pos + 1..].trim_start_matches(' ');
-                    Some((key, value))
-                } else {
-                    None
-                }
-            }
-
-            // 处理一个完整的 SseEvent
-            async fn handle_sse_event(
-                tx: &tokio::sync::mpsc::Sender<Result<ProviderEvent, LlmError>>,
-                adapter: &impl ProviderAdapter,
-                accumulator: &mut ToolCallAccumulator,
-                event: &SseEvent,
-            ) -> (bool, Option<TokenUsage>) {
-                let mut is_done = false;
-                let mut usage = None;
-
-                match adapter.parse_stream_chunk(event) {
-                    Ok(result) => {
-                        for c in result.chunks {
-                            match c {
-                                StreamChunk::TextDelta(text) => {
-                                    let _ = tx.send(Ok(ProviderEvent::Token { token: text })).await;
-                                }
-                                StreamChunk::ToolCallDelta(delta) => {
-                                    accumulator.feed(&delta);
-                                }
-                                StreamChunk::Usage(u) => {
-                                    usage = Some(u);
-                                }
-                                StreamChunk::Done => {
-                                    is_done = true;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                    }
-                }
-
-                (is_done, usage)
-            }
-
-            while let Some(result) = boxed_stream.next().await {
-                match result {
-                    Ok(bytes) => {
-                        let chunk_str = String::from_utf8_lossy(&bytes).to_string();
-                        sse_buffer.push_str(&chunk_str);
-
-                        // 取出完整 buffer 处理，避免借用冲突
-                        let buffer = std::mem::take(&mut sse_buffer);
-                        let mut lines: Vec<String> = Vec::new();
-                        let mut rest = buffer.as_str();
-                        while let Some(pos) = rest.find('\n') {
-                            lines.push(rest[..pos].to_string());
-                            rest = &rest[pos + 1..];
-                        }
-                        sse_buffer = rest.to_string();
-
-                        // 按 SSE 帧解析：event: / data: / 空行
-                        let mut frame_event: Option<String> = None;
-                        let mut frame_data: Option<String> = None;
-
-                        for line in lines {
-                            let line_trimmed = line.trim();
-                            if line_trimmed.is_empty() {
-                                // 空行 = SSE 帧边界，提交事件
-                                if let Some(data) = frame_data.take() {
-                                    let sse_event = SseEvent {
-                                        event: frame_event.take(),
-                                        data,
-                                    };
-                                    let (done, u) = handle_sse_event(
-                                        &tx,
-                                        &adapter,
-                                        &mut accumulator,
-                                        &sse_event,
-                                    )
-                                    .await;
-                                    if done {
-                                        is_done = true;
-                                    }
-                                    if let Some(u) = u {
-                                        usage = Some(u);
-                                    }
-                                }
-                                continue;
-                            }
-
-                            if let Some((key, value)) = parse_sse_line(line_trimmed) {
-                                match key {
-                                    "event" => {
-                                        frame_event = Some(value.to_string());
-                                    }
-                                    "data" => {
-                                        if value.is_empty() {
-                                            continue;
-                                        }
-                                        frame_data.get_or_insert_with(String::new).push_str(value);
-                                    }
-                                    _ => {} // id:, retry: 等忽略
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(LlmError::Network {
-                                detail: e.to_string(),
-                            }))
-                            .await;
-                        return;
-                    }
-                }
-
-                if is_done {
-                    break;
-                }
-            }
-
-            let tool_calls = accumulator.finalize().unwrap_or_default();
-            let _ = tx.send(Ok(ProviderEvent::Done { tool_calls, usage })).await;
+            super::stream::stream_processor::process_stream(tx, model, adapter, resp).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -500,74 +342,5 @@ impl AuthConfig {
             AuthConfig::Header { header, value } => builder.header(header, value.expose_secret()),
             AuthConfig::None => builder,
         }
-    }
-}
-
-// ─── ToolCallAccumulator — 按 index 聚合增量 delta ───
-
-/// ToolCall 增量组装器 — 按 index 聚合（GenericProvider 内部使用）
-///
-/// 以 index 为 key，因为很多 Provider 的第一批 delta 只有 index 而没有 id。
-pub(crate) struct ToolCallAccumulator {
-    current: std::collections::HashMap<usize, PendingToolCall>,
-}
-
-struct PendingToolCall {
-    id: Option<String>,
-    name: Option<String>,
-    arguments: String,
-}
-
-impl ToolCallAccumulator {
-    pub fn new() -> Self {
-        Self {
-            current: std::collections::HashMap::new(),
-        }
-    }
-
-    /// 接收统一的 ToolCallDelta 增量并组装
-    pub fn feed(&mut self, delta: &ToolCallDelta) {
-        let entry = self
-            .current
-            .entry(delta.index)
-            .or_insert_with(|| PendingToolCall {
-                id: None,
-                name: None,
-                arguments: String::new(),
-            });
-
-        if let Some(ref id) = delta.id {
-            entry.id = Some(id.clone());
-        }
-        if let Some(ref name) = delta.name {
-            entry.name = Some(name.clone());
-        }
-        if let Some(ref d) = delta.arguments_delta {
-            entry.arguments.push_str(d);
-        }
-    }
-
-    /// 完成组装，返回完整的 ToolCall 列表（按 index 排序）
-    pub fn finalize(self) -> Result<Vec<ToolCall>, LlmError> {
-        let mut entries: Vec<_> = self.current.into_iter().collect();
-        entries.sort_by_key(|&(idx, _)| idx);
-
-        let mut result = Vec::new();
-        for (_index, pending) in entries {
-            let id = pending.id.unwrap_or_else(|| "unknown".to_string());
-            let name = pending.name.unwrap_or_else(|| "unknown".to_string());
-            let arguments: serde_json::Value = if pending.arguments.is_empty() {
-                serde_json::Value::Object(Default::default())
-            } else {
-                serde_json::from_str(&pending.arguments)
-                    .unwrap_or(serde_json::Value::String(pending.arguments))
-            };
-            result.push(ToolCall {
-                id,
-                name,
-                arguments,
-            });
-        }
-        Ok(result)
     }
 }

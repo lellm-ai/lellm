@@ -10,8 +10,9 @@ use lellm_core::{
 use std::borrow::Cow;
 
 use super::base::{
-    ProviderAdapter, ProviderRequest, SseEvent, StreamChunk, StreamParseResult, ToolCallDelta,
+    ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
 };
+use super::stream::sse_frame::SseFrame;
 
 /// OpenAI 兼容适配器 — 一个实现覆盖所有 OpenAI 兼容 provider。
 #[derive(Debug, Clone)]
@@ -180,8 +181,8 @@ impl ProviderAdapter for OpenAICompatAdapter {
         Ok(ChatResponse::new(content, usage, raw))
     }
 
-    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError> {
-        let data = &event.data;
+    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError> {
+        let data = &frame.data;
         if data.is_empty() {
             return Ok(StreamParseResult::empty());
         }
