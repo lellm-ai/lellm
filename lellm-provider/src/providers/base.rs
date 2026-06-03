@@ -131,8 +131,13 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
         }
     }
 
-    /// 将 ProviderRequest 发送并返回 RawResponse
-    async fn send(&self, req: ProviderRequest) -> Result<RawResponse, LlmError> {
+    /// 构建 reqwest RequestBuilder — URL + Auth + Headers + Body 统一在此组装。
+    ///
+    /// 这是 RetryPolicy、Metrics、OpenTelemetry 的唯一接入点。
+    fn build_request_builder(
+        &self,
+        req: &ProviderRequest,
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
         let url = self
             .config
             .base_url
@@ -141,7 +146,6 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
                 detail: format!("Invalid URL: {}", e),
             })?;
 
-        // 注入认证 header
         let builder = self.client.post(url);
         let builder = self.config.auth.apply(builder);
 
@@ -151,13 +155,15 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
             .iter()
             .fold(builder, |b, (key, value)| b.header(key, value));
 
-        let resp = builder
-            .body(req.body.to_vec())
-            .send()
-            .await
-            .map_err(|e| LlmError::Network {
-                detail: e.to_string(),
-            })?;
+        Ok(builder.body(req.body.clone()))
+    }
+
+    /// 发送请求并返回 RawResponse（一次性读取 body）
+    async fn send(&self, req: ProviderRequest) -> Result<RawResponse, LlmError> {
+        let builder = self.build_request_builder(&req)?;
+        let resp = builder.send().await.map_err(|e| LlmError::Network {
+            detail: e.to_string(),
+        })?;
 
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
@@ -216,28 +222,14 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         let http_req = self.adapter.build_request(request, true)?;
 
-        let resp = {
-            let url = self
-                .config
-                .base_url
-                .join(&http_req.path as &str)
-                .map_err(|e| LlmError::Network {
-                    detail: format!("Invalid URL: {}", e),
-                })?;
-
-            let builder = self.client.post(url);
-            let builder = self.config.auth.apply(builder);
-            http_req
-                .headers
-                .iter()
-                .fold(builder, |b, (key, value)| b.header(key, value))
-                .body(http_req.body.to_vec())
-                .send()
-                .await
-                .map_err(|e| LlmError::Network {
-                    detail: e.to_string(),
-                })?
-        };
+        // 复用 build_request_builder，发送流式请求
+        let resp = self
+            .build_request_builder(&http_req)?
+            .send()
+            .await
+            .map_err(|e| LlmError::Network {
+                detail: e.to_string(),
+            })?;
 
         let status = resp.status().as_u16();
         if status >= 400 {
