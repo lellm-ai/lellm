@@ -96,7 +96,8 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 | AgentEvent 终态契约 | [DESIGN.md §2](./DESIGN.md#2-agentevent-终态契约) |
 | ToolUseLoop 与 model 单向流动 | [DESIGN.md §3](./DESIGN.md#3-tooluseloop-不知道-router--registry--model-单向流动) |
 | ProviderAdapter SPI / ProviderRequest | [DESIGN.md §5](./DESIGN.md#5-provideradapter-spi--providerrequest-中间层) |
-| SSE 解析 / SseEvent | [DESIGN.md §5.1](./DESIGN.md#51-sse-解析--sseevent-中间表示) |
+| SSE 解析 / SseFrame | [DESIGN.md §5.1](./DESIGN.md#51-sse-解析--sseframe-中间表示) |
+| 流式传输层解耦 | [DESIGN.md §5.2](./DESIGN.md#52-流式处理--传输层解耦eventsink--streamevent) |
 | FallbackAction 设计 | [DESIGN.md §7](./DESIGN.md#7-fallbackactionswitchprovider-用-string-而非-routeentry) |
 | Message 语义校验 | [DESIGN.md §9](./DESIGN.md#9-message-语义校验) |
 
@@ -116,6 +117,9 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | LlmProvider trait | ✅ |
 | ProviderAdapter SPI | ✅ |
 | GenericProvider | ✅ |
+| stream/ 传输层解耦 | ✅ |
+| SseParser + ToolCallAccumulator | ✅ |
+| EventSink + StreamEvent | ✅ |
 | ToolExecutor | ✅ |
 | ToolUseLoop | ✅ |
 | ModelRouter + Registry | ✅ |

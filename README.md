@@ -39,12 +39,10 @@ use lellm::provider::providers::openai_compat::OpenAICompatAdapter;
 
 let provider = GenericProvider::new(
     OpenAICompatAdapter::openai(),
-    ProviderConfig {
-        base_url: "https://api.openai.com/v1".into(),
-        api_key: std::env::var("OPENAI_API_KEY").unwrap(),
-        model: "gpt-4o".into(),
-        timeout_secs: 120,
-    },
+    ProviderConfig::bearer(
+        "https://api.openai.com/v1",
+        std::env::var("OPENAI_API_KEY").unwrap(),
+    )?,
 );
 ```
 
@@ -158,6 +156,65 @@ OPENAI_API_KEY=sk-xxx \
 cargo run -p lellm-provider --example streaming
 ```
 
+## 架构设计
+
+### Provider 三层架构
+
+```
+用户 → LlmProvider (public API)
+       → GenericProvider<A> (框架内部)
+          → ProviderAdapter (pub(crate) SPI)
+```
+
+**职责切分：**
+
+| 职责 | Adapter | stream/ 模块 | GenericProvider |
+|------|---------|-------------|-----------------|
+| Endpoint 路径 | ✅ | ❌ | ❌ |
+| JSON 请求体格式 | ✅ | ❌ | ❌ |
+| 协议特定 Header | ✅ | ❌ | ❌ |
+| SseFrame → StreamChunk 解析 | ✅ | ❌ | ❌ |
+| SseParser (行缓冲 + SseFrame) | ❌ | ✅ | ❌ |
+| ToolCallAccumulator | ❌ | ✅ | ❌ |
+| process_stream (管道编排) | ❌ | ✅ | ❌ |
+| EventSink / StreamEvent | ❌ | ✅ (trait) | ❌ |
+| HTTP Client | ❌ | ❌ | ✅ |
+| base_url / api_key / timeout | ❌ | ❌ | ✅ |
+
+### 流式传输层解耦
+
+`stream/` 模块完全不知道 `reqwest`、`tokio channel` 等传输细节。
+
+```
+┌─────────────────────────────────────┐
+│ GenericProvider (base.rs)           │
+│ 知道: reqwest, tokio channel        │
+│ 职责: HTTP 发送, ChannelSink 桥接    │
+└─────────────────────────────────────┘
+                  ↓
+┌─────────────────────────────────────┐
+│ process_stream (stream_processor)   │
+│ 签名: Stream<Item=Result<Bytes>>    │
+│       EventSink (fn emit)           │
+│ 不知道: reqwest, tokio, ProviderEvent│
+└─────────────────────────────────────┘
+                  ↓
+┌─────────────────────────────────────┐
+│ SseParser + Adapter + Accumulator   │
+│ 纯逻辑，无 IO                       │
+└─────────────────────────────────────┘
+```
+
+**测试价值：** 无需 mock HTTP，直接构造 Stream 即可测试 SSE 解析管道：
+
+```rust
+let stream = futures_util::stream::iter(vec![
+    Ok(Bytes::from("data: {\"text\": \"hel\"}\n\n")),
+    Ok(Bytes::from("data: {\"text\": \"lo\"}\n\n")),
+]);
+process_stream(&mut mock_sink, &adapter, "test".into(), stream).await;
+```
+
 ## 项目结构
 
 ```
@@ -165,6 +222,20 @@ lellm/
 ├── lellm/               # Facade 统一入口
 ├── lellm-core/          # 协议（Message, ChatRequest, LlmError 等）
 ├── lellm-provider/      # Provider 适配层（OpenAI, Anthropic, ...）
+│   ├── providers/       # Adapter + GenericProvider
+│   │   ├── base.rs      # ProviderAdapter, GenericProvider, ProviderConfig
+│   │   ├── stream/      # 传输层解耦的流式处理管道
+│   │   │   ├── sse_parser.rs
+│   │   │   ├── stream_processor.rs
+│   │   │   └── tool_call_accumulator.rs
+│   │   ├── anthropic.rs
+│   │   └── openai_compat.rs
+│   └── router.rs        # ModelRouter + ProviderRegistry
 ├── lellm-agent/         # Agent Runtime（ToolUseLoop, Executor, ...）
 └── lellm-macros/        # Derive 宏
 ```
+
+## 详细设计
+
+- [BLUEPRINT.md](./docs/BLUEPRINT.md) — 产品蓝图与核心 API 契约
+- [DESIGN.md](./docs/DESIGN.md) — 关键设计决策的为什么与如何实现

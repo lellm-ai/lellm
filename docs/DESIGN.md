@@ -103,7 +103,7 @@ pub(crate) trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &str;
     fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError>;
     fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError>;
-    fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError>;
+    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
 }
 ```
 
@@ -118,16 +118,19 @@ pub struct GenericProvider<A: ProviderAdapter> {
 
 **职责切分：**
 
-| 职责 | Adapter | GenericProvider |
-|------|---------|-----------------|
-| Endpoint 路径 | ✅ | ❌ |
-| JSON 请求体格式 | ✅ | ❌ |
-| 协议特定 Header | ✅ | ❌ |
-| SSE 行缓冲 + SseEvent 构建 | ❌ | ✅ |
-| SseEvent → StreamChunk 解析 | ✅ | ❌ |
-| HTTP Client | ❌ | ✅ |
-| base_url / api_key / timeout | ❌ | ✅ |
-| ToolCall 增量组装 | ❌ | ✅ |
+| 职责 | Adapter | stream/ 模块 | GenericProvider |
+|------|---------|-------------|-----------------|
+| Endpoint 路径 | ✅ | ❌ | ❌ |
+| JSON 请求体格式 | ✅ | ❌ | ❌ |
+| 协议特定 Header | ✅ | ❌ | ❌ |
+| SseFrame → StreamChunk 解析 | ✅ | ❌ | ❌ |
+| SseParser (行缓冲 + SseFrame) | ❌ | ✅ | ❌ |
+| ToolCallAccumulator | ❌ | ✅ | ❌ |
+| process_stream (管道编排) | ❌ | ✅ | ❌ |
+| EventSink / StreamEvent | ❌ | ✅ (trait) | ❌ |
+| HTTP Client | ❌ | ❌ | ✅ |
+| base_url / api_key / timeout | ❌ | ❌ | ✅ |
+| ChannelSink (桥接) | ❌ | ❌ | ✅ |
 
 **`ProviderConfig` 精简为连接配置（不含 model）：**
 ```rust
@@ -165,46 +168,146 @@ impl AuthConfig {
 2. **不暴露认证细节** — `GenericProvider` 不需要知道 `Authorization`、`Bearer` 等协议细节
 3. **未来可扩展** — 支持 `AuthConfig::OAuth` 时只需加一个变体，API 不变
 
-## 5.1 SSE 解析 — SseEvent 中间表示
+## 5.1 SSE 解析 — SseFrame 中间表示
 
-**决定：** `GenericProvider` 负责 SSE 协议解析（行缓冲、`data:` 提取、空行检测），构建 `SseEvent` 交给 Adapter 解析 JSON payload。
+**决定：** `SseParser` 负责 SSE 协议解析（行缓冲、`data:` 提取、空行检测），构建 `SseFrame` 交给 Adapter 解析 JSON payload。
 
 ```rust
-/// SSE 事件 — GenericProvider 从字节流中构建，Adapter 只解析 data 字段。
-pub(crate) struct SseEvent {
-    /// event 字段（可选），如 "message", "done"
+/// SSE 帧 — SseParser 从字节流中构建，Adapter 只解析 data 字段。
+pub(crate) struct SseFrame {
+    /// event 字段（可选），如 "message_start", "content_block_delta"
     pub event: Option<String>,
-    /// data 字段内容（通常是一个 JSON 字符串或标记如 "[DONE]"）
+    /// data 字段内容（通常是 JSON 字符串或标记如 "[DONE]"）
     pub data: String,
 }
 ```
 
 **签名：**
 ```rust
-fn parse_stream_chunk(&self, event: &SseEvent) -> Result<StreamParseResult, LlmError>;
+fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
 ```
 
 **理由：**
 - Adapter 完全不知道 SSE 协议细节，只关心 `event` 类型和 `data` 内容
 - `event` 字段对 Anthropic 等 provider 有用（区分 `message_start` / `content_block_delta` / `message_stop`）
 - OpenAI 的 `[DONE]` 直接出现在 `data` 字段中，Adapter 自行判断
-- SSE 行缓冲只在一处实现（GenericProvider），避免重复代码
+- SSE 行缓冲只在 `SseParser` 一处实现，可独立测试
 
-**GenericProvider 的 SSE 解析伪代码：**
+**SseParser 的解析逻辑：**
 ```rust
 // 1. 字节 → 字符串，按 \n 分割
-// 2. 提取 data:xxx → SseEvent { event, data }
-// 3. 空行表示 SSE 帧边界
-// 4. 调用 adapter.parse_stream_chunk(&sse_event)
+// 2. 提取 event:xxx / data:xxx → SseFrame { event, data }
+// 3. 空行表示 SSE 帧边界，提交 SseFrame
+// 4. 不完整的帧保留在 buffer 中，等待下一块数据
 ```
+
+### 5.2 流式处理 — 传输层解耦（EventSink + StreamEvent）
+
+**问题：** `process_stream()` 直接接收 `reqwest::Response`，耦合 HTTP 客户端。测试需要 mockito/wiremock。
+
+**决定：** `process_stream()` 只认识 `Stream<Item = Result<Bytes, LlmError>>` 和 `EventSink` trait。
+
+```
+┌─────────────────────────────────────────────────────┐
+│ GenericProvider (base.rs)                           │
+│ 知道: reqwest, tokio::sync::mpsc, ProviderEvent     │
+│ 职责: HTTP 发送, 错误处理, ChannelSink 桥接          │
+└─────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────┐
+│ process_stream (stream_processor.rs)                │
+│ 签名: S: Stream<Item=Result<Bytes,LlmError>>        │
+│       E: EventSink  (fn emit(StreamEvent))          │
+│ 知道: bytes::Bytes, futures_core::Stream            │
+│ 不知道: reqwest, tokio channel, ProviderEvent        │
+└─────────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────────┐
+│ SseParser + Adapter + ToolCallAccumulator            │
+│ 纯逻辑，无 IO                                       │
+└─────────────────────────────────────────────────────┘
+```
+
+**`StreamEvent` — stream 模块对外的数据契约：**
+```rust
+pub(crate) enum StreamEvent {
+    Start { model: String },
+    Token { token: String },
+    Error(LlmError),
+    Done { tool_calls: Vec<ToolCall>, usage: Option<TokenUsage> },
+}
+```
+
+**`EventSink` — 解耦输出端：**
+```rust
+pub trait EventSink {
+    fn emit(&mut self, event: StreamEvent);
+}
+```
+
+**`ChannelSink` — 桥接 EventSink ←→ tokio channel：**
+```rust
+struct ChannelSink {
+    tx: tokio::sync::mpsc::Sender<Result<ProviderEvent, LlmError>>,
+}
+
+impl EventSink for ChannelSink {
+    fn emit(&mut self, event: StreamEvent) {
+        let _ = self.tx.try_send(map_stream_event(event));
+    }
+}
+```
+
+**`process_stream` 泛型签名：**
+```rust
+pub async fn process_stream<S, A, E>(
+    sink: &mut E,
+    adapter: &A,
+    model: String,
+    mut bytes_stream: S,
+) where
+    S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
+    A: ProviderAdapter,
+    E: EventSink,
+{
+    // ...
+}
+```
+
+**GenericProvider::stream() 中的调用：**
+```rust
+// 将 reqwest::Response 转换为通用字节流
+let byte_stream = resp
+    .bytes_stream()
+    .map(|item| item.map_err(|e| LlmError::Network { detail: e.to_string() }));
+
+let mut sink = ChannelSink { tx };
+tokio::spawn(async move {
+    process_stream(&mut sink, &adapter, model, Box::pin(byte_stream)).await;
+});
+```
+
+**测试价值：**
+```rust
+// 无需 mockito / wiremock / reqwest::Response
+let stream = futures_util::stream::iter(vec![
+    Ok(Bytes::from("data: {\"text\": \"hel\"}\n\n")),
+    Ok(Bytes::from("data: {\"text\": \"lo\"}\n\n")),
+]);
+process_stream(&mut mock_sink, &adapter, "test".into(), stream).await;
+```
+
+**未来扩展：** 接入 hyper、aws-smithy、mock transport，`process_stream()` 完全不用改。
 
 ## 6. GenericProvider 已实现 LlmProvider
 
 `GenericProvider<A: ProviderAdapter + Clone>` 自动 `impl LlmProvider`。
 
 **关键实现细节：**
-- SSE 行缓冲：`bytes_stream()` 可能截断单条 SSE 消息，按 `\n` 分割后构建 `SseEvent`
-- `ToolCallAccumulator` 在 GenericProvider 内部组装增量 delta
+- SSE 行缓冲由 `SseParser` 独立处理，`bytes_stream()` 的截断问题（跨 chunk 拼包）在 `SseParser` 内部解决
+- `ToolCallAccumulator` 在 `stream_processor.rs` 中组装增量 delta
+- `process_stream()` 通过 `EventSink` trait 输出事件，不知 reqwest / tokio channel
+- `ChannelSink` 在 `base.rs` 中桥接 `EventSink` ←→ tokio channel + `ProviderEvent`
 - `ProviderAdapter` 是 `pub(crate)`，外部只能通过 `LlmProvider` trait 使用
 
 ## 7. FallbackStrategy 集成到 ToolUseLoop

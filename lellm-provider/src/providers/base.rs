@@ -5,14 +5,16 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures_util::StreamExt;
 use http::HeaderMap;
 use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage};
 use secrecy::ExposeSecret;
 use std::borrow::Cow;
 
-use crate::{LlmProvider, ProviderStream};
+use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
 use super::stream::sse_frame::SseFrame;
+use super::stream::{EventSink, StreamEvent};
 pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
 
 // ─── Adapter → GenericProvider 的中间表示 ───
@@ -81,6 +83,30 @@ pub(crate) trait ProviderAdapter: Send + Sync {
     /// 解析单个 SSE 帧的 data 字段。
     /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 GenericProvider 统一处理，构建 SseFrame。
     fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
+}
+
+// ─── EventSink 适配：将 tokio channel 包装为 EventSink ───
+
+/// Channel Sink — 将 StreamEvent 转换为 ProviderEvent 并发送到 channel。
+///
+/// 这是 stream/ 模块与 GenericProvider 之间的唯一桥接点。
+struct ChannelSink {
+    tx: tokio::sync::mpsc::Sender<Result<ProviderEvent, LlmError>>,
+}
+
+impl EventSink for ChannelSink {
+    fn emit(&mut self, event: StreamEvent) {
+        let _ = self.tx.try_send(map_stream_event(event));
+    }
+}
+
+fn map_stream_event(event: StreamEvent) -> Result<ProviderEvent, LlmError> {
+    match event {
+        StreamEvent::Start { model } => Ok(ProviderEvent::Start { model }),
+        StreamEvent::Token { token } => Ok(ProviderEvent::Token { token }),
+        StreamEvent::Error(e) => Err(e),
+        StreamEvent::Done { tool_calls, usage } => Ok(ProviderEvent::Done { tool_calls, usage }),
+    }
 }
 
 // ─── GenericProvider — 持有 config + client，统一 HTTP 传输 ───
@@ -202,7 +228,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         let http_req = self.adapter.build_request(request, true)?;
 
-        // 复用 build_request_builder，发送流式请求
+        // 发送流式请求
         let resp = self
             .build_request_builder(&http_req)?
             .send()
@@ -227,10 +253,17 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         let model = request.model.clone();
         let adapter = self.adapter.clone();
 
-        // 使用 stream_processor 处理 SSE 字节流
+        // 将 reqwest::Response 转换为通用字节流：Stream<Item = Result<Bytes, LlmError>>
+        let byte_stream = resp
+            .bytes_stream()
+            .map(|item| item.map_err(|e| LlmError::Network { detail: e.to_string() }));
+        let boxed_stream = Box::pin(byte_stream);
+
+        // 使用 ChannelSink 桥接 EventSink ←→ tokio channel
         let (tx, rx) = tokio::sync::mpsc::channel(32);
+        let mut sink = ChannelSink { tx };
         tokio::spawn(async move {
-            super::stream::stream_processor::process_stream(tx, model, adapter, resp).await;
+            super::stream::stream_processor::process_stream(&mut sink, &adapter, model, boxed_stream).await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
