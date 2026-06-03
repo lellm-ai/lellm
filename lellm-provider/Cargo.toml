@@ -28,3 +28,5 @@ futures-core.workspace = true
 futures-util.workspace = true
 secrecy.workspace = true
 url.workspace = true
+http = "1"
+bytes = "1"

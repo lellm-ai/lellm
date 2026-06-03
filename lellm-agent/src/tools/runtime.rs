@@ -125,13 +125,36 @@ impl ToolUseLoop {
 
     /// 流式执行，返回事件接收器
     ///
-    /// 终态契约：
-    /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
-    /// - 异常结束：`LoopError` 恰好一次，然后 channel 关闭
-    /// - 终态事件后不再发送任何事件
-    /// - 绝不会发送伪造的 `ToolEnd { tool_call_id: "", .. }`
+    /// 内部通过 `tokio::spawn` 启动 Agent Loop，立即返回 `Receiver`。
     ///
-    /// 若 Receiver 被丢弃，Agent Loop 会在下一次事件发送时立即终止。
+    /// **Agent Stream Contract：**
+    ///
+    /// | 场景 | 事件序列 |
+    /// |------|----------|
+    /// | 正常结束 | `...events...` → `LoopEnd` → channel close |
+    /// | 业务失败 | `...events...` → `LoopError` → channel close |
+    /// | 运行时异常 | `...events...` → channel close |
+    ///
+    /// 若 channel 在未收到 `LoopEnd` 或 `LoopError` 的情况下关闭，
+    /// 表示 Agent Runtime 发生了非预期中断（panic、task abort、OOM 等）。
+    ///
+    /// **双向终止：**
+    /// - 正常/异常结束 → 发送终态事件后 spawn 退出 → channel 关闭
+    /// - Receiver 被丢弃 → 下一次 `emit()` 失败 → 立即退出 spawn
+    ///
+    /// **消费者标准写法：**
+    /// ```rust,ignore
+    /// let mut saw_terminal = false;
+    /// while let Some(event) = rx.recv().await {
+    ///     match event {
+    ///         AgentEvent::LoopEnd { .. } | AgentEvent::LoopError { .. } => {
+    ///             saw_terminal = true;
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// assert!(saw_terminal, "agent runtime crashed");
+    /// ```
     pub fn execute_stream(self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let model = self.model.clone();
@@ -150,17 +173,6 @@ impl ToolUseLoop {
             let mut completed = false;
 
             for iteration in 1..=max_iterations {
-                if !emit(
-                    &tx,
-                    AgentEvent::Provider(lellm_provider::ProviderEvent::Start {
-                        model: model.model.clone(),
-                    }),
-                )
-                .await
-                {
-                    return;
-                }
-
                 match model.provider.stream(&req).await {
                     Ok(stream) => {
                         use futures_util::StreamExt;

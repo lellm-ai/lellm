@@ -2,13 +2,15 @@
 //!
 //! 覆盖 OpenAI、NVIDIA、DeepSeek、VLLM、LLaMA 等使用 OpenAI 兼容接口的 provider。
 
+use bytes::Bytes;
+use http::HeaderMap;
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
 };
+use std::borrow::Cow;
 
 use super::base::{
-    HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, SseEvent, StreamChunk,
-    StreamParseResult, ToolCallDelta,
+    ProviderAdapter, ProviderRequest, SseEvent, StreamChunk, StreamParseResult, ToolCallDelta,
 };
 
 /// OpenAI 兼容适配器 — 一个实现覆盖所有 OpenAI 兼容 provider。
@@ -55,21 +57,9 @@ impl ProviderAdapter for OpenAICompatAdapter {
         &self.provider_id
     }
 
-    fn build_request(
-        &self,
-        req: &ChatRequest,
-        config: &ProviderConfig,
-        stream: bool,
-    ) -> Result<HttpRequest, LlmError> {
-        let url = config
-            .base_url
-            .join("/v1/chat/completions")
-            .unwrap_or_else(|_| config.base_url.clone())
-            .to_string();
-
+    fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {
         // 构建请求 body
         // OpenAI 需要 {"role": "...", "content": "..."} 格式
-        // 不能直接使用 serde_json::to_value(&req.messages)（会序列化出 type 而非 role）
         let messages: Vec<serde_json::Map<String, serde_json::Value>> = req
             .messages
             .iter()
@@ -136,27 +126,30 @@ impl ProviderAdapter for OpenAICompatAdapter {
             );
         }
 
-        let body_bytes = serde_json::to_string(&body).map_err(|e| LlmError::ParseError {
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::ParseError {
             detail: format!("Failed to serialize request body: {}", e),
         })?;
 
-        let mut headers = vec![("Content-Type".into(), "application/json".into())];
-        if let Some((name, value)) = config.auth.get_header() {
-            headers.push((name.to_string(), value));
-        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/json"
+                .parse()
+                .map_err(|_| LlmError::ParseError {
+                    detail: "Invalid header value".into(),
+                })?,
+        );
 
-        Ok(HttpRequest {
-            url,
-            method: "POST".into(),
+        Ok(ProviderRequest {
+            path: Cow::Borrowed("/v1/chat/completions"),
             headers,
-            body: Some(body_bytes.into_bytes()),
-            stream,
+            body: Bytes::from(body_bytes),
         })
     }
 
-    fn parse_response(&self, resp: &HttpResponse) -> Result<ChatResponse, LlmError> {
+    fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
         let raw: serde_json::Value =
-            serde_json::from_slice(&resp.body).map_err(|e| LlmError::ParseError {
+            serde_json::from_slice(body).map_err(|e| LlmError::ParseError {
                 detail: format!("Invalid JSON: {}", e),
             })?;
 
@@ -253,7 +246,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
                         results.push(StreamChunk::TextDelta(content_text.into()));
                     }
 
-                    // 工具调用增量 — 统一为 ToolCallDelta(index, id, name, arguments_delta)
+                    // 工具调用增量
                     if let Some(tc_arr) = d.get("tool_calls").and_then(|a| a.as_array()) {
                         for tc in tc_arr {
                             let index =

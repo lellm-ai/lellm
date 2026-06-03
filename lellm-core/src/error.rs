@@ -18,13 +18,19 @@ pub enum LellmError {
 /// LLM API 错误。
 #[derive(Debug, Error)]
 pub enum LlmError {
-    #[error("api error: {provider} {status}")]
+    #[error("api error: {provider} {status} {code:?} {message}")]
     ApiError {
         provider: String,
         status: u16,
         code: Option<String>,
         message: String,
     },
+
+    #[error("authentication failed: {provider} {message}")]
+    Authentication { provider: String, message: String },
+
+    #[error("rate limited: {provider}")]
+    RateLimited { provider: String },
 
     #[error("request timeout")]
     Timeout,

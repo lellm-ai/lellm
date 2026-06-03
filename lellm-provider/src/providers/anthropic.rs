@@ -1,12 +1,14 @@
 //! Anthropic Provider 适配器。
 
+use bytes::Bytes;
+use http::HeaderMap;
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
 };
+use std::borrow::Cow;
 
 use super::base::{
-    HttpRequest, HttpResponse, ProviderAdapter, ProviderConfig, SseEvent, StreamChunk,
-    StreamParseResult, ToolCallDelta,
+    ProviderAdapter, ProviderRequest, SseEvent, StreamChunk, StreamParseResult, ToolCallDelta,
 };
 
 /// Anthropic 适配器。
@@ -14,22 +16,11 @@ use super::base::{
 pub struct AnthropicAdapter;
 
 impl ProviderAdapter for AnthropicAdapter {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "anthropic"
     }
 
-    fn build_request(
-        &self,
-        req: &ChatRequest,
-        config: &ProviderConfig,
-        stream: bool,
-    ) -> Result<HttpRequest, LlmError> {
-        let url = config
-            .base_url
-            .join("/v1/messages")
-            .unwrap_or_else(|_| config.base_url.clone())
-            .to_string();
-
+    fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {
         // Anthropic 需要 {"role": "...", "content": [...]} 格式
         // system 消息必须放在单独的 system 字段，不能在 messages 数组中
         let mut system_text = String::new();
@@ -73,7 +64,6 @@ impl ProviderAdapter for AnthropicAdapter {
                     // Anthropic: tool_result 是 role="user" 消息中的 content block
                     let mut map = serde_json::Map::new();
                     map.insert("role".into(), "user".into());
-                    // 构建 tool_result content block
                     let mut block = serde_json::Map::new();
                     block.insert("type".into(), "tool_result".into());
                     block.insert("tool_use_id".into(), tool_call_id.clone().into());
@@ -122,30 +112,28 @@ impl ProviderAdapter for AnthropicAdapter {
             );
         }
 
-        let body_bytes = serde_json::to_string(&body).map_err(|e| LlmError::ParseError {
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::ParseError {
             detail: format!("Failed to serialize request body: {}", e),
         })?;
 
-        let mut headers = vec![
-            ("Content-Type".into(), "application/json".into()),
-            ("anthropic-version".into(), "2023-06-01".into()),
-        ];
-        if let Some((name, value)) = config.auth.get_header() {
-            headers.push((name.to_string(), value));
-        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-version",
+            "2023-06-01".parse().map_err(|_| LlmError::ParseError {
+                detail: "Invalid header value".into(),
+            })?,
+        );
 
-        Ok(HttpRequest {
-            url,
-            method: "POST".into(),
+        Ok(ProviderRequest {
+            path: Cow::Borrowed("/v1/messages"),
             headers,
-            body: Some(body_bytes.into_bytes()),
-            stream,
+            body: Bytes::from(body_bytes),
         })
     }
 
-    fn parse_response(&self, resp: &HttpResponse) -> Result<ChatResponse, LlmError> {
+    fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
         let raw: serde_json::Value =
-            serde_json::from_slice(&resp.body).map_err(|e| LlmError::ParseError {
+            serde_json::from_slice(body).map_err(|e| LlmError::ParseError {
                 detail: format!("Invalid JSON: {}", e),
             })?;
 
@@ -226,7 +214,6 @@ impl ProviderAdapter for AnthropicAdapter {
         let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
             "content_block_start" => {
-                // tool_use 类型在此事件中携带 id + name
                 let block = val.get("content_block").unwrap_or(&serde_json::Value::Null);
                 let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if block_type == "tool_use" {
@@ -274,7 +261,6 @@ impl ProviderAdapter for AnthropicAdapter {
                 }
             }
             "message_delta" => {
-                // 提取 usage
                 if let Some(usage_val) = val.get("usage") {
                     let usage = TokenUsage {
                         prompt_tokens: 0,
