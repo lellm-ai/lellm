@@ -2,12 +2,11 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use lellm_core::{Message, ToolCall};
+use lellm_core::{Message, ToolCall, ToolError, ToolErrorKind, ToolResult};
 
-use super::ToolCallResult;
+use super::{RetryPolicy, ToolFn};
 
 /// 工具安全分级
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,18 +37,11 @@ pub struct ToolRegistration {
     func: ToolFn,
 }
 
-/// 异步工具函数类型
-type ToolFn = Arc<
-    dyn Fn(&serde_json::Value) -> Pin<Box<dyn std::future::Future<Output = ToolCallResult> + Send>>
-        + Send
-        + Sync,
->;
-
 impl ToolRegistration {
     pub fn safe<F, Fut>(f: F) -> Self
     where
         F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolCallResult> + Send + 'static,
+        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
     {
         Self {
             safety: ParallelSafety::Safe,
@@ -61,7 +53,7 @@ impl ToolRegistration {
     pub fn category_exclusive<F, Fut>(category: ToolCategory, f: F) -> Self
     where
         F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolCallResult> + Send + 'static,
+        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
     {
         Self {
             safety: ParallelSafety::CategoryExclusive,
@@ -73,7 +65,7 @@ impl ToolRegistration {
     pub fn exclusive<F, Fut>(f: F) -> Self
     where
         F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolCallResult> + Send + 'static,
+        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
     {
         Self {
             safety: ParallelSafety::Exclusive,
@@ -120,10 +112,17 @@ impl ToolExecutor {
         self.categories.get(name).cloned()
     }
 
-    pub async fn execute(&self, call: &ToolCall) -> ToolCallResult {
+    /// 执行单个工具调用，自带重试。
+    pub async fn execute(&self, call: &ToolCall) -> ToolResult {
         match self.tools.get(&call.name) {
-            Some(tool_fn) => tool_fn(&call.arguments).await,
-            None => ToolCallResult::Err(format!("unknown tool: {}", call.name)),
+            Some(tool_fn) => {
+                let policy = RetryPolicy::default();
+                policy.execute_with_retry(tool_fn, &call.arguments).await
+            }
+            None => Err(ToolError {
+                kind: ToolErrorKind::Internal,
+                message: format!("unknown tool: {}", call.name),
+            }),
         }
     }
 
@@ -213,11 +212,11 @@ impl ToolExecutor {
         results
     }
 
-    /// 将 ToolCallResult 转为 Message::ToolResult
-    fn to_tool_result_message(&self, call: &ToolCall, result: ToolCallResult) -> Message {
+    /// 将 ToolResult 转为 Message::ToolResult
+    fn to_tool_result_message(&self, call: &ToolCall, result: ToolResult) -> Message {
         let content = match result {
-            ToolCallResult::Ok(s) => s,
-            ToolCallResult::Err(e) => format!("tool error: {e}"),
+            Ok(s) => s,
+            Err(e) => format!("tool error: {e}"),
         };
         Message::ToolResult {
             tool_call_id: call.id.clone(),

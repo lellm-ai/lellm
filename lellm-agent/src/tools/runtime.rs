@@ -3,19 +3,80 @@
 //! 负责 LLM 返回 tool_calls → 执行工具 → 结果注入 → 再次调用 LLM 的循环，
 //! 直到 LLM 返回纯文本或达到最大轮次。
 
-use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolResult};
 use lellm_provider::ResolvedModel;
 use tokio::sync::mpsc::Sender;
 
 use super::executor::ToolExecutor;
 use super::{AgentEvent, AgentStream, StopReason};
 
-/// 工具执行结果
-#[derive(Debug, Clone)]
-pub enum ToolCallResult {
-    Ok(String),
-    Err(String),
+// ─── 循环状态机 ───
+
+/// Agent Loop 共享状态 — 非流式与流式执行模式共用。
+#[derive(Debug)]
+pub struct LoopState {
+    pub messages: Vec<Message>,
+    pub iterations: usize,
+    pub tool_calls_executed: usize,
 }
+
+impl LoopState {
+    pub fn new(messages: Vec<Message>) -> Self {
+        Self {
+            messages,
+            iterations: 0,
+            tool_calls_executed: 0,
+        }
+    }
+
+    /// 追加 Assistant 响应到历史
+    pub fn push_assistant(&mut self, content: Vec<lellm_core::ContentBlock>) {
+        self.messages.push(Message::Assistant { content });
+    }
+
+    /// 追加工具执行结果到历史
+    pub fn push_tool_results(&mut self, results: Vec<Message>) {
+        self.messages.extend(results);
+    }
+
+    /// 记录本轮工具调用数量
+    pub fn add_tool_calls(&mut self, count: usize) {
+        self.tool_calls_executed += count;
+    }
+
+    /// 进入下一轮迭代
+    pub fn next_iteration(&mut self) {
+        self.iterations += 1;
+    }
+
+    /// 判断是否已达到最大轮次
+    pub fn reached_max(&self, max_iterations: usize) -> bool {
+        self.iterations >= max_iterations
+    }
+
+    /// 构建最终执行结果
+    pub fn finish(&self, stop_reason: StopReason, response: ChatResponse) -> ToolUseResult {
+        ToolUseResult {
+            stop_reason,
+            response,
+            messages: self.messages.clone(),
+            iterations: self.iterations,
+            tool_calls_executed: self.tool_calls_executed,
+        }
+    }
+
+    /// 构建正常完成结果
+    pub fn finish_complete(&self, response: ChatResponse) -> ToolUseResult {
+        self.finish(StopReason::Complete, response)
+    }
+
+    /// 构建达到最大轮次结果
+    pub fn finish_max_iterations(&self, response: ChatResponse) -> ToolUseResult {
+        self.finish(StopReason::MaxIterationsReached, response)
+    }
+}
+
+// ─── 执行结果 ───
 
 /// ToolUseLoop 执行结果
 #[derive(Debug, Clone)]
@@ -30,16 +91,40 @@ pub struct ToolUseResult {
 
 impl ToolUseResult {
     /// 仅 `StopReason::Complete` 返回 `true`。
-    /// 调用方不应盲目 `?` 解包后直接使用，应先检查此方法。
     pub fn is_success(&self) -> bool {
         matches!(self.stop_reason, StopReason::Complete)
     }
 }
 
-/// 发送事件，消费者丢弃 Receiver 时立即返回 `false` 以终止 loop。
+// ─── 辅助函数 ───
+
+/// 发送事件，消费者丢弃 Receiver 时返回 `false`。
 async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
     tx.send(event).await.is_ok()
 }
+
+/// 将 ToolResult 转为 Message::ToolResult
+fn to_tool_result_message(call: &lellm_core::ToolCall, result: ToolResult) -> Message {
+    let content_str = match result {
+        Ok(s) => s,
+        Err(e) => format!("tool error: {e}"),
+    };
+    Message::ToolResult {
+        tool_call_id: call.id.clone(),
+        content: lellm_core::text_block(content_str),
+    }
+}
+
+/// 构建空的 ChatResponse（边界情况兜底）
+fn empty_response() -> ChatResponse {
+    ChatResponse::new(
+        lellm_core::text_block(String::new()),
+        lellm_core::TokenUsage::default(),
+        serde_json::Value::Null,
+    )
+}
+
+// ─── ToolUseLoop ───
 
 /// 管理 LLM 与工具调用闭环
 pub struct ToolUseLoop {
@@ -68,93 +153,60 @@ impl ToolUseLoop {
     /// - `Ok(ToolUseResult)` — Agent 层完成（含 MaxIterationsReached）
     /// - `Err(LlmError)` — Provider 调用失败
     pub async fn execute(self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
-        let mut req = ChatRequest {
-            model: self.model.model.clone(),
-            messages,
-            ..Default::default()
-        };
-
-        let mut tool_calls_executed = 0usize;
+        let mut state = LoopState::new(messages);
         let mut last_response: Option<ChatResponse> = None;
 
-        for iteration in 1..=self.max_iterations {
+        loop {
+            if state.reached_max(self.max_iterations) {
+                return Ok(state.finish_max_iterations(
+                    last_response.unwrap_or_else(|| empty_response()),
+                ));
+            }
+
+            state.next_iteration();
+
+            let req = ChatRequest {
+                model: self.model.model.clone(),
+                messages: state.messages.clone(),
+                ..Default::default()
+            };
+
             let response = self.model.provider.call(&req).await?;
             last_response = Some(response);
 
             if !last_response.as_ref().unwrap().has_tool_calls() {
-                return Ok(ToolUseResult {
-                    stop_reason: StopReason::Complete,
-                    response: last_response.unwrap(),
-                    messages: req.messages,
-                    iterations: iteration,
-                    tool_calls_executed,
-                });
+                return Ok(state.finish_complete(last_response.unwrap()));
             }
 
+            // 提取工具调用并执行
             let tool_calls: Vec<_> = last_response
                 .as_ref()
                 .unwrap()
                 .tool_calls()
                 .cloned()
                 .collect();
-            tool_calls_executed += tool_calls.len();
 
-            req.messages.push(Message::Assistant {
-                content: last_response.as_ref().unwrap().content.clone(),
-            });
+            let response_content = last_response.as_ref().unwrap().content.clone();
+            state.push_assistant(response_content);
+            state.add_tool_calls(tool_calls.len());
 
-            let tool_results = self.executor.execute_batch(&tool_calls).await;
-            req.messages.extend(tool_results);
+            let results = self.executor.execute_batch(&tool_calls).await;
+            state.push_tool_results(results);
 
             tracing::debug!(
-                iteration,
+                iteration = state.iterations,
                 tool_calls = tool_calls.len(),
                 "tool-use loop iteration"
             );
         }
-
-        // 达到最大轮次 — Agent 层正常终止，不是 Provider 错误
-        Ok(ToolUseResult {
-            stop_reason: StopReason::MaxIterationsReached,
-            response: last_response.unwrap(),
-            messages: req.messages,
-            iterations: self.max_iterations,
-            tool_calls_executed,
-        })
     }
 
     /// 流式执行，返回事件接收器
     ///
-    /// 内部通过 `tokio::spawn` 启动 Agent Loop，立即返回 `Receiver`。
-    ///
     /// **Agent Stream Contract：**
-    ///
-    /// | 场景 | 事件序列 |
-    /// |------|----------|
-    /// | 正常结束 | `...events...` → `LoopEnd` → channel close |
-    /// | 业务失败 | `...events...` → `LoopError` → channel close |
-    /// | 运行时异常 | `...events...` → channel close |
-    ///
-    /// 若 channel 在未收到 `LoopEnd` 或 `LoopError` 的情况下关闭，
-    /// 表示 Agent Runtime 发生了非预期中断（panic、task abort、OOM 等）。
-    ///
-    /// **双向终止：**
-    /// - 正常/异常结束 → 发送终态事件后 spawn 退出 → channel 关闭
-    /// - Receiver 被丢弃 → 下一次 `emit()` 失败 → 立即退出 spawn
-    ///
-    /// **消费者标准写法：**
-    /// ```rust,ignore
-    /// let mut saw_terminal = false;
-    /// while let Some(event) = rx.recv().await {
-    ///     match event {
-    ///         AgentEvent::LoopEnd { .. } | AgentEvent::LoopError { .. } => {
-    ///             saw_terminal = true;
-    ///         }
-    ///         _ => {}
-    ///     }
-    /// }
-    /// assert!(saw_terminal, "agent runtime crashed");
-    /// ```
+    /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
+    /// - 业务失败：`LoopError` 恰好一次，然后 channel 关闭
+    /// - 运行时异常：channel 直接关闭（未收到终态事件）
     pub fn execute_stream(self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let model = self.model.clone();
@@ -162,233 +214,273 @@ impl ToolUseLoop {
         let max_iterations = self.max_iterations;
 
         tokio::spawn(async move {
-            let mut req = ChatRequest {
-                model: model.model.clone(),
-                messages,
-                ..Default::default()
-            };
-
-            let mut tool_calls_executed = 0usize;
+            let mut state = LoopState::new(messages);
             let mut last_response: Option<ChatResponse> = None;
-            let mut completed = false;
 
-            for iteration in 1..=max_iterations {
+            loop {
+                if state.reached_max(max_iterations) {
+                    let _ = emit(
+                        &tx,
+                        AgentEvent::LoopEnd {
+                            result: state.finish_max_iterations(
+                                last_response.unwrap_or_else(|| empty_response()),
+                            ),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
+                state.next_iteration();
+
+                let req = ChatRequest {
+                    model: model.model.clone(),
+                    messages: state.messages.clone(),
+                    ..Default::default()
+                };
+
                 match model.provider.stream(&req).await {
-                    Ok(stream) => {
-                        use futures_util::StreamExt;
-                        let mut stream = stream;
+                    Ok(mut stream) => {
                         let mut text_buffer = String::new();
 
-                        let mut iteration_over = false;
+                        let iter_result = process_stream_iteration(
+                            &tx,
+                            &executor,
+                            &mut state,
+                            &mut stream,
+                            &mut text_buffer,
+                        )
+                        .await;
 
-                        while let Some(event) = stream.next().await {
-                            match event {
-                                Ok(lellm_provider::ProviderEvent::Start { .. }) => {
-                                    if !emit(
-                                        &tx,
-                                        AgentEvent::Provider(
-                                            lellm_provider::ProviderEvent::Start {
-                                                model: model.model.clone(),
-                                            },
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        return;
-                                    }
-                                }
-                                Ok(lellm_provider::ProviderEvent::Token { token }) => {
-                                    text_buffer.push_str(&token);
-                                    if !emit(
-                                        &tx,
-                                        AgentEvent::Provider(
-                                            lellm_provider::ProviderEvent::Token { token },
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        return;
-                                    }
-                                }
-                                Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
-                                    let pending_tool_calls = tool_calls;
-                                    let usage_val = usage.unwrap_or_default();
-
-                                    // 统一构建 ChatResponse — 无论有无 tool_calls
-                                    let content: Vec<lellm_core::ContentBlock> =
-                                        lellm_core::text_block(text_buffer.clone())
-                                            .into_iter()
-                                            .chain(pending_tool_calls.iter().map(|tc| {
-                                                lellm_core::ContentBlock::ToolCall(tc.clone())
-                                            }))
-                                            .collect();
-
-                                    let response = ChatResponse::new(
-                                        content,
-                                        usage_val,
-                                        serde_json::json!(null),
-                                    );
-
-                                    if !pending_tool_calls.is_empty() {
-                                        req.messages.push(Message::Assistant {
-                                            content: response.content.clone(),
-                                        });
-                                        tool_calls_executed += pending_tool_calls.len();
-
-                                        let mut tool_results = Vec::new();
-                                        for tc in &pending_tool_calls {
-                                            if !emit(
-                                                &tx,
-                                                AgentEvent::ToolStart {
-                                                    tool_call_id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                },
-                                            )
-                                            .await
-                                            {
-                                                return;
-                                            }
-
-                                            let result = executor.execute(tc).await;
-
-                                            if !emit(
-                                                &tx,
-                                                AgentEvent::ToolEnd {
-                                                    tool_call_id: tc.id.clone(),
-                                                    result: result.clone(),
-                                                },
-                                            )
-                                            .await
-                                            {
-                                                return;
-                                            }
-
-                                            let content_str = match &result {
-                                                ToolCallResult::Ok(s) => s.clone(),
-                                                ToolCallResult::Err(e) => {
-                                                    format!("tool error: {e}")
-                                                }
-                                            };
-
-                                            tool_results.push(Message::ToolResult {
-                                                tool_call_id: tc.id.clone(),
-                                                content: lellm_core::text_block(content_str),
-                                            });
-                                        }
-                                        req.messages.extend(tool_results);
-
-                                        // 保存为 last_response，供 MaxIterationsReached 使用
-                                        last_response = Some(response);
-
-                                        tracing::debug!(
-                                            iteration,
-                                            tool_calls = pending_tool_calls.len(),
-                                            "tool-use stream iteration"
-                                        );
-                                    } else {
-                                        if !emit(
-                                            &tx,
-                                            AgentEvent::Provider(
-                                                lellm_provider::ProviderEvent::Done {
-                                                    tool_calls: Vec::new(),
-                                                    usage: Some(response.usage),
-                                                },
-                                            ),
-                                        )
-                                        .await
-                                        {
-                                            return;
-                                        }
-
-                                        if !emit(
-                                            &tx,
-                                            AgentEvent::LoopEnd {
-                                                result: ToolUseResult {
-                                                    stop_reason: StopReason::Complete,
-                                                    response,
-                                                    messages: req.messages.clone(),
-                                                    iterations: iteration,
-                                                    tool_calls_executed,
-                                                },
-                                            },
-                                        )
-                                        .await
-                                        {
-                                            return;
-                                        }
-
-                                        completed = true;
-                                        iteration_over = true;
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    if !emit(
-                                        &tx,
-                                        AgentEvent::LoopError {
-                                            error: e,
-                                            iterations: iteration,
-                                        },
-                                    )
-                                    .await
-                                    {
-                                        return;
-                                    }
-                                    iteration_over = true;
-                                    break;
-                                }
-                            }
+                        if let Some(resp) = iter_result.response {
+                            last_response = Some(resp);
                         }
 
-                        if iteration_over {
-                            break;
+                        if iter_result.terminated {
+                            let result = if iter_result.is_complete {
+                                state.finish_complete(
+                                    last_response.unwrap_or_else(|| empty_response()),
+                                )
+                            } else {
+                                state.finish_max_iterations(
+                                    last_response.unwrap_or_else(|| empty_response()),
+                                )
+                            };
+                            let _ = emit(&tx, AgentEvent::LoopEnd { result }).await;
+                            return;
                         }
                     }
                     Err(e) => {
-                        if !emit(
+                        let _ = emit(
                             &tx,
                             AgentEvent::LoopError {
                                 error: e,
-                                iterations: iteration,
+                                iterations: state.iterations,
                             },
                         )
-                        .await
-                        {
-                            return;
-                        }
-                        break;
+                        .await;
+                        return;
                     }
-                }
-            }
-
-            // 达到最大轮次 — 仅在未完成时发送
-            if !completed {
-                let response = last_response.unwrap_or_else(|| {
-                    ChatResponse::new(
-                        lellm_core::text_block(String::new()),
-                        lellm_core::TokenUsage::default(),
-                        serde_json::Value::Null,
-                    )
-                });
-                if !emit(
-                    &tx,
-                    AgentEvent::LoopEnd {
-                        result: ToolUseResult {
-                            stop_reason: StopReason::MaxIterationsReached,
-                            response,
-                            messages: req.messages,
-                            iterations: max_iterations,
-                            tool_calls_executed,
-                        },
-                    },
-                )
-                .await
-                {
-                    return;
                 }
             }
         });
 
         rx
     }
+}
+
+/// 流式单轮迭代的结果
+struct StreamIterResult {
+    /// 是否应退出外层循环
+    terminated: bool,
+    /// 是否正常完成（vs 错误终止）
+    is_complete: bool,
+    /// 本轮构建的 ChatResponse（供外层追踪 last_response）
+    response: Option<ChatResponse>,
+}
+
+/// 处理流式单轮迭代
+async fn process_stream_iteration(
+    tx: &Sender<AgentEvent>,
+    executor: &ToolExecutor,
+    state: &mut LoopState,
+    stream: &mut lellm_provider::ProviderStream,
+    text_buffer: &mut String,
+) -> StreamIterResult {
+    use futures_util::StreamExt;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(lellm_provider::ProviderEvent::Start { model: m }) => {
+                // 直接透传，不再手动 re-emit
+                if !emit(
+                    tx,
+                    AgentEvent::Provider(lellm_provider::ProviderEvent::Start { model: m }),
+                )
+                .await
+                {
+                    return StreamIterResult::terminated_false();
+                }
+            }
+            Ok(lellm_provider::ProviderEvent::Token { token }) => {
+                text_buffer.push_str(&token);
+                if !emit(
+                    tx,
+                    AgentEvent::Provider(lellm_provider::ProviderEvent::Token { token }),
+                )
+                .await
+                {
+                    return StreamIterResult::terminated_false();
+                }
+            }
+            Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
+                let pending_tool_calls = tool_calls;
+                let usage_val = usage.unwrap_or_default();
+
+                // 统一构建 ChatResponse
+                let content: Vec<lellm_core::ContentBlock> =
+                    lellm_core::text_block(text_buffer.clone())
+                        .into_iter()
+                        .chain(
+                            pending_tool_calls
+                                .iter()
+                                .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
+                        )
+                        .collect();
+
+                let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
+
+                if !pending_tool_calls.is_empty() {
+                    // 有工具调用 — 追加历史并执行
+                    state.push_assistant(response.content.clone());
+                    state.add_tool_calls(pending_tool_calls.len());
+
+                    let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
+                    if results.is_none() {
+                        return StreamIterResult::terminated_false();
+                    }
+                    state.push_tool_results(results.unwrap());
+
+                    tracing::debug!(
+                        iteration = state.iterations,
+                        tool_calls = pending_tool_calls.len(),
+                        "tool-use stream iteration"
+                    );
+
+                    return StreamIterResult::new(false, Some(response));
+                } else {
+                    // 无工具调用 — 正常结束
+                    if !emit(
+                        tx,
+                        AgentEvent::Provider(lellm_provider::ProviderEvent::Done {
+                            tool_calls: Vec::new(),
+                            usage: Some(response.usage),
+                        }),
+                    )
+                    .await
+                    {
+                        return StreamIterResult::terminated_false();
+                    }
+
+                    if !emit(
+                        tx,
+                        AgentEvent::LoopEnd {
+                            result: state.finish_complete(response),
+                        },
+                    )
+                    .await
+                    {
+                        return StreamIterResult::terminated_false();
+                    }
+
+                    return StreamIterResult::completed(None);
+                }
+            }
+            Err(e) => {
+                let _ = emit(
+                    tx,
+                    AgentEvent::LoopError {
+                        error: e,
+                        iterations: state.iterations,
+                    },
+                )
+                .await;
+                return StreamIterResult::terminated_error();
+            }
+        }
+    }
+
+    StreamIterResult::terminated_false()
+}
+
+impl StreamIterResult {
+    fn new(terminated: bool, response: Option<ChatResponse>) -> Self {
+        Self {
+            terminated,
+            is_complete: false,
+            response,
+        }
+    }
+    fn completed(response: Option<ChatResponse>) -> Self {
+        Self {
+            terminated: true,
+            is_complete: true,
+            response,
+        }
+    }
+    fn terminated_error() -> Self {
+        Self {
+            terminated: true,
+            is_complete: false,
+            response: None,
+        }
+    }
+    fn terminated_false() -> Self {
+        Self {
+            terminated: false,
+            is_complete: false,
+            response: None,
+        }
+    }
+}
+
+/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具
+async fn emit_and_execute_tools(
+    tx: &Sender<AgentEvent>,
+    executor: &ToolExecutor,
+    tool_calls: &[lellm_core::ToolCall],
+) -> Option<Vec<Message>> {
+    let mut results = Vec::new();
+
+    for tc in tool_calls {
+        if !emit(
+            tx,
+            AgentEvent::ToolStart {
+                tool_call_id: tc.id.clone(),
+                name: tc.name.clone(),
+            },
+        )
+        .await
+        {
+            return None;
+        }
+
+        let result = executor.execute(tc).await;
+
+        if !emit(
+            tx,
+            AgentEvent::ToolEnd {
+                tool_call_id: tc.id.clone(),
+                result: result.clone(),
+            },
+        )
+        .await
+        {
+            return None;
+        }
+
+        results.push(to_tool_result_message(tc, result));
+    }
+
+    Some(results)
 }

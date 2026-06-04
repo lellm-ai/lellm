@@ -14,8 +14,8 @@ use std::borrow::Cow;
 use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
 use super::stream::sse_frame::SseFrame;
-use super::stream::{EventSink, StreamEvent};
 pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
+use super::stream::{EventSink, StreamEvent};
 
 // ─── Adapter → GenericProvider 的中间表示 ───
 
@@ -34,6 +34,7 @@ pub(crate) struct ProviderRequest {
 #[derive(Debug)]
 pub(crate) struct RawResponse {
     pub status: u16,
+    #[allow(dead_code)]
     pub headers: HeaderMap,
     pub body: Bytes,
 }
@@ -254,16 +255,24 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         let adapter = self.adapter.clone();
 
         // 将 reqwest::Response 转换为通用字节流：Stream<Item = Result<Bytes, LlmError>>
-        let byte_stream = resp
-            .bytes_stream()
-            .map(|item| item.map_err(|e| LlmError::Network { detail: e.to_string() }));
+        let byte_stream = resp.bytes_stream().map(|item| {
+            item.map_err(|e| LlmError::Network {
+                detail: e.to_string(),
+            })
+        });
         let boxed_stream = Box::pin(byte_stream);
 
         // 使用 ChannelSink 桥接 EventSink ←→ tokio channel
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let mut sink = ChannelSink { tx };
         tokio::spawn(async move {
-            super::stream::stream_processor::process_stream(&mut sink, &adapter, model, boxed_stream).await;
+            super::stream::stream_processor::process_stream(
+                &mut sink,
+                &adapter,
+                model,
+                boxed_stream,
+            )
+            .await;
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);

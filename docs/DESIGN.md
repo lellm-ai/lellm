@@ -310,29 +310,82 @@ process_stream(&mut mock_sink, &adapter, "test".into(), stream).await;
 - `ChannelSink` 在 `base.rs` 中桥接 `EventSink` ←→ tokio channel + `ProviderEvent`
 - `ProviderAdapter` 是 `pub(crate)`，外部只能通过 `LlmProvider` trait 使用
 
-## 7. FallbackStrategy 集成到 ToolUseLoop
+## 7. 恢复层 — RetryPolicy（瞬时故障）与 FallbackStrategy（路由决策）
+
+**核心原则：** v0.1 发布前，仓库中不允许存在 "Runtime 永远不会调用到的恢复模块"。要么接入，要么标记 v0.2。
+
+### 7.1 ToolError 类型化
+
+**决定：** 删除 `ToolCallResult` 枚举，改用 Rust 原生 `Result`：
+
+```rust
+pub type ToolResult = Result<String, ToolError>;
+
+pub struct ToolError {
+    pub kind: ToolErrorKind,
+    pub message: String,
+}
+
+pub enum ToolErrorKind {
+    Timeout,
+    Network,
+    PermissionDenied,
+    InvalidInput,
+    RateLimited,
+    Internal,
+}
+```
+
+**理由：**
+- `ToolCallResult::Ok/Err(String)` 是纯字符串错误，`RetryPolicy` 无法分类
+- Rust 已有 `Result<T,E>`，不需要再包一层枚举
+- 类型安全：`match err.kind` 编译期 exhaustive check
+
+### 7.2 RetryPolicy — 瞬时故障恢复（"再试一次"）
+
+**执行链：** `ToolUseLoop → ToolExecutor → RetryPolicy → tool_fn()`
+
+```rust
+// ToolExecutor 内部
+async fn execute(&self, call: &ToolCall) -> ToolResult {
+    let tool_fn = self.tools.get(&call.name).expect("...");
+    RetryPolicy::execute_with_retry(tool_fn).await
+}
+```
+
+**可重试 vs 不可重试：**
+
+| ToolErrorKind | 可重试 | 策略 |
+|--------------|--------|------|
+| Timeout | ✅ | 指数退避 |
+| Network | ✅ | 固定间隔 |
+| RateLimited | ✅ | 按 Retry-After |
+| PermissionDenied | ❌ | 直接返回 |
+| InvalidInput | ❌ | 直接返回 |
+| Internal | ⚠️ | 视情况 |
+
+**RetryPolicy 负责：** 是否重试、退避间隔、最大次数。
+**FallbackStrategy 负责：** Retry 耗尽后，换条路走（Abort / SwitchProvider / AskUser）。
+
+### 7.3 FallbackStrategy — 路由决策（"换条路走"）
 
 **钩子点：**
 
 | 触发条件 | 钩子位置 | FallbackReason |
 |---------|---------|----------------|
 | Provider 调用失败 | `call()` / `stream()` 返回 `Err` | `LlmError` |
+| 工具重试耗尽 | RetryPolicy 返回 `Err` | `ToolError` |
 | 连续 N 轮 ToolCall | LoopDetector 触发（v0.2） | `LoopDetected` |
 | 达到最大迭代 | for 循环结束 | `MaxIterationsReached` |
 
-**v0.1 实现范围：**
+**v0.1 实现范围：** ⚠️ 可选
 - 只实现 `Retry` + `Abort`（`DefaultFallback`）
 - Fallback 钩子只在 **Provider 错误** 处触发
-- 对 Timeout/Network/5xx 错误重试（默认 3 次），其余直接 Abort
 
 **v0.2 扩展：**
 - `SwitchProvider` — 传入 `Vec<ResolvedModel>` 备选链
 - `RetryWithMessages` — 注入干预消息
 - `LoopDetected` / `SignalVoter` 触发 Fallback
-
-**`SwitchProvider(String)` 用 String 而非 RouteEntry：**
-- v0.1 保留变体但不实现
-- 用 `String` 保持简单，v0.2 实现时再改为 `RouteEntry`
 
 ## 8. AgentEvent 流式阶段事件
 

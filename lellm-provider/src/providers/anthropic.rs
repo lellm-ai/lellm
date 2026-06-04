@@ -29,8 +29,8 @@ impl ProviderAdapter for AnthropicAdapter {
 
         for m in &req.messages {
             match m {
-                Message::System { content: _ } => {
-                    system_text = m.extract_text();
+                Message::System { content } => {
+                    system_text = content.iter().filter_map(|b| b.as_text()).collect();
                 }
                 Message::User { content } => {
                     let mut map = serde_json::Map::new();

@@ -1,5 +1,6 @@
 //! 错误类型定义。
 
+use std::fmt;
 use thiserror::Error;
 
 /// lellm 顶层错误类型。
@@ -7,10 +8,13 @@ use thiserror::Error;
 pub enum LellmError {
     #[error("LLM error: {0}")]
     Llm(#[from] LlmError),
+
     #[error("Tool error: {0}")]
     Tool(#[from] ToolError),
+
     #[error("Memory error: {0}")]
     Memory(#[from] MemoryError),
+
     #[error("Parse error: {0}")]
     Parse(#[from] ParseError),
 }
@@ -48,21 +52,72 @@ pub enum LlmError {
     Other { message: String },
 }
 
-/// 工具执行错误。
-#[derive(Debug, Error)]
-pub enum ToolError {
-    #[error("tool not found: {0}")]
-    NotFound(String),
-
-    #[error("tool execution failed: {0}")]
-    ExecutionFailed(String),
-
-    #[error("tool execution timed out")]
+/// 工具执行错误的分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// 工具未找到
+    NotFound,
+    /// 工具执行超时
     Timeout,
-
-    #[error("tool call loop detected")]
+    /// 网络相关错误
+    Network,
+    /// 权限不足
+    PermissionDenied,
+    /// 输入参数无效
+    InvalidInput,
+    /// 被限流
+    RateLimited,
+    /// 检测到循环调用
     LoopDetected,
+    /// 内部错误（兜底）
+    Internal,
 }
+
+impl ToolErrorKind {
+    /// 该错误类型是否值得重试
+    pub fn is_retriable(self) -> bool {
+        matches!(self, Self::Timeout | Self::Network | Self::RateLimited)
+    }
+}
+
+impl fmt::Display for ToolErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "NotFound"),
+            Self::Timeout => write!(f, "Timeout"),
+            Self::Network => write!(f, "Network"),
+            Self::PermissionDenied => write!(f, "PermissionDenied"),
+            Self::InvalidInput => write!(f, "InvalidInput"),
+            Self::RateLimited => write!(f, "RateLimited"),
+            Self::LoopDetected => write!(f, "LoopDetected"),
+            Self::Internal => write!(f, "Internal"),
+        }
+    }
+}
+
+/// 工具执行错误 — 携带错误分类与详细描述。
+#[derive(Clone)]
+pub struct ToolError {
+    pub kind: ToolErrorKind,
+    pub message: String,
+}
+
+impl fmt::Display for ToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.kind, self.message)
+    }
+}
+
+impl fmt::Debug for ToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ToolError({}: {})", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for ToolError {}
+
+/// 工具执行结果 — Rust 原生 Result，不包装枚举。
+pub type ToolResult = Result<String, ToolError>;
 
 /// 记忆操作错误。
 #[derive(Debug, Error)]
@@ -105,14 +160,29 @@ mod tests {
 
     #[test]
     fn test_tool_error_display() {
-        let err = ToolError::NotFound("read_file".into());
-        assert_eq!(format!("{}", err), "tool not found: read_file");
+        let err = ToolError {
+            kind: ToolErrorKind::NotFound,
+            message: "read_file".into(),
+        };
+        assert!(format!("{}", err).contains("read_file"));
     }
 
     #[test]
-    fn test_lellm_error_from_llm_error() {
-        let llm_err = LlmError::Timeout;
-        let top_err: LellmError = llm_err.into();
-        assert!(format!("{}", top_err).contains("LLM error"));
+    fn test_lellm_error_from_tool_error() {
+        let tool_err = ToolError {
+            kind: ToolErrorKind::Timeout,
+            message: "timeout".into(),
+        };
+        let top_err: LellmError = tool_err.into();
+        assert!(format!("{}", top_err).contains("Tool error"));
+    }
+
+    #[test]
+    fn test_tool_error_is_retriable() {
+        assert!(ToolErrorKind::Timeout.is_retriable());
+        assert!(ToolErrorKind::Network.is_retriable());
+        assert!(ToolErrorKind::RateLimited.is_retriable());
+        assert!(!ToolErrorKind::NotFound.is_retriable());
+        assert!(!ToolErrorKind::InvalidInput.is_retriable());
     }
 }

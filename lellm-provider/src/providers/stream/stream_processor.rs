@@ -11,8 +11,8 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use lellm_core::{LlmError, TokenUsage};
 
-use crate::providers::base::{ProviderAdapter, StreamChunk};
 use super::{EventSink, SseFrame, SseParser, StreamEvent, ToolCallAccumulator, ToolCallDelta};
+use crate::providers::base::{ProviderAdapter, StreamChunk};
 
 /// 单个 SseFrame 的解析结果。
 struct FrameResult {
@@ -30,12 +30,8 @@ struct FrameResult {
 /// - `S`: 任意字节流（reqwest、hyper、mock、file...）
 /// - `A`: Provider 适配器，负责 SSE data → StreamChunk 的协议解析
 /// - `E`: 事件输出端，负责将 StreamEvent 转发给消费者
-pub async fn process_stream<S, A, E>(
-    sink: &mut E,
-    adapter: &A,
-    model: String,
-    mut bytes_stream: S,
-) where
+pub async fn process_stream<S, A, E>(sink: &mut E, adapter: &A, model: String, mut bytes_stream: S)
+where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
     A: ProviderAdapter,
     E: EventSink,

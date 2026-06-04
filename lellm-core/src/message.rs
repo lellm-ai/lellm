@@ -87,25 +87,7 @@ impl Message {
         }
     }
 
-    /// 提取所有文本块拼接为字符串
-    pub fn extract_text(&self) -> String {
-        match self {
-            Message::System { content } => Self::join_text(content),
-            Message::User { content } => Self::join_text(content),
-            Message::Assistant { content } => Self::join_text(content),
-            Message::ToolResult { content, .. } => Self::join_text(content),
-        }
-    }
-
-    fn join_text(blocks: &[ContentBlock]) -> String {
-        blocks
-            .iter()
-            .filter_map(|b| b.as_text().map(|s| s.to_string()))
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
-    /// 提取所有 ToolCall
+    /// 提取所有 ToolCall（仅 Assistant 消息包含）
     pub fn extract_tool_calls(&self) -> Vec<ToolCall> {
         match self {
             Message::Assistant { content } => content
@@ -121,7 +103,8 @@ impl Message {
             _ => Vec::new(),
         }
     }
-}
+
+ }
 
 /// 便捷函数：创建纯文本块
 pub fn text_block(s: String) -> Vec<ContentBlock> {
@@ -149,11 +132,12 @@ mod tests {
     }
 
     #[test]
-    fn test_message_extract_text() {
+    fn test_message_content() {
         let msg = Message::User {
             content: text_block("hello world".to_string()),
         };
-        assert_eq!(msg.extract_text(), "hello world");
+        assert_eq!(msg.content().len(), 1);
+        assert_eq!(msg.content()[0].as_text(), Some("hello world"));
     }
 
     #[test]

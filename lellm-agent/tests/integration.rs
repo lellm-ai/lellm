@@ -1,4 +1,4 @@
-use lellm_agent::{ToolCallResult, ToolCategory, ToolExecutor, ToolRegistration, ToolUseLoop};
+use lellm_agent::{ToolCategory, ToolExecutor, ToolRegistration, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
@@ -45,7 +45,7 @@ async fn test_tool_executor_register_and_execute() {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                ToolCallResult::Ok(format!("echo: {}", text))
+                Ok(format!("echo: {}", text))
             }
         }),
     );
@@ -57,7 +57,7 @@ async fn test_tool_executor_register_and_execute() {
     };
 
     let result = executor.execute(&call).await;
-    assert!(matches!(result, ToolCallResult::Ok(ref s) if s == "echo: hello"));
+    assert!(matches!(result, Ok(ref s) if s == "echo: hello"));
 }
 
 #[test]

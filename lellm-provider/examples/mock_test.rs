@@ -43,7 +43,10 @@ fn main() {
         // ─── 3. 验证请求被正确接收 ───
         let received = provider.received_requests();
         println!("received  = {} request(s)", received.len());
-        println!("first msg   = {}", received[0].messages[0].extract_text());
+        let first_block = &received[0].messages[0].content()[0];
+        if let Some(text) = first_block.as_text() {
+            println!("first msg   = {}", text);
+        }
     });
 }
 

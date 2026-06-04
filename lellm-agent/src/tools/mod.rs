@@ -18,9 +18,21 @@ pub use fallback::{
 pub use lellm_provider::ResolvedModel;
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
-pub use retry::{BackoffStrategy, RetryPolicy, ToolErrorKind};
-pub use runtime::{ToolCallResult, ToolUseLoop, ToolUseResult};
+pub use retry::{BackoffStrategy, RetryPolicy};
+pub use runtime::{LoopState, ToolUseLoop, ToolUseResult};
 pub use signal_voter::{NegativeSignal, SignalVoter};
+
+/// 异步工具函数类型（executor + retry 共享）
+pub(crate) type ToolFn = std::sync::Arc<
+    dyn Fn(
+            &serde_json::Value,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send>>
+        + Send
+        + Sync,
+>;
+
+// 从 core 再导出，方便用户统一从 lellm::agent 引入
+pub use lellm_core::{ToolError, ToolErrorKind, ToolResult};
 
 /// Agent 层流式事件 — 封闭、强类型、exhaustive match
 ///
@@ -37,7 +49,7 @@ pub enum AgentEvent {
     /// 工具执行完成
     ToolEnd {
         tool_call_id: String,
-        result: ToolCallResult,
+        result: ToolResult,
     },
     /// 工具重试
     Retry {

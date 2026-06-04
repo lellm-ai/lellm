@@ -1,95 +1,118 @@
-//! 工具重试策略 — 错误分类、退避、提示注入。
+//! 工具重试策略 — 瞬时故障恢复（"再试一次"）。
+//!
+//! 位于 ToolExecutor 内部，负责 transient failure recovery。
+//! 重试耗尽后，错误向上传播至 FallbackStrategy（"换条路走"）。
 
 use std::time::Duration;
 
-use super::ToolCallResult;
+use lellm_core::{ToolErrorKind, ToolResult};
 
-/// 工具错误类型分类
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolErrorKind {
-    Timeout,
-    PermissionDenied,
-    NotFound,
-    NetworkError,
-    ParseError,
-    Unknown,
-}
-
-impl ToolErrorKind {
-    pub fn is_retriable(self) -> bool {
-        matches!(self, Self::Timeout | Self::NetworkError | Self::Unknown)
-    }
-
-    pub fn max_attempts(self) -> u32 {
-        match self {
-            Self::Timeout => 5,
-            Self::NetworkError => 3,
-            Self::Unknown => 3,
-            _ => 0,
-        }
-    }
-
-    pub fn backoff_ms(self, attempt: u32) -> u64 {
-        match self {
-            Self::Timeout => (2_u64).saturating_pow(attempt + 1) * 1000,
-            Self::NetworkError | Self::Unknown => 3000,
-            _ => 0,
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Timeout => "该操作超时，请检查参数或尝试更轻量的替代工具",
-            Self::PermissionDenied => "权限不足，请确认当前角色是否允许此操作",
-            Self::NotFound => "资源未找到，请检查参数拼写",
-            Self::NetworkError => "网络异常，请重试或考虑降级方案",
-            Self::ParseError => "输出格式不匹配，请严格遵循 JSON Schema",
-            Self::Unknown => "操作失败，请分析错误信息并调整策略",
-        }
-    }
-}
+use super::ToolFn;
 
 /// 退避策略
 #[derive(Debug, Clone)]
 pub enum BackoffStrategy {
+    /// 固定间隔
     Fixed(Duration),
+    /// 指数退避
     Exponential { base: Duration, max: Duration },
 }
 
-/// 重试策略
-pub struct RetryPolicy;
-
-impl RetryPolicy {
-    pub async fn execute_with_retry<F, Fut>(kind: ToolErrorKind, f: F) -> ToolCallResult
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = ToolCallResult>,
-    {
-        let max = kind.max_attempts();
-        if max == 0 {
-            return f().await;
-        }
-
-        for attempt in 0..max {
-            let result = f().await;
-            match result {
-                ToolCallResult::Ok(_) => return result,
-                ToolCallResult::Err(msg) if attempt == max - 1 => {
-                    return ToolCallResult::Err(format!(
-                        "{} (retried {} times, hint: {})",
-                        msg,
-                        max,
-                        kind.hint()
-                    ));
-                }
-                ToolCallResult::Err(_) => {
-                    let delay = kind.backoff_ms(attempt);
-                    if delay > 0 {
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
-                    }
-                }
+impl BackoffStrategy {
+    /// 计算第 attempt 次的退避时间
+    pub fn delay(&self, attempt: u32) -> Duration {
+        match self {
+            BackoffStrategy::Fixed(d) => *d,
+            BackoffStrategy::Exponential { base, max } => {
+                let d = base.saturating_mul(2_u32.pow(attempt));
+                d.min(*max)
             }
         }
-        f().await
+    }
+}
+
+/// 重试策略配置。
+///
+/// `max_attempts` 表示**总尝试次数**（初始执行 + 重试），与主流 SDK 语义一致：
+/// - `max_attempts = 1` → 不重试，只执行一次
+/// - `max_attempts = 3` → 初始执行 + 最多 2 次重试
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    /// 总尝试次数（初始 + 重试），默认 3
+    max_attempts: u32,
+    /// 退避策略
+    backoff: BackoffStrategy,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            backoff: BackoffStrategy::Exponential {
+                base: Duration::from_millis(500),
+                max: Duration::from_secs(30),
+            },
+        }
+    }
+}
+
+impl RetryPolicy {
+    pub fn new(max_attempts: u32, backoff: BackoffStrategy) -> Self {
+        Self {
+            max_attempts,
+            backoff,
+        }
+    }
+
+    /// 执行工具函数并自动重试可重试的错误。
+    ///
+    /// `max_attempts` = 总尝试次数（初始执行 + 重试），与 AWS SDK / reqwest 等语义一致。
+    /// 执行链：`ToolUseLoop → ToolExecutor → RetryPolicy → tool_fn()`
+    pub async fn execute_with_retry(
+        &self,
+        tool_fn: &ToolFn,
+        args: &serde_json::Value,
+    ) -> ToolResult {
+        let mut last_result = tool_fn(args).await;
+        if last_result.is_ok() {
+            return last_result;
+        }
+
+        for attempt in 1..self.max_attempts {
+            match &last_result {
+                Err(e) if e.kind.is_retriable() => {}
+                _ => return last_result,
+            }
+
+            let delay = self.backoff.delay(attempt);
+            tracing::warn!(
+                attempt,
+                max = self.max_attempts,
+                delay_ms = delay.as_millis(),
+                "tool execution failed, retrying"
+            );
+            tokio::time::sleep(delay).await;
+
+            last_result = tool_fn(args).await;
+            if last_result.is_ok() {
+                return last_result;
+            }
+        }
+
+        last_result
+    }
+}
+
+/// 根据错误类型获取默认退避策略
+pub fn default_backoff_for(kind: ToolErrorKind) -> BackoffStrategy {
+    match kind {
+        ToolErrorKind::Timeout => BackoffStrategy::Exponential {
+            base: Duration::from_secs(1),
+            max: Duration::from_secs(60),
+        },
+        ToolErrorKind::Network | ToolErrorKind::RateLimited => {
+            BackoffStrategy::Fixed(Duration::from_secs(3))
+        }
+        _ => BackoffStrategy::Fixed(Duration::ZERO),
     }
 }

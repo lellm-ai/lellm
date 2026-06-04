@@ -98,8 +98,10 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 | ProviderAdapter SPI / ProviderRequest | [DESIGN.md §5](./DESIGN.md#5-provideradapter-spi--providerrequest-中间层) |
 | SSE 解析 / SseFrame | [DESIGN.md §5.1](./DESIGN.md#51-sse-解析--sseframe-中间表示) |
 | 流式传输层解耦 | [DESIGN.md §5.2](./DESIGN.md#52-流式处理--传输层解耦eventsink--streamevent) |
-| FallbackAction 设计 | [DESIGN.md §7](./DESIGN.md#7-fallbackactionswitchprovider-用-string-而非-routeentry) |
-| Message 语义校验 | [DESIGN.md §9](./DESIGN.md#9-message-语义校验) |
+| ToolError 类型化 + RetryPolicy 集成 | [DESIGN.md §7.1-7.2](./DESIGN.md#7-%E5%87%86%E5%A4%8D%E5%B1%82---retypolicy%E5%8B%BE%E6%97%B6%E6%95%85%E9%9A%9C%E4%B8%8E-fallbackstrategy%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96) |
+| FallbackStrategy 路由决策 | [DESIGN.md §7.3](./DESIGN.md#73-fallbackstrategy---%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96%EF%BC%88%22%E6%8D%A2%E6%9D%A1%E8%B7%AF%E8%B5%B0%22%EF%BC%89) |
+| Message 语义校验 | [DESIGN.md §9](./DESIGN.md#9-message-%E8%AF%AD%E4%B9%89%E6%A0%A1%E9%AA%8C) |
+| build_request 序列化完整性 | [DESIGN.md §10](./DESIGN.md#10-build_request-%E5%BA%8F%E5%88%97%E5%8C%96%E5%AE%8C%E6%95%B4%E6%80%A7) |
 
 ## 六、实现状态
 
@@ -128,19 +130,25 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 
 ### Resilience Layer
 
-| 模块 | 类型定义 | 集成到 ToolUseLoop |
-|------|---------|-------------------|
-| FallbackStrategy | ✅ | 🚧 |
-| RetryPolicy | ✅ | 🚧 |
-| LoopDetector | ✅ | ⏳ |
-| SignalVoter | ✅ | ⏳ |
+| 模块 | 类型定义 | 集成状态 | v0.1 范围 |
+|------|---------|---------|----------|
+| ToolError (类型化) | 🚧 | — | ✅ 必须 |
+| RetryPolicy → ToolExecutor | ✅ | 🚧 | ✅ 必须 |
+| Retry AgentEvent | ✅ | — | ✅ 推荐 |
+| FallbackStrategy | ✅ | ⏳ | ⚠️ 可选 |
+| LoopDetector | ✅ | ⏳ | ❌ v0.2 |
+| SignalVoter | ✅ | ⏳ | ❌ v0.2 |
+
+> **v0.1 铁律：** 仓库中不允许存在 "Runtime 永远不会调用到的恢复模块"。要么接入，要么标记 v0.2。
 
 ### 待完成
 
 | 优先级 | 模块 | 状态 |
 |--------|------|------|
-| P1-H | AnthropicAdapter | 🔴 Stub |
-| P1-H | OpenAICompatAdapter | 🔴 Stub（仅 parse，build_request 不完整） |
+| P0 | `ToolError` 类型化 + `ToolResult = Result<String, ToolError>` | 🔴 未开始 |
+| P0 | `ToolExecutor` 集成 `RetryPolicy` | 🔴 依赖 P0 |
+| P1-H | AnthropicAdapter `parse_response` / `parse_sse_frame` 完善 | 🔴 Stub |
+| P1-H | OpenAICompatAdapter `build_request` 完善 | 🟡 部分（parse 完整，build_request 已有） |
 | P3 | lellm-macros derive | 🟡 Stub |
 | P4 | examples/ | 🟡 部分 |
 

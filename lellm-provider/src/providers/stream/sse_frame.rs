@@ -4,6 +4,7 @@
 #[derive(Debug, Clone)]
 pub struct SseFrame {
     /// event 字段（可选），如 "message_start", "content_block_delta"
+    #[allow(dead_code)]
     pub event: Option<String>,
     /// data 字段内容（通常是 JSON 字符串或标记如 "[DONE]"）
     pub data: String,

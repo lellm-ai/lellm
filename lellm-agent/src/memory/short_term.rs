@@ -87,8 +87,8 @@ mod tests {
         assert_eq!(memory.len(), 2);
         let recent = memory.recent(2);
         assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].extract_text(), "msg3");
-        assert_eq!(recent[1].extract_text(), "msg4");
+        assert_eq!(recent[0].content()[0].as_text(), Some("msg3"));
+        assert_eq!(recent[1].content()[0].as_text(), Some("msg4"));
     }
 
     #[test]

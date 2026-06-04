@@ -10,7 +10,7 @@ pub use memory::ShortTermMemory;
 pub use tools::{
     AgentEvent, AgentStream, BackoffStrategy, DefaultFallback, FallbackAction, FallbackContext,
     FallbackReason, FallbackStrategy, LoopDetector, LoopIntervention, NegativeSignal,
-    ParallelSafety, ResolvedModel, RetryPolicy, SignalVoter, StopReason, ToolCallResult,
-    ToolCategory, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry, ToolSearchResult,
+    ParallelSafety, ResolvedModel, RetryPolicy, SignalVoter, StopReason, ToolCategory, ToolError,
+    ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry, ToolResult, ToolSearchResult,
     ToolSource, ToolUseLoop, ToolUseResult,
 };
