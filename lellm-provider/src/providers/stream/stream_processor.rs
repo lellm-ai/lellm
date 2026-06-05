@@ -145,7 +145,7 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
             }
         }
         Err(e) => {
-            tracing::debug!(error = %e, "failed to parse SSE frame");
+            tracing::debug!(error = %e, "ignoring unparseable SSE frame");
         }
     }
 

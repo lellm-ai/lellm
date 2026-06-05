@@ -129,7 +129,7 @@ impl ToolUseLoop {
         Self {
             model,
             executor,
-            max_iterations: 15,
+            max_iterations: 10,
             fallback: Arc::new(DefaultFallback::default()),
         }
     }

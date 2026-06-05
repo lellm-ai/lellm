@@ -12,21 +12,31 @@ Rust 版本的 LangChain / LangGraph / AutoGen。
 
 ## 安装
 
-默认启用 `provider` feature：
+所有 feature 均需显式开启（`default = []`），保证 `lellm-core` 零运行时依赖：
 
 ```toml
 [dependencies]
-lellm = "0.1"
-```
+# 仅协议对象（零运行时依赖）
+lellm = { version = "0.1", features = ["core"] }
 
-按需加载：
+# 协议 + Provider 适配层
+lellm = { version = "0.1", features = ["provider"] }
 
-```toml
-# 启用 Agent
+# 协议 + Provider + Agent 运行时
 lellm = { version = "0.1", features = ["agent"] }
 
 # 全部启用
 lellm = { version = "0.1", features = ["full"] }
+```
+
+Feature 依赖图：
+
+```
+core          — 仅 lellm-core（零运行时依赖）
+provider      — core + lellm-provider
+agent         — core + provider + lellm-agent
+macros        — lellm-macros
+full          — core + provider + agent + macros
 ```
 
 ## 快速开始
@@ -124,6 +134,83 @@ while let Some(event) = stream.next().await {
     }
 }
 ```
+
+### Agent Loop — 工具调用闭环
+
+```rust
+use lellm::agent::{ToolExecutor, ToolRegistry, ToolUseLoop, ResolvedModel, StopReason};
+use lellm::provider::ResolvedModel;
+
+// 注册工具
+let mut registry = ToolRegistry::new();
+registry.register_search(); // 示例工具
+
+// 构建 executor
+let executor = ToolExecutor::from_registry(registry);
+
+// 解析模型（通过 Router + Registry）
+let route = router.resolve(lellm::provider::TaskLevel::Flash)?;
+let resolved = registry_provider.resolve(route)?;
+
+// 执行 Agent Loop
+let loop_ = ToolUseLoop::new(resolved, executor)
+    .set_max_iterations(10); // 最多 10 次 Provider 调用
+
+let result = loop_.execute(messages).await?;
+
+match result.stop_reason {
+    StopReason::Complete => {
+        println!("Agent 完成，共 {} 轮", result.iterations);
+    }
+    StopReason::MaxIterationsReached => {
+        eprintln!("达到最大轮次 ({})，Agent 未完成", result.iterations);
+    }
+    StopReason::LoopDetected => {
+        eprintln!("检测到循环，已中止");
+    }
+}
+```
+
+**`max_iterations` 语义：**
+
+`max_iterations` = **Provider 调用次数上限**（即最多发起多少次 LLM 请求）。
+
+每次迭代 = 一次 Provider 调用 + 可选的工具执行。达到上限后，无论 Agent 是否还有未完成的 tool_calls，都会返回 `StopReason::MaxIterationsReached`。
+
+```
+max_iterations = 3 的执行流程：
+
+  User
+    ↓
+  Provider #1  ← iteration 1
+    ↓
+  Assistant(tool_calls)
+    ↓
+  Tool Execute
+    ↓
+  ToolResult
+    ↓
+  Provider #2  ← iteration 2
+    ↓
+  Assistant(tool_calls)
+    ↓
+  Tool Execute
+    ↓
+  ToolResult
+    ↓
+  Provider #3  ← iteration 3
+    ↓
+  Assistant(text)   ← 无 tool_calls，自然结束
+    ↓
+  STOP(Complete)
+```
+
+**默认值：** `max_iterations = 10`（可通过 `set_max_iterations()` 调整）。
+
+**为什么用 Provider 调用次数而非「完整轮次」：**
+- 资源可控 — 直接对应 API 调用次数、token 消耗、延迟估算
+- 语义简单 — 一次迭代 = 一次 Provider 调用，无歧义
+- 便于 Rate Limit 规划
 
 ## 支持的 Provider
 

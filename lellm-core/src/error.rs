@@ -48,6 +48,9 @@ pub enum LlmError {
     #[error("model not found: {model}")]
     ModelNotFound { model: String },
 
+    #[error("unsupported feature: {feature}")]
+    UnsupportedFeature { feature: String },
+
     #[error("{message}")]
     Other { message: String },
 }

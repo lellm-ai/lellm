@@ -62,11 +62,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
-            .map(|m| {
-                serialize_openai_message(m).map_err(|e| LlmError::ParseError {
-                    detail: format!("Failed to serialize message: {}", e),
-                })
-            })
+            .map(|m| serialize_openai_message(m))
             .collect::<Result<_, _>>()?;
 
         let mut body = serde_json::Map::new();
@@ -298,7 +294,7 @@ fn parse_openai_usage(raw: &serde_json::Value) -> TokenUsage {
 /// 将 Message 序列化为 OpenAI 格式的消息对象。
 ///
 /// 关键：Assistant 消息中的 ToolCall 必须放入 `tool_calls` 数组，不能丢失。
-fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, serde_json::Error> {
+fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, LlmError> {
     match msg {
         Message::System { content } => {
             let mut map = serde_json::Map::new();
@@ -312,17 +308,24 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, serde_js
         Message::User { content } => {
             let mut map = serde_json::Map::new();
             map.insert("role".into(), "user".into());
-            map.insert("content".into(), serialize_openai_content_blocks(content)?);
+            map.insert(
+                "content".into(),
+                serialize_openai_content_blocks(content)?,
+            );
             Ok(serde_json::Value::Object(map))
         }
         Message::Assistant { content } => {
             let mut map = serde_json::Map::new();
             map.insert("role".into(), "assistant".into());
 
-            // 提取文本
+            // 提取文本（Thinking 被有意忽略 — OpenAI 不支持 thinking blocks）
             let text: String = content
                 .iter()
-                .filter_map(|b| b.as_text().map(|s| s.to_string()))
+                .filter_map(|b| match b {
+                    ContentBlock::Text(t) => Some(t.text.to_string()),
+                    ContentBlock::Thinking(_) => None, // OpenAI 不支持，静默跳过
+                    _ => None,
+                })
                 .collect();
             if !text.is_empty() {
                 map.insert("content".into(), text.into());
@@ -376,8 +379,15 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, serde_js
 /// 将 ContentBlock 序列化为 OpenAI user 消息的 content（当前只支持 Text）
 fn serialize_openai_content_blocks(
     blocks: &[ContentBlock],
-) -> Result<serde_json::Value, serde_json::Error> {
-    // v0.1: 只支持纯文本 user 消息
+) -> Result<serde_json::Value, LlmError> {
+    // v0.1: 只支持纯文本 user 消息，Image 明确报错
+    for block in blocks {
+        if matches!(block, ContentBlock::Image { .. }) {
+            return Err(LlmError::UnsupportedFeature {
+                feature: "Image in user messages (OpenAI adapter)".into(),
+            });
+        }
+    }
     let text: String = blocks
         .iter()
         .filter_map(|b| b.as_text().map(|s| s.to_string()))

@@ -183,9 +183,9 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
                 if let Message::User { content } = msg {
                     for block in content {
                         if let ContentBlock::Image { .. } = block {
-                            return Err(LlmError::ParseError {
-                                detail: format!(
-                                    "{} does not support image input",
+                            return Err(LlmError::UnsupportedFeature {
+                                feature: format!(
+                                    "Image input ({} adapter)",
                                     self.adapter.name()
                                 ),
                             });

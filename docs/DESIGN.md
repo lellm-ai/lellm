@@ -327,11 +327,13 @@ pub struct ToolError {
 }
 
 pub enum ToolErrorKind {
+    NotFound,
     Timeout,
     Network,
     PermissionDenied,
     InvalidInput,
     RateLimited,
+    LoopDetected,
     Internal,
 }
 ```
@@ -357,11 +359,13 @@ async fn execute(&self, call: &ToolCall) -> ToolResult {
 
 | ToolErrorKind | 可重试 | 策略 |
 |--------------|--------|------|
+| NotFound | ❌ | 直接返回 |
 | Timeout | ✅ | 指数退避 |
 | Network | ✅ | 固定间隔 |
 | RateLimited | ✅ | 按 Retry-After |
 | PermissionDenied | ❌ | 直接返回 |
 | InvalidInput | ❌ | 直接返回 |
+| LoopDetected | ❌ | 直接返回 |
 | Internal | ⚠️ | 视情况 |
 
 **RetryPolicy 负责：** 是否重试、退避间隔、最大次数。
@@ -442,7 +446,7 @@ LoopEnd
 | **ToolCall** | ✅ 必须等价 | `ToolCallAccumulator` 产出必须与非流式一致 |
 | **Usage** | ✅ 必须等价 | Provider 最终 usage 必须传递到流式 ChatResponse |
 | **raw** | ⚠️ 不要求等价 | 流式 `raw = null`（天然无单次完整响应） |
-| **Thinking** | ⚠️ 暂不要求 | 流式 `StreamChunk` 无 `ThinkingDelta`，v0.2 补齐 |
+| **Thinking** | ✅ 必须等价 | 流式 `StreamChunk::ThinkingDelta` 已实现，`thinking_buffer` 累积到 `ChatResponse` |
 
 **如果 Text / ToolCall / Usage 在两种模式下产出不同，属于 correctness bug，v0.1 必须修复。**
 
