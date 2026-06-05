@@ -39,7 +39,7 @@ where
     A: ProviderAdapter,
     E: EventSink,
 {
-    sink.emit(StreamEvent::Start { model });
+    sink.emit(StreamEvent::Start { model }).await;
 
     let mut parser = SseParser::new();
     let mut tool_call_acc = ToolCallAccumulator::new();
@@ -56,7 +56,7 @@ where
 
                     // 文本增量
                     if let Some(text) = fr.text {
-                        sink.emit(StreamEvent::Token { token: text });
+                        sink.emit(StreamEvent::Token { token: text }).await;
                     }
 
                     // ToolCall 增量
@@ -76,7 +76,7 @@ where
                 }
             }
             Err(e) => {
-                sink.emit(StreamEvent::Error(e));
+                sink.emit(StreamEvent::Error(e)).await;
                 return;
             }
         }
@@ -91,7 +91,7 @@ where
     sink.emit(StreamEvent::ResponseComplete {
         tool_calls,
         usage: final_usage,
-    });
+    }).await;
 }
 
 /// 处理单个 SseFrame — 调用 Adapter 解析，返回结构化结果。

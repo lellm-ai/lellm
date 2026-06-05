@@ -101,8 +101,25 @@ struct ChannelSink {
 }
 
 impl EventSink for ChannelSink {
-    fn emit(&mut self, event: StreamEvent) {
-        let _ = self.tx.try_send(map_stream_event(event));
+    async fn emit(&mut self, event: StreamEvent) {
+        if event.is_critical() {
+            // 关键事件（Error, ResponseComplete）必须送达
+            let mapped = map_stream_event(event);
+            if let Err(e) = self.tx.send(mapped).await {
+                tracing::error!(
+                    error = %e,
+                    "critical stream event lost: channel closed"
+                );
+            }
+        } else {
+            // Token 等可丢弃事件，channel 满时丢弃
+            let mapped = map_stream_event(event);
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                self.tx.try_send(mapped)
+            {
+                tracing::warn!("stream event dropped: channel full");
+            }
+        }
     }
 }
 

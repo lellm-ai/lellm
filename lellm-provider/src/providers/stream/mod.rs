@@ -26,21 +26,33 @@ pub(crate) use usage_accumulator::{UsageAccumulator, UsageDelta};
 pub(crate) enum StreamEvent {
     /// 流式开始
     Start { model: String },
-    /// 文本增量
+    /// 文本增量（可丢弃）
     Token { token: String },
-    /// 解析错误
+    /// 解析错误（不可丢弃）
     Error(LlmError),
-    /// 单次 LLM 响应结束（HTTP/SSE 请求完成）
+    /// 单次 LLM 响应结束（HTTP/SSE 请求完成，不可丢弃）
     ResponseComplete {
         tool_calls: Vec<ToolCall>,
         usage: Option<TokenUsage>,
     },
 }
 
+impl StreamEvent {
+    /// 事件是否为关键状态机事件——丢失会导致消费者状态错乱。
+    pub(crate) fn is_critical(&self) -> bool {
+        matches!(
+            self,
+            StreamEvent::Error(_) | StreamEvent::ResponseComplete { .. }
+        )
+    }
+}
+
 /// 事件输出接口 — process_stream() 的唯一输出通道。
 ///
 /// 解耦 stream/ 模块与具体传输机制（tokio channel, callback, mock 等）。
 /// 测试时只需实现此 trait 即可构造 mock sink。
+///
+/// **async** — 关键事件（Error, ResponseComplete）需要阻塞等待送达。
 pub trait EventSink {
-    fn emit(&mut self, event: StreamEvent);
+    async fn emit(&mut self, event: StreamEvent);
 }
