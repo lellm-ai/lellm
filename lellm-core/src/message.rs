@@ -1,5 +1,6 @@
 //! 消息与内容块类型。
 
+use crate::error::ToolResult;
 use serde::{Deserialize, Serialize};
 
 /// 纯文本块
@@ -84,6 +85,21 @@ impl Message {
             | Message::User { content }
             | Message::Assistant { content }
             | Message::ToolResult { content, .. } => content,
+        }
+    }
+
+    /// 从工具调用结果构建 Message::ToolResult
+    ///
+    /// 成功 → 文本 content，失败 → `"tool error: {e}"` 文本 content。
+    /// **TODO(v0.2):** 保留错误语义，如 `is_error: bool` 或独立变体。
+    pub fn tool_result(call: &ToolCall, result: &ToolResult) -> Self {
+        let content_str = match result {
+            Ok(s) => s.clone(),
+            Err(e) => format!("tool error: {e}"),
+        };
+        Message::ToolResult {
+            tool_call_id: call.id.clone(),
+            content: text_block(content_str),
         }
     }
 

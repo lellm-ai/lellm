@@ -234,7 +234,7 @@ impl ToolExecutor {
         calls
             .into_iter()
             .zip(results)
-            .map(|(call, result)| self.to_tool_result_message(&call, result))
+            .map(|(call, result)| Message::tool_result(&call, &result))
             .collect()
     }
 
@@ -243,21 +243,9 @@ impl ToolExecutor {
         let mut results = Vec::with_capacity(calls.len());
         for call in calls {
             let result = self.execute(&call).await;
-            results.push(self.to_tool_result_message(&call, result));
+            results.push(Message::tool_result(&call, &result));
         }
         results
-    }
-
-    /// 将 ToolResult 转为 Message::ToolResult
-    fn to_tool_result_message(&self, call: &ToolCall, result: ToolResult) -> Message {
-        let content = match result {
-            Ok(s) => s,
-            Err(e) => format!("tool error: {e}"),
-        };
-        Message::ToolResult {
-            tool_call_id: call.id.clone(),
-            content: lellm_core::text_block(content),
-        }
     }
 
     /// 按安全分级将 tool_calls 分为可并行和需串行两组

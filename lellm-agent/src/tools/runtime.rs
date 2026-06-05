@@ -3,7 +3,7 @@
 //! 负责 LLM 返回 tool_calls → 执行工具 → 结果注入 → 再次调用 LLM 的循环，
 //! 直到 LLM 返回纯文本或达到最大轮次。
 
-use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolResult};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -103,18 +103,6 @@ impl ToolUseResult {
 /// 发送事件，消费者丢弃 Receiver 时返回 `false`。
 async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
     tx.send(event).await.is_ok()
-}
-
-/// 将 ToolResult 转为 Message::ToolResult
-fn to_tool_result_message(call: &lellm_core::ToolCall, result: ToolResult) -> Message {
-    let content_str = match result {
-        Ok(s) => s,
-        Err(e) => format!("tool error: {e}"),
-    };
-    Message::ToolResult {
-        tool_call_id: call.id.clone(),
-        content: lellm_core::text_block(content_str),
-    }
 }
 
 /// 构建空的 ChatResponse（边界情况兜底）
@@ -533,7 +521,7 @@ async fn emit_and_execute_tools(
             return None;
         }
 
-        results.push(to_tool_result_message(tc, result));
+        results.push(Message::tool_result(tc, &result));
     }
 
     Some(results)
