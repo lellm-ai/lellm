@@ -133,8 +133,8 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
                 }
             }
         }
-        Err(_) => {
-            // 单帧解析失败，跳过继续处理后续帧
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to parse SSE frame");
         }
     }
 
