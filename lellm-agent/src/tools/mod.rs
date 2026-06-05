@@ -5,21 +5,23 @@
 
 pub mod executor;
 pub mod fallback;
+#[cfg(feature = "v02-preview")]
 pub mod loop_detector;
 pub mod registry;
 pub mod retry;
 pub mod runtime;
+#[cfg(feature = "v02-preview")]
 pub mod signal_voter;
 
 pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
-pub use fallback::{
-    DefaultFallback, FallbackAction, FallbackContext, FallbackReason, FallbackStrategy,
-};
+pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 pub use lellm_provider::ResolvedModel;
+#[cfg(feature = "v02-preview")]
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{LoopState, ToolUseLoop, ToolUseResult};
+#[cfg(feature = "v02-preview")]
 pub use signal_voter::{NegativeSignal, SignalVoter};
 
 /// 异步工具函数类型（executor + retry 共享）
@@ -74,10 +76,8 @@ pub enum StopReason {
     Complete,
     /// 达到最大轮次
     MaxIterationsReached,
-    /// 检测到循环
+    /// 检测到循环（v0.2）
     LoopDetected,
-    /// Fallback 主动给出最终结果
-    FallbackComplete,
 }
 
 /// Agent 层流式事件通道类型别名

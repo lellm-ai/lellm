@@ -132,12 +132,12 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 
 | 模块 | 类型定义 | 集成状态 | v0.1 范围 |
 |------|---------|---------|----------|
-| ToolError (类型化) | 🚧 | — | ✅ 必须 |
-| RetryPolicy → ToolExecutor | ✅ | 🚧 | ✅ 必须 |
-| Retry AgentEvent | ✅ | — | ✅ 推荐 |
-| FallbackStrategy | ✅ | ⏳ | ⚠️ 可选 |
-| LoopDetector | ✅ | ⏳ | ❌ v0.2 |
-| SignalVoter | ✅ | ⏳ | ❌ v0.2 |
+| ToolError (类型化) | ✅ | ✅ | ✅ 必须 |
+| RetryPolicy → ToolExecutor | ✅ | ✅ | ✅ 必须 |
+| FallbackStrategy → ToolUseLoop | ✅ | ✅ | ✅ 必须 |
+| Retry AgentEvent | ✅ | — | ⚠️ v0.2 |
+| LoopDetector | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
+| SignalVoter | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
 
 > **v0.1 铁律：** 仓库中不允许存在 "Runtime 永远不会调用到的恢复模块"。要么接入，要么标记 v0.2。
 
@@ -145,10 +145,10 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 
 | 优先级 | 模块 | 状态 |
 |--------|------|------|
-| P0 | `ToolError` 类型化 + `ToolResult = Result<String, ToolError>` | 🔴 未开始 |
-| P0 | `ToolExecutor` 集成 `RetryPolicy` | 🔴 依赖 P0 |
-| P1-H | AnthropicAdapter `parse_response` / `parse_sse_frame` 完善 | 🔴 Stub |
-| P1-H | OpenAICompatAdapter `build_request` 完善 | 🟡 部分（parse 完整，build_request 已有） |
+| P0 | `ToolError` 类型化 + `ToolResult = Result<String, ToolError>` | ✅ 已完成（core/error.rs） |
+| P0 | `ToolExecutor` 集成 `RetryPolicy` | ✅ 已完成（agent/tools/executor.rs） |
+| P1-H | AnthropicAdapter `parse_response` / `parse_sse_frame` 完善 | ✅ 已完成 |
+| P1-H | OpenAICompatAdapter `build_request` 完善 | ✅ 已完成 |
 | P3 | lellm-macros derive | 🟡 Stub |
 | P4 | examples/ | 🟡 部分 |
 

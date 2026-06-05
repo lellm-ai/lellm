@@ -5,9 +5,11 @@
 
 use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolResult};
 use lellm_provider::ResolvedModel;
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use super::executor::ToolExecutor;
+use super::fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 use super::{AgentEvent, AgentStream, StopReason};
 
 // ─── 循环状态机 ───
@@ -131,6 +133,7 @@ pub struct ToolUseLoop {
     model: ResolvedModel,
     executor: ToolExecutor,
     max_iterations: usize,
+    fallback: Arc<dyn FallbackStrategy>,
 }
 
 impl ToolUseLoop {
@@ -139,11 +142,18 @@ impl ToolUseLoop {
             model,
             executor,
             max_iterations: 15,
+            fallback: Arc::new(DefaultFallback::default()),
         }
     }
 
     pub fn set_max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    /// 注入 Fallback 策略（默认 `DefaultFallback::new(3)`）
+    pub fn with_fallback(mut self, fallback: Arc<dyn FallbackStrategy>) -> Self {
+        self.fallback = fallback;
         self
     }
 
@@ -171,7 +181,35 @@ impl ToolUseLoop {
                 ..Default::default()
             };
 
-            let response = self.model.provider.call(&req).await?;
+            // Provider 调用 — 受 FallbackStrategy 保护
+            let mut retry_attempt: usize = 1;
+            let response = loop {
+                match self.model.provider.call(&req).await {
+                    Ok(resp) => break resp,
+                    Err(e) => {
+                        tracing::warn!(
+                            attempt = retry_attempt,
+                            error = %e,
+                            "provider call failed, fallback handling"
+                        );
+                        let ctx = FallbackContext {
+                            error: e,
+                            attempt: retry_attempt,
+                            iterations: state.iterations,
+                            conversation: state.messages.clone().into(),
+                        };
+                        match self.fallback.handle(&ctx).await {
+                            FallbackAction::Retry => {
+                                retry_attempt += 1;
+                                continue;
+                            }
+                            FallbackAction::Abort => {
+                                return Err(ctx.error);
+                            }
+                        }
+                    }
+                }
+            };
             last_response = Some(response);
 
             if !last_response.as_ref().unwrap().has_tool_calls() {
@@ -212,6 +250,7 @@ impl ToolUseLoop {
         let model = self.model.clone();
         let executor = self.executor;
         let max_iterations = self.max_iterations;
+        let fallback = self.fallback.clone();
 
         tokio::spawn(async move {
             let mut state = LoopState::new(messages);
@@ -239,7 +278,37 @@ impl ToolUseLoop {
                     ..Default::default()
                 };
 
-                match model.provider.stream(&req).await {
+                // Provider 流式调用 — 受 FallbackStrategy 保护
+                let mut retry_attempt: usize = 1;
+                let stream_result: Result<lellm_provider::ProviderStream, LlmError> = loop {
+                    match model.provider.stream(&req).await {
+                        Ok(s) => break Ok(s),
+                        Err(e) => {
+                            tracing::warn!(
+                                attempt = retry_attempt,
+                                error = %e,
+                                "provider stream failed, fallback handling"
+                            );
+                            let ctx = FallbackContext {
+                                error: e,
+                                attempt: retry_attempt,
+                                iterations: state.iterations,
+                                conversation: state.messages.clone().into(),
+                            };
+                            match fallback.handle(&ctx).await {
+                                FallbackAction::Retry => {
+                                    retry_attempt += 1;
+                                    continue;
+                                }
+                                FallbackAction::Abort => {
+                                    break Err(ctx.error);
+                                }
+                            }
+                        }
+                    }
+                };
+
+                match stream_result {
                     Ok(mut stream) => {
                         let mut text_buffer = String::new();
 

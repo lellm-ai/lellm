@@ -20,7 +20,7 @@ pub enum LellmError {
 }
 
 /// LLM API 错误。
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum LlmError {
     #[error("api error: {provider} {status} {code:?} {message}")]
     ApiError {

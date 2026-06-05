@@ -20,5 +20,10 @@ tracing.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 
+[features]
+default = []
+# v0.2 预览功能 — LoopDetector, SignalVoter
+v02-preview = []
+
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock"] }
