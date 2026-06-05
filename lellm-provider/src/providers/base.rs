@@ -46,9 +46,12 @@ pub(crate) struct RawResponse {
 pub(crate) enum StreamChunk {
     TextDelta(String),
     ToolCallDelta(ToolCallDelta),
+    /// 完整 usage（OpenAI 最后一个 chunk 携带）
     Usage(TokenUsage),
-    /// 输入 token 计数（Anthropic message_start 事件携带，与 output_tokens 分离）
+    /// 输入 token 计数（Anthropic message_start 事件）
     InputTokens(u32),
+    /// 输出 token 计数（Anthropic message_delta 事件）
+    OutputTokens(u32),
     Done,
 }
 

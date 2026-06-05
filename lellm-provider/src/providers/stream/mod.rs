@@ -11,10 +11,12 @@ pub(crate) mod sse_frame;
 pub(crate) mod sse_parser;
 pub(crate) mod stream_processor;
 pub(crate) mod tool_call_accumulator;
+pub(crate) mod usage_accumulator;
 
 pub(crate) use sse_frame::SseFrame;
 pub(crate) use sse_parser::SseParser;
 pub(crate) use tool_call_accumulator::{ToolCallAccumulator, ToolCallDelta};
+pub(crate) use usage_accumulator::{UsageAccumulator, UsageDelta};
 
 /// 流式事件 — process_stream() 的输出单元。
 ///

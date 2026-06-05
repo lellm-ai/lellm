@@ -277,18 +277,21 @@ impl ProviderAdapter for AnthropicAdapter {
                 }
             }
             "message_delta" => {
+                let mut chunks = Vec::new();
+
                 if let Some(usage_val) = val.get("usage") {
-                    let usage = TokenUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: usage_val
-                            .get("output_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        total_tokens: 0,
-                    };
-                    return Ok(StreamParseResult::chunk(StreamChunk::Usage(usage)));
+                    let output_tokens = usage_val
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    if output_tokens > 0 {
+                        chunks.push(StreamChunk::OutputTokens(output_tokens));
+                    }
                 }
-                return Ok(StreamParseResult::chunk(StreamChunk::Done));
+
+                // message_delta 总是流中的最后一个有意义事件，附带 Done
+                chunks.push(StreamChunk::Done);
+                return Ok(StreamParseResult { chunks });
             }
             _ => {}
         }

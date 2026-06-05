@@ -79,6 +79,11 @@ impl ProviderAdapter for OpenAICompatAdapter {
         );
         if stream {
             body.insert("stream".into(), true.into());
+            // 流式模式下请求 usage 数据（OpenAI 默认不返回）
+            body.insert(
+                "stream_options".into(),
+                serde_json::json!({ "include_usage": true }),
+            );
         }
         if let Some(temp) = req.temperature {
             body.insert("temperature".into(), temp.into());

@@ -1,6 +1,6 @@
 //! Stream Processor — SSE 字节流 → StreamEvent 分发的纯协议管道。
 //!
-//! 职责：orchestrate SseParser + Adapter + ToolCallAccumulator，
+//! 职责：orchestrate SseParser + Adapter + ToolCallAccumulator + UsageAccumulator，
 //! 将结果通过 EventSink 输出。
 //!
 //! **不知道** reqwest、tokio channel 等传输细节。
@@ -9,17 +9,19 @@
 use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use lellm_core::{LlmError, TokenUsage};
+use lellm_core::LlmError;
 
-use super::{EventSink, SseFrame, SseParser, StreamEvent, ToolCallAccumulator, ToolCallDelta};
+use super::{
+    EventSink, SseFrame, SseParser, StreamEvent, ToolCallAccumulator, ToolCallDelta,
+    UsageAccumulator, UsageDelta,
+};
 use crate::providers::base::{ProviderAdapter, StreamChunk};
 
 /// 单个 SseFrame 的解析结果。
 struct FrameResult {
     text: Option<String>,
     tool_call_delta: Option<ToolCallDelta>,
-    usage: Option<TokenUsage>,
-    input_tokens: Option<u32>,
+    usage_delta: Option<UsageDelta>,
     is_done: bool,
 }
 
@@ -40,9 +42,8 @@ where
     sink.emit(StreamEvent::Start { model });
 
     let mut parser = SseParser::new();
-    let mut accumulator = ToolCallAccumulator::new();
-    let mut usage: Option<TokenUsage> = None;
-    let mut input_tokens: u32 = 0;
+    let mut tool_call_acc = ToolCallAccumulator::new();
+    let mut usage_acc = UsageAccumulator::new();
     let mut is_done = false;
 
     while let Some(result) = bytes_stream.next().await {
@@ -60,17 +61,12 @@ where
 
                     // ToolCall 增量
                     if let Some(delta) = fr.tool_call_delta {
-                        accumulator.push(&delta);
+                        tool_call_acc.push(&delta);
                     }
 
-                    // Usage
-                    if let Some(u) = fr.usage {
-                        usage = Some(u);
-                    }
-
-                    // Input tokens (Anthropic message_start 事件)
-                    if let Some(its) = fr.input_tokens {
-                        input_tokens = its;
+                    // Usage 增量
+                    if let Some(delta) = fr.usage_delta {
+                        usage_acc.push(&delta);
                     }
 
                     // 结束标记
@@ -90,26 +86,8 @@ where
         }
     }
 
-    let tool_calls = accumulator.finalize().unwrap_or_default();
-    // 合并 input_tokens（Anthropic message_start 事件中携带）
-    let final_usage = match usage {
-    Some(mut u) => {
-        if input_tokens > 0 {
-            u.prompt_tokens = input_tokens;
-        }
-        // 修正 total_tokens（流式 usage 可能未携带 total）
-        if u.total_tokens == 0 {
-            u.total_tokens = u.prompt_tokens + u.completion_tokens;
-        }
-        Some(u)
-    }
-    None if input_tokens > 0 => Some(TokenUsage {
-        prompt_tokens: input_tokens,
-        completion_tokens: 0,
-        total_tokens: input_tokens,
-    }),
-    None => None,
-};
+    let tool_calls = tool_call_acc.finalize().unwrap_or_default();
+    let final_usage = usage_acc.finalize();
     sink.emit(StreamEvent::ResponseComplete {
         tool_calls,
         usage: final_usage,
@@ -121,8 +99,7 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
     let mut result = FrameResult {
         text: None,
         tool_call_delta: None,
-        usage: None,
-        input_tokens: None,
+        usage_delta: None,
         is_done: false,
     };
 
@@ -142,10 +119,13 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
                         });
                     }
                     StreamChunk::Usage(u) => {
-                        result.usage = Some(u);
+                        result.usage_delta = Some(UsageDelta::Full(u));
                     }
                     StreamChunk::InputTokens(it) => {
-                        result.input_tokens = Some(it);
+                        result.usage_delta = Some(UsageDelta::InputTokens(it));
+                    }
+                    StreamChunk::OutputTokens(ot) => {
+                        result.usage_delta = Some(UsageDelta::OutputTokens(ot));
                     }
                     StreamChunk::Done => {
                         result.is_done = true;
@@ -164,4 +144,4 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
 // NOTE: process_stream 的单元测试需要 Mock Adapter。
 // 由于 ProviderAdapter trait 涉及 parse_sse_frame(JSON 解析)，
 // 完整的集成测试放在 tests/integration.rs 中。
-// SseParser 和 ToolCallAccumulator 已有独立的单元测试。
+// SseParser, ToolCallAccumulator, UsageAccumulator 已有独立的单元测试。
