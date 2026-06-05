@@ -84,7 +84,7 @@ where
     }
 
     let tool_calls = accumulator.finalize().unwrap_or_default();
-    sink.emit(StreamEvent::Done { tool_calls, usage });
+    sink.emit(StreamEvent::ResponseComplete { tool_calls, usage });
 }
 
 /// 处理单个 SseFrame — 调用 Adapter 解析，返回结构化结果。

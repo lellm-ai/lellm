@@ -76,28 +76,62 @@ impl ToolRegistration {
 }
 
 /// 工具执行器 — 按名称分派 ToolCall 到实际工具函数。
-#[derive(Clone, Default)]
+///
+/// 内部使用 `Arc<HashMap>` — 注册后不可变，clone 为 O(1)。
 pub struct ToolExecutor {
-    tools: HashMap<String, ToolFn>,
-    safety: HashMap<String, ParallelSafety>,
-    categories: HashMap<String, ToolCategory>,
+    tools: Arc<HashMap<String, ToolFn>>,
+    safety: Arc<HashMap<String, ParallelSafety>>,
+    categories: Arc<HashMap<String, ToolCategory>>,
+    retry_policy: RetryPolicy,
+}
+
+impl Default for ToolExecutor {
+    fn default() -> Self {
+        Self {
+            tools: Arc::new(HashMap::new()),
+            safety: Arc::new(HashMap::new()),
+            categories: Arc::new(HashMap::new()),
+            retry_policy: RetryPolicy::default(),
+        }
+    }
+}
+
+impl Clone for ToolExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            tools: Arc::clone(&self.tools),
+            safety: Arc::clone(&self.safety),
+            categories: Arc::clone(&self.categories),
+            retry_policy: self.retry_policy.clone(),
+        }
+    }
 }
 
 impl ToolExecutor {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 构造时绑定全局重试策略。
+    pub fn with_retry_policy(policy: RetryPolicy) -> Self {
         Self {
-            tools: HashMap::new(),
-            safety: HashMap::new(),
-            categories: HashMap::new(),
+            retry_policy: policy,
+            ..Default::default()
         }
     }
 
     pub fn register(&mut self, name: &str, reg: ToolRegistration) {
-        self.safety.insert(name.to_string(), reg.safety.clone());
+        Arc::get_mut(&mut self.safety)
+            .unwrap()
+            .insert(name.to_string(), reg.safety.clone());
         if let Some(cat) = reg.category {
-            self.categories.insert(name.to_string(), cat);
+            Arc::get_mut(&mut self.categories)
+                .unwrap()
+                .insert(name.to_string(), cat);
         }
-        self.tools.insert(name.to_string(), reg.func);
+        Arc::get_mut(&mut self.tools)
+            .unwrap()
+            .insert(name.to_string(), reg.func);
     }
 
     pub fn safety_for(&self, name: &str) -> ParallelSafety {
@@ -116,11 +150,12 @@ impl ToolExecutor {
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {
         match self.tools.get(&call.name) {
             Some(tool_fn) => {
-                let policy = RetryPolicy::default();
-                policy.execute_with_retry(tool_fn, &call.arguments).await
+                self.retry_policy
+                    .execute_with_retry(tool_fn, &call.arguments)
+                    .await
             }
             None => Err(ToolError {
-                kind: ToolErrorKind::Internal,
+                kind: ToolErrorKind::NotFound,
                 message: format!("unknown tool: {}", call.name),
             }),
         }
@@ -153,31 +188,32 @@ impl ToolExecutor {
             }
         }
 
-        // 构建所有并行任务组：Safe 组 + 每个 category 组 + Exclusive 组
-        // 使用 tokio::spawn 绕过 impl Future 类型不一致的问题
+        // 使用 Arc 共享 executor，避免每个 spawn 克隆整个 HashMap
+        let executor = Arc::new(self.clone());
+
         let mut group_handles: Vec<tokio::task::JoinHandle<Vec<Message>>> = Vec::new();
 
         // Safe 组 — 并发执行
         if !safe_calls.is_empty() {
-            let executor = self.clone();
-            group_handles.push(tokio::spawn(async move {
-                executor.run_parallel(safe_calls).await
-            }));
+            let exe = Arc::clone(&executor);
+            group_handles.push(tokio::spawn(
+                async move { exe.run_parallel(safe_calls).await },
+            ));
         }
 
         // CategoryExclusive 组 — 每组内串行，组间并发
         for group_calls in category_calls.into_values() {
-            let executor = self.clone();
-            group_handles.push(tokio::spawn(async move {
-                executor.run_serial(group_calls).await
-            }));
+            let exe = Arc::clone(&executor);
+            group_handles.push(tokio::spawn(
+                async move { exe.run_serial(group_calls).await },
+            ));
         }
 
         // Exclusive 组 — 串行执行
         if !exclusive_calls.is_empty() {
-            let executor = self.clone();
+            let exe = Arc::clone(&executor);
             group_handles.push(tokio::spawn(async move {
-                executor.run_serial(exclusive_calls).await
+                exe.run_serial(exclusive_calls).await
             }));
         }
 

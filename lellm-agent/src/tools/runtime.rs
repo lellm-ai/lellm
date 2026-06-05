@@ -158,9 +158,9 @@ impl ToolUseLoop {
 
         loop {
             if state.reached_max(self.max_iterations) {
-                return Ok(state.finish_max_iterations(
-                    last_response.unwrap_or_else(|| empty_response()),
-                ));
+                return Ok(
+                    state.finish_max_iterations(last_response.unwrap_or_else(|| empty_response()))
+                );
             }
 
             state.next_iteration();
@@ -252,6 +252,9 @@ impl ToolUseLoop {
                         )
                         .await;
 
+                        // 每轮结束后清空 buffer，避免跨轮次累积
+                        text_buffer.clear();
+
                         if let Some(resp) = iter_result.response {
                             last_response = Some(resp);
                         }
@@ -309,93 +312,9 @@ async fn process_stream_iteration(
 ) -> StreamIterResult {
     use futures_util::StreamExt;
 
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(lellm_provider::ProviderEvent::Start { model: m }) => {
-                // 直接透传，不再手动 re-emit
-                if !emit(
-                    tx,
-                    AgentEvent::Provider(lellm_provider::ProviderEvent::Start { model: m }),
-                )
-                .await
-                {
-                    return StreamIterResult::terminated_false();
-                }
-            }
-            Ok(lellm_provider::ProviderEvent::Token { token }) => {
-                text_buffer.push_str(&token);
-                if !emit(
-                    tx,
-                    AgentEvent::Provider(lellm_provider::ProviderEvent::Token { token }),
-                )
-                .await
-                {
-                    return StreamIterResult::terminated_false();
-                }
-            }
-            Ok(lellm_provider::ProviderEvent::Done { tool_calls, usage }) => {
-                let pending_tool_calls = tool_calls;
-                let usage_val = usage.unwrap_or_default();
-
-                // 统一构建 ChatResponse
-                let content: Vec<lellm_core::ContentBlock> =
-                    lellm_core::text_block(text_buffer.clone())
-                        .into_iter()
-                        .chain(
-                            pending_tool_calls
-                                .iter()
-                                .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
-                        )
-                        .collect();
-
-                let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
-
-                if !pending_tool_calls.is_empty() {
-                    // 有工具调用 — 追加历史并执行
-                    state.push_assistant(response.content.clone());
-                    state.add_tool_calls(pending_tool_calls.len());
-
-                    let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
-                    if results.is_none() {
-                        return StreamIterResult::terminated_false();
-                    }
-                    state.push_tool_results(results.unwrap());
-
-                    tracing::debug!(
-                        iteration = state.iterations,
-                        tool_calls = pending_tool_calls.len(),
-                        "tool-use stream iteration"
-                    );
-
-                    return StreamIterResult::new(false, Some(response));
-                } else {
-                    // 无工具调用 — 正常结束
-                    if !emit(
-                        tx,
-                        AgentEvent::Provider(lellm_provider::ProviderEvent::Done {
-                            tool_calls: Vec::new(),
-                            usage: Some(response.usage),
-                        }),
-                    )
-                    .await
-                    {
-                        return StreamIterResult::terminated_false();
-                    }
-
-                    if !emit(
-                        tx,
-                        AgentEvent::LoopEnd {
-                            result: state.finish_complete(response),
-                        },
-                    )
-                    .await
-                    {
-                        return StreamIterResult::terminated_false();
-                    }
-
-                    return StreamIterResult::completed(None);
-                }
-            }
+    while let Some(result) = stream.next().await {
+        let ev = match result {
+            Ok(ev) => ev,
             Err(e) => {
                 let _ = emit(
                     tx,
@@ -406,6 +325,72 @@ async fn process_stream_iteration(
                 )
                 .await;
                 return StreamIterResult::terminated_error();
+            }
+        };
+
+        // 统一透传 Provider 事件 — Provider 发一次，Agent 只负责转发
+        match &ev {
+            lellm_provider::ProviderEvent::Token { token } => {
+                text_buffer.push_str(token);
+            }
+            lellm_provider::ProviderEvent::Start { .. }
+            | lellm_provider::ProviderEvent::ResponseComplete { .. } => {}
+        }
+
+        if !emit(tx, AgentEvent::Provider(ev.clone())).await {
+            return StreamIterResult::terminated_false();
+        }
+
+        // ResponseComplete 事件需要特殊处理：工具执行、终止判断
+        if let lellm_provider::ProviderEvent::ResponseComplete { tool_calls, usage } = ev {
+            let pending_tool_calls = tool_calls;
+            let usage_val = usage.unwrap_or_default();
+
+            // 统一构建 ChatResponse
+            let content: Vec<lellm_core::ContentBlock> =
+                lellm_core::text_block(text_buffer.clone())
+                    .into_iter()
+                    .chain(
+                        pending_tool_calls
+                            .iter()
+                            .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
+                    )
+                    .collect();
+
+            let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
+
+            if !pending_tool_calls.is_empty() {
+                // 有工具调用 — 追加历史并执行
+                state.push_assistant(response.content.clone());
+                state.add_tool_calls(pending_tool_calls.len());
+
+                let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
+                if results.is_none() {
+                    return StreamIterResult::terminated_false();
+                }
+                state.push_tool_results(results.unwrap());
+
+                tracing::debug!(
+                    iteration = state.iterations,
+                    tool_calls = pending_tool_calls.len(),
+                    "tool-use stream iteration"
+                );
+
+                return StreamIterResult::new(false, Some(response));
+            } else {
+                // 无工具调用 — 正常结束（ResponseComplete 已在上方统一透传）
+                if !emit(
+                    tx,
+                    AgentEvent::LoopEnd {
+                        result: state.finish_complete(response),
+                    },
+                )
+                .await
+                {
+                    return StreamIterResult::terminated_false();
+                }
+
+                return StreamIterResult::completed(None);
             }
         }
     }

@@ -28,8 +28,8 @@ pub(crate) enum StreamEvent {
     Token { token: String },
     /// 解析错误
     Error(LlmError),
-    /// 流式结束
-    Done {
+    /// 单次 LLM 响应结束（HTTP/SSE 请求完成）
+    ResponseComplete {
         tool_calls: Vec<ToolCall>,
         usage: Option<TokenUsage>,
     },

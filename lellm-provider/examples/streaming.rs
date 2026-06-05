@@ -34,7 +34,7 @@ async fn main() -> Result<(), LlmError> {
                 print!("{}", token);
                 std::io::Write::flush(&mut std::io::stdout()).ok();
             }
-            ProviderEvent::Done {
+            ProviderEvent::ResponseComplete {
                 tool_calls: tc,
                 usage,
             } => {

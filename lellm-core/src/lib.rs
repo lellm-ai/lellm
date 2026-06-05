@@ -11,7 +11,9 @@ pub mod message;
 pub mod request;
 pub mod response;
 
-pub use error::{LellmError, LlmError, MemoryError, ParseError, ToolError, ToolErrorKind, ToolResult};
+pub use error::{
+    LellmError, LlmError, MemoryError, ParseError, ToolError, ToolErrorKind, ToolResult,
+};
 pub use message::{
     ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall, text_block,
 };

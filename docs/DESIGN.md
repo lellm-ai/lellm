@@ -389,19 +389,23 @@ async fn execute(&self, call: &ToolCall) -> ToolResult {
 
 ## 8. AgentEvent 流式阶段事件
 
-**决定：** 流式模式下，ToolCall 必须在 `ProviderEvent::Done` 后统一提交执行（原子执行）。
+**决定：** 流式模式下，ToolCall 必须在 `ProviderEvent::ResponseComplete` 后统一提交执行（原子执行）。
+
+**`ResponseComplete` 语义（v2026-06-05 重命名）：**
+- `ProviderEvent::Done` 曾承担两种语义：Provider 层"单次请求结束" vs Agent 层"推理结束"
+- 重命名为 `ResponseComplete`，明确表示"单次 HTTP/SSE 请求完成"
+- 消费者通过 `tool_calls.is_empty()` 判断模型是否给出最终答案
 
 **事件流：**
 ```
+Provider(Start)
 Provider(Token)*
-Provider(Done)
-[可选] ToolExecutionStart { pending: usize }
+Provider(ResponseComplete { tool_calls: [...] })  ← 有工具调用
 ToolStart / ToolEnd *
-[可选] ToolExecutionEnd
+Provider(Start)
 Provider(Token)*
-Provider(Done)
-...
-LoopEnd | LoopError
+Provider(ResponseComplete { tool_calls: [] })     ← 无工具调用
+LoopEnd
 ```
 
 **`ToolExecutionStart` / `ToolExecutionEnd` 是状态机层面的事件：**
@@ -424,7 +428,8 @@ LoopEnd | LoopError
 流式串行是有意为之——`execute_stream()` 的核心价值是实时 Token 输出，工具执行是次要路径。v0.2 再优化流式分组并发。
 
 **`execute_stream()` 已知问题：**
-- `ProviderEvent::Start` 重复发送——每轮迭代手动 emit 一次 + Provider 内部 emit 一次。待修复（删除手动 emit）。
+- ~~`ProviderEvent::Start` 重复发送~~ — ✅ 已修复（v2026-06-05）。Provider 发一次，Agent 统一透传，不再手动构造。
+- ~~`ProviderEvent::Done` 语义歧义~~ — ✅ 已修复（v2026-06-05）。重命名为 `ResponseComplete`，明确表示"单次 HTTP/SSE 请求完成"。
 - `GenericProvider` spawn 任务延迟终止——消费者丢弃 Receiver 后，spawn 任务需等到下一次 `tx.send()` 才发现 channel 断了。v0.2 引入 `CancellationToken`。
 
 ### `execute()` vs `execute_stream()` 等价性边界

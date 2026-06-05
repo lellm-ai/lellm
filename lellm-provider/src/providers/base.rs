@@ -106,7 +106,9 @@ fn map_stream_event(event: StreamEvent) -> Result<ProviderEvent, LlmError> {
         StreamEvent::Start { model } => Ok(ProviderEvent::Start { model }),
         StreamEvent::Token { token } => Ok(ProviderEvent::Token { token }),
         StreamEvent::Error(e) => Err(e),
-        StreamEvent::Done { tool_calls, usage } => Ok(ProviderEvent::Done { tool_calls, usage }),
+        StreamEvent::ResponseComplete { tool_calls, usage } => {
+            Ok(ProviderEvent::ResponseComplete { tool_calls, usage })
+        }
     }
 }
 

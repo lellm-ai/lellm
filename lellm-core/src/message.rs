@@ -103,8 +103,7 @@ impl Message {
             _ => Vec::new(),
         }
     }
-
- }
+}
 
 /// 便捷函数：创建纯文本块
 pub fn text_block(s: String) -> Vec<ContentBlock> {

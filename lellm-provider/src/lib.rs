@@ -27,8 +27,11 @@ pub enum ProviderEvent {
     Start { model: String },
     /// LLM 增量令牌
     Token { token: String },
-    /// LLM 调用完成
-    Done {
+    /// 单次 LLM 响应结束（HTTP/SSE 请求完成）。
+    ///
+    /// 注意：这不等于 Agent 推理结束。如果 `tool_calls` 非空，
+    /// Agent 会继续执行工具并发起下一轮调用。
+    ResponseComplete {
         tool_calls: Vec<ToolCall>,
         usage: Option<TokenUsage>,
     },
