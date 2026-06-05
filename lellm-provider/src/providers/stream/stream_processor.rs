@@ -19,6 +19,7 @@ struct FrameResult {
     text: Option<String>,
     tool_call_delta: Option<ToolCallDelta>,
     usage: Option<TokenUsage>,
+    input_tokens: Option<u32>,
     is_done: bool,
 }
 
@@ -41,6 +42,7 @@ where
     let mut parser = SseParser::new();
     let mut accumulator = ToolCallAccumulator::new();
     let mut usage: Option<TokenUsage> = None;
+    let mut input_tokens: u32 = 0;
     let mut is_done = false;
 
     while let Some(result) = bytes_stream.next().await {
@@ -66,6 +68,11 @@ where
                         usage = Some(u);
                     }
 
+                    // Input tokens (Anthropic message_start 事件)
+                    if let Some(its) = fr.input_tokens {
+                        input_tokens = its;
+                    }
+
                     // 结束标记
                     if fr.is_done {
                         is_done = true;
@@ -84,7 +91,29 @@ where
     }
 
     let tool_calls = accumulator.finalize().unwrap_or_default();
-    sink.emit(StreamEvent::ResponseComplete { tool_calls, usage });
+    // 合并 input_tokens（Anthropic message_start 事件中携带）
+    let final_usage = match usage {
+    Some(mut u) => {
+        if input_tokens > 0 {
+            u.prompt_tokens = input_tokens;
+        }
+        // 修正 total_tokens（流式 usage 可能未携带 total）
+        if u.total_tokens == 0 {
+            u.total_tokens = u.prompt_tokens + u.completion_tokens;
+        }
+        Some(u)
+    }
+    None if input_tokens > 0 => Some(TokenUsage {
+        prompt_tokens: input_tokens,
+        completion_tokens: 0,
+        total_tokens: input_tokens,
+    }),
+    None => None,
+};
+    sink.emit(StreamEvent::ResponseComplete {
+        tool_calls,
+        usage: final_usage,
+    });
 }
 
 /// 处理单个 SseFrame — 调用 Adapter 解析，返回结构化结果。
@@ -93,6 +122,7 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
         text: None,
         tool_call_delta: None,
         usage: None,
+        input_tokens: None,
         is_done: false,
     };
 
@@ -113,6 +143,9 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
                     }
                     StreamChunk::Usage(u) => {
                         result.usage = Some(u);
+                    }
+                    StreamChunk::InputTokens(it) => {
+                        result.input_tokens = Some(it);
                     }
                     StreamChunk::Done => {
                         result.is_done = true;

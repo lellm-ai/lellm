@@ -486,7 +486,11 @@ impl StreamIterResult {
     }
 }
 
-/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具
+/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具。
+///
+/// **设计决策（见 docs/DESIGN.md §8）：** 流式模式工具执行强制串行，
+/// 即使工具标记为 Safe。原因：ToolStart/ToolEnd 与 Token 交错会让消费者解析更复杂。
+/// v0.2 再优化流式分组并发。
 async fn emit_and_execute_tools(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,

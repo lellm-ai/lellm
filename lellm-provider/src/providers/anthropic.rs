@@ -214,6 +214,21 @@ impl ProviderAdapter for AnthropicAdapter {
 
         let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {
+            "message_start" => {
+                // 提取 input_tokens（流式模式下 message_start 携带 prompt_tokens）
+                if let Some(usage_val) = val.get("usage") {
+                    let input_tokens = usage_val
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    if input_tokens > 0 {
+                        return Ok(StreamParseResult::chunk(StreamChunk::InputTokens(
+                            input_tokens,
+                        )));
+                    }
+                }
+                return Ok(StreamParseResult::empty());
+            }
             "content_block_start" => {
                 let block = val.get("content_block").unwrap_or(&serde_json::Value::Null);
                 let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");

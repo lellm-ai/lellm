@@ -47,6 +47,8 @@ pub(crate) enum StreamChunk {
     TextDelta(String),
     ToolCallDelta(ToolCallDelta),
     Usage(TokenUsage),
+    /// 输入 token 计数（Anthropic message_start 事件携带，与 output_tokens 分离）
+    InputTokens(u32),
     Done,
 }
 
