@@ -20,6 +20,7 @@ use crate::providers::base::{ProviderAdapter, StreamChunk};
 /// 单个 SseFrame 的解析结果。
 struct FrameResult {
     text: Option<String>,
+    thinking: Option<String>,
     tool_call_delta: Option<ToolCallDelta>,
     usage_delta: Option<UsageDelta>,
     is_done: bool,
@@ -59,6 +60,11 @@ where
                         sink.emit(StreamEvent::Token { token: text }).await;
                     }
 
+                    // 思考增量
+                    if let Some(thinking) = fr.thinking {
+                        sink.emit(StreamEvent::ThinkingDelta { thinking }).await;
+                    }
+
                     // ToolCall 增量
                     if let Some(delta) = fr.tool_call_delta {
                         tool_call_acc.push(&delta);
@@ -91,13 +97,15 @@ where
     sink.emit(StreamEvent::ResponseComplete {
         tool_calls,
         usage: final_usage,
-    }).await;
+    })
+    .await;
 }
 
 /// 处理单个 SseFrame — 调用 Adapter 解析，返回结构化结果。
 fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResult {
     let mut result = FrameResult {
         text: None,
+        thinking: None,
         tool_call_delta: None,
         usage_delta: None,
         is_done: false,
@@ -109,6 +117,9 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
                 match chunk {
                     StreamChunk::TextDelta(text) => {
                         result.text = Some(text);
+                    }
+                    StreamChunk::ThinkingDelta(thinking) => {
+                        result.thinking = Some(thinking);
                     }
                     StreamChunk::ToolCallDelta(delta) => {
                         result.tool_call_delta = Some(ToolCallDelta {

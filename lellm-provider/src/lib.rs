@@ -27,6 +27,8 @@ pub enum ProviderEvent {
     Start { model: String },
     /// LLM 增量令牌
     Token { token: String },
+    /// LLM 思考块增量（Claude thinking / OpenAI reasoning_content）
+    ThinkingDelta { thinking: String },
     /// 单次 LLM 响应结束（HTTP/SSE 请求完成）。
     ///
     /// 注意：这不等于 Agent 推理结束。如果 `tool_calls` 非空，

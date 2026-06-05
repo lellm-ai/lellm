@@ -3,7 +3,8 @@
 use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
-    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, ThinkingBlock,
+    TokenUsage, ToolCall,
 };
 use std::borrow::Cow;
 
@@ -178,6 +179,21 @@ impl ProviderAdapter for AnthropicAdapter {
                         arguments: input,
                     }));
                 }
+                "thinking" => {
+                    let thinking = block
+                        .get("thinking")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let redacted = block
+                        .get("redacted_thinking")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    if !thinking.is_empty() || redacted.is_some() {
+                        content.push(ContentBlock::Thinking(ThinkingBlock { thinking, redacted }));
+                    }
+                }
                 _ => {}
             }
         }
@@ -274,8 +290,17 @@ impl ProviderAdapter for AnthropicAdapter {
                             },
                         )));
                     }
+                } else if delta_type == "thinking_delta" {
+                    if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str())
+                        && !thinking.is_empty()
+                    {
+                        return Ok(StreamParseResult::chunk(StreamChunk::ThinkingDelta(
+                            thinking.into(),
+                        )));
+                    }
                 }
             }
+
             "message_delta" => {
                 let mut chunks = Vec::new();
 
@@ -333,7 +358,11 @@ fn serialize_anthropic_content_blocks(
                 "input": tc.arguments
             }),
             ContentBlock::Image { source: _ } => {
-                // v0.1 不支持图片，跳过
+                // v0.1 不支持图片，跳过（validate_request 应在此之前拦截）
+                tracing::warn!(
+                    provider = "anthropic",
+                    "Image block encountered - silently dropped (should be caught by validate_request)"
+                );
                 serde_json::json!(null)
             }
         })

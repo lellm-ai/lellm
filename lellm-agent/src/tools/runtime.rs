@@ -299,6 +299,7 @@ impl ToolUseLoop {
                 match stream_result {
                     Ok(mut stream) => {
                         let mut text_buffer = String::new();
+                        let mut thinking_buffer = String::new();
 
                         let iter_result = process_stream_iteration(
                             &tx,
@@ -306,11 +307,13 @@ impl ToolUseLoop {
                             &mut state,
                             &mut stream,
                             &mut text_buffer,
+                            &mut thinking_buffer,
                         )
                         .await;
 
                         // 每轮结束后清空 buffer，避免跨轮次累积
                         text_buffer.clear();
+                        thinking_buffer.clear();
 
                         if let Some(resp) = iter_result.response {
                             last_response = Some(resp);
@@ -366,6 +369,7 @@ async fn process_stream_iteration(
     state: &mut LoopState,
     stream: &mut lellm_provider::ProviderStream,
     text_buffer: &mut String,
+    thinking_buffer: &mut String,
 ) -> StreamIterResult {
     use futures_util::StreamExt;
 
@@ -390,6 +394,9 @@ async fn process_stream_iteration(
             lellm_provider::ProviderEvent::Token { token } => {
                 text_buffer.push_str(token);
             }
+            lellm_provider::ProviderEvent::ThinkingDelta { thinking } => {
+                thinking_buffer.push_str(thinking);
+            }
             lellm_provider::ProviderEvent::Start { .. }
             | lellm_provider::ProviderEvent::ResponseComplete { .. } => {}
         }
@@ -404,15 +411,29 @@ async fn process_stream_iteration(
             let usage_val = usage.unwrap_or_default();
 
             // 统一构建 ChatResponse
-            let content: Vec<lellm_core::ContentBlock> =
-                lellm_core::text_block(text_buffer.clone())
-                    .into_iter()
-                    .chain(
-                        pending_tool_calls
-                            .iter()
-                            .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
-                    )
-                    .collect();
+            let mut content: Vec<lellm_core::ContentBlock> = Vec::new();
+
+            // Thinking 块优先于 Text（符合 Anthropic 响应顺序）
+            if !thinking_buffer.is_empty() {
+                content.push(lellm_core::ContentBlock::Thinking(
+                    lellm_core::ThinkingBlock {
+                        thinking: thinking_buffer.clone(),
+                        redacted: None,
+                    },
+                ));
+            }
+
+            if !text_buffer.is_empty() {
+                content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
+                    text: text_buffer.clone(),
+                }));
+            }
+
+            content.extend(
+                pending_tool_calls
+                    .iter()
+                    .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
+            );
 
             let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
 

@@ -28,6 +28,8 @@ pub(crate) enum StreamEvent {
     Start { model: String },
     /// 文本增量（可丢弃）
     Token { token: String },
+    /// 思考块增量（可丢弃）
+    ThinkingDelta { thinking: String },
     /// 解析错误（不可丢弃）
     Error(LlmError),
     /// 单次 LLM 响应结束（HTTP/SSE 请求完成，不可丢弃）

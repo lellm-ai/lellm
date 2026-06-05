@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::HeaderMap;
-use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage};
+use lellm_core::{ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TokenUsage};
 use secrecy::ExposeSecret;
 use std::borrow::Cow;
 
@@ -45,6 +45,8 @@ pub(crate) struct RawResponse {
 #[derive(Debug)]
 pub(crate) enum StreamChunk {
     TextDelta(String),
+    /// 思考块增量（Anthropic thinking_delta / OpenAI reasoning_content）
+    ThinkingDelta(String),
     ToolCallDelta(ToolCallDelta),
     /// 完整 usage（OpenAI 最后一个 chunk 携带）
     Usage(TokenUsage),
@@ -89,6 +91,12 @@ pub(crate) trait ProviderAdapter: Send + Sync {
     /// 解析单个 SSE 帧的 data 字段。
     /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 GenericProvider 统一处理，构建 SseFrame。
     fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
+
+    /// Provider 能力声明。
+    /// 默认不支持图片输入。Adapter 可覆写以声明支持。
+    fn supports_image_input(&self) -> bool {
+        false
+    }
 }
 
 // ─── EventSink 适配：将 tokio channel 包装为 EventSink ───
@@ -114,9 +122,7 @@ impl EventSink for ChannelSink {
         } else {
             // Token 等可丢弃事件，channel 满时丢弃
             let mapped = map_stream_event(event);
-            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-                self.tx.try_send(mapped)
-            {
+            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = self.tx.try_send(mapped) {
                 tracing::warn!("stream event dropped: channel full");
             }
         }
@@ -127,6 +133,7 @@ fn map_stream_event(event: StreamEvent) -> Result<ProviderEvent, LlmError> {
     match event {
         StreamEvent::Start { model } => Ok(ProviderEvent::Start { model }),
         StreamEvent::Token { token } => Ok(ProviderEvent::Token { token }),
+        StreamEvent::ThinkingDelta { thinking } => Ok(ProviderEvent::ThinkingDelta { thinking }),
         StreamEvent::Error(e) => Err(e),
         StreamEvent::ResponseComplete { tool_calls, usage } => {
             Ok(ProviderEvent::ResponseComplete { tool_calls, usage })
@@ -160,6 +167,35 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
             config,
             client,
         }
+    }
+
+    /// 校验 ChatRequest：消息语义 + Provider 能力匹配。
+    /// 在 build_request 之前调用，拦截非法请求。
+    fn validate_request(&self, req: &ChatRequest) -> Result<(), LlmError> {
+        // 1. 消息语义校验
+        for msg in &req.messages {
+            msg.validate()?;
+        }
+
+        // 2. Provider 能力校验 — Image 输入
+        if !self.adapter.supports_image_input() {
+            for msg in &req.messages {
+                if let Message::User { content } = msg {
+                    for block in content {
+                        if let ContentBlock::Image { .. } = block {
+                            return Err(LlmError::ParseError {
+                                detail: format!(
+                                    "{} does not support image input",
+                                    self.adapter.name()
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// 构建 reqwest RequestBuilder — URL + Auth + Headers + Body 统一在此组装。
@@ -240,6 +276,7 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
 #[allow(private_bounds)]
 impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        self.validate_request(request)?;
         let http_req = self.adapter.build_request(request, false)?;
         let resp = self.send(http_req).await?;
 
@@ -251,6 +288,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     }
 
     async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
+        self.validate_request(request)?;
         let http_req = self.adapter.build_request(request, true)?;
 
         // 发送流式请求

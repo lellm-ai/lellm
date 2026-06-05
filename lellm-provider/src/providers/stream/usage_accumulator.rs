@@ -42,7 +42,8 @@ impl UsageAccumulator {
                 self.prompt_tokens = Some(std::cmp::max(*n, self.prompt_tokens.unwrap_or(0)));
             }
             UsageDelta::OutputTokens(n) => {
-                self.completion_tokens = Some(std::cmp::max(*n, self.completion_tokens.unwrap_or(0)));
+                self.completion_tokens =
+                    Some(std::cmp::max(*n, self.completion_tokens.unwrap_or(0)));
             }
             UsageDelta::Full(u) => {
                 // OpenAI 一次性返回完整 usage，直接覆盖

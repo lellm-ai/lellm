@@ -1,6 +1,6 @@
 //! 消息与内容块类型。
 
-use crate::error::ToolResult;
+use crate::error::{LlmError, ToolResult};
 use serde::{Deserialize, Serialize};
 
 /// 纯文本块
@@ -103,6 +103,65 @@ impl Message {
         }
     }
 
+    /// 语义校验 — 检查 Message 变体与 ContentBlock 的合法性。
+    ///
+    /// v0.1 核心规则：
+    /// 1. `ToolResult` 禁止包含 `ToolCall` 或 `Thinking`
+    /// 2. `ToolResult.tool_call_id` 非空
+    /// 3. `Assistant` 中的 `ToolCall.id` 非空
+    /// 4. `User` 禁止包含 `Thinking`
+    pub fn validate(&self) -> Result<(), LlmError> {
+        match self {
+            Message::ToolResult {
+                tool_call_id,
+                content,
+            } => {
+                if tool_call_id.is_empty() {
+                    return Err(LlmError::ParseError {
+                        detail: "ToolResult.tool_call_id must not be empty".into(),
+                    });
+                }
+                for block in content {
+                    match block {
+                        ContentBlock::ToolCall(_) => {
+                            return Err(LlmError::ParseError {
+                                detail: "ToolResult must not contain ToolCall blocks".into(),
+                            });
+                        }
+                        ContentBlock::Thinking(_) => {
+                            return Err(LlmError::ParseError {
+                                detail: "ToolResult must not contain Thinking blocks".into(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Message::Assistant { content } => {
+                for block in content {
+                    if let ContentBlock::ToolCall(tc) = block {
+                        if tc.id.is_empty() {
+                            return Err(LlmError::ParseError {
+                                detail: "Assistant ToolCall.id must not be empty".into(),
+                            });
+                        }
+                    }
+                }
+            }
+            Message::User { content } => {
+                for block in content {
+                    if let ContentBlock::Thinking(_) = block {
+                        return Err(LlmError::ParseError {
+                            detail: "User must not contain Thinking blocks".into(),
+                        });
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+        Ok(())
+    }
+
     /// 提取所有 ToolCall（仅 Assistant 消息包含）
     pub fn extract_tool_calls(&self) -> Vec<ToolCall> {
         match self {
@@ -168,5 +227,97 @@ mod tests {
         let calls = msg.extract_tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "test");
+    }
+
+    // ─── validate() 测试 ───
+
+    #[test]
+    fn test_validate_user_ok() {
+        let msg = Message::User {
+            content: text_block("hello".to_string()),
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_user_reject_thinking() {
+        let msg = Message::User {
+            content: vec![ContentBlock::Thinking(ThinkingBlock {
+                thinking: "hmm".into(),
+                redacted: None,
+            })],
+        };
+        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+    }
+
+    #[test]
+    fn test_validate_assistant_ok() {
+        let msg = Message::Assistant {
+            content: text_block("hi".to_string()),
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_assistant_tool_call_empty_id() {
+        let msg = Message::Assistant {
+            content: vec![ContentBlock::ToolCall(ToolCall {
+                id: String::new(),
+                name: "test".into(),
+                arguments: serde_json::json!({}),
+            })],
+        };
+        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+    }
+
+    #[test]
+    fn test_validate_tool_result_ok() {
+        let msg = Message::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: text_block("ok".to_string()),
+        };
+        assert!(msg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_tool_result_empty_id() {
+        let msg = Message::ToolResult {
+            tool_call_id: String::new(),
+            content: text_block("ok".to_string()),
+        };
+        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+    }
+
+    #[test]
+    fn test_validate_tool_result_reject_tool_call() {
+        let msg = Message::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: vec![ContentBlock::ToolCall(ToolCall {
+                id: "x".into(),
+                name: "y".into(),
+                arguments: serde_json::json!({}),
+            })],
+        };
+        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+    }
+
+    #[test]
+    fn test_validate_tool_result_reject_thinking() {
+        let msg = Message::ToolResult {
+            tool_call_id: "call_1".to_string(),
+            content: vec![ContentBlock::Thinking(ThinkingBlock {
+                thinking: "hmm".into(),
+                redacted: None,
+            })],
+        };
+        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+    }
+
+    #[test]
+    fn test_validate_system_ok() {
+        let msg = Message::System {
+            content: text_block("you are helpful".to_string()),
+        };
+        assert!(msg.validate().is_ok());
     }
 }
