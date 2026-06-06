@@ -10,11 +10,13 @@ use lellm_core::{LlmError, Message};
 
 /// Fallback 上下文 — 提供给策略做决策的依据。
 ///
-/// **设计原则：** Runtime 只报告事实（第几次失败、什么错误），
-/// 策略自己决定是否继续。不传递 `max_attempts` — 决策权在 Strategy。
-pub struct FallbackContext {
-    /// Provider 调用失败的具体错误
-    pub error: LlmError,
+/// **设计原则：**
+/// - Runtime 只报告事实（第几次失败、什么错误），策略自己决定是否继续
+/// - `error` 为借用 — Context 是**观察窗口**，不成为错误的临时仓库
+/// - 错误所有权始终留在 Retry Loop 手中，Abort 时直接 `err.clone()` 返回
+pub struct FallbackContext<'a> {
+    /// Provider 调用失败的具体错误（借用，Context 只观察）
+    pub error: &'a LlmError,
     /// 当前失败次数（从 1 开始，首次失败为 1）
     pub attempt: usize,
     /// Agent Loop 已完成的迭代轮次

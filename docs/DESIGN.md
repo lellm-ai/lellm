@@ -386,6 +386,12 @@ async fn execute(&self, call: &ToolCall) -> ToolResult {
 - 只实现 `Retry` + `Abort`（`DefaultFallback`）
 - Fallback 钩子只在 **Provider 错误** 处触发
 
+**`FallbackContext` — 观察窗口，不持有错误所有权：**
+- `error: &'a LlmError`（借用）— Context 只观察，不成为错误的临时仓库
+- 错误所有权始终留在 Retry Loop 手中，Abort 时直接返回 owned `err`
+- `execute_with_fallback<T, F, Fut>()` 自由函数统一处理 `execute()` 和 `execute_stream()` 的重试逻辑
+- 零成本抽象 — 泛型 `F: FnMut() -> Fut`，无 `Box<dyn Future>`
+
 **v0.2 扩展：**
 - `SwitchProvider` — 传入 `Vec<ResolvedModel>` 备选链
 - `RetryWithMessages` — 注入干预消息

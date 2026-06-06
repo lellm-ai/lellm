@@ -198,6 +198,53 @@ async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
     tx.send(event).await.is_ok()
 }
 
+/// 带 Fallback 重试的通用操作执行器（自由函数，spawned task 可用）。
+///
+/// **职责划分：**
+/// - `FallbackContext` = 观察窗口（借用 `&LlmError`）
+/// - Retry Loop = 错误所有者（Abort 时直接返回 owned `err`）
+///
+/// 零成本抽象 — 泛型 `F: FnMut() -> Fut`，无 `Box<dyn Future>`。
+async fn execute_with_fallback<T, F, Fut>(
+    fallback: &Arc<dyn FallbackStrategy>,
+    mut op: F,
+    iteration: usize,
+    messages: &[Message],
+) -> Result<T, LlmError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, LlmError>>,
+{
+    let mut attempt: usize = 1;
+
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                tracing::warn!(
+                    attempt = attempt,
+                    error = %err,
+                    "provider operation failed, fallback handling"
+                );
+                let ctx = FallbackContext {
+                    error: &err,
+                    attempt,
+                    iterations: iteration,
+                    conversation: messages.to_vec().into(),
+                };
+                match fallback.handle(&ctx).await {
+                    FallbackAction::Retry => {
+                        attempt += 1;
+                    }
+                    FallbackAction::Abort => {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 构建空的 ChatResponse（边界情况兜底）
 fn empty_response() -> ChatResponse {
     ChatResponse::new(
@@ -314,35 +361,13 @@ impl ToolUseLoop {
             state.next_iteration();
 
             let req = self.build_request(&state.messages);
-
-            let mut retry_attempt: usize = 1;
-            let response = loop {
-                match self.model.provider.call(&req).await {
-                    Ok(resp) => break resp,
-                    Err(e) => {
-                        tracing::warn!(
-                            attempt = retry_attempt,
-                            error = %e,
-                            "provider call failed, fallback handling"
-                        );
-                        let ctx = FallbackContext {
-                            error: e,
-                            attempt: retry_attempt,
-                            iterations: state.iterations,
-                            conversation: Arc::from(state.messages.as_slice()),
-                        };
-                        match self.deps.fallback.handle(&ctx).await {
-                            FallbackAction::Retry => {
-                                retry_attempt += 1;
-                                continue;
-                            }
-                            FallbackAction::Abort => {
-                                return Err(ctx.error);
-                            }
-                        }
-                    }
-                }
-            };
+            let response = execute_with_fallback(
+                &self.deps.fallback,
+                || self.model.provider.call(&req),
+                state.iterations,
+                &state.messages,
+            )
+            .await?;
             last_response = Some(response);
 
             if !last_response.as_ref().unwrap().has_tool_calls() {
@@ -423,34 +448,14 @@ impl ToolUseLoop {
 
                 let req = build_request_inner(&model, &executor, &state.messages);
 
-                let mut retry_attempt: usize = 1;
-                let stream_result: Result<lellm_provider::ProviderStream, LlmError> = loop {
-                    match model.provider.stream(&req).await {
-                        Ok(s) => break Ok(s),
-                        Err(e) => {
-                            tracing::warn!(
-                                attempt = retry_attempt,
-                                error = %e,
-                                "provider stream failed, fallback handling"
-                            );
-                            let ctx = FallbackContext {
-                                error: e,
-                                attempt: retry_attempt,
-                                iterations: state.iterations,
-                                conversation: Arc::from(state.messages.as_slice()),
-                            };
-                            match deps.fallback.handle(&ctx).await {
-                                FallbackAction::Retry => {
-                                    retry_attempt += 1;
-                                    continue;
-                                }
-                                FallbackAction::Abort => {
-                                    break Err(ctx.error);
-                                }
-                            }
-                        }
-                    }
-                };
+                let stream_result: Result<lellm_provider::ProviderStream, LlmError> =
+                    execute_with_fallback(
+                        &deps.fallback,
+                        || model.provider.stream(&req),
+                        state.iterations,
+                        &state.messages,
+                    )
+                    .await;
 
                 match stream_result {
                     Ok(mut stream) => {
