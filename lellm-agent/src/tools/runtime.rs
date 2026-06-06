@@ -271,10 +271,9 @@ fn empty_response() -> ChatResponse {
 ///     .build();
 /// ```
 ///
-/// **高级（直接构造 + with_ 链式调用）：**
+/// **高级（直接构造）：**
 /// ```rust,ignore
-/// let agent = ToolUseLoop::new(model, executor, config, deps)
-///     .with_system_prompt("你是助手".into());
+/// let agent = ToolUseLoop::new(model, executor, config, deps);
 /// ```
 #[derive(Clone)]
 pub struct ToolUseLoop {
@@ -310,20 +309,6 @@ impl ToolUseLoop {
             ToolUseConfig::default(),
             ToolUseDeps::default(),
         )
-    }
-
-    // ─── with_ 糖衣 setter（次要入口，链式调用）───────────────
-
-    /// 设置系统提示（覆盖 config.system_prompt）
-    pub fn with_system_prompt(mut self, prompt: String) -> Self {
-        self.config.system_prompt = Some(prompt);
-        self
-    }
-
-    /// 设置最大迭代轮次（覆盖 config.max_iterations）
-    pub fn with_max_iterations(mut self, max: usize) -> Self {
-        self.config.max_iterations = max;
-        self
     }
 
     // ─── 内部方法 ─────────────────────────────────────────────

@@ -38,16 +38,9 @@ ToolUseLoop::new(model, executor, config, deps)
 ToolUseLoop::simple(model, executor)
 ```
 
-次要入口（链式 with_）：
-```rust
-ToolUseLoop::new(...)
-    .with_system_prompt("...".into())
-    .with_max_iterations(20)
-```
-
 **设计原则：**
-- `AgentBuilder` = 唯一推荐的配置入口
-- `ToolUseLoop` = Runtime，`with_` 方法仅供高级用户微调
+- `AgentBuilder` = 唯一的配置入口
+- `ToolUseLoop` = Runtime，不提供 `with_` 方法
 - **不存在** `AgentBuilder::from_loop()` — 不鼓励 Runtime → Builder 的反向转换
 
 ## 核心组件

@@ -26,8 +26,9 @@ async fn test_tool_use_loop_no_tool_calls() {
         content: lellm_core::text_block("test".to_string()),
     }];
 
-    let result = ToolUseLoop::simple(model, executor)
-        .with_max_iterations(5)
+    let result = AgentBuilder::new(model)
+        .max_iterations(5)
+        .build()
         .execute(messages)
         .await
         .unwrap();
