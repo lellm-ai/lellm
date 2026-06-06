@@ -22,18 +22,18 @@ use super::ToolRegistration;
 use super::executor::ToolExecutor;
 use super::fallback::FallbackStrategy;
 use super::retry::RetryPolicy;
-use super::runtime::ToolUseLoop;
+use super::runtime::{ToolUseConfig, ToolUseDeps, ToolUseLoop};
 
 /// Agent 链式构建器 — 推荐的 Agent 创建方式。
 ///
-/// 内部持有构建参数，`build()` 时组装为 `ToolUseLoop`。
-/// 所有 setter 返回 `self`（不借用），支持流畅的链式调用。
+/// 内部持有构建参数，`build()` 时组装为 `ToolUseConfig` + `ToolUseDeps`，
+/// 再传给 `ToolUseLoop::new()`。所有 setter 返回 `self`（不借用），
+/// 支持流畅的链式调用。
 pub struct AgentBuilder {
     model: ResolvedModel,
     executor: ToolExecutor,
-    max_iterations: usize,
-    fallback: Option<Arc<dyn FallbackStrategy>>,
-    system_prompt: Option<String>,
+    config: ToolUseConfig,
+    deps: ToolUseDeps,
 }
 
 impl AgentBuilder {
@@ -42,9 +42,8 @@ impl AgentBuilder {
         Self {
             model,
             executor: ToolExecutor::default(),
-            max_iterations: 10,
-            fallback: None,
-            system_prompt: None,
+            config: ToolUseConfig::default(),
+            deps: ToolUseDeps::default(),
         }
     }
 
@@ -66,19 +65,19 @@ impl AgentBuilder {
 
     /// 设置最大迭代轮次（默认 10）。
     pub fn max_iterations(mut self, max: usize) -> Self {
-        self.max_iterations = max;
+        self.config.max_iterations = max;
         self
     }
 
     /// 设置系统提示。
     pub fn system_prompt(mut self, prompt: String) -> Self {
-        self.system_prompt = Some(prompt);
+        self.config.system_prompt = Some(prompt);
         self
     }
 
     /// 设置 Fallback 策略。
     pub fn fallback(mut self, fallback: Arc<dyn FallbackStrategy>) -> Self {
-        self.fallback = Some(fallback);
+        self.deps.fallback = fallback;
         self
     }
 
@@ -89,32 +88,10 @@ impl AgentBuilder {
     }
 
     /// 构建 ToolUseLoop。
+    ///
+    /// 将内部参数组装为 `ToolUseConfig` + `ToolUseDeps`，
+    /// 传给 `ToolUseLoop::new()`。无字段复制逻辑。
     pub fn build(self) -> ToolUseLoop {
-        let mut loop_ = ToolUseLoop::new(self.model, self.executor);
-
-        loop_.max_iterations = self.max_iterations;
-
-        if let Some(sp) = self.system_prompt {
-            loop_.system_prompt = Some(sp);
-        }
-
-        if let Some(fb) = self.fallback {
-            loop_.fallback = fb;
-        }
-
-        loop_
-    }
-}
-
-impl AgentBuilder {
-    /// 从现有 ToolUseLoop 创建构建器（用于修改配置）。
-    pub fn from_loop(loop_: &ToolUseLoop) -> Self {
-        Self {
-            model: loop_.model.clone(),
-            executor: loop_.executor.clone(),
-            max_iterations: loop_.max_iterations,
-            fallback: Some(loop_.fallback.clone()),
-            system_prompt: loop_.system_prompt.clone(),
-        }
+        ToolUseLoop::new(self.model, self.executor, self.config, self.deps)
     }
 }

@@ -73,6 +73,8 @@ pub enum Message {
     },
     ToolResult {
         tool_call_id: String,
+        /// 工具执行是否失败（供 Provider API 映射，如 Anthropic `is_error: true`）
+        is_error: bool,
         content: Vec<ContentBlock>,
     },
 }
@@ -88,17 +90,23 @@ impl Message {
         }
     }
 
+    /// 返回 ToolResult 的 is_error 标记（仅 ToolResult 变体有效）
+    pub fn is_tool_error(&self) -> bool {
+        matches!(self, Message::ToolResult { is_error: true, .. })
+    }
+
     /// 从工具调用结果构建 Message::ToolResult
     ///
-    /// 成功 → 文本 content，失败 → `"tool error: {e}"` 文本 content。
-    /// **TODO(v0.2):** 保留错误语义，如 `is_error: bool` 或独立变体。
+    /// 成功 → 文本 content，`is_error: false`
+    /// 失败 → `"tool error: {e}"` 文本 content，`is_error: true`
     pub fn tool_result(call: &ToolCall, result: &ToolResult) -> Self {
-        let content_str = match result {
-            Ok(s) => s.clone(),
-            Err(e) => format!("tool error: {e}"),
+        let (content_str, is_error) = match result {
+            Ok(s) => (s.clone(), false),
+            Err(e) => (format!("tool error: {e}"), true),
         };
         Message::ToolResult {
             tool_call_id: call.id.clone(),
+            is_error,
             content: text_block(content_str),
         }
     }
@@ -114,6 +122,7 @@ impl Message {
         match self {
             Message::ToolResult {
                 tool_call_id,
+                is_error: _,
                 content,
             } => {
                 if tool_call_id.is_empty() {
@@ -274,6 +283,7 @@ mod tests {
     fn test_validate_tool_result_ok() {
         let msg = Message::ToolResult {
             tool_call_id: "call_1".to_string(),
+            is_error: false,
             content: text_block("ok".to_string()),
         };
         assert!(msg.validate().is_ok());
@@ -283,6 +293,7 @@ mod tests {
     fn test_validate_tool_result_empty_id() {
         let msg = Message::ToolResult {
             tool_call_id: String::new(),
+            is_error: false,
             content: text_block("ok".to_string()),
         };
         assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
@@ -292,6 +303,7 @@ mod tests {
     fn test_validate_tool_result_reject_tool_call() {
         let msg = Message::ToolResult {
             tool_call_id: "call_1".to_string(),
+            is_error: false,
             content: vec![ContentBlock::ToolCall(ToolCall {
                 id: "x".into(),
                 name: "y".into(),
@@ -305,6 +317,7 @@ mod tests {
     fn test_validate_tool_result_reject_thinking() {
         let msg = Message::ToolResult {
             tool_call_id: "call_1".to_string(),
+            is_error: false,
             content: vec![ContentBlock::Thinking(ThinkingBlock {
                 thinking: "hmm".into(),
                 redacted: None,

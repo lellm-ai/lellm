@@ -354,6 +354,7 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, LlmError
         }
         Message::ToolResult {
             tool_call_id,
+            is_error: _,
             content,
         } => {
             let mut map = serde_json::Map::new();
@@ -368,6 +369,8 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, LlmError
                     .join("\n")
                     .into(),
             );
+            // NOTE: OpenAI API supports "content" field for tool results.
+            // is_error is implicitly conveyed via the error message content.
             Ok(serde_json::Value::Object(map))
         }
     }

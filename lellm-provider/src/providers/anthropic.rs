@@ -53,6 +53,7 @@ impl ProviderAdapter for AnthropicAdapter {
                 }
                 Message::ToolResult {
                     tool_call_id,
+                    is_error,
                     content,
                 } => {
                     // Anthropic: tool_result 是 role="user" 消息中的 content block
@@ -61,6 +62,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     let mut block = serde_json::Map::new();
                     block.insert("type".into(), "tool_result".into());
                     block.insert("tool_use_id".into(), tool_call_id.clone().into());
+                    block.insert("is_error".into(), (*is_error).into());
                     block.insert(
                         "content".into(),
                         serialize_anthropic_content_blocks(content)?,

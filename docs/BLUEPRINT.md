@@ -58,9 +58,29 @@ pub trait LlmProvider: Send + Sync {
 ### 4.2 ToolUseLoop
 
 ```rust
+// 推荐入口 — AgentBuilder
+let agent = AgentBuilder::new(model)
+    .system_prompt("...".into())
+    .tool(search_tool)
+    .max_iterations(20)
+    .build();
+
+// 内部结构 — Config vs Deps 分层
+pub struct ToolUseLoop {
+    model: ResolvedModel,
+    executor: ToolExecutor,
+    config: ToolUseConfig,    // 纯参数 (system_prompt, max_iterations)
+    deps: ToolUseDeps,        // 策略服务 (fallback)
+}
+
 impl ToolUseLoop {
-    pub async fn execute(self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError>;
-    pub fn execute_stream(self, messages: Vec<Message>) -> AgentStream;
+    pub fn new(model, executor, config, deps) -> Self;
+    pub fn simple(model, executor) -> Self;  // 默认配置
+    pub fn with_system_prompt(self, prompt) -> Self;  // 链式微调
+    pub fn with_max_iterations(self, max) -> Self;
+    // &self 借用，不消费 — 支持复用
+    pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError>;
+    pub fn execute_stream(&self, messages: Vec<Message>) -> AgentStream;
 }
 ```
 
@@ -76,6 +96,7 @@ pub enum ContentBlock {
 ```
 
 Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 ContentBlock。
+`ToolResult` 携带 `is_error: bool` 标记，区分工具成功与失败。
 
 ### 4.4 Provider 三层架构
 
