@@ -461,20 +461,35 @@ impl ToolUseLoop {
                         text_buffer.clear();
                         thinking_buffer.clear();
 
-                        if let Some(resp) = iter_result.response {
-                            last_response = Some(resp);
-                        }
-
-                        if iter_result.terminated {
-                            let result = if iter_result.is_complete {
-                                state.finish_complete(last_response.unwrap_or_else(empty_response))
-                            } else {
-                                state.finish_max_iterations(
-                                    last_response.unwrap_or_else(empty_response),
+                        match iter_result {
+                            StreamIterResult::Continue { response } => {
+                                last_response = Some(response);
+                            }
+                            StreamIterResult::Complete { response } => {
+                                let _ = emit(
+                                    &tx,
+                                    AgentEvent::LoopEnd {
+                                        result: state.finish_complete(response),
+                                    },
                                 )
-                            };
-                            let _ = emit(&tx, AgentEvent::LoopEnd { result }).await;
-                            return;
+                                .await;
+                                return;
+                            }
+                            StreamIterResult::Terminated { response } => {
+                                if let Some(resp) = response {
+                                    last_response = Some(resp);
+                                }
+                                let _ = emit(
+                                    &tx,
+                                    AgentEvent::LoopEnd {
+                                        result: state.finish_max_iterations(
+                                            last_response.unwrap_or_else(empty_response),
+                                        ),
+                                    },
+                                )
+                                .await;
+                                return;
+                            }
                         }
                     }
                     Err(e) => {
@@ -546,7 +561,7 @@ async fn process_stream_iteration(
         }
 
         if !emit(tx, AgentEvent::Provider(ev.clone())).await {
-            return StreamIterResult::terminated_false();
+            return StreamIterResult::Terminated { response: None };
         }
 
         // ResponseComplete 事件需要特殊处理：工具执行、终止判断
@@ -588,7 +603,7 @@ async fn process_stream_iteration(
 
                 let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
                 if results.is_none() {
-                    return StreamIterResult::terminated_false();
+                    return StreamIterResult::Terminated { response: Some(response) };
                 }
                 state.push_tool_results(results.unwrap());
 
@@ -598,57 +613,26 @@ async fn process_stream_iteration(
                     "tool-use stream iteration"
                 );
 
-                return StreamIterResult::new(false, Some(response));
+                return StreamIterResult::Continue { response };
             } else {
                 // 无工具调用 — 正常结束（ResponseComplete 已在上方统一透传）
                 if !emit(
                     tx,
                     AgentEvent::LoopEnd {
-                        result: state.finish_complete(response),
+                        result: state.finish_complete(response.clone()),
                     },
                 )
                 .await
                 {
-                    return StreamIterResult::terminated_false();
+                    return StreamIterResult::Terminated { response: Some(response) };
                 }
 
-                return StreamIterResult::completed(None);
+                return StreamIterResult::Complete { response };
             }
         }
     }
 
-    StreamIterResult::terminated_false()
-}
-
-impl StreamIterResult {
-    fn new(terminated: bool, response: Option<ChatResponse>) -> Self {
-        Self {
-            terminated,
-            is_complete: false,
-            response,
-        }
-    }
-    fn completed(response: Option<ChatResponse>) -> Self {
-        Self {
-            terminated: true,
-            is_complete: true,
-            response,
-        }
-    }
-    fn terminated_error() -> Self {
-        Self {
-            terminated: true,
-            is_complete: false,
-            response: None,
-        }
-    }
-    fn terminated_false() -> Self {
-        Self {
-            terminated: false,
-            is_complete: false,
-            response: None,
-        }
-    }
+    StreamIterResult::Terminated { response: None }
 }
 
 /// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具。

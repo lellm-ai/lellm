@@ -440,6 +440,7 @@ LoopEnd
 **`execute_stream()` 已知问题：**
 - ~~`ProviderEvent::Start` 重复发送~~ — ✅ 已修复（v2026-06-05）。Provider 发一次，Agent 统一透传，不再手动构造。
 - ~~`ProviderEvent::Done` 语义歧义~~ — ✅ 已修复（v2026-06-05）。重命名为 `ResponseComplete`，明确表示"单次 HTTP/SSE 请求完成"。
+- ~~`last_response` 外部状态管理~~ — ✅ 已修复（v2026-06-06）。`StreamIterResult` 改为枚举（Continue/Complete/Terminated），类型层面保证 Complete 携带最终响应。
 - spawn 任务延迟终止 — 分层解决：
   - **v0.1 ✅** `ChannelSink::is_closed()` + `emit() -> bool` fast-exit。消费者断开后，下一次循环迭代或 `ResponseComplete` 发送前立即退出。
   - **v0.2** `CancellationToken` + `AbortHandle` + HTTP stream 立即关闭。

@@ -5,13 +5,17 @@ use thiserror::Error;
 
 /// lellm 顶层错误类型 — 门面层统一错误出口。
 ///
-/// **用途：** 供 `lellm` facade crate 聚合各子层错误（Llm, Tool, Memory, Parse）。
+/// **架构归属：** `lellm` facade crate（聚合各子层错误）
+/// **代码位置：** `lellm-core`（暂留，便于 `#[from]` 跨 crate 转换）
 ///
-/// **注意：** Core 层 API 不直接使用此类型。各层返回各自的领域错误：
+/// **铁律：Core 公共 API 禁止返回 `LellmError`。**
+/// 各层必须返回各自的领域错误：
 /// - Provider API → `Result<T, LlmError>`
 /// - Tool 执行 → `Result<String, ToolError>`
 /// - 记忆操作 → `Result<T, MemoryError>`
 /// - 解析操作 → `Result<T, ParseError>`
+///
+/// **迁移计划：** 等 facade 承担业务逻辑时，移至 `lellm/src/error.rs`。
 #[derive(Debug, Error)]
 pub enum LellmError {
     #[error("LLM error: {0}")]
