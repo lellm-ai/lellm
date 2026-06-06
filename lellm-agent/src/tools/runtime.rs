@@ -370,7 +370,18 @@ impl ToolUseLoop {
             state.push_assistant(response_content);
             state.add_tool_calls(tool_calls.len());
 
-            let results = self.executor.execute_batch(&tool_calls).await;
+            let results = match self.executor.execute_batch(&tool_calls).await {
+                Ok(results) => results,
+                Err(e) => {
+                    // spawned task panic — 生成错误消息，让 LLM 看到执行失败
+                    tracing::error!(error = %e, "tool batch execution failed");
+                    vec![Message::ToolResult {
+                        tool_call_id: String::new(),
+                        is_error: true,
+                        content: lellm_core::text_block(format!("tool execution failed: {e}")),
+                    }]
+                }
+            };
             state.push_tool_results(results);
 
             tracing::debug!(

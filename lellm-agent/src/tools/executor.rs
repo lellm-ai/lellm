@@ -168,7 +168,13 @@ impl ToolExecutor {
     /// - `Safe` → 全部并发（`join_all`）
     /// - `CategoryExclusive` → 按 category 分组，组内串行、组间并发
     /// - `Exclusive` → 全部串行
-    pub async fn execute_batch(&self, calls: &[ToolCall]) -> Vec<Message> {
+    ///
+    /// 返回 `Result` — 任何 spawned task panic 或取消，统一转为 `ToolError::Internal`。
+    /// 调用方（ToolUseLoop）决定终止、重试或 Fallback。
+    pub async fn execute_batch(
+        &self,
+        calls: &[ToolCall],
+    ) -> Result<Vec<Message>, ToolError> {
         let mut safe_calls = Vec::new();
         let mut category_calls: HashMap<ToolCategory, Vec<ToolCall>> = HashMap::new();
         let mut exclusive_calls = Vec::new();
@@ -214,10 +220,17 @@ impl ToolExecutor {
         let all_results = futures_util::future::join_all(group_handles).await;
         let mut flat = Vec::new();
         for handle_result in all_results {
-            let messages = handle_result.expect("spawned task panicked");
-            flat.extend(messages);
+            match handle_result {
+                Ok(messages) => flat.extend(messages),
+                Err(join_err) => {
+                    return Err(ToolError {
+                        kind: ToolErrorKind::Internal,
+                        message: format!("tool task failed: {join_err}"),
+                    });
+                }
+            }
         }
-        flat
+        Ok(flat)
     }
 
     async fn run_parallel(&self, calls: Vec<ToolCall>) -> Vec<Message> {
