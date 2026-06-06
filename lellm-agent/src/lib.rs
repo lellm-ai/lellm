@@ -6,6 +6,9 @@
 pub mod memory;
 pub mod tools;
 
+// Re-export schemars so derive(ToolDefinition) macro can reference it.
+pub use schemars;
+
 pub use memory::ShortTermMemory;
 pub use tools::{
     AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, DefaultFallback, FallbackAction,

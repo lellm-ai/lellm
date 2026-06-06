@@ -1,6 +1,6 @@
 //! 消息与内容块类型。
 
-use crate::error::{LlmError, ToolResult};
+use crate::error::{ParseError, ToolResult};
 use serde::{Deserialize, Serialize};
 
 /// 纯文本块
@@ -118,7 +118,7 @@ impl Message {
     /// 2. `ToolResult.tool_call_id` 非空
     /// 3. `Assistant` 中的 `ToolCall.id` 非空
     /// 4. `User` 禁止包含 `Thinking`
-    pub fn validate(&self) -> Result<(), LlmError> {
+    pub fn validate(&self) -> Result<(), ParseError> {
         match self {
             Message::ToolResult {
                 tool_call_id,
@@ -126,19 +126,19 @@ impl Message {
                 content,
             } => {
                 if tool_call_id.is_empty() {
-                    return Err(LlmError::ParseError {
+                    return Err(ParseError {
                         detail: "ToolResult.tool_call_id must not be empty".into(),
                     });
                 }
                 for block in content {
                     match block {
                         ContentBlock::ToolCall(_) => {
-                            return Err(LlmError::ParseError {
+                            return Err(ParseError {
                                 detail: "ToolResult must not contain ToolCall blocks".into(),
                             });
                         }
                         ContentBlock::Thinking(_) => {
-                            return Err(LlmError::ParseError {
+                            return Err(ParseError {
                                 detail: "ToolResult must not contain Thinking blocks".into(),
                             });
                         }
@@ -148,10 +148,8 @@ impl Message {
             }
             Message::Assistant { content } => {
                 for block in content {
-                    if let ContentBlock::ToolCall(tc) = block
-                        && tc.id.is_empty()
-                    {
-                        return Err(LlmError::ParseError {
+                    if let ContentBlock::ToolCall(tc) = block && tc.id.is_empty() {
+                        return Err(ParseError {
                             detail: "Assistant ToolCall.id must not be empty".into(),
                         });
                     }
@@ -160,7 +158,7 @@ impl Message {
             Message::User { content } => {
                 for block in content {
                     if let ContentBlock::Thinking(_) = block {
-                        return Err(LlmError::ParseError {
+                        return Err(ParseError {
                             detail: "User must not contain Thinking blocks".into(),
                         });
                     }
@@ -256,7 +254,7 @@ mod tests {
                 redacted: None,
             })],
         };
-        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+        assert!(matches!(msg.validate(), Err(ParseError { .. })));
     }
 
     #[test]
@@ -276,7 +274,7 @@ mod tests {
                 arguments: serde_json::json!({}),
             })],
         };
-        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+        assert!(matches!(msg.validate(), Err(ParseError { .. })));
     }
 
     #[test]
@@ -296,7 +294,7 @@ mod tests {
             is_error: false,
             content: text_block("ok".to_string()),
         };
-        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+        assert!(matches!(msg.validate(), Err(ParseError { .. })));
     }
 
     #[test]
@@ -310,7 +308,7 @@ mod tests {
                 arguments: serde_json::json!({}),
             })],
         };
-        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+        assert!(matches!(msg.validate(), Err(ParseError { .. })));
     }
 
     #[test]
@@ -323,7 +321,7 @@ mod tests {
                 redacted: None,
             })],
         };
-        assert!(matches!(msg.validate(), Err(LlmError::ParseError { .. })));
+        assert!(matches!(msg.validate(), Err(ParseError { .. })));
     }
 
     #[test]

@@ -26,7 +26,7 @@ impl Default for ChatRequest {
             model: String::new(),
             messages: Vec::new(),
             tools: None,
-            temperature: Some(0.6),
+            temperature: None,
             max_tokens: None,
             top_p: None,
             seed: None,

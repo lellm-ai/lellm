@@ -119,6 +119,11 @@ impl ToolExecutor {
         }
     }
 
+    /// 设置/替换重试策略（不丢失已注册的工具）。
+    pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
+        self.retry_policy = policy;
+    }
+
     /// 是否有注册的工具
     pub fn has_tools(&self) -> bool {
         !self.tools.is_empty()

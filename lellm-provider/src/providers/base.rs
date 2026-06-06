@@ -190,7 +190,7 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
     fn validate_request(&self, req: &ChatRequest) -> Result<(), LlmError> {
         // 1. 消息语义校验
         for msg in &req.messages {
-            msg.validate()?;
+            msg.validate().map_err(|e| LlmError::ParseError { detail: e.detail })?;
         }
 
         // 2. Provider 能力校验 — Image 输入（检查所有消息变体）

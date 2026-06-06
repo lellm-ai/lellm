@@ -1,6 +1,7 @@
 use lellm_agent::{
     AgentBuilder, ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, ToolUseLoop,
 };
+use lellm_agent::schemars::JsonSchema;
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
 use lellm_macros::ToolDefinition as ToolDefinitionDerive;
 use lellm_provider::{MockProvider, ResolvedModel};
@@ -82,7 +83,7 @@ fn test_tool_category() {
 
 // ─── ToolArgs trait + derive(ToolDefinition) 测试 ───
 
-#[derive(ToolDefinitionDerive)]
+#[derive(JsonSchema, ToolDefinitionDerive)]
 #[tool(name = "weather_search", description = "搜索天气信息")]
 struct WeatherArgs {
     /// 城市名称
@@ -123,8 +124,13 @@ fn test_tool_definition_generation() {
     assert_eq!(properties["city"]["type"], "string");
     assert_eq!(properties["city"]["description"], "城市名称");
 
-    // unit — Option<String> → not required + string
-    assert_eq!(properties["unit"]["type"], "string");
+    // unit — Option<String> → not required + ["string", "null"] (JSON Schema nullable)
+    let unit_type = &properties["unit"]["type"];
+    assert!(
+        *unit_type == "string" || *unit_type == serde_json::json!(["string", "null"]),
+        "expected string or [string, null], got {}",
+        unit_type
+    );
     assert_eq!(properties["unit"]["description"], "单位（摄氏度/华氏度）");
 
     // include_forecast — bool → required + boolean
@@ -156,7 +162,7 @@ fn test_tool_args_schema_backward_compat() {
 #[test]
 fn test_tool_definition_default_name() {
     // 不指定 name，应自动转换为 snake_case
-    #[derive(ToolDefinitionDerive)]
+    #[derive(JsonSchema, ToolDefinitionDerive)]
     #[tool(description = "测试默认命名")]
     struct MySearchTool {
         pub query: String,
@@ -169,7 +175,7 @@ fn test_tool_definition_default_name() {
 #[test]
 fn test_option_type_inference() {
     // 验证 Option<T> 正确推导内部类型
-    #[derive(ToolDefinitionDerive)]
+    #[derive(JsonSchema, ToolDefinitionDerive)]
     #[tool(name = "typed_test", description = "测试类型推导")]
     struct TypedTestArgs {
         /// 可选字符串
@@ -190,14 +196,20 @@ fn test_option_type_inference() {
         .as_object()
         .unwrap();
 
-    // Option<String> → string
-    assert_eq!(properties["opt_string"]["type"], "string");
-    // Option<i32> → integer
-    assert_eq!(properties["opt_int"]["type"], "integer");
-    // Option<bool> → boolean
-    assert_eq!(properties["opt_bool"]["type"], "boolean");
-    // Option<f64> → number
-    assert_eq!(properties["opt_float"]["type"], "number");
+    // Option<T> → [T, "null"] in JSON Schema (schemars standard)
+    fn expect_type(actual: &serde_json::Value, expected: &str) {
+        assert!(
+            *actual == expected || *actual == serde_json::json!([expected, "null"]),
+            "expected {} or [{} , \"null\"], got {}",
+            expected,
+            expected,
+            actual
+        );
+    }
+    expect_type(&properties["opt_string"]["type"], "string");
+    expect_type(&properties["opt_int"]["type"], "integer");
+    expect_type(&properties["opt_bool"]["type"], "boolean");
+    expect_type(&properties["opt_float"]["type"], "number");
 
     // 全部是 Option，required 应为空
     let required = def.parameters.get("required");

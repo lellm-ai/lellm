@@ -95,11 +95,11 @@ fn build_request_messages_inner(
 fn build_request_inner(
     model: &ResolvedModel,
     executor: &ToolExecutor,
-    messages: Vec<Message>,
+    messages: &[Message],
 ) -> ChatRequest {
     ChatRequest {
         model: model.model.clone(),
-        messages,
+        messages: messages.to_vec(),
         tools: executor.has_tools().then(|| executor.definitions()),
         ..Default::default()
     }
@@ -288,7 +288,7 @@ impl ToolUseLoop {
     }
 
     /// 构建 ChatRequest，自动注入工具 Schema。
-    fn build_request(&self, messages: Vec<Message>) -> ChatRequest {
+    fn build_request(&self, messages: &[Message]) -> ChatRequest {
         build_request_inner(&self.model, &self.executor, messages)
     }
 
@@ -313,7 +313,7 @@ impl ToolUseLoop {
 
             state.next_iteration();
 
-            let req = self.build_request(state.messages.clone());
+            let req = self.build_request(&state.messages);
 
             let mut retry_attempt: usize = 1;
             let response = loop {
@@ -329,7 +329,7 @@ impl ToolUseLoop {
                             error: e,
                             attempt: retry_attempt,
                             iterations: state.iterations,
-                            conversation: state.messages.clone().into(),
+                            conversation: Arc::from(state.messages.as_slice()),
                         };
                         match self.deps.fallback.handle(&ctx).await {
                             FallbackAction::Retry => {
@@ -421,7 +421,7 @@ impl ToolUseLoop {
 
                 state.next_iteration();
 
-                let req = build_request_inner(&model, &executor, state.messages.clone());
+                let req = build_request_inner(&model, &executor, &state.messages);
 
                 let mut retry_attempt: usize = 1;
                 let stream_result: Result<lellm_provider::ProviderStream, LlmError> = loop {
@@ -437,7 +437,7 @@ impl ToolUseLoop {
                                 error: e,
                                 attempt: retry_attempt,
                                 iterations: state.iterations,
-                                conversation: state.messages.clone().into(),
+                                conversation: Arc::from(state.messages.as_slice()),
                             };
                             match deps.fallback.handle(&ctx).await {
                                 FallbackAction::Retry => {

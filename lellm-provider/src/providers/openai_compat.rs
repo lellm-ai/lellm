@@ -6,6 +6,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
+    ToolChoice,
 };
 use std::borrow::Cow;
 
@@ -84,6 +85,24 @@ impl ProviderAdapter for OpenAICompatAdapter {
         if let Some(temp) = req.temperature {
             body.insert("temperature".into(), temp.into());
         }
+        if let Some(max_tokens) = req.max_tokens {
+            body.insert("max_tokens".into(), max_tokens.into());
+        }
+        if let Some(top_p) = req.top_p {
+            body.insert("top_p".into(), top_p.into());
+        }
+        if let Some(seed) = req.seed {
+            body.insert("seed".into(), seed.into());
+        }
+        if let Some(ref tool_choice) = req.tool_choice {
+            body.insert(
+                "tool_choice".into(),
+                serialize_openai_tool_choice(tool_choice),
+            );
+        }
+        if let Some(ref stop_sequences) = req.stop_sequences {
+            body.insert("stop".into(), serde_json::to_value(stop_sequences).unwrap());
+        }
         if let Some(ref tools) = req.tools {
             body.insert(
                 "tools".into(),
@@ -91,6 +110,12 @@ impl ProviderAdapter for OpenAICompatAdapter {
                     detail: format!("Failed to serialize tools: {}", e),
                 })?,
             );
+        }
+        // Provider 特有参数（extra 最后合并，允许覆盖标准字段）
+        if let Some(ref extra) = req.extra {
+            for (k, v) in extra {
+                body.insert(k.clone(), v.clone());
+            }
         }
 
         let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::ParseError {
@@ -400,4 +425,14 @@ fn serialize_openai_text_blocks(blocks: &[ContentBlock]) -> String {
         .filter_map(|b| b.as_text().map(|s| s.to_string()))
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// 将 ToolChoice 序列化为 OpenAI 格式。
+fn serialize_openai_tool_choice(choice: &ToolChoice) -> serde_json::Value {
+    match choice {
+        ToolChoice::Tool { name } => {
+            serde_json::json!({"type": "function", "function": {"name": name}})
+        }
+        ToolChoice::Any => "required".into(),
+    }
 }

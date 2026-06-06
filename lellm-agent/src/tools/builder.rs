@@ -81,9 +81,9 @@ impl AgentBuilder {
         self
     }
 
-    /// 设置工具重试策略。
+    /// 设置工具重试策略（不影响已注册的工具）。
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.executor = ToolExecutor::with_retry_policy(policy);
+        self.executor.set_retry_policy(policy);
         self
     }
 
