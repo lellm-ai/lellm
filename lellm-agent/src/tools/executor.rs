@@ -83,6 +83,22 @@ impl ToolRegistration {
     }
 }
 
+/// 批量执行结果 — 保留已成功的工具结果，不因单个 task panic 全部丢失。
+#[derive(Debug)]
+pub struct BatchExecutionResult {
+    /// 已成功执行的工具结果（含 ToolError 包装的 Message::ToolResult { is_error: true }）
+    pub completed: Vec<Message>,
+    /// 首个 spawned task panic 错误（如有）
+    pub panicked: Option<ToolError>,
+}
+
+impl BatchExecutionResult {
+    /// 是否有 spawned task panic
+    pub fn is_ok(&self) -> bool {
+        self.panicked.is_none()
+    }
+}
+
 /// 工具执行器 — 按名称分派 ToolCall 到实际工具函数。
 ///
 /// 内部使用 `Arc<HashMap>` — 注册后不可变，clone 为 O(1)。
@@ -169,12 +185,9 @@ impl ToolExecutor {
     /// - `CategoryExclusive` → 按 category 分组，组内串行、组间并发
     /// - `Exclusive` → 全部串行
     ///
-    /// 返回 `Result` — 任何 spawned task panic 或取消，统一转为 `ToolError::Internal`。
-    /// 调用方（ToolUseLoop）决定终止、重试或 Fallback。
-    pub async fn execute_batch(
-        &self,
-        calls: &[ToolCall],
-    ) -> Result<Vec<Message>, ToolError> {
+    /// 返回 `BatchExecutionResult` — 保留已成功的工具结果，
+    /// 不因单个 spawned task panic 丢失所有结果。
+    pub async fn execute_batch(&self, calls: &[ToolCall]) -> BatchExecutionResult {
         let mut safe_calls = Vec::new();
         let mut category_calls: HashMap<ToolCategory, Vec<ToolCall>> = HashMap::new();
         let mut exclusive_calls = Vec::new();
@@ -218,19 +231,25 @@ impl ToolExecutor {
         }
 
         let all_results = futures_util::future::join_all(group_handles).await;
-        let mut flat = Vec::new();
+        let mut completed = Vec::new();
+        let mut panicked = None;
         for handle_result in all_results {
             match handle_result {
-                Ok(messages) => flat.extend(messages),
+                Ok(messages) => completed.extend(messages),
                 Err(join_err) => {
-                    return Err(ToolError {
-                        kind: ToolErrorKind::Internal,
-                        message: format!("tool task failed: {join_err}"),
-                    });
+                    if panicked.is_none() {
+                        panicked = Some(ToolError {
+                            kind: ToolErrorKind::Internal,
+                            message: format!("tool task failed: {join_err}"),
+                        });
+                    }
                 }
             }
         }
-        Ok(flat)
+        BatchExecutionResult {
+            completed,
+            panicked,
+        }
     }
 
     async fn run_parallel(&self, calls: Vec<ToolCall>) -> Vec<Message> {

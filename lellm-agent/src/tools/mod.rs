@@ -15,7 +15,9 @@ pub mod runtime;
 pub mod signal_voter;
 
 pub use builder::AgentBuilder;
-pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
+pub use executor::{
+    BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration,
+};
 pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 pub use lellm_provider::ResolvedModel;
 #[cfg(feature = "v02-preview")]
@@ -116,6 +118,8 @@ pub enum StopReason {
     Complete,
     /// 达到最大轮次
     MaxIterationsReached,
+    /// 外部取消（消费者断开、task 终止等）
+    Cancelled,
     // NOTE: LoopDetected 将在 v0.2 LoopDetector 实现时加回
 }
 

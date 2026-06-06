@@ -148,7 +148,9 @@ impl Message {
             }
             Message::Assistant { content } => {
                 for block in content {
-                    if let ContentBlock::ToolCall(tc) = block && tc.id.is_empty() {
+                    if let ContentBlock::ToolCall(tc) = block
+                        && tc.id.is_empty()
+                    {
                         return Err(ParseError {
                             detail: "Assistant ToolCall.id must not be empty".into(),
                         });

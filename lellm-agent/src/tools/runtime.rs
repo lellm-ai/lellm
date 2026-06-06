@@ -169,6 +169,11 @@ impl LoopState {
     pub fn finish_max_iterations(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::MaxIterationsReached, response)
     }
+
+    /// 构建外部取消结果
+    pub fn finish_cancelled(&self, response: ChatResponse) -> ToolUseResult {
+        self.finish(StopReason::Cancelled, response)
+    }
 }
 
 // ─── 执行结果 ───
@@ -370,17 +375,35 @@ impl ToolUseLoop {
             state.push_assistant(response_content);
             state.add_tool_calls(tool_calls.len());
 
-            let results = match self.executor.execute_batch(&tool_calls).await {
-                Ok(results) => results,
-                Err(e) => {
-                    // spawned task panic — 生成错误消息，让 LLM 看到执行失败
-                    tracing::error!(error = %e, "tool batch execution failed");
-                    vec![Message::ToolResult {
-                        tool_call_id: String::new(),
-                        is_error: true,
-                        content: lellm_core::text_block(format!("tool execution failed: {e}")),
-                    }]
+            let batch = self.executor.execute_batch(&tool_calls).await;
+
+            // 追加已成功的结果
+            let results = if let Some(e) = &batch.panicked {
+                // spawned task panic — 为未完成的 tool_call 生成错误结果
+                tracing::error!(error = %e, "tool batch task panicked");
+                let mut results = batch.completed;
+                let completed_ids: std::collections::HashSet<String> = results
+                    .iter()
+                    .filter_map(|m| {
+                        if let Message::ToolResult { tool_call_id, .. } = m {
+                            Some(tool_call_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for tc in &tool_calls {
+                    if !completed_ids.contains(&tc.id) {
+                        results.push(Message::ToolResult {
+                            tool_call_id: tc.id.clone(),
+                            is_error: true,
+                            content: lellm_core::text_block(format!("tool task failed: {e}")),
+                        });
+                    }
                 }
+                results
+            } else {
+                batch.completed
             };
             state.push_tool_results(results);
 
@@ -487,15 +510,12 @@ impl ToolUseLoop {
                                 return;
                             }
                             StreamIterResult::Terminated { response } => {
-                                if let Some(resp) = response {
-                                    last_response = Some(resp);
-                                }
+                                let resp =
+                                    response.or(last_response).unwrap_or_else(empty_response);
                                 let _ = emit(
                                     &tx,
                                     AgentEvent::LoopEnd {
-                                        result: state.finish_max_iterations(
-                                            last_response.unwrap_or_else(empty_response),
-                                        ),
+                                        result: state.finish_cancelled(resp),
                                     },
                                 )
                                 .await;
@@ -614,7 +634,9 @@ async fn process_stream_iteration(
 
                 let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
                 if results.is_none() {
-                    return StreamIterResult::Terminated { response: Some(response) };
+                    return StreamIterResult::Terminated {
+                        response: Some(response),
+                    };
                 }
                 state.push_tool_results(results.unwrap());
 
@@ -635,7 +657,9 @@ async fn process_stream_iteration(
                 )
                 .await
                 {
-                    return StreamIterResult::Terminated { response: Some(response) };
+                    return StreamIterResult::Terminated {
+                        response: Some(response),
+                    };
                 }
 
                 return StreamIterResult::Complete { response };

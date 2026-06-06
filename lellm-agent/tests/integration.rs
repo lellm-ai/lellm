@@ -1,7 +1,7 @@
+use lellm_agent::schemars::JsonSchema;
 use lellm_agent::{
     AgentBuilder, ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, ToolUseLoop,
 };
-use lellm_agent::schemars::JsonSchema;
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
 use lellm_macros::ToolDefinition as ToolDefinitionDerive;
 use lellm_provider::{MockProvider, ResolvedModel};

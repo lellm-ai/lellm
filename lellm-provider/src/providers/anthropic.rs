@@ -107,7 +107,10 @@ impl ProviderAdapter for AnthropicAdapter {
             );
         }
         if let Some(ref stop_sequences) = req.stop_sequences {
-            body.insert("stop_sequences".into(), serde_json::to_value(stop_sequences).unwrap());
+            body.insert(
+                "stop_sequences".into(),
+                serde_json::to_value(stop_sequences).unwrap(),
+            );
         }
         if let Some(ref tools) = req.tools {
             body.insert(

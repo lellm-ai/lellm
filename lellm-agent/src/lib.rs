@@ -13,9 +13,9 @@ pub use memory::ShortTermMemory;
 pub use tools::{
     AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, DefaultFallback, FallbackAction,
     FallbackContext, FallbackStrategy, ParallelSafety, ResolvedModel, RetryPolicy, StopReason,
-    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration,
-    ToolRegistry, ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps,
-    ToolUseLoop, ToolUseResult,
+    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry,
+    ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop,
+    ToolUseResult,
 };
 #[cfg(feature = "v02-preview")]
 pub use tools::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};
