@@ -45,10 +45,10 @@ ToolUseLoop::simple(model, executor)
 
 ## 核心组件
 
-### 1. ToolEntry — 工具完整条目
+### 1. ToolRegistration — 工具完整条目
 
 ```rust
-pub struct ToolEntry {
+pub struct ToolRegistration {
     pub definition: ToolDefinition,  // JSON Schema
     pub safety: ParallelSafety,      // 并行安全分级
     pub category: Option<ToolCategory>,
@@ -57,7 +57,7 @@ pub struct ToolEntry {
 
 #[derive(Clone)]
 pub struct ToolExecutor {
-    tools: Arc<HashMap<String, ToolEntry>>,
+    tools: Arc<HashMap<String, ToolRegistration>>,
     retry_policy: RetryPolicy,
 }
 ```

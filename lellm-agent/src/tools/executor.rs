@@ -30,16 +30,11 @@ impl ToolCategory {
     }
 }
 
-/// 工具完整条目 — Schema、安全分级、执行函数合一。
+/// 工具注册信息 — Schema、安全分级、执行函数合一。
+///
+/// 用户通过 `ToolRegistration::safe()` 等工厂方法构造，
+/// `ToolExecutor` 内部直接持有。消除 `ToolEntry` 的无意义拷贝。
 #[derive(Clone)]
-pub struct ToolEntry {
-    pub definition: ToolDefinition,
-    pub safety: ParallelSafety,
-    pub category: Option<ToolCategory>,
-    pub func: ToolFn,
-}
-
-/// 工具注册信息（包含 Schema + 安全分级 + 执行函数）。
 pub struct ToolRegistration {
     pub definition: ToolDefinition,
     pub safety: ParallelSafety,
@@ -93,7 +88,7 @@ impl ToolRegistration {
 /// 内部使用 `Arc<HashMap>` — 注册后不可变，clone 为 O(1)。
 #[derive(Clone)]
 pub struct ToolExecutor {
-    tools: Arc<HashMap<String, ToolEntry>>,
+    tools: Arc<HashMap<String, ToolRegistration>>,
     retry_policy: RetryPolicy,
 }
 
@@ -135,15 +130,9 @@ impl ToolExecutor {
     }
 
     pub fn register(&mut self, name: &str, reg: ToolRegistration) {
-        let entry = ToolEntry {
-            definition: reg.definition,
-            safety: reg.safety,
-            category: reg.category,
-            func: reg.func,
-        };
         Arc::get_mut(&mut self.tools)
-            .unwrap()
-            .insert(name.to_string(), entry);
+            .expect("ToolExecutor already cloned, cannot register more tools")
+            .insert(name.to_string(), reg);
     }
 
     pub fn safety_for(&self, name: &str) -> ParallelSafety {

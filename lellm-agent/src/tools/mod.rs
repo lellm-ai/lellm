@@ -15,7 +15,7 @@ pub mod runtime;
 pub mod signal_voter;
 
 pub use builder::AgentBuilder;
-pub use executor::{ParallelSafety, ToolCategory, ToolEntry, ToolExecutor, ToolRegistration};
+pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
 pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 pub use lellm_provider::ResolvedModel;
 #[cfg(feature = "v02-preview")]

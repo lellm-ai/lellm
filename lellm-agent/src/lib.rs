@@ -13,7 +13,7 @@ pub use memory::ShortTermMemory;
 pub use tools::{
     AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, DefaultFallback, FallbackAction,
     FallbackContext, FallbackStrategy, ParallelSafety, ResolvedModel, RetryPolicy, StopReason,
-    ToolArgs, ToolCategory, ToolEntry, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration,
+    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration,
     ToolRegistry, ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps,
     ToolUseLoop, ToolUseResult,
 };
