@@ -34,7 +34,7 @@ async fn main() -> Result<(), LlmError> {
                 print!("{}", token);
                 std::io::Write::flush(&mut std::io::stdout()).ok();
             }
-            ProviderEvent::ThinkingDelta { thinking: _ } => {
+            ProviderEvent::ThinkingDelta { thinking: _, .. } => {
                 // Thinking 内容暂不输出（v0.1）
             }
             ProviderEvent::ResponseComplete {

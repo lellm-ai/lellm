@@ -480,6 +480,7 @@ impl ToolUseLoop {
                     Ok(mut stream) => {
                         let mut text_buffer = String::new();
                         let mut thinking_buffer = String::new();
+                        let mut redacted_buffer: Option<String> = None;
 
                         let iter_result = process_stream_iteration(
                             &tx,
@@ -488,12 +489,14 @@ impl ToolUseLoop {
                             &mut stream,
                             &mut text_buffer,
                             &mut thinking_buffer,
+                            &mut redacted_buffer,
                         )
                         .await;
 
                         // 每轮结束后清空 buffer，避免跨轮次累积
                         text_buffer.clear();
                         thinking_buffer.clear();
+                        let _ = redacted_buffer.take();
 
                         match iter_result {
                             StreamIterResult::Continue { response } => {
@@ -560,6 +563,7 @@ async fn process_stream_iteration(
     stream: &mut lellm_provider::ProviderStream,
     text_buffer: &mut String,
     thinking_buffer: &mut String,
+    redacted_buffer: &mut Option<String>,
 ) -> StreamIterResult {
     use futures_util::StreamExt;
 
@@ -584,8 +588,15 @@ async fn process_stream_iteration(
             lellm_provider::ProviderEvent::Token { token } => {
                 text_buffer.push_str(token);
             }
-            lellm_provider::ProviderEvent::ThinkingDelta { thinking } => {
+            lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
                 thinking_buffer.push_str(thinking);
+                if let Some(r) = redacted {
+                    if let Some(ref mut prev) = *redacted_buffer {
+                        prev.push_str(r);
+                    } else {
+                        *redacted_buffer = Some(r.clone());
+                    }
+                }
             }
             lellm_provider::ProviderEvent::Start { .. }
             | lellm_provider::ProviderEvent::ResponseComplete { .. } => {}
@@ -608,7 +619,7 @@ async fn process_stream_iteration(
                 content.push(lellm_core::ContentBlock::Thinking(
                     lellm_core::ThinkingBlock {
                         thinking: thinking_buffer.clone(),
-                        redacted: None,
+                        redacted: redacted_buffer.clone(),
                     },
                 ));
             }

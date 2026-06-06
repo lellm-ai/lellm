@@ -46,7 +46,10 @@ pub(crate) struct RawResponse {
 pub(crate) enum StreamChunk {
     TextDelta(String),
     /// 思考块增量（Anthropic thinking_delta / OpenAI reasoning_content）
-    ThinkingDelta(String),
+    ThinkingDelta {
+        thinking: String,
+        redacted: Option<String>,
+    },
     ToolCallDelta(ToolCallDelta),
     /// 完整 usage（OpenAI 最后一个 chunk 携带）
     Usage(TokenUsage),
@@ -149,7 +152,9 @@ fn map_stream_event(event: StreamEvent) -> Result<ProviderEvent, LlmError> {
     match event {
         StreamEvent::Start { model } => Ok(ProviderEvent::Start { model }),
         StreamEvent::Token { token } => Ok(ProviderEvent::Token { token }),
-        StreamEvent::ThinkingDelta { thinking } => Ok(ProviderEvent::ThinkingDelta { thinking }),
+        StreamEvent::ThinkingDelta { thinking, redacted } => {
+            Ok(ProviderEvent::ThinkingDelta { thinking, redacted })
+        }
         StreamEvent::Error(e) => Err(e),
         StreamEvent::ResponseComplete { tool_calls, usage } => {
             Ok(ProviderEvent::ResponseComplete { tool_calls, usage })

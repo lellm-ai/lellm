@@ -21,6 +21,7 @@ use crate::providers::base::{ProviderAdapter, StreamChunk};
 struct FrameResult {
     text: Option<String>,
     thinking: Option<String>,
+    thinking_redacted: Option<String>,
     tool_call_delta: Option<ToolCallDelta>,
     usage_delta: Option<UsageDelta>,
     is_done: bool,
@@ -72,7 +73,13 @@ where
 
                     // 思考增量
                     if let Some(thinking) = fr.thinking {
-                        if !sink.emit(StreamEvent::ThinkingDelta { thinking }).await {
+                        if !sink
+                            .emit(StreamEvent::ThinkingDelta {
+                                thinking,
+                                redacted: fr.thinking_redacted,
+                            })
+                            .await
+                        {
                             return;
                         }
                     }
@@ -123,6 +130,7 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
     let mut result = FrameResult {
         text: None,
         thinking: None,
+        thinking_redacted: None,
         tool_call_delta: None,
         usage_delta: None,
         is_done: false,
@@ -135,8 +143,9 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
                     StreamChunk::TextDelta(text) => {
                         result.text = Some(text);
                     }
-                    StreamChunk::ThinkingDelta(thinking) => {
+                    StreamChunk::ThinkingDelta { thinking, redacted } => {
                         result.thinking = Some(thinking);
+                        result.thinking_redacted = redacted;
                     }
                     StreamChunk::ToolCallDelta(delta) => {
                         result.tool_call_delta = Some(ToolCallDelta {

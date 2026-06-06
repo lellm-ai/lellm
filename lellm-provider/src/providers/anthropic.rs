@@ -304,12 +304,26 @@ impl ProviderAdapter for AnthropicAdapter {
                         )));
                     }
                 } else if delta_type == "thinking_delta" {
-                    if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str())
-                        && !thinking.is_empty()
-                    {
-                        return Ok(StreamParseResult::chunk(StreamChunk::ThinkingDelta(
-                            thinking.into(),
-                        )));
+                    let thinking = delta
+                        .get("thinking")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string());
+                    let redacted = delta
+                        .get("redacted_thinking")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(t) = thinking {
+                        return Ok(StreamParseResult::chunk(StreamChunk::ThinkingDelta {
+                            thinking: t,
+                            redacted,
+                        }));
+                    }
+                    // redacted_thinking without thinking is also valid
+                    if let Some(r) = redacted {
+                        return Ok(StreamParseResult::chunk(StreamChunk::ThinkingDelta {
+                            thinking: String::new(),
+                            redacted: Some(r),
+                        }));
                     }
                 }
             }
