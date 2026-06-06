@@ -347,11 +347,9 @@ fn serialize_anthropic_content_blocks(
                 "name": tc.name,
                 "input": tc.arguments
             })),
-            ContentBlock::Image { source: _ } => {
-                Err(LlmError::UnsupportedFeature {
-                    feature: "Image in content blocks (Anthropic adapter)".into(),
-                })
-            }
+            ContentBlock::Image { source: _ } => Err(LlmError::UnsupportedFeature {
+                feature: "Image in content blocks (Anthropic adapter)".into(),
+            }),
         })
         .collect::<Result<Vec<_>, _>>()?;
 

@@ -308,10 +308,7 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, LlmError
         Message::User { content } => {
             let mut map = serde_json::Map::new();
             map.insert("role".into(), "user".into());
-            map.insert(
-                "content".into(),
-                serialize_openai_content_blocks(content)?,
-            );
+            map.insert("content".into(), serialize_openai_content_blocks(content)?);
             Ok(serde_json::Value::Object(map))
         }
         Message::Assistant { content } => {
@@ -377,9 +374,7 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, LlmError
 }
 
 /// 将 ContentBlock 序列化为 OpenAI user 消息的 content（当前只支持 Text）
-fn serialize_openai_content_blocks(
-    blocks: &[ContentBlock],
-) -> Result<serde_json::Value, LlmError> {
+fn serialize_openai_content_blocks(blocks: &[ContentBlock]) -> Result<serde_json::Value, LlmError> {
     // v0.1: 只支持纯文本 user 消息，Image 明确报错
     for block in blocks {
         if matches!(block, ContentBlock::Image { .. }) {

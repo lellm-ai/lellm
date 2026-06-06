@@ -12,6 +12,44 @@ use super::executor::ToolExecutor;
 use super::fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 use super::{AgentEvent, AgentStream, StopReason};
 
+/// 检查消息列表中是否已存在 System 消息。
+fn has_system_message(messages: &[Message]) -> bool {
+    messages.iter().any(|m| matches!(m, Message::System { .. }))
+}
+
+/// 构建有效的请求消息列表（用于 spawned task，无法使用 &self）
+fn build_request_messages_inner(
+    system_prompt: &Option<String>,
+    messages: &[Message],
+) -> Result<Vec<Message>, LlmError> {
+    if let Some(sp) = system_prompt {
+        if has_system_message(messages) {
+            return Err(LlmError::DuplicateSystemPrompt);
+        }
+        let mut result = vec![Message::System {
+            content: lellm_core::text_block(sp.clone()),
+        }];
+        result.extend(messages.iter().cloned());
+        Ok(result)
+    } else {
+        Ok(messages.to_vec())
+    }
+}
+
+/// 构建 ChatRequest（用于 spawned task）
+fn build_request_inner(
+    model: &ResolvedModel,
+    executor: &ToolExecutor,
+    messages: Vec<Message>,
+) -> ChatRequest {
+    ChatRequest {
+        model: model.model.clone(),
+        messages,
+        tools: executor.has_tools().then(|| executor.definitions()),
+        ..Default::default()
+    }
+}
+
 // ─── 循环状态机 ───
 
 /// Agent Loop 共享状态 — 非流式与流式执行模式共用。
@@ -116,12 +154,16 @@ fn empty_response() -> ChatResponse {
 
 // ─── ToolUseLoop ───
 
-/// 管理 LLM 与工具调用闭环
+/// 管理 LLM 与工具调用闭环。
+///
+/// 内部全为 Arc/Clone，clone 为 O(1)，支持并发 execute。
+#[derive(Clone)]
 pub struct ToolUseLoop {
-    model: ResolvedModel,
-    executor: ToolExecutor,
-    max_iterations: usize,
-    fallback: Arc<dyn FallbackStrategy>,
+    pub(crate) model: ResolvedModel,
+    pub(crate) executor: ToolExecutor,
+    pub(crate) max_iterations: usize,
+    pub(crate) fallback: Arc<dyn FallbackStrategy>,
+    pub(crate) system_prompt: Option<String>,
 }
 
 impl ToolUseLoop {
@@ -131,11 +173,18 @@ impl ToolUseLoop {
             executor,
             max_iterations: 10,
             fallback: Arc::new(DefaultFallback::default()),
+            system_prompt: None,
         }
     }
 
     pub fn set_max_iterations(mut self, max: usize) -> Self {
         self.max_iterations = max;
+        self
+    }
+
+    /// 设置系统提示（Runtime Config，不修改 messages）
+    pub fn set_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = Some(prompt);
         self
     }
 
@@ -145,13 +194,46 @@ impl ToolUseLoop {
         self
     }
 
+    /// 构建有效的请求消息列表：system_prompt + conversation_messages。
+    /// 双来源冲突时返回 DuplicateSystemPrompt 错误。
+    fn build_request_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        if let Some(ref sp) = self.system_prompt {
+            if has_system_message(messages) {
+                return Err(LlmError::DuplicateSystemPrompt);
+            }
+            let mut result = vec![Message::System {
+                content: lellm_core::text_block(sp.clone()),
+            }];
+            result.extend(messages.iter().cloned());
+            Ok(result)
+        } else {
+            Ok(messages.to_vec())
+        }
+    }
+
+    /// 构建 ChatRequest，自动注入工具 Schema。
+    fn build_request(&self, messages: Vec<Message>) -> ChatRequest {
+        ChatRequest {
+            model: self.model.model.clone(),
+            messages,
+            tools: self
+                .executor
+                .has_tools()
+                .then(|| self.executor.definitions()),
+            ..Default::default()
+        }
+    }
+
     /// 非流式执行
     ///
     /// 语义：
     /// - `Ok(ToolUseResult)` — Agent 层完成（含 MaxIterationsReached）
     /// - `Err(LlmError)` — Provider 调用失败
-    pub async fn execute(self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
-        let mut state = LoopState::new(messages);
+    ///
+    /// `&self` 借用，不消费 self — 支持复用同一个 agent 做多次对话。
+    pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
+        let initial_messages = self.build_request_messages(&messages)?;
+        let mut state = LoopState::new(initial_messages);
         let mut last_response: Option<ChatResponse> = None;
 
         loop {
@@ -163,13 +245,8 @@ impl ToolUseLoop {
 
             state.next_iteration();
 
-            let req = ChatRequest {
-                model: self.model.model.clone(),
-                messages: state.messages.clone(),
-                ..Default::default()
-            };
+            let req = self.build_request(state.messages.clone());
 
-            // Provider 调用 — 受 FallbackStrategy 保护
             let mut retry_attempt: usize = 1;
             let response = loop {
                 match self.model.provider.call(&req).await {
@@ -204,7 +281,6 @@ impl ToolUseLoop {
                 return Ok(state.finish_complete(last_response.unwrap()));
             }
 
-            // 提取工具调用并执行
             let tool_calls: Vec<_> = last_response
                 .as_ref()
                 .unwrap()
@@ -233,15 +309,33 @@ impl ToolUseLoop {
     /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
     /// - 业务失败：`LoopError` 恰好一次，然后 channel 关闭
     /// - 运行时异常：channel 直接关闭（未收到终态事件）
-    pub fn execute_stream(self, messages: Vec<Message>) -> AgentStream {
+    ///
+    /// `&self` 借用，不消费 self — 支持复用同一个 agent。
+    pub fn execute_stream(&self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let model = self.model.clone();
-        let executor = self.executor;
+        let executor = self.executor.clone();
         let max_iterations = self.max_iterations;
         let fallback = self.fallback.clone();
+        let system_prompt = self.system_prompt.clone();
 
         tokio::spawn(async move {
-            let mut state = LoopState::new(messages);
+            // 构建初始消息
+            let initial_messages = match build_request_messages_inner(&system_prompt, &messages) {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = tokio::sync::mpsc::Sender::send(
+                        &tx,
+                        AgentEvent::LoopError {
+                            error: e,
+                            iterations: 0,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+            };
+            let mut state = LoopState::new(initial_messages);
             let mut last_response: Option<ChatResponse> = None;
 
             loop {
@@ -260,13 +354,8 @@ impl ToolUseLoop {
 
                 state.next_iteration();
 
-                let req = ChatRequest {
-                    model: model.model.clone(),
-                    messages: state.messages.clone(),
-                    ..Default::default()
-                };
+                let req = build_request_inner(&model, &executor, state.messages.clone());
 
-                // Provider 流式调用 — 受 FallbackStrategy 保护
                 let mut retry_attempt: usize = 1;
                 let stream_result: Result<lellm_provider::ProviderStream, LlmError> = loop {
                     match model.provider.stream(&req).await {

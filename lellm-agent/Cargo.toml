@@ -27,3 +27,4 @@ v02-preview = []
 
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock"] }
+lellm-macros = { path = "../lellm-macros" }

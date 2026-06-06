@@ -199,10 +199,7 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
                 for block in msg.content() {
                     if let ContentBlock::Image { .. } = block {
                         return Err(LlmError::UnsupportedFeature {
-                            feature: format!(
-                                "Image input ({} adapter)",
-                                self.adapter.name()
-                            ),
+                            feature: format!("Image input ({} adapter)", self.adapter.name()),
                         });
                     }
                 }
@@ -383,7 +380,7 @@ impl ProviderConfig {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Bearer {
-                api_key: secrecy::SecretString::new(api_key.into()),
+                api_key: secrecy::SecretString::new(api_key.into().into()),
             },
             timeout: std::time::Duration::from_secs(120),
         })
@@ -399,7 +396,7 @@ impl ProviderConfig {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Header {
                 header: header.into(),
-                value: secrecy::SecretString::new(value.into()),
+                value: secrecy::SecretString::new(value.into().into()),
             },
             timeout: std::time::Duration::from_secs(120),
         })

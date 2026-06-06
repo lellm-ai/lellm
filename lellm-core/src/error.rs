@@ -51,6 +51,9 @@ pub enum LlmError {
     #[error("unsupported feature: {feature}")]
     UnsupportedFeature { feature: String },
 
+    #[error("duplicate system prompt: both config and conversation contain system message")]
+    DuplicateSystemPrompt,
+
     #[error("{message}")]
     Other { message: String },
 }

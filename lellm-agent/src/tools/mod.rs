@@ -3,6 +3,7 @@
 //! 提供 ToolRegistry, ToolExecutor, ToolUseLoop 以及防御机制
 //! （循环检测、重试策略、Fallback 等）。
 
+pub mod builder;
 pub mod executor;
 pub mod fallback;
 #[cfg(feature = "v02-preview")]
@@ -13,7 +14,8 @@ pub mod runtime;
 #[cfg(feature = "v02-preview")]
 pub mod signal_voter;
 
-pub use executor::{ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
+pub use builder::AgentBuilder;
+pub use executor::{ParallelSafety, ToolCategory, ToolEntry, ToolExecutor, ToolRegistration};
 pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 pub use lellm_provider::ResolvedModel;
 #[cfg(feature = "v02-preview")]
@@ -35,6 +37,44 @@ pub(crate) type ToolFn = std::sync::Arc<
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{ToolError, ToolErrorKind, ToolResult};
+
+/// 工具参数 trait — 由 derive(ToolDefinition) 自动生成。
+///
+/// 实现了此 trait 的结构体，即可通过 `tool_definition()` 方法
+/// 自动获得 JSON Schema 工具定义。Schema 由宏在编译时生成，
+/// 采用 schemars 兼容的 JSON Schema 格式。
+///
+/// # 示例
+/// ```ignore
+/// use lellm_macros::ToolDefinition;
+///
+/// #[derive(ToolDefinition)]
+/// #[tool(name = "search", description = "搜索互联网信息")]
+/// pub struct SearchArgs {
+///     /// 搜索关键词
+///     pub query: String,
+/// }
+///
+/// // 自动实现 ToolArgs trait
+/// let def = SearchArgs::tool_definition();
+/// assert_eq!(def.name, "search");
+/// ```
+pub trait ToolArgs {
+    /// 工具名称（蛇形命名）
+    const NAME: &'static str;
+    /// 工具描述
+    const DESCRIPTION: &'static str;
+    /// 由 derive(ToolDefinition) 宏生成的 JSON Schema
+    fn __schema() -> serde_json::Value;
+    /// 自动生成 ToolDefinition（含 JSON Schema）
+    fn tool_definition() -> lellm_core::ToolDefinition {
+        lellm_core::ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: Self::DESCRIPTION.to_string(),
+            parameters: Self::__schema(),
+        }
+    }
+}
 
 /// Agent 层流式事件 — 封闭、强类型、exhaustive match
 ///
