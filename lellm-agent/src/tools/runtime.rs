@@ -496,14 +496,14 @@ impl ToolUseLoop {
     }
 }
 
-/// 流式单轮迭代的结果
-struct StreamIterResult {
-    /// 是否应退出外层循环
-    terminated: bool,
-    /// 是否正常完成（vs 错误终止）
-    is_complete: bool,
-    /// 本轮构建的 ChatResponse（供外层追踪 last_response）
-    response: Option<ChatResponse>,
+/// 流式单轮迭代的结果 — 枚举保证类型安全。
+enum StreamIterResult {
+    /// 继续循环（有 tool_calls，应进入下一轮）
+    Continue { response: ChatResponse },
+    /// 正常完成（无 tool_calls，Agent 已获得最终答案）
+    Complete { response: ChatResponse },
+    /// 异常终止（消费者断开或 stream 异常，不再继续）
+    Terminated { response: Option<ChatResponse> },
 }
 
 /// 处理流式单轮迭代
@@ -529,7 +529,7 @@ async fn process_stream_iteration(
                     },
                 )
                 .await;
-                return StreamIterResult::terminated_error();
+                return StreamIterResult::Terminated { response: None };
             }
         };
 
