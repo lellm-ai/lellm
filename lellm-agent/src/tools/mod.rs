@@ -76,8 +76,7 @@ pub enum StopReason {
     Complete,
     /// 达到最大轮次
     MaxIterationsReached,
-    /// 检测到循环（v0.2）
-    LoopDetected,
+    // NOTE: LoopDetected 将在 v0.2 LoopDetector 实现时加回
 }
 
 /// Agent 层流式事件通道类型别名

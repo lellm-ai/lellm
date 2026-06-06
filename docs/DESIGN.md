@@ -434,7 +434,24 @@ LoopEnd
 **`execute_stream()` 已知问题：**
 - ~~`ProviderEvent::Start` 重复发送~~ — ✅ 已修复（v2026-06-05）。Provider 发一次，Agent 统一透传，不再手动构造。
 - ~~`ProviderEvent::Done` 语义歧义~~ — ✅ 已修复（v2026-06-05）。重命名为 `ResponseComplete`，明确表示"单次 HTTP/SSE 请求完成"。
-- `GenericProvider` spawn 任务延迟终止——消费者丢弃 Receiver 后，spawn 任务需等到下一次 `tx.send()` 才发现 channel 断了。v0.2 引入 `CancellationToken`。
+- spawn 任务延迟终止 — 分层解决：
+  - **v0.1 ✅** `ChannelSink::is_closed()` + `emit() -> bool` fast-exit。消费者断开后，下一次循环迭代或 `ResponseComplete` 发送前立即退出。
+  - **v0.2** `CancellationToken` + `AbortHandle` + HTTP stream 立即关闭。
+
+### spawn 任务取消 — 分层方案
+
+| 层级 | 机制 | 效果 | 延迟窗口 |
+|------|------|------|----------|
+| v0.1 | `is_closed()` 快速探测 | 避免解析开销 | 最多 1 个 HTTP chunk |
+| v0.1 | `emit() -> bool` fast-fail | 立即退出 | 0（发现即退出） |
+| v0.2 | `CancellationToken` | 协作式取消 | 取决于取消点密度 |
+| v0.2 | `AbortHandle` | 强制终止 spawn | 取决于 tokio yield 点 |
+
+**v0.1 实现要点：**
+- `EventSink::emit()` 返回 `bool`，`false` 表示消费者已断开
+- `EventSink::is_closed()` 默认返回 `false`（测试 mock 无需覆盖）
+- `ChannelSink` 实现 `is_closed()` → `tx.is_closed()`
+- `process_stream` 在循环入口 + `ResponseComplete` 前检查 `is_closed()`
 
 ### `execute()` vs `execute_stream()` 等价性边界
 

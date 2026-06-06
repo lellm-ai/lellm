@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::HeaderMap;
-use lellm_core::{ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TokenUsage};
+use lellm_core::{ChatRequest, ChatResponse, ContentBlock, LlmError, TokenUsage};
 use secrecy::ExposeSecret;
 use std::borrow::Cow;
 
@@ -104,28 +104,44 @@ pub(crate) trait ProviderAdapter: Send + Sync {
 /// Channel Sink — 将 StreamEvent 转换为 ProviderEvent 并发送到 channel。
 ///
 /// 这是 stream/ 模块与 GenericProvider 之间的唯一桥接点。
+/// `emit` 返回 `false` 表示消费者已断开。
 struct ChannelSink {
     tx: tokio::sync::mpsc::Sender<Result<ProviderEvent, LlmError>>,
 }
 
 impl EventSink for ChannelSink {
-    async fn emit(&mut self, event: StreamEvent) {
+    async fn emit(&mut self, event: StreamEvent) -> bool {
         if event.is_critical() {
             // 关键事件（Error, ResponseComplete）必须送达
             let mapped = map_stream_event(event);
-            if let Err(e) = self.tx.send(mapped).await {
-                tracing::error!(
-                    error = %e,
-                    "critical stream event lost: channel closed"
-                );
+            match self.tx.send(mapped).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "critical stream event lost: channel closed"
+                    );
+                    false
+                }
             }
         } else {
             // Token 等可丢弃事件，channel 满时丢弃
             let mapped = map_stream_event(event);
-            if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = self.tx.try_send(mapped) {
-                tracing::warn!("stream event dropped: channel full");
+            match self.tx.try_send(mapped) {
+                Ok(()) => true,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!("stream event dropped: channel full");
+                    true // channel 没断，只是满
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    false // channel 断了
+                }
             }
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
     }
 }
 
@@ -177,19 +193,17 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
             msg.validate()?;
         }
 
-        // 2. Provider 能力校验 — Image 输入
+        // 2. Provider 能力校验 — Image 输入（检查所有消息变体）
         if !self.adapter.supports_image_input() {
             for msg in &req.messages {
-                if let Message::User { content } = msg {
-                    for block in content {
-                        if let ContentBlock::Image { .. } = block {
-                            return Err(LlmError::UnsupportedFeature {
-                                feature: format!(
-                                    "Image input ({} adapter)",
-                                    self.adapter.name()
-                                ),
-                            });
-                        }
+                for block in msg.content() {
+                    if let ContentBlock::Image { .. } = block {
+                        return Err(LlmError::UnsupportedFeature {
+                            feature: format!(
+                                "Image input ({} adapter)",
+                                self.adapter.name()
+                            ),
+                        });
                     }
                 }
             }

@@ -40,7 +40,10 @@ where
     A: ProviderAdapter,
     E: EventSink,
 {
-    sink.emit(StreamEvent::Start { model }).await;
+    // Start 事件 — 消费者尚未连接则立即退出
+    if !sink.emit(StreamEvent::Start { model }).await {
+        return;
+    }
 
     let mut parser = SseParser::new();
     let mut tool_call_acc = ToolCallAccumulator::new();
@@ -48,6 +51,11 @@ where
     let mut is_done = false;
 
     while let Some(result) = bytes_stream.next().await {
+        // 在解析开销前快速探测 channel 是否断开
+        if sink.is_closed() {
+            return;
+        }
+
         match result {
             Ok(bytes) => {
                 let frames = parser.feed(&bytes);
@@ -57,12 +65,16 @@ where
 
                     // 文本增量
                     if let Some(text) = fr.text {
-                        sink.emit(StreamEvent::Token { token: text }).await;
+                        if !sink.emit(StreamEvent::Token { token: text }).await {
+                            return;
+                        }
                     }
 
                     // 思考增量
                     if let Some(thinking) = fr.thinking {
-                        sink.emit(StreamEvent::ThinkingDelta { thinking }).await;
+                        if !sink.emit(StreamEvent::ThinkingDelta { thinking }).await {
+                            return;
+                        }
                     }
 
                     // ToolCall 增量
@@ -90,6 +102,11 @@ where
         if is_done {
             break;
         }
+    }
+
+    // 消费者已断开 — 跳过 ResponseComplete 的发送开销
+    if sink.is_closed() {
+        return;
     }
 
     let tool_calls = tool_call_acc.finalize().unwrap_or_default();
@@ -145,7 +162,16 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
             }
         }
         Err(e) => {
-            tracing::debug!(error = %e, "ignoring unparseable SSE frame");
+            // [DONE]、空 frame 等是可预期的跳过，不报警
+            if frame.data == "[DONE]" || frame.data.is_empty() {
+                tracing::trace!(error = %e, "ignoring non-data frame");
+            } else {
+                tracing::warn!(
+                    error = %e,
+                    data_len = frame.data.len(),
+                    "failed to parse provider SSE frame"
+                );
+            }
         }
     }
 

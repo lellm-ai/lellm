@@ -38,11 +38,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     map.insert("role".into(), "user".into());
                     map.insert(
                         "content".into(),
-                        serialize_anthropic_content_blocks(content).map_err(|e| {
-                            LlmError::ParseError {
-                                detail: format!("Failed to serialize content: {}", e),
-                            }
-                        })?,
+                        serialize_anthropic_content_blocks(content)?,
                     );
                     messages.push(map);
                 }
@@ -51,11 +47,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     map.insert("role".into(), "assistant".into());
                     map.insert(
                         "content".into(),
-                        serialize_anthropic_content_blocks(content).map_err(|e| {
-                            LlmError::ParseError {
-                                detail: format!("Failed to serialize content: {}", e),
-                            }
-                        })?,
+                        serialize_anthropic_content_blocks(content)?,
                     );
                     messages.push(map);
                 }
@@ -71,11 +63,7 @@ impl ProviderAdapter for AnthropicAdapter {
                     block.insert("tool_use_id".into(), tool_call_id.clone().into());
                     block.insert(
                         "content".into(),
-                        serialize_anthropic_content_blocks(content).map_err(|e| {
-                            LlmError::ParseError {
-                                detail: format!("Failed to serialize tool result content: {}", e),
-                            }
-                        })?,
+                        serialize_anthropic_content_blocks(content)?,
                     );
                     map.insert(
                         "content".into(),
@@ -332,16 +320,18 @@ impl ProviderAdapter for AnthropicAdapter {
 /// - `ToolCall` → `{"type": "tool_use", "id": ..., "name": ..., "input": {...}}`
 /// - `Thinking` → `{"type": "thinking", "thinking": "..."}`
 /// - `Image` → 暂不支持，返回空数组（v0.2 补齐）
+/// 将 ContentBlock 序列化为 Anthropic 格式。
+/// v0.1 不支持图片，遇到 Image 返回 UnsupportedFeature 错误。
 fn serialize_anthropic_content_blocks(
     blocks: &[ContentBlock],
-) -> Result<serde_json::Value, serde_json::Error> {
+) -> Result<serde_json::Value, LlmError> {
     let arr: Vec<serde_json::Value> = blocks
         .iter()
         .map(|block| match block {
-            ContentBlock::Text(tb) => serde_json::json!({
+            ContentBlock::Text(tb) => Ok(serde_json::json!({
                 "type": "text",
                 "text": tb.text
-            }),
+            })),
             ContentBlock::Thinking(tb) => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("type".into(), "thinking".into());
@@ -349,25 +339,21 @@ fn serialize_anthropic_content_blocks(
                 if let Some(ref redacted) = tb.redacted {
                     obj.insert("redacted_thinking".into(), serde_json::json!(redacted));
                 }
-                serde_json::Value::Object(obj)
+                Ok(serde_json::Value::Object(obj))
             }
-            ContentBlock::ToolCall(tc) => serde_json::json!({
+            ContentBlock::ToolCall(tc) => Ok(serde_json::json!({
                 "type": "tool_use",
                 "id": tc.id,
                 "name": tc.name,
                 "input": tc.arguments
-            }),
+            })),
             ContentBlock::Image { source: _ } => {
-                // v0.1 不支持图片，跳过（validate_request 应在此之前拦截）
-                tracing::warn!(
-                    provider = "anthropic",
-                    "Image block encountered - silently dropped (should be caught by validate_request)"
-                );
-                serde_json::json!(null)
+                Err(LlmError::UnsupportedFeature {
+                    feature: "Image in content blocks (Anthropic adapter)".into(),
+                })
             }
         })
-        .filter(|v| !v.is_null())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(serde_json::Value::Array(arr))
 }

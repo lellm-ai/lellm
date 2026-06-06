@@ -55,6 +55,15 @@ impl StreamEvent {
 /// 测试时只需实现此 trait 即可构造 mock sink。
 ///
 /// **async** — 关键事件（Error, ResponseComplete）需要阻塞等待送达。
+/// **emit 返回 bool** — `false` 表示 channel 已关闭，调用方应立即退出。
+/// **is_closed** — 零开销探测，用于在耗时的解析工作前快速退出。
 pub trait EventSink {
-    async fn emit(&mut self, event: StreamEvent);
+    /// 发送事件。返回 `false` 表示消费者已断开，应立即退出。
+    async fn emit(&mut self, event: StreamEvent) -> bool;
+
+    /// 消费者是否已断开。用于在解析开销前快速退出。
+    /// 默认返回 `false`（测试 mock 无需覆盖）。
+    fn is_closed(&self) -> bool {
+        false
+    }
 }
