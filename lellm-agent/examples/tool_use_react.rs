@@ -1,13 +1,17 @@
 //! 工具调用 — 使用真实 Provider 的 ReAct 循环
 //!
-//! 天气查询链：LLM 推理城市拼音 → `fetch_weather` → 失败重试（真实 wttr.in API）
+//! 天气查询链：LLM 推理城市 → 构造 wttr.in URL → `http_get` → 失败重试
+//!
+//! 核心设计：**工具层不硬编码任何业务 API**，仅提供通用 `http_get`。
+//! LLM 根据 system_prompt 中的 API 知识，自行推理请求 URL。
 //!
 //! ReAct 流程：
 //! ```text
 //! 用户: "帮我查一下浦东新区的天气"
 //!   → LLM 推理: 浦东新区 → 上海 → shanghai
-//!   → 调用: fetch_weather("shanghai")
-//!   → ✅ 成功 → 自然语言总结
+//!   → LLM 构造: https://wttr.in/shanghai?format=j1
+//!   → 调用: http_get(url)
+//!   → ✅ 成功 → 解析 JSON → 自然语言总结
 //!   → ❌ 失败 → LLM 重新推理 → 再次调用 → ...
 //! ```
 //!
@@ -27,69 +31,47 @@ use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
 use lellm_provider::{ProviderEvent, ResolvedModel};
 use std::sync::Arc;
 
-// ─── 工具定义 ───────────────────────────────────────────────────
+// ─── 通用 HTTP GET 工具 ─────────────────────────────────────────
 
+/// 通用 HTTP GET 请求参数
 #[derive(JsonSchema, ToolDefinition)]
 #[tool(
-    name = "fetch_weather",
-    description = "获取全球任意城市的实时天气。\
-                   返回 JSON: {{ city, condition, temperature, humidity, wind_speed }}。\
-                   城市名使用英文（小写，多词用连字符），如 'shanghai', 'new-york', 'tokyo', 'london'。\
-                   若返回 NotFound，请重新推理城市英文名后重试。"
+    name = "http_get",
+    description = "发送 HTTP GET 请求并返回响应文本。\
+                   用于调用外部 API 获取数据。URL 必须由你根据 API 文档构造。"
 )]
 #[allow(dead_code)]
-struct FetchWeatherArgs {
-    /// 城市英文名，如 "shanghai"、"new york"、"tokyo"
-    city: String,
+struct HttpGetArgs {
+    /// 完整的请求 URL（包含协议、域名、路径、查询参数）
+    url: String,
 }
 
-/// 从 wttr.in 获取天气，直接返回 JSON 字符串
-fn fetch_weather(city: &str) -> Result<String, ToolError> {
-    let response = reqwest::blocking::get(format!("https://wttr.in/{city}?format=%c+%t+%h+%w"))
+/// 通用 HTTP GET — 纯传输层，不知业务语义
+fn http_get(url: &str) -> Result<String, ToolError> {
+    reqwest::blocking::get(url)
         .map_err(|e| ToolError {
             kind: ToolErrorKind::Network,
-            message: format!("请求 wttr.in 失败: {e}"),
+            message: format!("请求失败: {e}"),
         })?
         .text()
         .map_err(|e| ToolError {
             kind: ToolErrorKind::Internal,
             message: format!("读取响应失败: {e}"),
-        })?;
-
-    let parts: Vec<&str> = response.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err(ToolError {
-            kind: ToolErrorKind::NotFound,
-            message: format!(
-                "城市 '{city}' 未找到，请检查英文名。\
-                 示例: shanghai, new-york, tokyo, london, paris。\
-                 请重新推理城市英文名（多词用连字符），再试。",
-            ),
-        });
-    }
-
-    Ok(serde_json::json!({
-        "city": city,
-        "condition": parts.first().unwrap_or(&""),
-        "temperature": parts.get(1).unwrap_or(&""),
-        "humidity": parts.get(2).unwrap_or(&""),
-        "wind_speed": parts.get(3).unwrap_or(&""),
-    })
-    .to_string())
+        })
 }
 
-/// 创建天气查询工具注册
-fn register_weather_tools() -> Vec<ToolRegistration> {
+/// 注册通用 HTTP 工具
+fn register_http_tools() -> Vec<ToolRegistration> {
     vec![ToolRegistration::safe(
-        FetchWeatherArgs::tool_definition(),
+        HttpGetArgs::tool_definition(),
         |args: &serde_json::Value| {
-            let city = args
-                .get("city")
+            let url = args
+                .get("url")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
             async move {
-                tokio::task::spawn_blocking(move || fetch_weather(&city))
+                tokio::task::spawn_blocking(move || http_get(&url))
                     .await
                     .map_err(|e| ToolError {
                         kind: ToolErrorKind::Internal,
@@ -125,13 +107,23 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
         model: "gpt-4o".to_string(),
     })
     .system_prompt(
-        "你是一个天气查询助手。\
-                    用户会告诉你一个地址，请推理对应的城市英文名，\
-                    调用 fetch_weather(city) 获取天气。若返回 NotFound，\
-                    请重新推理城市英文名后重试。获取到天气后，用自然语言总结。"
+        "你是一个天气查询助手，拥有以下 API 知识：\n\
+         \n\
+         【wttr.in 天气 API】\n\
+         - 简洁格式：https://wttr.in/{城市}?format=%c+%t+%h+%w\n\
+         - 返回：天气状况 温度 湿度 风速（空格分隔），如 '小雨 17°C 94% 7km/h'\n\
+         - 城市未找到时返回空响应\n\
+         \n\
+         工作流程：\n\
+         1. 用户给出地址 → 推理对应城市英文名（小写，多词用连字符，如 new-york）\n\
+         2. 构造 wttr.in URL，调用 http_get(url)\n\
+         3. 若返回空或错误 → 重新推理城市名 → 再次调用 http_get\n\
+         4. 获取天气后，用自然语言总结\n\
+         \n\
+         注意：直接调用 http_get 工具，不要尝试其他方式获取天气。"
             .to_string(),
     )
-    .tools(register_weather_tools())
+    .tools(register_http_tools())
     .max_iterations(10)
     .build()
 }
@@ -285,7 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = create_provider();
     let agent = create_agent(provider);
 
-    println!("=== LeLLM Agent — 天气查询链（真实 wttr.in API）===\n");
+    println!("=== LeLLM Agent — 天气查询链（LLM 推理 + 通用 http_get）===\n");
 
     let question = match std::env::args().nth(1) {
         Some(addr) => format!("帮我查一下{addr}的天气"),
