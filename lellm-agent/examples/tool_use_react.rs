@@ -96,7 +96,8 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
     GenericProvider::new(
         OpenAICompatAdapter::openai(),
         ProviderConfig::bearer(
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+            &std::env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
             std::env::var("OPENAI_API_KEY").expect("请设置 OPENAI_API_KEY"),
         )
         .expect("Invalid base URL")
@@ -145,24 +146,32 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
 struct RoundState {
     reasoning: String,
     current_tool: Option<String>,
+    step_start: Option<std::time::Instant>,
 }
 
 async fn observe_react_loop(
     mut stream: AgentStream,
     question: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let total_start = std::time::Instant::now();
+
     println!("================================ 人类消息 =================================");
     println!("{question}\n");
 
     let mut iteration: usize = 0;
     let mut round = RoundState::default();
+    let mut step_times: Vec<(usize, f64)> = Vec::new();
 
     while let Some(event) = stream.recv().await {
         match event {
             // ─── Provider 事件 ───────────────────────────────────────
             AgentEvent::Provider(ProviderEvent::Start { model }) => {
                 iteration += 1;
-                round = RoundState::default();
+                round = RoundState {
+                    reasoning: String::new(),
+                    current_tool: None,
+                    step_start: Some(std::time::Instant::now()),
+                };
                 eprintln!("[DEBUG] >>> 第 {iteration} 轮 — 调用 {model}");
             }
 
@@ -179,8 +188,17 @@ async fn observe_react_loop(
             }
 
             AgentEvent::Provider(ProviderEvent::ResponseComplete { tool_calls, usage }) => {
+                let elapsed = round
+                    .step_start
+                    .map(|t| t.elapsed().as_secs_f64())
+                    .unwrap_or(0.0);
+                step_times.push((iteration, elapsed));
+
                 if tool_calls.is_empty() {
-                    eprintln!("\n[DEBUG] >>> 第 {iteration} 轮 — 最终回答");
+                    eprintln!(
+                        "\n[DEBUG] >>> 第 {iteration} 轮 — 最终回答 ({:.2}s)",
+                        elapsed
+                    );
                     let _ = usage;
                 } else {
                     println!();
@@ -197,8 +215,9 @@ async fn observe_react_loop(
                     }
                     println!();
                     eprintln!(
-                        "[DEBUG] >>> 第 {iteration} 轮 — {} 个工具调用",
-                        tool_calls.len()
+                        "[DEBUG] >>> 第 {iteration} 轮 — {} 个工具调用 ({:.2}s)",
+                        tool_calls.len(),
+                        elapsed
                     );
                 }
             }
@@ -209,6 +228,10 @@ async fn observe_react_loop(
             }
 
             AgentEvent::ToolEnd { result, .. } => {
+                let tool_elapsed = round
+                    .step_start
+                    .map(|t| t.elapsed().as_secs_f64())
+                    .unwrap_or(0.0);
                 println!(
                     "=============================== 工具观察 ================================"
                 );
@@ -228,6 +251,7 @@ async fn observe_react_loop(
                     }
                 }
                 round.current_tool = None;
+                eprintln!("[DEBUG] >>> 工具执行耗时 {:.2}s", tool_elapsed);
                 println!();
             }
 
@@ -246,6 +270,7 @@ async fn observe_react_loop(
 
             // ─── 终态事件 ────────────────────────────────────────────
             AgentEvent::LoopEnd { result } => {
+                let total = total_start.elapsed();
                 println!();
                 println!("--- 执行摘要 ---");
                 println!("停止原因: {:?}", result.stop_reason);
@@ -257,13 +282,21 @@ async fn observe_react_loop(
                     result.response.usage.completion_tokens,
                     result.response.usage.total_tokens,
                 );
+                println!();
+                println!("--- 耗时明细 ---");
+                for (i, t) in &step_times {
+                    println!("  第 {} 轮: {:.2}s", i, t);
+                }
+                println!("总耗时: {:.2}s", total.as_secs_f64());
                 return Ok(());
             }
 
             AgentEvent::LoopError { error, iterations } => {
+                let total = total_start.elapsed();
                 println!();
                 println!("================================ 错误 =================================");
                 println!("❌ Agent 执行失败（第 {iterations} 轮）: {error}");
+                println!("总耗时: {:.2}s", total.as_secs_f64());
                 println!();
                 return Err(format!("Agent 执行失败: {error}").into());
             }
@@ -291,7 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let question = match std::env::args().nth(1) {
         Some(addr) => format!("帮我查一下{addr}的天气"),
-        None => "帮我查一下金桥/宁海/新宿的天气".to_string(),
+        None => "帮我查一下金桥的天气".to_string(),
     };
 
     let stream = agent.execute_stream(vec![Message::User {
