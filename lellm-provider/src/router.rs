@@ -30,6 +30,9 @@ pub struct RouteEntry {
 pub struct ResolvedModel {
     pub provider: Arc<dyn LlmProvider>,
     pub model: String,
+    /// 模型上下文窗口大小（Token），用于 v0.2 自动推导 ContextBudget
+    /// 若未知则设为 `None`，使用 ContextBudget 的固定默认值
+    pub context_window: Option<usize>,
 }
 
 /// 模型路由器 — 根据任务级别选择路由。
@@ -93,6 +96,7 @@ impl ProviderRegistry {
         Ok(ResolvedModel {
             provider,
             model: route.model.clone(),
+            context_window: None,
         })
     }
 }

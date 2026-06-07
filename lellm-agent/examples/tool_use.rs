@@ -163,6 +163,7 @@ fn create_react_agent() -> ToolUseLoop {
     ]));
 
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "react-model".to_string(),
     };

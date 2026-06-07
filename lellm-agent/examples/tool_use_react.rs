@@ -114,6 +114,7 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
         model: "Qwen3.6".to_string(),
+        context_window: None,
     })
     .system_prompt(
         "天气查询助手。使用 wttr.in 获取天气：\n\

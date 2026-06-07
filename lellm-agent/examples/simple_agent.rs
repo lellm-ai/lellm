@@ -30,6 +30,7 @@ fn create_simple_agent() -> ToolUseLoop {
     let provider = Arc::new(MockProvider::reply_with(response));
 
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test-model".to_string(),
     };

@@ -36,7 +36,10 @@ pub struct ToolUseConfig {
     pub system_prompt: Option<String>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
-    /// 上下文预算管理（`None` = 不限制，兼容现有行为）
+    /// 上下文预算管理（默认开启，`None` = 不限制）
+    ///
+    /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 50,000）
+    /// **v0.2**: 从 `ResolvedModel.context_window` 自动推导（window * 0.8）
     pub context_budget: Option<ContextBudget>,
 }
 
@@ -45,7 +48,7 @@ impl Default for ToolUseConfig {
         Self {
             system_prompt: None,
             max_iterations: 10,
-            context_budget: None,
+            context_budget: Some(ContextBudget::default()),
         }
     }
 }

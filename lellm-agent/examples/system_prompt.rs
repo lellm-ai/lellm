@@ -36,6 +36,7 @@ fn create_agent_with_builder() -> ToolUseLoop {
     let provider = Arc::new(MockProvider::reply_with(response));
 
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test-model".to_string(),
     };
@@ -57,6 +58,7 @@ fn create_agent_simple() -> ToolUseLoop {
     let provider = Arc::new(MockProvider::reply_with(response));
 
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test-model".to_string(),
     };
@@ -142,6 +144,7 @@ async fn main() {
     );
     let provider3 = Arc::new(MockProvider::reply_with(response3));
     let model3 = ResolvedModel {
+        context_window: None,
         provider: provider3,
         model: "test-model".to_string(),
     };

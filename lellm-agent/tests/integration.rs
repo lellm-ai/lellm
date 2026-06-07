@@ -17,6 +17,7 @@ async fn test_tool_use_loop_no_tool_calls() {
     let provider = Arc::new(MockProvider::reply_with(response));
 
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test-model".to_string(),
     };
@@ -228,6 +229,7 @@ async fn test_builder_basic_build() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test-model".to_string(),
     };
@@ -254,6 +256,7 @@ async fn test_builder_with_config() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test-model".to_string(),
     };
@@ -324,6 +327,7 @@ async fn test_builder_with_tool() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test".to_string(),
     };
@@ -343,6 +347,7 @@ fn test_builder_chain_api() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test".to_string(),
     };
@@ -373,6 +378,7 @@ async fn test_create_agent() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test".to_string(),
     };
@@ -414,6 +420,7 @@ async fn test_create_agent_with_tools() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test".to_string(),
     };
@@ -431,6 +438,7 @@ async fn test_create_agent_with_system() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test".to_string(),
     };
@@ -456,6 +464,7 @@ fn test_create_agent_full() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "test".to_string(),
     };

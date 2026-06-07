@@ -31,6 +31,7 @@ async fn main() {
     let provider = Arc::new(MockProvider::reply_with(response));
 
     let model = ResolvedModel {
+        context_window: None,
         provider,
         model: "streaming-model".to_string(),
     };
