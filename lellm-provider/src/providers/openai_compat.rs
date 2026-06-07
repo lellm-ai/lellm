@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
-    ToolChoice,
+    ToolChoice, ToolDefinition,
 };
 use std::borrow::Cow;
 
@@ -106,8 +106,10 @@ impl ProviderAdapter for OpenAICompatAdapter {
         if let Some(ref tools) = req.tools {
             body.insert(
                 "tools".into(),
-                serde_json::to_value(tools).map_err(|e| LlmError::ParseError {
-                    detail: format!("Failed to serialize tools: {}", e),
+                serde_json::to_value(serialize_openai_tools(tools)).map_err(|e| {
+                    LlmError::ParseError {
+                        detail: format!("Failed to serialize tools: {}", e),
+                    }
                 })?,
             );
         }
@@ -425,6 +427,25 @@ fn serialize_openai_text_blocks(blocks: &[ContentBlock]) -> String {
         .filter_map(|b| b.as_text().map(|s| s.to_string()))
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// 将 ToolDefinition 数组序列化为 OpenAI 格式的工具列表。
+///
+/// OpenAI 要求每个工具都用 `{"type": "function", "function": {...}}` 包装。
+fn serialize_openai_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters
+                }
+            })
+        })
+        .collect()
 }
 
 /// 将 ToolChoice 序列化为 OpenAI 格式。
