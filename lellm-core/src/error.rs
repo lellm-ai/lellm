@@ -51,6 +51,9 @@ pub enum LlmError {
     #[error("request timeout")]
     Timeout,
 
+    #[error("unexpected EOF: stream ended without ResponseComplete")]
+    UnexpectedEof,
+
     #[error("response parse error")]
     ParseError { detail: String },
 

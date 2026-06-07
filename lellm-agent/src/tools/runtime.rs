@@ -108,7 +108,9 @@ fn build_request_inner(
 // ─── 循环状态机 ───
 
 /// Agent Loop 共享状态 — 非流式与流式执行模式共用。
-#[derive(Debug)]
+///
+/// `Clone` 用于迭代重试时回滚状态（snapshot → restore）。
+#[derive(Debug, Clone)]
 pub struct LoopState {
     pub messages: Vec<Message>,
     pub iterations: usize,
@@ -467,6 +469,7 @@ impl ToolUseLoop {
 
                 let req = build_request_inner(&model, &executor, &state.messages);
 
+                // Provider 连接失败会触发 fallback 重试。
                 let stream_result: Result<lellm_provider::ProviderStream, LlmError> =
                     execute_with_fallback(
                         &deps.fallback,
@@ -476,13 +479,15 @@ impl ToolUseLoop {
                     )
                     .await;
 
-                match stream_result {
+                // process_stream_iteration 返回 Result，Err 直接传播为 LoopError。
+                let result: Result<StreamIterResult, LlmError> = match stream_result {
+                    Err(e) => Err(e),
                     Ok(mut stream) => {
                         let mut text_buffer = String::new();
                         let mut thinking_buffer = String::new();
                         let mut redacted_buffer: Option<String> = None;
 
-                        let iter_result = process_stream_iteration(
+                        process_stream_iteration(
                             &tx,
                             &executor,
                             &mut state,
@@ -491,40 +496,39 @@ impl ToolUseLoop {
                             &mut thinking_buffer,
                             &mut redacted_buffer,
                         )
+                        .await
+                    }
+                };
+
+                match result {
+                    Ok(StreamIterResult::Continue {
+                        response,
+                        tool_calls: _,
+                    }) => {
+                        last_response = Some(response);
+                    }
+                    Ok(StreamIterResult::Complete { response }) => {
+                        let _ = emit(
+                            &tx,
+                            AgentEvent::LoopEnd {
+                                result: state.finish_complete(response),
+                            },
+                        )
                         .await;
-
-                        // 每轮结束后清空 buffer，避免跨轮次累积
-                        text_buffer.clear();
-                        thinking_buffer.clear();
-                        let _ = redacted_buffer.take();
-
-                        match iter_result {
-                            StreamIterResult::Continue { response } => {
-                                last_response = Some(response);
-                            }
-                            StreamIterResult::Complete { response } => {
-                                let _ = emit(
-                                    &tx,
-                                    AgentEvent::LoopEnd {
-                                        result: state.finish_complete(response),
-                                    },
-                                )
-                                .await;
-                                return;
-                            }
-                            StreamIterResult::Terminated { response } => {
-                                let resp =
-                                    response.or(last_response).unwrap_or_else(empty_response);
-                                let _ = emit(
-                                    &tx,
-                                    AgentEvent::LoopEnd {
-                                        result: state.finish_cancelled(resp),
-                                    },
-                                )
-                                .await;
-                                return;
-                            }
-                        }
+                        return;
+                    }
+                    Ok(StreamIterResult::Cancelled { response }) => {
+                        let resp = response
+                            .or(last_response.take())
+                            .unwrap_or_else(empty_response);
+                        let _ = emit(
+                            &tx,
+                            AgentEvent::LoopEnd {
+                                result: state.finish_cancelled(resp),
+                            },
+                        )
+                        .await;
+                        return;
                     }
                     Err(e) => {
                         let _ = emit(
@@ -545,17 +549,25 @@ impl ToolUseLoop {
     }
 }
 
-/// 流式单轮迭代的结果 — 枚举保证类型安全。
+/// 流式单轮迭代的合法结果 — 枚举保证类型安全。
+///
+/// **设计原则：** 仅表达"一次迭代成功完成后的状态"。
+/// 错误通过 `Result<StreamIterResult, LlmError>` 的 `Err` 表达。
 enum StreamIterResult {
     /// 继续循环（有 tool_calls，应进入下一轮）
-    Continue { response: ChatResponse },
+    Continue {
+        response: ChatResponse,
+        tool_calls: Vec<lellm_core::ToolCall>,
+    },
     /// 正常完成（无 tool_calls，Agent 已获得最终答案）
     Complete { response: ChatResponse },
-    /// 异常终止（消费者断开或 stream 异常，不再继续）
-    Terminated { response: Option<ChatResponse> },
+    /// 消费者断开（不再继续）
+    Cancelled { response: Option<ChatResponse> },
 }
 
-/// 处理流式单轮迭代
+/// 处理流式单轮迭代。
+///
+/// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
@@ -564,22 +576,14 @@ async fn process_stream_iteration(
     text_buffer: &mut String,
     thinking_buffer: &mut String,
     redacted_buffer: &mut Option<String>,
-) -> StreamIterResult {
+) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
     while let Some(result) = stream.next().await {
         let ev = match result {
             Ok(ev) => ev,
             Err(e) => {
-                let _ = emit(
-                    tx,
-                    AgentEvent::LoopError {
-                        error: e,
-                        iterations: state.iterations,
-                    },
-                )
-                .await;
-                return StreamIterResult::Terminated { response: None };
+                return Err(e);
             }
         };
 
@@ -603,7 +607,7 @@ async fn process_stream_iteration(
         }
 
         if !emit(tx, AgentEvent::Provider(ev.clone())).await {
-            return StreamIterResult::Terminated { response: None };
+            return Ok(StreamIterResult::Cancelled { response: None });
         }
 
         // ResponseComplete 事件需要特殊处理：工具执行、终止判断
@@ -645,9 +649,9 @@ async fn process_stream_iteration(
 
                 let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
                 if results.is_none() {
-                    return StreamIterResult::Terminated {
+                    return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
-                    };
+                    });
                 }
                 state.push_tool_results(results.unwrap());
 
@@ -657,7 +661,10 @@ async fn process_stream_iteration(
                     "tool-use stream iteration"
                 );
 
-                return StreamIterResult::Continue { response };
+                return Ok(StreamIterResult::Continue {
+                    response,
+                    tool_calls: pending_tool_calls,
+                });
             } else {
                 // 无工具调用 — 正常结束（ResponseComplete 已在上方统一透传）
                 if !emit(
@@ -668,17 +675,17 @@ async fn process_stream_iteration(
                 )
                 .await
                 {
-                    return StreamIterResult::Terminated {
+                    return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
-                    };
+                    });
                 }
 
-                return StreamIterResult::Complete { response };
+                return Ok(StreamIterResult::Complete { response });
             }
         }
     }
 
-    StreamIterResult::Terminated { response: None }
+    Err(LlmError::UnexpectedEof)
 }
 
 /// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具。
