@@ -2,7 +2,13 @@
 //!
 //! 包含两个示例场景：
 //! 1. **产品搜索链**：`search_products` → `check_inventory`（模拟数据）
-//! 2. **天气查询链**：`resolve_city` → `fetch_weather`（真实 wttr.in API）
+//! 2. **天气查询链**：LLM 推理城市拼音 → `fetch_weather`（真实 wttr.in API）
+//!
+//! 天气查询链中，**城市识别完全由大模型推理完成**：
+//! - 用户输入任意地址（街道、乡镇、区、县）
+//! - LLM 自行推理出所属地级市，并转换为拼音
+//! - LLM 调用 `fetch_weather(city_pinyin)` 获取天气
+//! - 无需任何硬编码映射表
 //!
 //! 对应 LangChain 用法：
 //! ```python
@@ -10,16 +16,11 @@
 //! from langchain.agents import create_agent
 //!
 //! @tool
-//! def resolve_city(address: str) -> str:
-//!     """从地址中提取城市名称并转为拼音。"""
-//!     return {"city": "上海", "pinyin": "shanghai"}
-//!
-//! @tool
 //! def fetch_weather(city_pinyin: str) -> str:
-//!     """调用 wttr.in 获取城市天气。"""
+//!     """调用 wttr.in 获取城市天气。城市名用拼音，如 'shanghai', 'beijing'。"""
 //!     return curl("-s", f"wttr.in/{city_pinyin}?format=%c+%t+%h+%w")
 //!
-//! agent = create_agent(model, tools=[resolve_city, fetch_weather])
+//! agent = create_agent(model, tools=[fetch_weather])
 //! result = agent.invoke("帮我查一下浦东新区的天气")
 //! ```
 //!
@@ -43,29 +44,18 @@ use lellm_macros::ToolDefinition as ToolDefinitionDerive;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::{GenericProvider, ProviderConfig};
 use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 // ─── 工具定义 ───────────────────────────────────────────────────
-
-/// 从地址中解析城市
-#[allow(dead_code)]
-#[derive(JsonSchema, ToolDefinitionDerive)]
-#[tool(
-    name = "resolve_city",
-    description = "从中文地址中提取地级市名称，并转换为拼音。输入可以是街道、乡镇、县、区等地址。返回城市中文名和拼音。"
-)]
-struct ResolveCityArgs {
-    /// 中文地址，例如 "上海市浦东新区"、"北京市朝阳区"、"广州市天河区"
-    address: String,
-}
 
 /// 获取城市天气
 #[allow(dead_code)]
 #[derive(JsonSchema, ToolDefinitionDerive)]
 #[tool(
     name = "fetch_weather",
-    description = "调用 wttr.in API 获取指定城市的实时天气情况。返回 JSON 结构化数据，包含天气状况、温度、湿度、风速。城市名称使用拼音，例如 'shanghai'、'beijing'。"
+    description = "调用 wttr.in API 获取指定城市的实时天气情况。\
+                   返回 JSON 结构化数据，包含天气状况、温度、湿度、风速。\
+                   城市名称必须使用拼音，例如 'shanghai'、'beijing'、'guangzhou'、'shenzhen'。"
 )]
 struct FetchWeatherArgs {
     /// 城市拼音名称，例如 "shanghai"、"beijing"、"guangzhou"
@@ -93,162 +83,6 @@ struct CheckInventoryArgs {
     product_id: String,
 }
 
-// ─── 常用城市拼音映射表 ──────────────────────────────────────────
-
-/// 常见中国城市名 → 拼音映射（覆盖主要地级市）
-fn city_to_pinyin(city: &str) -> Option<&'static str> {
-    // 使用静态 HashMap 避免重复构建
-    use std::sync::OnceLock;
-    static CITY_MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-
-    CITY_MAP
-        .get_or_init(|| {
-            let mut m = HashMap::new();
-            // 直辖市
-            m.insert("北京", "beijing");
-            m.insert("上海", "shanghai");
-            m.insert("天津", "tianjin");
-            m.insert("重庆", "chongqing");
-            // 广东省
-            m.insert("广州", "guangzhou");
-            m.insert("深圳", "shenzhen");
-            m.insert("东莞", "dongguan");
-            m.insert("佛山", "foshan");
-            m.insert("珠海", "zhuhai");
-            m.insert("中山", "zhongshan");
-            // 江苏省
-            m.insert("南京", "nanjing");
-            m.insert("苏州", "suzhou");
-            m.insert("无锡", "wuxi");
-            m.insert("常州", "changzhou");
-            m.insert("徐州", "xuzhou");
-            // 浙江省
-            m.insert("杭州", "hangzhou");
-            m.insert("宁波", "ningbo");
-            m.insert("温州", "wenzhou");
-            m.insert("绍兴", "shaoxing");
-            // 四川省
-            m.insert("成都", "chengdu");
-            m.insert("绵阳", "mianyang");
-            m.insert("德阳", "deyang");
-            // 湖北省
-            m.insert("武汉", "wuhan");
-            m.insert("宜昌", "yichang");
-            m.insert("襄阳", "xiangyang");
-            // 湖南省
-            m.insert("长沙", "changsha");
-            m.insert("株洲", "zhuzhou");
-            m.insert("湘潭", "xiangtan");
-            // 福建省
-            m.insert("福州", "fuzhou");
-            m.insert("厦门", "xiamen");
-            m.insert("泉州", "quanzhou");
-            // 山东省
-            m.insert("济南", "jinan");
-            m.insert("青岛", "qingdao");
-            m.insert("烟台", "yantai");
-            // 河南省
-            m.insert("郑州", "zhengzhou");
-            m.insert("洛阳", "luoyang");
-            m.insert("开封", "kaifeng");
-            // 陕西省
-            m.insert("西安", "xian");
-            m.insert("咸阳", "xianyang");
-            // 河北省
-            m.insert("石家庄", "shijiazhuang");
-            m.insert("唐山", "tangshan");
-            // 辽宁省
-            m.insert("沈阳", "shenyang");
-            m.insert("大连", "dalian");
-            // 黑龙江省
-            m.insert("哈尔滨", "haerbin");
-            // 云南省
-            m.insert("昆明", "kunming");
-            m.insert("大理", "dali");
-            // 贵州省
-            m.insert("贵阳", "guiyang");
-            // 甘肃省
-            m.insert("兰州", "lanzhou");
-            // 青海省
-            m.insert("西宁", "xining");
-            // 宁夏
-            m.insert("银川", "yinchuan");
-            // 内蒙古
-            m.insert("呼和浩特", "huhehaote");
-            // 山西省
-            m.insert("太原", "taiyuan");
-            // 安徽省
-            m.insert("合肥", "hefei");
-            m.insert("芜湖", "wuhu");
-            // 江西省
-            m.insert("南昌", "nanchang");
-            m.insert("九江", "jiujiang");
-            // 吉林省
-            m.insert("长春", "changchun");
-            m.insert("吉林", "jilin");
-            // 新疆
-            m.insert("乌鲁木齐", "wulumuqi");
-            // 西藏
-            m.insert("拉萨", "lasa");
-            // 海南省
-            m.insert("海口", "haikou");
-            m
-        })
-        .get(city)
-        .copied()
-}
-
-/// 从地址中提取城市名称。
-/// 策略：先匹配长名称（如"石家庄市"），再匹配短名称。
-fn extract_city_from_address(address: &str) -> Option<&str> {
-    use std::sync::OnceLock;
-    static CITIES: OnceLock<Vec<&'static str>> = OnceLock::new();
-
-    let cities = CITIES.get_or_init(|| {
-        vec![
-            "石家庄市", "唐山市", "哈尔滨市", "呼和浩特市", "乌鲁木齐",
-            "沈阳市", "大连市", "长春市", "吉林省", "济南市", "青岛市",
-            "北京市", "上海市", "天津市", "重庆市",
-            "广州市", "深圳市", "东莞市", "佛山市", "珠海市", "中山市",
-            "南京市", "苏州市", "无锡市", "常州市", "徐州市",
-            "杭州市", "宁波市", "温州市", "绍兴市",
-            "成都市", "绵阳市", "德阳市",
-            "武汉市", "宜昌市", "襄阳市",
-            "长沙市", "株洲市", "湘潭市",
-            "福州市", "厦门市", "泉州市",
-            "郑州市", "洛阳市", "开封市",
-            "西安市", "咸阳市",
-            "昆明市", "大理市",
-            "贵阳市", "兰州市", "西宁市", "银川市", "拉萨市", "海口市",
-            "合肥市", "芜湖市",
-            "南昌市", "九江市",
-            "烟台市", "沈阳市",
-            "长沙市", "株洲市",
-        ]
-    });
-
-    // 按长度降序匹配，优先匹配长名称
-    let mut cities_sorted: Vec<_> = cities.clone();
-    cities_sorted.sort_by_key(|c| std::cmp::Reverse(c.len()));
-
-    for city in &cities_sorted {
-        if address.contains(city) {
-            // 去掉后缀 "市"
-            return Some(city.strip_suffix("市").unwrap_or(city));
-        }
-    }
-
-    // 尝试匹配不带"市"的城市名
-    for city in cities {
-        let city_name = city.strip_suffix("市").unwrap_or(city);
-        if address.contains(city_name) {
-            return Some(city_name);
-        }
-    }
-
-    None
-}
-
 // ─── 天气 API 响应结构 ──────────────────────────────────────────
 
 /// wttr.in 天气返回的结构化数据
@@ -266,7 +100,7 @@ struct WeatherInfo {
     wind_speed: String,
 }
 
-/// 调用 wttr.in API 获取天气
+/// 调用 wttr.in API 获取天气（blocking，应在 spawn_blocking 中调用）
 fn fetch_weather_from_wttr(city_pinyin: &str) -> Result<WeatherInfo, ToolError> {
     let url = format!(
         "https://wttr.in/{}?format=%c+%t+%h+%w",
@@ -284,8 +118,6 @@ fn fetch_weather_from_wttr(city_pinyin: &str) -> Result<WeatherInfo, ToolError> 
             message: format!("读取响应失败: {}", e),
         })?;
 
-    // 解析 wttr.in 返回的文本，格式: "小雨 17°C 94% 7km/h"
-    // 用空格分割，但中文和符号之间可能有特殊空格
     let parts: Vec<&str> = response.split_whitespace().collect();
 
     if parts.is_empty() {
@@ -295,60 +127,31 @@ fn fetch_weather_from_wttr(city_pinyin: &str) -> Result<WeatherInfo, ToolError> 
         });
     }
 
-    // 简单解析：第一部分天气，第二部分温度，第三部分湿度，第四部分风速
-    let condition = parts.first().unwrap_or(&"").to_string();
-    let temperature = parts.get(1).unwrap_or(&"").to_string();
-    let humidity = parts.get(2).unwrap_or(&"").to_string();
-    let wind_speed = parts.get(3).unwrap_or(&"").to_string();
-
     Ok(WeatherInfo {
         city: city_pinyin.to_string(),
-        condition,
-        temperature,
-        humidity,
-        wind_speed,
+        condition: parts.first().unwrap_or(&"").to_string(),
+        temperature: parts.get(1).unwrap_or(&"").to_string(),
+        humidity: parts.get(2).unwrap_or(&"").to_string(),
+        wind_speed: parts.get(3).unwrap_or(&"").to_string(),
     })
 }
 
 // ─── 工具注册 ───────────────────────────────────────────────────
 
-/// 注册天气查询链工具（真实 API）
+/// 注册天气查询工具（真实 wttr.in API）
 fn register_weather_tools() -> Vec<ToolRegistration> {
-    vec![
-        ToolRegistration::safe(ResolveCityArgs::tool_definition(), |args| {
-            let address = args
-                .get("address")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move {
-                let city = extract_city_from_address(&address).ok_or_else(|| ToolError {
-                    kind: ToolErrorKind::InvalidInput,
-                    message: format!("无法从地址 '{}' 中提取城市名称，请提供更明确的地址。", address),
-                })?;
-
-                let pinyin = city_to_pinyin(city).ok_or_else(|| ToolError {
-                    kind: ToolErrorKind::NotFound,
-                    message: format!("城市 '{}' 不在支持列表中，请确认城市名称。", city),
-                })?;
-
-                Ok(serde_json::json!({
-                    "address": address,
-                    "city": city,
-                    "pinyin": pinyin
-                }).to_string())
-            }
-        }),
-        ToolRegistration::safe(FetchWeatherArgs::tool_definition(), |args| {
+    vec![ToolRegistration::safe(
+        FetchWeatherArgs::tool_definition(),
+        |args| {
             let city_pinyin = args
                 .get("city_pinyin")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
             async move {
-                // 使用 spawn_blocking 避免阻塞 tokio 异步运行时
                 let join_result =
-                    tokio::task::spawn_blocking(move || fetch_weather_from_wttr(&city_pinyin)).await;
+                    tokio::task::spawn_blocking(move || fetch_weather_from_wttr(&city_pinyin))
+                        .await;
                 let weather = join_result.map_err(|e| ToolError {
                     kind: ToolErrorKind::Internal,
                     message: format!("任务执行失败: {}", e),
@@ -360,10 +163,11 @@ fn register_weather_tools() -> Vec<ToolRegistration> {
                     "temperature": weather.temperature,
                     "humidity": weather.humidity,
                     "wind_speed": weather.wind_speed
-                }).to_string())
+                })
+                .to_string())
             }
-        }),
-    ]
+        },
+    )]
 }
 
 /// 注册产品搜索链工具（模拟数据）
@@ -434,7 +238,7 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
     )
 }
 
-/// 创建天气查询 Agent（真实 API 链）
+/// 创建天气查询 Agent — LLM 自行推理城市拼音
 fn create_weather_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     let model = ResolvedModel {
         provider: Arc::new(provider),
@@ -444,8 +248,9 @@ fn create_weather_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolU
     AgentBuilder::new(model)
         .system_prompt(
             "你是一个天气查询助手。\
-             用户会告诉你一个地址，你需要先调用 resolve_city 解析出城市名称和拼音，\
-             再调用 fetch_weather 获取该城市的天气信息。\
+             用户会告诉你一个地址（可能是街道、乡镇、区县等），\
+             你需要先推理出该地址所属的地级市名称，并将其转换为拼音，\
+             然后调用 fetch_weather 工具获取该城市的天气信息。\
              最后用自然语言总结天气情况。"
                 .to_string(),
         )
@@ -479,8 +284,6 @@ fn create_product_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolU
 struct RoundState {
     /// 本轮 LLM 输出的推理文本（Token 累积）
     reasoning: String,
-    /// ResponseComplete 携带的工具调用
-    pending_tool_calls: Vec<lellm_core::ToolCall>,
     /// 已收集的工具结果（按执行顺序）
     tool_observations: Vec<(String, Result<String, lellm_core::ToolError>)>,
     /// 当前正在执行的工具名称
@@ -536,9 +339,7 @@ async fn observe_react_loop(
                     usage,
                 },
             ) => {
-                round.pending_tool_calls = tool_calls;
-
-                if round.pending_tool_calls.is_empty() {
+                if tool_calls.is_empty() {
                     eprintln!("\n[DEBUG] >>> 第 {} 轮 — 最终回答", iteration);
                     let _ = usage;
                 } else {
@@ -550,7 +351,7 @@ async fn observe_react_loop(
                         println!("推理: {}", round.reasoning);
                     }
                     println!("工具调用：");
-                    for tc in &round.pending_tool_calls {
+                    for tc in &tool_calls {
                         println!("  {} ({})", tc.name, tc.id);
                         println!("  参数: {}", tc.arguments);
                     }
@@ -558,7 +359,7 @@ async fn observe_react_loop(
                     eprintln!(
                         "[DEBUG] >>> 第 {} 轮 — {} 个工具调用",
                         iteration,
-                        round.pending_tool_calls.len()
+                        tool_calls.len()
                     );
                 }
             }
@@ -574,18 +375,13 @@ async fn observe_react_loop(
                     .take()
                     .unwrap_or_else(|| "unknown".to_string());
 
-                let observation = match &result {
-                    Ok(output) => (tool_name, Ok(output.clone())),
-                    Err(err) => (tool_name, Err(err.clone())),
-                };
-                round.tool_observations.push(observation);
+                round.tool_observations.push((tool_name, result.clone()));
 
                 println!(
                     "=============================== 工具观察 ================================"
                 );
                 match &round.tool_observations.last().unwrap().1 {
                     Ok(output) => {
-                        // 尝试格式化 JSON 输出
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
                             println!(
                                 "{}",
@@ -661,30 +457,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = create_provider();
 
     // 命令行参数选择场景：
-    //   - 无参数 或 "product" → 产品搜索链（模拟数据）
-    //   - "weather" → 天气查询链（真实 wttr.in API）
+    //   - 无参数 或 "weather" → 天气查询链（真实 wttr.in API）
+    //   - "product" → 产品搜索链（模拟数据）
     //   - 其他文本 → 天气查询链，文本作为地址输入
     let scenario = std::env::args().nth(1);
     match scenario {
         Some(arg) if arg == "product" => {
             let agent = create_product_agent(provider);
             println!("=== LeLLM Agent — 产品搜索链（模拟数据）===\n");
+            let question = "找出当前最受欢迎的无线耳机并检查其库存";
             let stream = agent.execute_stream(vec![lellm_core::Message::User {
-                content: lellm_core::text_block(
-                    "找出当前最受欢迎的无线耳机并检查其库存".to_string(),
-                ),
+                content: lellm_core::text_block(question.to_string()),
             }]);
-            observe_react_loop(stream, "找出当前最受欢迎的无线耳机并检查其库存").await
+            observe_react_loop(stream, question).await
         }
-        Some(arg) if arg == "weather" => {
-            let agent = create_weather_agent(provider);
-            println!("=== LeLLM Agent — 天气查询链（真实 wttr.in API）===\n");
-            let stream = agent.execute_stream(vec![lellm_core::Message::User {
-                content: lellm_core::text_block("帮我查一下浦东新区的天气".to_string()),
-            }]);
-            observe_react_loop(stream, "帮我查一下浦东新区的天气").await
-        }
-        Some(address) => {
+        Some(address) if address != "weather" => {
             let agent = create_weather_agent(provider);
             println!("=== LeLLM Agent — 天气查询链（真实 wttr.in API）===\n");
             let question = format!("帮我查一下{}的天气", address);
@@ -693,14 +480,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }]);
             observe_react_loop(stream, &question).await
         }
-        None => {
-            // 默认：天气查询链
+        _ => {
             let agent = create_weather_agent(provider);
             println!("=== LeLLM Agent — 天气查询链（真实 wttr.in API）===\n");
+            let question = "帮我查一下浦东新区的天气";
             let stream = agent.execute_stream(vec![lellm_core::Message::User {
-                content: lellm_core::text_block("帮我查一下浦东新区的天气".to_string()),
+                content: lellm_core::text_block(question.to_string()),
             }]);
-            observe_react_loop(stream, "帮我查一下浦东新区的天气").await
+            observe_react_loop(stream, question).await
         }
     }
 }
