@@ -178,7 +178,10 @@ pub struct GenericProvider<A: ProviderAdapter> {
 impl<A: ProviderAdapter + Clone> GenericProvider<A> {
     pub fn new(adapter: A, config: ProviderConfig) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(config.timeout)
+            // connect_timeout — 仅限制 TCP/TLS 握手时间
+            .connect_timeout(config.timeout)
+            // read_timeout — 防止 SSE 空闲连接挂死（300s，首 token 另有 tokio::time::timeout 控制）
+            .read_timeout(std::time::Duration::from_secs(300))
             .user_agent(format!("LeLLM/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();
@@ -295,7 +298,16 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.validate_request(request)?;
         let http_req = self.adapter.build_request(request, false)?;
-        let resp = self.send(http_req).await?;
+
+        // 非流式：tokio::time::timeout 控制整体请求超时（防止模型卡死 / provider 挂死）
+        let resp = match tokio::time::timeout(self.config.timeout, self.send(http_req)).await {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                return Err(LlmError::Timeout {
+                    detail: format!("request timed out after {:?}", self.config.timeout),
+                });
+            }
+        };
 
         if (200..=299).contains(&resp.status) {
             self.adapter.parse_response(&resp.body)
@@ -308,7 +320,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         self.validate_request(request)?;
         let http_req = self.adapter.build_request(request, true)?;
 
-        // 发送流式请求
+        // 发送流式请求 — 无整体超时（connect_timeout 已在 ClientBuilder 设置）
         let resp = self
             .build_request_builder(&http_req)?
             .send()
@@ -330,15 +342,41 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
             return Err(self.handle_error(&raw_resp));
         }
 
+        // 首 token 超时 — 防止连接建立后长时间无响应
+        let byte_stream = resp.bytes_stream();
+        let mut first_token_guard = byte_stream;
+        let first_chunk = match tokio::time::timeout(
+            self.config.timeout,
+            futures_util::StreamExt::next(&mut first_token_guard),
+        )
+        .await
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return Err(LlmError::UnexpectedEof);
+            }
+            Err(_elapsed) => {
+                return Err(LlmError::Timeout {
+                    detail: format!("first token timed out after {:?}", self.config.timeout),
+                });
+            }
+        };
+
+        let first_bytes = first_chunk.map_err(|e| LlmError::Network {
+            detail: e.to_string(),
+        })?;
+
         let model = request.model.clone();
         let adapter = self.adapter.clone();
 
-        // 将 reqwest::Response 转换为通用字节流：Stream<Item = Result<Bytes, LlmError>>
-        let byte_stream = resp.bytes_stream().map(|item| {
+        // 将首 chunk + 剩余流拼接为通用字节流
+        let remaining = first_token_guard.map(|item| {
             item.map_err(|e| LlmError::Network {
                 detail: e.to_string(),
             })
         });
+        let byte_stream =
+            futures_util::stream::once(async move { Ok(first_bytes) }).chain(remaining);
         let boxed_stream = Box::pin(byte_stream);
 
         // 使用 ChannelSink 桥接 EventSink ←→ tokio channel

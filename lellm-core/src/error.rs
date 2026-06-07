@@ -48,8 +48,8 @@ pub enum LlmError {
     #[error("rate limited: {provider}")]
     RateLimited { provider: String },
 
-    #[error("request timeout")]
-    Timeout,
+    #[error("request timeout: {detail}")]
+    Timeout { detail: String },
 
     #[error("unexpected EOF: stream ended without ResponseComplete")]
     UnexpectedEof,
@@ -163,8 +163,11 @@ mod tests {
 
     #[test]
     fn test_llm_error_display() {
-        let err = LlmError::Timeout;
-        assert_eq!(format!("{}", err), "request timeout");
+        let err = LlmError::Timeout {
+            detail: "timed out after 60s".into(),
+        };
+        assert!(format!("{}", err).contains("timeout"));
+        assert!(format!("{}", err).contains("60s"));
     }
 
     #[test]

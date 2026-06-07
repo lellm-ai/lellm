@@ -62,7 +62,7 @@ impl DefaultFallback {
     /// 判断 LlmError 是否可重试
     fn is_retriable(error: &LlmError) -> bool {
         match error {
-            LlmError::Timeout | LlmError::Network { .. } => true,
+            LlmError::Timeout { .. } | LlmError::Network { .. } => true,
             LlmError::ApiError { status, .. } => *status >= 500,
             _ => false,
         }

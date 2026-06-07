@@ -66,10 +66,11 @@ impl ContextBudget {
 /// 估算消息列表的总 Token 数（CJK-aware 启发式）。
 ///
 /// 估算规则：
-/// - ASCII 字符: 4 chars ≈ 1 token
-/// - CJK 汉字: 1.5 tokens/字
+/// - ASCII 字符: 4 chars ≈ 1 token（BPE 常见比例）
+/// - CJK 汉字: 2.5 tokens/字
 /// - 其他 Unicode（标点、空白等）: 1 token/字
 /// - Image 块: 固定 1000 tokens
+/// - 安全系数: 1.1x（覆盖 role marker、JSON wrapper 等协议开销）
 ///
 /// v0.1 使用启发式估算，零额外依赖。
 /// P2 可替换为 `tiktoken-rs` 等 Provider-specific tokenizer。
@@ -77,7 +78,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages.iter().map(estimate_message).sum()
 }
 
-/// 估算单条消息的 Token 数。
+/// 估算单条消息的 Token 数（含 role 和结构开销）。
 pub fn estimate_message(msg: &Message) -> usize {
     let mut total: usize = 0;
 
@@ -129,6 +130,12 @@ fn estimate_json_value(value: &serde_json::Value) -> usize {
 }
 
 /// 估算文本的 Token 数（CJK-aware）。
+///
+/// 估算规则：
+/// - ASCII 字符: 4 chars ≈ 1 token（BPE 常见比例）
+/// - CJK 汉字: 2.5 tokens/字（1 char = 5 raw → 除以 2 = 2.5）
+/// - 其他 Unicode（标点、空白等）: 1 token/字
+/// - 最后乘以 1.1x 安全系数，覆盖协议开销（role marker、JSON wrapper 等）
 fn estimate_text(s: &str) -> usize {
     let mut ascii_count: usize = 0;
     let mut cjk_count: usize = 0;
@@ -138,15 +145,17 @@ fn estimate_text(s: &str) -> usize {
         if ch.is_ascii() {
             ascii_count += 1;
         } else if ch.is_alphabetic() || ch.is_numeric() {
-            // CJK 汉字按 1.5 token/字 → 2 chars = 3 tokens
-            cjk_count += 3;
+            // CJK 汉字按 2.5 token/字 → 1 char = 5 raw, 除以 2 = 2.5
+            cjk_count += 5;
         } else {
             // 标点、空白等按 1 token
             other_count += 1;
         }
     }
 
-    (ascii_count / 4) + (cjk_count / 2) + other_count
+    // 1.1x 安全系数 — 覆盖 role marker、JSON wrapper 等协议开销
+    let raw = (ascii_count.saturating_div(4)) + (cjk_count.saturating_div(2)) + other_count;
+    (raw as f32 * 1.1).ceil() as usize
 }
 
 // ─── 压缩结果 ────────────────────────────────────────────────────

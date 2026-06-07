@@ -378,6 +378,7 @@ impl ToolUseLoop {
         let initial_messages = self.build_request_messages(&messages)?;
         let mut state = LoopState::new(initial_messages);
         let mut last_response: Option<ChatResponse> = None;
+        let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
         loop {
             if state.reached_max(self.config.max_iterations) {
@@ -387,6 +388,9 @@ impl ToolUseLoop {
             }
 
             state.next_iteration();
+
+            // 上下文压缩检查 — ToolResult 加入后、下一轮请求前
+            state.compact(&self.config.context_budget, &*compactor);
 
             let req = self.build_request(&state.messages);
             let response = execute_with_fallback(
