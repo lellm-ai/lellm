@@ -60,7 +60,7 @@ where
 
         match result {
             Ok(bytes) => {
-                tracing::debug!(
+                tracing::trace!(
                     elapsed = ?stream_start.elapsed(),
                     bytes = bytes.len(),
                     "stream chunk received"

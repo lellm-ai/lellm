@@ -236,6 +236,16 @@ impl ProviderAdapter for OpenAICompatAdapter {
                         results.push(StreamChunk::TextDelta(content_text.into()));
                     }
 
+                    // 推理/思考增量（Qwen 等模型的 reasoning_content 字段）
+                    if let Some(reasoning_text) = d.get("reasoning_content").and_then(|c| c.as_str())
+                        && !reasoning_text.is_empty()
+                    {
+                        results.push(StreamChunk::ThinkingDelta {
+                            thinking: reasoning_text.into(),
+                            redacted: None,
+                        });
+                    }
+
                     // 工具调用增量
                     if let Some(tc_arr) = d.get("tool_calls").and_then(|a| a.as_array()) {
                         for tc in tc_arr {

@@ -36,9 +36,12 @@ pub struct ToolUseConfig {
     pub system_prompt: Option<String>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
-    /// 每次 LLM 请求的最大输出 token 数（默认 16k）
+    /// 每次 LLM 请求的最大输出 token 数（默认 4k）
     ///
     /// 控制单次 Provider 调用的响应长度上限，防止模型输出过长。
+    /// 工具调用轮次通常只需几百 token，但模型 thinking 会消耗额外空间，
+    /// 4k 在"够用"和"不浪费"之间取得平衡。
+    /// 若需要长文本生成，可通过 Builder 调大。
     /// 会自动注入到 `ChatRequest.max_tokens`。
     pub max_output_tokens: u32,
     /// 上下文预算管理（默认开启）
@@ -55,7 +58,7 @@ impl Default for ToolUseConfig {
         Self {
             system_prompt: None,
             max_iterations: 10,
-            max_output_tokens: 16_000,
+            max_output_tokens: 4_000,
             context_budget: ContextBudget::default(),
         }
     }

@@ -70,7 +70,7 @@ impl AgentBuilder {
         self
     }
 
-    /// 设置每次 LLM 请求的最大输出 token 数（默认 16k）。
+    /// 设置每次 LLM 请求的最大输出 token 数（默认 4k）。
     pub fn max_output_tokens(mut self, max: u32) -> Self {
         self.config.max_output_tokens = max;
         self
