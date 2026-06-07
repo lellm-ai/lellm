@@ -32,50 +32,44 @@ use std::sync::Arc;
 #[derive(JsonSchema, ToolDefinition)]
 #[tool(
     name = "fetch_weather",
-    description = "调用 wttr.in API 获取指定城市的实时天气情况。\
+    description = "获取全球任意城市的实时天气。\
                    返回 JSON: {{ city, condition, temperature, humidity, wind_speed }}。\
-                   城市名称必须使用拼音（小写，无分隔符），如 'shanghai'、'beijing'、'guangzhou'。\
-                   如果城市拼音错误导致查询失败，工具会返回 NotFound 错误，\
-                   请根据错误信息重新推理城市名和拼音，再次调用本工具。\
-                   常见城市拼音：beijing, shanghai, tianjin, chongqing, guangzhou, shenzhen,\
-                   nanjing, suzhou, hangzhou, ningbo, chengdu, wuhan, changsha, fuzhou, xiamen,\
-                   jinan, qingdao, zhengzhou, xian, shenyang, dalian, haerbin, kunming, guiyang,\
-                   lanzhou, taiyuan, hefei, nanchang, changchun, haikou, yinchuan, xining, lasa。"
+                   城市名使用英文（小写，多词用连字符），如 'shanghai', 'new-york', 'tokyo', 'london'。\
+                   若返回 NotFound，请重新推理城市英文名后重试。"
 )]
 #[allow(dead_code)]
 struct FetchWeatherArgs {
-    /// 城市拼音名称（小写，无分隔符），例如 "shanghai"、"beijing"
-    city_pinyin: String,
+    /// 城市英文名，如 "shanghai"、"new york"、"tokyo"
+    city: String,
 }
 
 /// 从 wttr.in 获取天气，直接返回 JSON 字符串
-fn fetch_weather(city_pinyin: &str) -> Result<String, ToolError> {
-    let response =
-        reqwest::blocking::get(format!("https://wttr.in/{city_pinyin}?format=%c+%t+%h+%w"))
-            .map_err(|e| ToolError {
-                kind: ToolErrorKind::Network,
-                message: format!("请求 wttr.in 失败: {e}"),
-            })?
-            .text()
-            .map_err(|e| ToolError {
-                kind: ToolErrorKind::Internal,
-                message: format!("读取响应失败: {e}"),
-            })?;
+fn fetch_weather(city: &str) -> Result<String, ToolError> {
+    let response = reqwest::blocking::get(format!("https://wttr.in/{city}?format=%c+%t+%h+%w"))
+        .map_err(|e| ToolError {
+            kind: ToolErrorKind::Network,
+            message: format!("请求 wttr.in 失败: {e}"),
+        })?
+        .text()
+        .map_err(|e| ToolError {
+            kind: ToolErrorKind::Internal,
+            message: format!("读取响应失败: {e}"),
+        })?;
 
     let parts: Vec<&str> = response.split_whitespace().collect();
     if parts.is_empty() {
         return Err(ToolError {
             kind: ToolErrorKind::NotFound,
             message: format!(
-                "城市 '{city_pinyin}' 未找到，请检查拼音。\
-                 示例: beijing, shanghai, guangzhou, shenzhen, chengdu。\
-                 请重新推理地址所属的地级市，修正拼音后再试。",
+                "城市 '{city}' 未找到，请检查英文名。\
+                 示例: shanghai, new-york, tokyo, london, paris。\
+                 请重新推理城市英文名（多词用连字符），再试。",
             ),
         });
     }
 
     Ok(serde_json::json!({
-        "city": city_pinyin,
+        "city": city,
         "condition": parts.first().unwrap_or(&""),
         "temperature": parts.get(1).unwrap_or(&""),
         "humidity": parts.get(2).unwrap_or(&""),
@@ -90,7 +84,7 @@ fn register_weather_tools() -> Vec<ToolRegistration> {
         FetchWeatherArgs::tool_definition(),
         |args: &serde_json::Value| {
             let city = args
-                .get("city_pinyin")
+                .get("city")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -112,8 +106,7 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
     GenericProvider::new(
         OpenAICompatAdapter::openai(),
         ProviderConfig::bearer(
-            std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into()),
             std::env::var("OPENAI_API_KEY").expect("请设置 OPENAI_API_KEY"),
         )
         .expect("Invalid base URL")
@@ -132,11 +125,10 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
         model: "gpt-4o".to_string(),
     })
     .system_prompt(
-        "你是一个天气查询助手。用户会告诉你一个地址（可能是街道、乡镇、区县等），\
-                    请推理该地址所属的地级市名称，将城市名转换为拼音（如 上海→shanghai），\
-                    调用 fetch_weather(city_pinyin) 获取天气。如果工具返回 NotFound 错误，\
-                    请根据错误信息重新推理城市名和拼音，再次调用。获取到天气后，\
-                    用自然语言总结天气情况。拼音不要加分隔符。"
+        "你是一个天气查询助手。\
+                    用户会告诉你一个地址，请推理对应的城市英文名，\
+                    调用 fetch_weather(city) 获取天气。若返回 NotFound，\
+                    请重新推理城市英文名后重试。获取到天气后，用自然语言总结。"
             .to_string(),
     )
     .tools(register_weather_tools())
