@@ -89,9 +89,9 @@ impl AgentBuilder {
     }
 
     /// 设置上下文预算（Token 上限 + 压缩策略）。
-    /// 设置为 `None` 时不做任何限制（默认行为）。
+    /// 若要关闭限制，设置 `max_tokens = usize::MAX`。
     pub fn context_budget(mut self, budget: ContextBudget) -> Self {
-        self.config.context_budget = Some(budget);
+        self.config.context_budget = budget;
         self
     }
 

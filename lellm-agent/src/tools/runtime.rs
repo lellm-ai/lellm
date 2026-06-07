@@ -36,11 +36,13 @@ pub struct ToolUseConfig {
     pub system_prompt: Option<String>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
-    /// 上下文预算管理（默认开启，`None` = 不限制）
+    /// 上下文预算管理（默认开启）
     ///
     /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 50,000）
     /// **v0.2**: 从 `ResolvedModel.context_window` 自动推导（window * 0.8）
-    pub context_budget: Option<ContextBudget>,
+    ///
+    /// 若要关闭限制，设置 `max_tokens = usize::MAX`。
+    pub context_budget: ContextBudget,
 }
 
 impl Default for ToolUseConfig {
@@ -48,7 +50,7 @@ impl Default for ToolUseConfig {
         Self {
             system_prompt: None,
             max_iterations: 10,
-            context_budget: Some(ContextBudget::default()),
+            context_budget: ContextBudget::default(),
         }
     }
 }
@@ -503,18 +505,16 @@ impl ToolUseLoop {
                 state.next_iteration();
 
                 // 上下文压缩检查
-                if let Some(ref budget) = config.context_budget {
-                    if let Some(result) = state.compact(budget, &*compactor) {
-                        let _ = emit(
-                            &tx,
-                            AgentEvent::ContextCompacted {
-                                before_tokens: result.before_tokens,
-                                after_tokens: result.after_tokens,
-                                removed_messages: result.removed_messages,
-                            },
-                        )
-                        .await;
-                    }
+                if let Some(result) = state.compact(&config.context_budget, &*compactor) {
+                    let _ = emit(
+                        &tx,
+                        AgentEvent::ContextCompacted {
+                            before_tokens: result.before_tokens,
+                            after_tokens: result.after_tokens,
+                            removed_messages: result.removed_messages,
+                        },
+                    )
+                    .await;
                 }
 
                 let req = build_request_inner(&model, &executor, &state.messages);
@@ -545,7 +545,7 @@ impl ToolUseLoop {
                             &mut text_buffer,
                             &mut thinking_buffer,
                             &mut redacted_buffer,
-                            config.context_budget.as_ref(),
+                            &config.context_budget,
                         )
                         .await
                     }
@@ -628,7 +628,7 @@ async fn process_stream_iteration(
     text_buffer: &mut String,
     thinking_buffer: &mut String,
     redacted_buffer: &mut Option<String>,
-    budget: Option<&ContextBudget>,
+    budget: &ContextBudget,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
@@ -701,7 +701,7 @@ async fn process_stream_iteration(
                 state.add_tool_calls(pending_tool_calls.len());
 
                 let results =
-                    emit_and_execute_tools(tx, executor, &pending_tool_calls, budget).await;
+                    emit_and_execute_tools(tx, executor, &pending_tool_calls, &budget).await;
                 if results.is_none() {
                     return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
@@ -751,7 +751,7 @@ async fn emit_and_execute_tools(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
     tool_calls: &[lellm_core::ToolCall],
-    budget: Option<&ContextBudget>,
+    budget: &ContextBudget,
 ) -> Option<Vec<Message>> {
     let mut results = Vec::new();
 
@@ -771,20 +771,16 @@ async fn emit_and_execute_tools(
         let raw_result = executor.execute(tc).await;
 
         // 工具结果截断
-        let truncated_result = if let Some(b) = budget {
-            match &raw_result {
-                Ok(text) => {
-                    let truncated = b.truncate_tool_result(text.clone());
-                    if truncated != *text {
-                        Ok(truncated)
-                    } else {
-                        raw_result
-                    }
+        let truncated_result = match &raw_result {
+            Ok(text) => {
+                let truncated = budget.truncate_tool_result(text.clone());
+                if truncated != *text {
+                    Ok(truncated)
+                } else {
+                    raw_result
                 }
-                Err(_) => raw_result, // 错误消息不截断
             }
-        } else {
-            raw_result
+            Err(_) => raw_result, // 错误消息不截断
         };
 
         if !emit(
