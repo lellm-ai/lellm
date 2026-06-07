@@ -1,17 +1,18 @@
 //! 工具调用 — 使用真实 Provider 的 ReAct 循环
 //!
-//! 天气查询链：LLM 推理城市 → 构造 wttr.in JSON URL → `http_get` → 解析 → 总结
+//! 天气查询链：LLM 推理城市 → `http_get` wttr.in 文本 → 解析为 JSON 输出
 //!
 //! 核心设计：**工具层不硬编码任何业务 API**，仅提供通用 `http_get`。
-//! LLM 根据 system_prompt 中的 API 知识，自行构造 URL 并解析 JSON 响应。
+//! LLM 根据 system_prompt 中的 API 知识，自行构造 URL，解析轻量文本响应，
+//! 并以 JSON 格式输出最终结果。
 //!
 //! ReAct 流程：
 //! ```text
 //! 用户: "帮我查一下浦东新区的天气"
 //!   → LLM 推理: 浦东新区 → 上海 → shanghai
-//!   → LLM 构造: https://wttr.in/shanghai?format=j1
-//!   → 调用: http_get(url) → 返回 JSON
-//!   → LLM 解析 current_condition[0] → 自然语言总结
+//!   → LLM 构造: https://wttr.in/shanghai?format=%c+%t+%h+%w
+//!   → 调用: http_get(url) → 返回 '小雨 17°C 94% 7km/h'
+//!   → LLM 解析文本 → 输出 JSON: {"city":"shanghai","condition":"小雨",...}
 //!   → ❌ 失败 → 重新推理城市 → 再次调用 → ...
 //! ```
 //!
@@ -107,21 +108,19 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
         model: "gpt-4o".to_string(),
     })
     .system_prompt(
-        "天气查询助手。使用 wttr.in JSON API 获取天气：\n\
+        "天气查询助手。使用 wttr.in 获取天气：\n\
          \n\
-         URL 模板：https://wttr.in/{city}?format=j1\n\
+         URL 模板：https://wttr.in/{city}?format=%c+%t+%h+%w\n\
          城市名：英文小写，多词用连字符（new-york, san-francisco）\n\
+         返回：空格分隔的文本，如 '小雨 17°C 94% 7km/h'\n\
          \n\
-         返回 JSON，当前天气在 current_condition[0]：\n\
-         - temp_C: 温度（°C）\n\
-         - humidity: 湿度（%）\n\
-         - weatherDesc[0].value: 天气状况\n\
-         - windspeedKmph: 风速（km/h）\n\
-         - FeelsLikeC: 体感温度\n\
+         工作流程：\n\
+         1. 用户给地址 → 推理城市英文名 → 调用 http_get(url)\n\
+         2. 解析返回的文本，构造 JSON 输出：\n\
+         {{\"city\":\"tokyo\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"7km/h\"}}\n\
+         3. 若 API 报错或返回空 → 重新推理城市名 → 重试\n\
          \n\
-         用户给地址→推理城市英文名→调用 http_get(url)→\n\
-         解析 JSON 并用自然语言总结天气。若 API 报错或返回空，\n\
-         重新推理城市名后重试。"
+         最终回答必须是 JSON 格式，不要其他文字。"
             .to_string(),
     )
     .tools(register_http_tools())
@@ -278,7 +277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = create_provider();
     let agent = create_agent(provider);
 
-    println!("=== LeLLM Agent — 天气查询链（LLM 推理 + 通用 http_get）===\n");
+    println!("=== LeLLM Agent — 天气查询链（http_get + JSON 输出）===\n");
 
     let question = match std::env::args().nth(1) {
         Some(addr) => format!("帮我查一下{addr}的天气"),
