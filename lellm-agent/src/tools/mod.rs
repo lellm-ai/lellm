@@ -4,6 +4,7 @@
 //! （循环检测、重试策略、Fallback 等）。
 
 pub mod builder;
+pub mod context;
 pub mod executor;
 pub mod fallback;
 #[cfg(feature = "v02-preview")]
@@ -15,6 +16,9 @@ pub mod runtime;
 pub mod signal_voter;
 
 pub use builder::AgentBuilder;
+pub use context::{
+    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_tokens,
+};
 pub use executor::{
     BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration,
 };
@@ -101,6 +105,12 @@ pub enum AgentEvent {
         attempt: usize,
         max_attempts: usize,
         reason: String,
+    },
+    /// 上下文压缩完成（可观测性事件）
+    ContextCompacted {
+        before_tokens: usize,
+        after_tokens: usize,
+        removed_messages: usize,
     },
     /// Agent loop 正常结束（恰好一次，后不再发送）
     LoopEnd { result: ToolUseResult },

@@ -19,6 +19,7 @@ use std::sync::Arc;
 use lellm_provider::ResolvedModel;
 
 use super::ToolRegistration;
+use super::context::ContextBudget;
 use super::executor::ToolExecutor;
 use super::fallback::FallbackStrategy;
 use super::retry::RetryPolicy;
@@ -84,6 +85,13 @@ impl AgentBuilder {
     /// 设置工具重试策略（不影响已注册的工具）。
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
         self.executor.set_retry_policy(policy);
+        self
+    }
+
+    /// 设置上下文预算（Token 上限 + 压缩策略）。
+    /// 设置为 `None` 时不做任何限制（默认行为）。
+    pub fn context_budget(mut self, budget: ContextBudget) -> Self {
+        self.config.context_budget = Some(budget);
         self
     }
 

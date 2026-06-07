@@ -11,11 +11,12 @@ pub use schemars;
 
 pub use memory::ShortTermMemory;
 pub use tools::{
-    AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, DefaultFallback, FallbackAction,
-    FallbackContext, FallbackStrategy, ParallelSafety, ResolvedModel, RetryPolicy, StopReason,
-    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry,
-    ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop,
-    ToolUseResult,
+    AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, CompactionResult, ContextBudget,
+    ContextCompactor, DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy,
+    LocalCompactor, ParallelSafety, ResolvedModel, RetryPolicy, StopReason, ToolArgs, ToolCategory,
+    ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry, ToolResult,
+    ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult,
+    estimate_tokens,
 };
 #[cfg(feature = "v02-preview")]
 pub use tools::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};

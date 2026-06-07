@@ -18,6 +18,7 @@ use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+use super::context::{ContextBudget, ContextCompactor, LocalCompactor, estimate_tokens};
 use super::executor::ToolExecutor;
 use super::fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 use super::{AgentEvent, AgentStream, StopReason};
@@ -35,6 +36,8 @@ pub struct ToolUseConfig {
     pub system_prompt: Option<String>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
+    /// 上下文预算管理（`None` = 不限制，兼容现有行为）
+    pub context_budget: Option<ContextBudget>,
 }
 
 impl Default for ToolUseConfig {
@@ -42,6 +45,7 @@ impl Default for ToolUseConfig {
         Self {
             system_prompt: None,
             max_iterations: 10,
+            context_budget: None,
         }
     }
 }
@@ -113,14 +117,18 @@ fn build_request_inner(
 #[derive(Debug, Clone)]
 pub struct LoopState {
     pub messages: Vec<Message>,
+    /// 消息历史的估算 Token 数（与 messages 同步更新）
+    pub estimated_tokens: usize,
     pub iterations: usize,
     pub tool_calls_executed: usize,
 }
 
 impl LoopState {
     pub fn new(messages: Vec<Message>) -> Self {
+        let estimated_tokens = estimate_tokens(&messages);
         Self {
             messages,
+            estimated_tokens,
             iterations: 0,
             tool_calls_executed: 0,
         }
@@ -128,11 +136,18 @@ impl LoopState {
 
     /// 追加 Assistant 响应到历史
     pub fn push_assistant(&mut self, content: Vec<lellm_core::ContentBlock>) {
+        let msg = Message::Assistant {
+            content: content.clone(),
+        };
+        let tokens = estimate_tokens(&[msg]);
+        self.estimated_tokens += tokens;
         self.messages.push(Message::Assistant { content });
     }
 
     /// 追加工具执行结果到历史
     pub fn push_tool_results(&mut self, results: Vec<Message>) {
+        let tokens = estimate_tokens(&results);
+        self.estimated_tokens += tokens;
         self.messages.extend(results);
     }
 
@@ -149,6 +164,22 @@ impl LoopState {
     /// 判断是否已达到最大轮次
     pub fn reached_max(&self, max_iterations: usize) -> bool {
         self.iterations >= max_iterations
+    }
+
+    /// 对消息历史执行压缩。
+    /// 返回压缩结果（用于发射事件），`None` 表示无需压缩。
+    pub fn compact(
+        &mut self,
+        budget: &ContextBudget,
+        compactor: &dyn ContextCompactor,
+    ) -> Option<super::context::CompactionResult> {
+        if !budget.should_compact(self.estimated_tokens) {
+            return None;
+        }
+        let result = compactor.compact(&self.messages, budget);
+        self.messages = result.messages.clone();
+        self.estimated_tokens = result.after_tokens;
+        Some(result)
     }
 
     /// 构建最终执行结果
@@ -450,6 +481,7 @@ impl ToolUseLoop {
             };
             let mut state = LoopState::new(initial_messages);
             let mut last_response: Option<ChatResponse> = None;
+            let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
             loop {
                 if state.reached_max(config.max_iterations) {
@@ -466,6 +498,21 @@ impl ToolUseLoop {
                 }
 
                 state.next_iteration();
+
+                // 上下文压缩检查
+                if let Some(ref budget) = config.context_budget {
+                    if let Some(result) = state.compact(budget, &*compactor) {
+                        let _ = emit(
+                            &tx,
+                            AgentEvent::ContextCompacted {
+                                before_tokens: result.before_tokens,
+                                after_tokens: result.after_tokens,
+                                removed_messages: result.removed_messages,
+                            },
+                        )
+                        .await;
+                    }
+                }
 
                 let req = build_request_inner(&model, &executor, &state.messages);
 
@@ -495,6 +542,7 @@ impl ToolUseLoop {
                             &mut text_buffer,
                             &mut thinking_buffer,
                             &mut redacted_buffer,
+                            config.context_budget.as_ref(),
                         )
                         .await
                     }
@@ -577,6 +625,7 @@ async fn process_stream_iteration(
     text_buffer: &mut String,
     thinking_buffer: &mut String,
     redacted_buffer: &mut Option<String>,
+    budget: Option<&ContextBudget>,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
@@ -648,7 +697,8 @@ async fn process_stream_iteration(
                 state.push_assistant(response.content.clone());
                 state.add_tool_calls(pending_tool_calls.len());
 
-                let results = emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
+                let results =
+                    emit_and_execute_tools(tx, executor, &pending_tool_calls, budget).await;
                 if results.is_none() {
                     return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
@@ -698,6 +748,7 @@ async fn emit_and_execute_tools(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
     tool_calls: &[lellm_core::ToolCall],
+    budget: Option<&ContextBudget>,
 ) -> Option<Vec<Message>> {
     let mut results = Vec::new();
 
@@ -714,13 +765,30 @@ async fn emit_and_execute_tools(
             return None;
         }
 
-        let result = executor.execute(tc).await;
+        let raw_result = executor.execute(tc).await;
+
+        // 工具结果截断
+        let truncated_result = if let Some(b) = budget {
+            match &raw_result {
+                Ok(text) => {
+                    let truncated = b.truncate_tool_result(text.clone());
+                    if truncated != *text {
+                        Ok(truncated)
+                    } else {
+                        raw_result
+                    }
+                }
+                Err(_) => raw_result, // 错误消息不截断
+            }
+        } else {
+            raw_result
+        };
 
         if !emit(
             tx,
             AgentEvent::ToolEnd {
                 tool_call_id: tc.id.clone(),
-                result: result.clone(),
+                result: truncated_result.clone(),
             },
         )
         .await
@@ -728,7 +796,7 @@ async fn emit_and_execute_tools(
             return None;
         }
 
-        results.push(Message::tool_result(tc, &result));
+        results.push(Message::tool_result(tc, &truncated_result));
     }
 
     Some(results)

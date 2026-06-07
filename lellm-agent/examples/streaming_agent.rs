@@ -104,6 +104,15 @@ async fn main() {
                     tool_call_id, attempt, max_attempts, reason
                 );
             }
+            AgentEvent::ContextCompacted {
+                before_tokens,
+                after_tokens,
+                removed_messages,
+            } => {
+                println!(
+                    "[上下文压缩] {before_tokens} → {after_tokens} tokens (移除 {removed_messages} 条消息)"
+                );
+            }
             AgentEvent::LoopEnd { result } => {
                 println!("\n[循环结束]");
                 println!("  停止原因: {:?}", result.stop_reason);

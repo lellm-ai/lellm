@@ -268,6 +268,21 @@ async fn observe_react_loop(
                 println!();
             }
 
+            AgentEvent::ContextCompacted {
+                before_tokens,
+                after_tokens,
+                removed_messages,
+            } => {
+                println!("============================ 上下文压缩 ==============================");
+                println!(
+                    "📦 上下文压缩: {before_tokens} → {after_tokens} tokens (移除 {removed_messages} 条消息)"
+                );
+                eprintln!(
+                    "[DEBUG] >>> 上下文压缩: {before_tokens} → {after_tokens} tokens, 移除 {removed_messages} 条消息"
+                );
+                println!();
+            }
+
             // ─── 终态事件 ────────────────────────────────────────────
             AgentEvent::LoopEnd { result } => {
                 let total = total_start.elapsed();
