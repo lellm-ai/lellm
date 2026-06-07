@@ -32,36 +32,20 @@ pub enum LellmError {
 }
 
 /// LLM API 错误。
+///
+/// 错误分类：
+/// - **InvalidRequest** — 调用方构造了非法请求（发请求前本地可发现）
+/// - **UnsupportedFeature** — SDK 不支持的功能（能力边界）
+/// - **DuplicateSystemPrompt** — 系统提示冲突
+/// - **Provider** — 请求已发出，对端返回错误（401/429/500/…）
+/// - **Parse** — 响应体 JSON 解析失败
+/// - **Network** — 网络层错误
+/// - **Timeout** — 请求超时
+/// - **UnexpectedEof** — 流式输出意外结束
 #[derive(Debug, Error, Clone)]
 pub enum LlmError {
-    #[error("api error: {provider} {status} {code:?} {message}")]
-    ApiError {
-        provider: String,
-        status: u16,
-        code: Option<String>,
-        message: String,
-    },
-
-    #[error("authentication failed: {provider} {message}")]
-    Authentication { provider: String, message: String },
-
-    #[error("rate limited: {provider}")]
-    RateLimited { provider: String },
-
-    #[error("request timeout: {detail}")]
-    Timeout { detail: String },
-
-    #[error("unexpected EOF: stream ended without ResponseComplete")]
-    UnexpectedEof,
-
-    #[error("response parse error")]
-    ParseError { detail: String },
-
-    #[error("network error")]
-    Network { detail: String },
-
-    #[error("model not found: {model}")]
-    ModelNotFound { model: String },
+    #[error("invalid request: {message}")]
+    InvalidRequest { message: String },
 
     #[error("unsupported feature: {feature}")]
     UnsupportedFeature { feature: String },
@@ -69,8 +53,25 @@ pub enum LlmError {
     #[error("duplicate system prompt: both config and conversation contain system message")]
     DuplicateSystemPrompt,
 
-    #[error("{message}")]
-    Other { message: String },
+    #[error("network error: {detail}")]
+    Network { detail: String },
+
+    #[error("request timeout: {detail}")]
+    Timeout { detail: String },
+
+    #[error("provider error: {message}")]
+    Provider {
+        provider: String,
+        status: Option<u16>,
+        code: Option<String>,
+        message: String,
+    },
+
+    #[error("response parse error: {detail}")]
+    Parse { detail: String },
+
+    #[error("unexpected EOF: stream ended without ResponseComplete")]
+    UnexpectedEof,
 }
 
 /// 工具执行错误的分类。
@@ -171,15 +172,24 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_error_api_error_display() {
-        let err = LlmError::ApiError {
+    fn test_llm_error_provider_display() {
+        let err = LlmError::Provider {
             provider: "openai".into(),
-            status: 429,
+            status: Some(429),
             code: Some("rate_limit".into()),
             message: "Too many requests".into(),
         };
         assert!(format!("{}", err).contains("openai"));
-        assert!(format!("{}", err).contains("429"));
+        assert!(format!("{}", err).contains("Too many requests"));
+    }
+
+    #[test]
+    fn test_llm_error_invalid_request_display() {
+        let err = LlmError::InvalidRequest {
+            message: "Anthropic requires max_tokens".into(),
+        };
+        assert!(format!("{}", err).contains("invalid request"));
+        assert!(format!("{}", err).contains("max_tokens"));
     }
 
     #[test]

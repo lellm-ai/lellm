@@ -70,7 +70,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
         body.insert("model".into(), req.model.clone().into());
         body.insert(
             "messages".into(),
-            serde_json::to_value(messages).map_err(|e| LlmError::ParseError {
+            serde_json::to_value(messages).map_err(|e| LlmError::Parse {
                 detail: format!("Failed to serialize messages: {}", e),
             })?,
         );
@@ -107,7 +107,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
             body.insert(
                 "tools".into(),
                 serde_json::to_value(serialize_openai_tools(tools)).map_err(|e| {
-                    LlmError::ParseError {
+                    LlmError::Parse {
                         detail: format!("Failed to serialize tools: {}", e),
                     }
                 })?,
@@ -120,18 +120,16 @@ impl ProviderAdapter for OpenAICompatAdapter {
             }
         }
 
-        let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::ParseError {
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::Parse {
             detail: format!("Failed to serialize request body: {}", e),
         })?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
             "content-type",
-            "application/json"
-                .parse()
-                .map_err(|_| LlmError::ParseError {
-                    detail: "Invalid header value".into(),
-                })?,
+            "application/json".parse().map_err(|_| LlmError::Parse {
+                detail: "Invalid header value".into(),
+            })?,
         );
 
         Ok(ProviderRequest {
@@ -142,26 +140,25 @@ impl ProviderAdapter for OpenAICompatAdapter {
     }
 
     fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
-        let raw: serde_json::Value =
-            serde_json::from_slice(body).map_err(|e| LlmError::ParseError {
-                detail: format!("Invalid JSON: {}", e),
+        let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| LlmError::Parse {
+            detail: format!("Invalid JSON: {}", e),
+        })?;
+
+        let choices = raw
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .ok_or(LlmError::Parse {
+                detail: "Missing choices array".into(),
             })?;
 
-        let choices =
-            raw.get("choices")
-                .and_then(|c| c.as_array())
-                .ok_or(LlmError::ParseError {
-                    detail: "Missing choices array".into(),
-                })?;
-
         if choices.is_empty() {
-            return Err(LlmError::ParseError {
+            return Err(LlmError::Parse {
                 detail: "Empty choices array".into(),
             });
         }
 
         let first = &choices[0];
-        let message = first.get("message").ok_or(LlmError::ParseError {
+        let message = first.get("message").ok_or(LlmError::Parse {
             detail: "Missing message in choice".into(),
         })?;
 
@@ -219,10 +216,9 @@ impl ProviderAdapter for OpenAICompatAdapter {
             return Ok(StreamParseResult::chunk(StreamChunk::Done));
         }
 
-        let val: serde_json::Value =
-            serde_json::from_str(data).map_err(|e| LlmError::ParseError {
-                detail: format!("Invalid SSE JSON: {}", e),
-            })?;
+        let val: serde_json::Value = serde_json::from_str(data).map_err(|e| LlmError::Parse {
+            detail: format!("Invalid SSE JSON: {}", e),
+        })?;
 
         let mut results: Vec<StreamChunk> = Vec::new();
 

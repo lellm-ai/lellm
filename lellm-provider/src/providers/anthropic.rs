@@ -84,13 +84,15 @@ impl ProviderAdapter for AnthropicAdapter {
         }
         body.insert(
             "messages".into(),
-            serde_json::to_value(messages).map_err(|e| LlmError::ParseError {
+            serde_json::to_value(messages).map_err(|e| LlmError::Parse {
                 detail: format!("Failed to serialize messages: {}", e),
             })?,
         );
-        // Anthropic 要求 max_tokens 必填，用户未设置时默认 4096
-        let max_tokens = req.max_tokens.map(|v| v as u64).unwrap_or(4096);
-        body.insert("max_tokens".into(), max_tokens.into());
+        // Anthropic 要求 max_tokens 必填，未设置时返回错误
+        let max_tokens = req.max_tokens.ok_or_else(|| LlmError::InvalidRequest {
+            message: "Anthropic requires max_tokens".into(),
+        })?;
+        body.insert("max_tokens".into(), (max_tokens as u64).into());
         if stream {
             body.insert("stream".into(), true.into());
         }
@@ -115,7 +117,7 @@ impl ProviderAdapter for AnthropicAdapter {
         if let Some(ref tools) = req.tools {
             body.insert(
                 "tools".into(),
-                serde_json::to_value(tools).map_err(|e| LlmError::ParseError {
+                serde_json::to_value(tools).map_err(|e| LlmError::Parse {
                     detail: format!("Failed to serialize tools: {}", e),
                 })?,
             );
@@ -127,14 +129,14 @@ impl ProviderAdapter for AnthropicAdapter {
             }
         }
 
-        let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::ParseError {
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| LlmError::Parse {
             detail: format!("Failed to serialize request body: {}", e),
         })?;
 
         let mut headers = HeaderMap::new();
         headers.insert(
             "anthropic-version",
-            "2023-06-01".parse().map_err(|_| LlmError::ParseError {
+            "2023-06-01".parse().map_err(|_| LlmError::Parse {
                 detail: "Invalid header value".into(),
             })?,
         );
@@ -147,17 +149,16 @@ impl ProviderAdapter for AnthropicAdapter {
     }
 
     fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
-        let raw: serde_json::Value =
-            serde_json::from_slice(body).map_err(|e| LlmError::ParseError {
-                detail: format!("Invalid JSON: {}", e),
-            })?;
+        let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| LlmError::Parse {
+            detail: format!("Invalid JSON: {}", e),
+        })?;
 
-        let content_val =
-            raw.get("content")
-                .and_then(|c| c.as_array())
-                .ok_or(LlmError::ParseError {
-                    detail: "Missing content array".into(),
-                })?;
+        let content_val = raw
+            .get("content")
+            .and_then(|c| c.as_array())
+            .ok_or(LlmError::Parse {
+                detail: "Missing content array".into(),
+            })?;
 
         let mut content: Vec<ContentBlock> = Vec::new();
         for block in content_val {
@@ -236,10 +237,9 @@ impl ProviderAdapter for AnthropicAdapter {
             return Ok(StreamParseResult::empty());
         }
 
-        let val: serde_json::Value =
-            serde_json::from_str(data).map_err(|e| LlmError::ParseError {
-                detail: format!("Invalid SSE JSON: {}", e),
-            })?;
+        let val: serde_json::Value = serde_json::from_str(data).map_err(|e| LlmError::Parse {
+            detail: format!("Invalid SSE JSON: {}", e),
+        })?;
 
         let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match event_type {

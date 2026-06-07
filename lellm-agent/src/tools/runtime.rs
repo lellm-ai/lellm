@@ -36,6 +36,11 @@ pub struct ToolUseConfig {
     pub system_prompt: Option<String>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
+    /// 每次 LLM 请求的最大输出 token 数（默认 16k）
+    ///
+    /// 控制单次 Provider 调用的响应长度上限，防止模型输出过长。
+    /// 会自动注入到 `ChatRequest.max_tokens`。
+    pub max_output_tokens: u32,
     /// 上下文预算管理（默认开启）
     ///
     /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 128,000）
@@ -50,6 +55,7 @@ impl Default for ToolUseConfig {
         Self {
             system_prompt: None,
             max_iterations: 10,
+            max_output_tokens: 16_000,
             context_budget: ContextBudget::default(),
         }
     }
@@ -105,11 +111,13 @@ fn build_request_inner(
     model: &ResolvedModel,
     executor: &ToolExecutor,
     messages: &[Message],
+    max_output_tokens: u32,
 ) -> ChatRequest {
     ChatRequest {
         model: model.model.clone(),
         messages: messages.to_vec(),
         tools: executor.has_tools().then(|| executor.definitions()),
+        max_tokens: Some(max_output_tokens),
         ..Default::default()
     }
 }
@@ -362,9 +370,14 @@ impl ToolUseLoop {
         build_request_messages_inner(&self.config, messages)
     }
 
-    /// 构建 ChatRequest，自动注入工具 Schema。
+    /// 构建 ChatRequest，自动注入工具 Schema 和 max_tokens。
     fn build_request(&self, messages: &[Message]) -> ChatRequest {
-        build_request_inner(&self.model, &self.executor, messages)
+        build_request_inner(
+            &self.model,
+            &self.executor,
+            messages,
+            self.config.max_output_tokens,
+        )
     }
 
     /// 非流式执行
@@ -521,7 +534,12 @@ impl ToolUseLoop {
                     .await;
                 }
 
-                let req = build_request_inner(&model, &executor, &state.messages);
+                let req = build_request_inner(
+                    &model,
+                    &executor,
+                    &state.messages,
+                    config.max_output_tokens,
+                );
 
                 // 把 stream() + process_stream_iteration() 整体包进 fallback，
                 // 这样流消费失败（SSE 中途断掉）也能触发重试。

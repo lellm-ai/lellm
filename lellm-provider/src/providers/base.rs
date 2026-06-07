@@ -5,11 +5,11 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures_util::StreamExt;
 use http::HeaderMap;
 use lellm_core::{ChatRequest, ChatResponse, ContentBlock, LlmError, TokenUsage};
 use secrecy::ExposeSecret;
 use std::borrow::Cow;
+use tokio_stream::StreamExt;
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
@@ -199,7 +199,7 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
         // 1. 消息语义校验
         for msg in &req.messages {
             msg.validate()
-                .map_err(|e| LlmError::ParseError { detail: e.detail })?;
+                .map_err(|e| LlmError::Parse { detail: e.detail })?;
         }
 
         // 2. Provider 能力校验 — Image 输入（检查所有消息变体）
@@ -269,22 +269,27 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
     fn handle_error(&self, resp: &RawResponse) -> LlmError {
         let body_str = String::from_utf8_lossy(&resp.body);
         match resp.status {
-            401 => LlmError::Authentication {
+            401 => LlmError::Provider {
                 provider: self.adapter.name().to_string(),
-                message: body_str.into_owned(),
-            },
-            429 => LlmError::RateLimited {
-                provider: self.adapter.name().to_string(),
-            },
-            status @ (400..=599) => LlmError::ApiError {
-                provider: self.adapter.name().to_string(),
-                status,
+                status: Some(401),
                 code: None,
                 message: body_str.into_owned(),
             },
-            _ => LlmError::ApiError {
+            429 => LlmError::Provider {
                 provider: self.adapter.name().to_string(),
-                status: resp.status,
+                status: Some(429),
+                code: None,
+                message: "rate limited".into(),
+            },
+            status @ (400..=599) => LlmError::Provider {
+                provider: self.adapter.name().to_string(),
+                status: Some(status),
+                code: None,
+                message: body_str.into_owned(),
+            },
+            _ => LlmError::Provider {
+                provider: self.adapter.name().to_string(),
+                status: Some(resp.status),
                 code: None,
                 message: format!("Unexpected status: {}", resp.status),
             },
@@ -347,7 +352,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         let mut first_token_guard = byte_stream;
         let first_chunk = match tokio::time::timeout(
             self.config.timeout,
-            futures_util::StreamExt::next(&mut first_token_guard),
+            tokio_stream::StreamExt::next(&mut first_token_guard),
         )
         .await
         {
@@ -370,22 +375,25 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         let adapter = self.adapter.clone();
 
         // 将首 chunk + 剩余流拼接为通用字节流
-        // 每个 chunk 施加 idle_timeout，防止代理或上游中途卡死
-        let idle_timeout = self.config.idle_timeout;
-        let remaining = first_token_guard.then(move |chunk| {
-            let idle_timeout = idle_timeout;
-            async move {
-                match tokio::time::timeout(idle_timeout, async { chunk }).await {
-                    Ok(Ok(bytes)) => Ok(bytes),
-                    Ok(Err(e)) => Err(LlmError::Network {
-                        detail: e.to_string(),
-                    }),
-                    Err(_) => Err(LlmError::Timeout {
+        // timeout() 对每个 chunk 施加 idle_timeout，防止代理中途卡死
+        let idle_timeout = self.config.idle_timeout; // Duration is Copy
+        let remaining = first_token_guard
+            .map(move |item| {
+                item.map_err(|e| LlmError::Network {
+                    detail: e.to_string(),
+                })
+            })
+            .timeout(idle_timeout)
+            .map(move |item| match item {
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(e)) => Err(e),
+                Err(_elapsed) => {
+                    tracing::error!(?idle_timeout, "stream idle timeout triggered");
+                    Err(LlmError::Timeout {
                         detail: format!("stream idle timed out after {:?}", idle_timeout),
-                    }),
+                    })
                 }
-            }
-        });
+            });
         let byte_stream =
             futures_util::stream::once(async move { Ok(first_bytes) }).chain(remaining);
         let boxed_stream = Box::pin(byte_stream);

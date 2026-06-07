@@ -36,9 +36,9 @@ impl LlmProvider for MockProvider {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.received_requests.lock().unwrap().push(request.clone());
 
-        self.responses.first().cloned().ok_or(LlmError::ApiError {
+        self.responses.first().cloned().ok_or(LlmError::Provider {
             provider: "mock".into(),
-            status: 500,
+            status: Some(500),
             code: None,
             message: "No mock response configured".into(),
         })
@@ -47,9 +47,9 @@ impl LlmProvider for MockProvider {
     async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         self.received_requests.lock().unwrap().push(request.clone());
 
-        let response = self.responses.first().cloned().ok_or(LlmError::ApiError {
+        let response = self.responses.first().cloned().ok_or(LlmError::Provider {
             provider: "mock".into(),
-            status: 500,
+            status: Some(500),
             code: None,
             message: "No mock response configured".into(),
         })?;

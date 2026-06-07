@@ -87,9 +87,9 @@ impl ProviderRegistry {
     pub fn resolve(&self, route: &RouteEntry) -> Result<ResolvedModel, LlmError> {
         let provider = self
             .get(&route.provider_id)
-            .ok_or_else(|| LlmError::ApiError {
+            .ok_or_else(|| LlmError::Provider {
                 provider: route.provider_id.clone(),
-                status: 0,
+                status: None,
                 code: None,
                 message: format!("provider not registered: {}", route.provider_id),
             })?;

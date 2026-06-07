@@ -51,6 +51,7 @@ where
     let mut usage_acc = UsageAccumulator::new();
     let mut is_done = false;
 
+    let stream_start = std::time::Instant::now();
     while let Some(result) = bytes_stream.next().await {
         // 在解析开销前快速探测 channel 是否断开
         if sink.is_closed() {
@@ -59,6 +60,11 @@ where
 
         match result {
             Ok(bytes) => {
+                tracing::debug!(
+                    elapsed = ?stream_start.elapsed(),
+                    bytes = bytes.len(),
+                    "stream chunk received"
+                );
                 let frames = parser.feed(&bytes);
 
                 for frame in frames {
@@ -101,6 +107,11 @@ where
                 }
             }
             Err(e) => {
+                tracing::error!(
+                    elapsed = ?stream_start.elapsed(),
+                    error = %e,
+                    "stream error"
+                );
                 sink.emit(StreamEvent::Error(e)).await;
                 return;
             }

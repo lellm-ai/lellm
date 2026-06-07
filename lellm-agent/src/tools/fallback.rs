@@ -63,7 +63,9 @@ impl DefaultFallback {
     fn is_retriable(error: &LlmError) -> bool {
         match error {
             LlmError::Timeout { .. } | LlmError::Network { .. } => true,
-            LlmError::ApiError { status, .. } => *status >= 500,
+            LlmError::Provider {
+                status: Some(s), ..
+            } => *s >= 500,
             _ => false,
         }
     }
