@@ -29,3 +29,4 @@ v02-preview = []
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
 lellm-macros = { path = "../lellm-macros" }
+reqwest.workspace = true
