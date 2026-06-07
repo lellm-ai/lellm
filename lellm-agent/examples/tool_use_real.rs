@@ -2,13 +2,52 @@
 //!
 //! 包含两个示例场景：
 //! 1. **产品搜索链**：`search_products` → `check_inventory`（模拟数据）
-//! 2. **天气查询链**：LLM 推理城市拼音 → `fetch_weather`（真实 wttr.in API）
+//! 2. **天气查询链**：LLM 推理 → `fetch_weather` → 失败重试（真实 wttr.in API）
 //!
-//! 天气查询链中，**城市识别完全由大模型推理完成**：
-//! - 用户输入任意地址（街道、乡镇、区、县）
-//! - LLM 自行推理出所属地级市，并转换为拼音
-//! - LLM 调用 `fetch_weather(city_pinyin)` 获取天气
-//! - 无需任何硬编码映射表
+//! 天气查询链的 ReAct 流程（**城市识别完全由大模型推理**）：
+//!
+//! ```text
+//! ================================== 人类消息 ==================================
+//! 帮我查一下浦东新区的天气
+//!
+//! ================================== AI 消息 ==================================
+//! 推理: 浦东新区属于上海市，拼音为 shanghai
+//! 工具调用：
+//!   fetch_weather (call_xxx)
+//!   参数: {"city_pinyin": "shanghai"}
+//!
+//! ================================ 工具观察 ================================
+//! { "city": "shanghai", "condition": "小雨", "temperature": "17°C", ... }
+//!
+//! ================================== AI 消息 ==================================
+//! 上海当前天气：小雨，温度 17°C，湿度 94%，风速 7km/h
+//! → 成功，结束循环
+//! ```
+//!
+//! 若首次调用失败（拼音错误等），LLM 会重新推理并尝试：
+//!
+//! ```text
+//! ================================== 人类消息 ==================================
+//! 帮我查一下某某镇的天气
+//!
+//! ================================== AI 消息 ==================================
+//! 推理: 某某镇可能属于 XX 市，拼音尝试 "xx-xx"
+//! 工具调用：fetch_weather("xx-xx")
+//!
+//! ================================ 工具观察 ================================
+//! ❌ 工具错误 [NotFound] 城市 'xx-xx' 未找到，请重新推理...
+//!
+//! ================================== AI 消息 ==================================
+//! 推理: 拼音格式可能不对，去掉分隔符再试 "xxxx"
+//! 工具调用：fetch_weather("xxxx")
+//!
+//! ================================ 工具观察 ================================
+//! { "city": "xxxx", "condition": "晴", ... }
+//!
+//! ================================== AI 消息 ==================================
+//! XX 市当前天气：晴...
+//! → 成功，结束循环
+//! ```
 //!
 //! 对应 LangChain 用法：
 //! ```python
@@ -24,12 +63,9 @@
 //! result = agent.invoke("帮我查一下浦东新区的天气")
 //! ```
 //!
-//! 智能体遵循 ReAct（推理 + 行动）模式，在推理步骤与工具调用之间交替，
-//! 并将结果观察反馈到后续决策中，直到能够提供最终答案。
-//!
-//! 每一步都清晰可观测：
-//! - 人类消息 → AI 消息（工具调用） → 工具观察 → AI 消息（工具调用） → ... → 最终答案
-//! - 工具执行错误会以 "工具错误" 形式展示，不中断循环
+//! 智能体遵循 ReAct（推理 + 行动）模式：
+//! - 推理 → 工具调用 → 观察 → 若失败则重新推理 → ... → 最终答案
+//! - 工具执行错误会以 "工具错误" 形式展示，不中断循环（LLM 看到错误后重试）
 //! - Provider API 错误会以 "API 错误" 形式展示
 //!
 //! 运行（需设置环境变量）：
@@ -54,11 +90,18 @@ use std::sync::Arc;
 #[tool(
     name = "fetch_weather",
     description = "调用 wttr.in API 获取指定城市的实时天气情况。\
-                   返回 JSON 结构化数据，包含天气状况、温度、湿度、风速。\
-                   城市名称必须使用拼音，例如 'shanghai'、'beijing'、'guangzhou'、'shenzhen'。"
+                   返回 JSON 结构化数据：{{ city, condition, temperature, humidity, wind_speed }}。\
+                   城市名称必须使用拼音，例如 'shanghai'、'beijing'、'guangzhou'、'shenzhen'、'chengdu'。\
+                   如果城市拼音错误导致查询失败，工具会返回 NotFound 错误，\
+                   此时请根据错误信息重新推理城市名和拼音，再次调用本工具。\
+                   常见城市拼音参考：beijing, shanghai, tianjin, chongqing, guangzhou, shenzhen,\
+                   nanjing, suzhou, hangzhou, ningbo, chengdu, wuhan, changsha, fuzhou, xiamen,\
+                   jinan, qingdao, zhengzhou, xian, shenyang, dalian, haerbin, kunming, guiyang,\
+                   lanzhou, taiyuan, hefei, nanchang, changchun, haikou, yinchuan, xining, lasa。\
+                   "
 )]
 struct FetchWeatherArgs {
-    /// 城市拼音名称，例如 "shanghai"、"beijing"、"guangzhou"
+    /// 城市拼音名称（小写，无分隔符），例如 "shanghai"、"beijing"、"guangzhou"
     city_pinyin: String,
 }
 
@@ -122,8 +165,13 @@ fn fetch_weather_from_wttr(city_pinyin: &str) -> Result<WeatherInfo, ToolError> 
 
     if parts.is_empty() {
         return Err(ToolError {
-            kind: ToolErrorKind::Internal,
-            message: format!("wttr.in 返回空数据，城市 '{}' 可能不存在", city_pinyin),
+            kind: ToolErrorKind::NotFound,
+            message: format!(
+                "城市 '{}' 在 wttr.in 中未找到，请检查拼音是否正确。\
+                 常见示例: beijing, shanghai, guangzhou, shenzhen, chengdu, hangzhou, wuhan。\
+                 请重新推理地址所属的地级市，修正拼音后再试。",
+                city_pinyin
+            ),
         });
     }
 
@@ -238,7 +286,33 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
     )
 }
 
-/// 创建天气查询 Agent — LLM 自行推理城市拼音
+/// 创建天气查询 Agent — LLM 自行推理城市拼音，失败自动重试
+///
+/// ReAct 循环流程：
+/// ```text
+/// 用户: "帮我查一下浦东新区的天气"
+///
+/// ┌─ 第 1 轮 ──────────────────────────────────────┐
+/// │ LLM 推理: 浦东新区 → 上海 → shanghai            │
+/// │ 调用: fetch_weather("shanghai")                 │
+/// │ 观察: ✅ { city: "shanghai", condition: ... }   │
+/// │ → 成功，结束循环                                │
+/// └─────────────────────────────────────────────────┘
+///
+/// 若失败：
+/// ┌─ 第 1 轮 ──────────────────────────────────────┐
+/// │ LLM 推理: 某某镇 → XXX → "xxx-xxx"             │
+/// │ 调用: fetch_weather("xxx-xxx")                  │
+/// │ 观察: ❌ 城市不存在                             │
+/// ├─ 第 2 轮 ──────────────────────────────────────┤
+/// │ LLM 推理: 修正 → YYY → "yyy"                   │
+/// │ 调用: fetch_weather("yyy")                      │
+/// │ 观察: ✅ { ... }                                │
+/// │ → 成功，结束循环                                │
+/// └─────────────────────────────────────────────────┘
+///
+/// 若连续失败直到 max_iterations → MaxIterationsReached
+/// ```
 fn create_weather_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     let model = ResolvedModel {
         provider: Arc::new(provider),
@@ -249,9 +323,15 @@ fn create_weather_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolU
         .system_prompt(
             "你是一个天气查询助手。\
              用户会告诉你一个地址（可能是街道、乡镇、区县等），\
-             你需要先推理出该地址所属的地级市名称，并将其转换为拼音，\
-             然后调用 fetch_weather 工具获取该城市的天气信息。\
-             最后用自然语言总结天气情况。"
+             请按以下步骤操作：\
+             1. 推理该地址所属的地级市名称\
+             2. 将城市名转换为拼音（如 上海→shanghai，北京→beijing，广州→guangzhou）\
+             3. 调用 fetch_weather(city_pinyin) 获取天气\
+             4. 如果工具返回错误，根据错误信息重新推理城市名和拼音，再次调用 fetch_weather\
+             5. 获取到天气后，用自然语言总结天气情况\
+             \
+             注意：拼音不要加分隔符，如 shanghai 而非 shang-hai；\
+             不确定时尝试常见的地级市。"
                 .to_string(),
         )
         .tools(register_weather_tools())
