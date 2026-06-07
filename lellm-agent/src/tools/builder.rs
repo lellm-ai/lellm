@@ -76,6 +76,15 @@ impl AgentBuilder {
         self
     }
 
+    /// 设置整个 Agent Run 的最大输出 token 总数。
+    ///
+    /// 防止多轮工具调用导致总输出失控。达到阈值时立即停止，
+    /// 返回 `StopReason::OutputBudgetExceeded`。
+    pub fn max_total_output_tokens(mut self, max: u32) -> Self {
+        self.config.max_total_output_tokens = Some(max);
+        self
+    }
+
     /// 设置系统提示。
     pub fn system_prompt(mut self, prompt: String) -> Self {
         self.config.system_prompt = Some(prompt);

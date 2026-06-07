@@ -60,11 +60,6 @@ where
 
         match result {
             Ok(bytes) => {
-                tracing::trace!(
-                    elapsed = ?stream_start.elapsed(),
-                    bytes = bytes.len(),
-                    "stream chunk received"
-                );
                 let frames = parser.feed(&bytes);
 
                 for frame in frames {
@@ -183,9 +178,7 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
         }
         Err(e) => {
             // [DONE]、空 frame 等是可预期的跳过，不报警
-            if frame.data == "[DONE]" || frame.data.is_empty() {
-                tracing::trace!(error = %e, "ignoring non-data frame");
-            } else {
+            if frame.data != "[DONE]" && !frame.data.is_empty() {
                 tracing::warn!(
                     error = %e,
                     data_len = frame.data.len(),

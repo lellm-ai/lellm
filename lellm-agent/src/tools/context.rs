@@ -128,14 +128,16 @@ fn estimate_json_value(value: &serde_json::Value) -> usize {
     estimate_text(&serde_json::to_string(value).unwrap_or_default())
 }
 
-/// 估算文本的 Token 数（CJK-aware）。
+/// 估算文本的 Token 数（CJK-aware，含 1.1x 安全系数）。
 ///
 /// 估算规则：
 /// - ASCII 字符: 4 chars ≈ 1 token（BPE 常见比例）
 /// - CJK 汉字: 2.5 tokens/字（1 char = 5 raw → 除以 2 = 2.5）
 /// - 其他 Unicode（标点、空白等）: 1 token/字
 /// - 最后乘以 1.1x 安全系数，覆盖协议开销（role marker、JSON wrapper 等）
-fn estimate_text(s: &str) -> usize {
+///
+/// 可用于流式 delta 的增量 token 累计，作为输出预算的保险丝。
+pub fn estimate_text(s: &str) -> usize {
     let mut ascii_count: usize = 0;
     let mut cjk_count: usize = 0;
     let mut other_count: usize = 0;

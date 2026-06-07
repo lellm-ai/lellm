@@ -18,7 +18,9 @@ use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-use super::context::{ContextBudget, ContextCompactor, LocalCompactor, estimate_tokens};
+use super::context::{
+    ContextBudget, ContextCompactor, LocalCompactor, estimate_text, estimate_tokens,
+};
 use super::executor::ToolExecutor;
 use super::fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 use super::{AgentEvent, AgentStream, StopReason};
@@ -44,6 +46,15 @@ pub struct ToolUseConfig {
     /// 若需要长文本生成，可通过 Builder 调大。
     /// 会自动注入到 `ChatRequest.max_tokens`。
     pub max_output_tokens: u32,
+    /// 整个 Agent Run 的最大输出 token 总数（可选，默认无限制）。
+    ///
+    /// 即使每轮的 `max_output_tokens` 设置合理，多轮工具调用仍可能导致
+    /// 总输出巨大（如 10 轮 × 4k = 40k）。此字段提供聚合层面的保险丝，
+    /// 防止因工具循环或 Provider 忽略 max_tokens 而导致的成本失控。
+    ///
+    /// 统计范围：Assistant Text + Thinking（不含 Tool Call 结构开销）。
+    /// 在流式模式下边接收边检查，达到阈值立即停止。
+    pub max_total_output_tokens: Option<u32>,
     /// 上下文预算管理（默认开启）
     ///
     /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 128,000）
@@ -59,6 +70,7 @@ impl Default for ToolUseConfig {
             system_prompt: None,
             max_iterations: 10,
             max_output_tokens: 4_000,
+            max_total_output_tokens: None,
             context_budget: ContextBudget::default(),
         }
     }
@@ -137,6 +149,9 @@ pub struct LoopState {
     pub estimated_tokens: usize,
     pub iterations: usize,
     pub tool_calls_executed: usize,
+    /// 整个 Agent Run 的累计输出 Token 数（Text + Thinking，不含 Tool Call）
+    /// 用于 max_total_output_tokens 预算检查。
+    pub total_output_tokens: usize,
 }
 
 impl LoopState {
@@ -147,7 +162,35 @@ impl LoopState {
             estimated_tokens,
             iterations: 0,
             tool_calls_executed: 0,
+            total_output_tokens: 0,
         }
+    }
+
+    /// 累计输出 Token（Text + Thinking delta）
+    pub fn add_output_tokens(&mut self, tokens: usize) {
+        self.total_output_tokens += tokens;
+    }
+
+    /// 检查是否超过总输出预算
+    pub fn exceeded_total_output(&self, max: Option<u32>) -> bool {
+        match max {
+            Some(limit) => self.total_output_tokens >= limit as usize,
+            None => false,
+        }
+    }
+
+    /// 从 ContentBlock 估算输出 Token（Text + Thinking，不含 ToolCall）
+    pub fn add_output_from_content(&mut self, content: &[lellm_core::ContentBlock]) {
+        let tokens: usize = content
+            .iter()
+            .map(|b| match b {
+                lellm_core::ContentBlock::Text(t) => estimate_text(&t.text),
+                lellm_core::ContentBlock::Thinking(th) => estimate_text(&th.thinking),
+                lellm_core::ContentBlock::Image { .. } => 0,
+                lellm_core::ContentBlock::ToolCall(_) => 0,
+            })
+            .sum();
+        self.total_output_tokens += tokens;
     }
 
     /// 追加 Assistant 响应到历史
@@ -222,6 +265,11 @@ impl LoopState {
     /// 构建外部取消结果
     pub fn finish_cancelled(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::Cancelled, response)
+    }
+
+    /// 构建输出预算超限结果
+    pub fn finish_output_budget(&self, response: ChatResponse) -> ToolUseResult {
+        self.finish(StopReason::OutputBudgetExceeded, response)
     }
 }
 
@@ -305,6 +353,42 @@ fn empty_response() -> ChatResponse {
         lellm_core::text_block(String::new()),
         lellm_core::TokenUsage::default(),
         serde_json::Value::Null,
+    )
+}
+
+/// 从累积的 buffer 构建部分 ChatResponse（输出预算超限时使用）
+fn build_partial_response(
+    text_buffer: String,
+    thinking_buffer: String,
+    redacted_buffer: Option<String>,
+) -> ChatResponse {
+    let mut content: Vec<lellm_core::ContentBlock> = Vec::new();
+
+    if !thinking_buffer.is_empty() {
+        content.push(lellm_core::ContentBlock::Thinking(
+            lellm_core::ThinkingBlock {
+                thinking: thinking_buffer,
+                redacted: redacted_buffer,
+            },
+        ));
+    }
+
+    if !text_buffer.is_empty() {
+        content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
+            text: text_buffer,
+        }));
+    }
+
+    if content.is_empty() {
+        content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
+            text: String::new(),
+        }));
+    }
+
+    ChatResponse::new(
+        content,
+        lellm_core::TokenUsage::default(),
+        serde_json::json!(null),
     )
 }
 
@@ -417,6 +501,14 @@ impl ToolUseLoop {
             )
             .await?;
             last_response = Some(response);
+
+            // 累计本轮输出 Token
+            state.add_output_from_content(&last_response.as_ref().unwrap().content);
+
+            // 总输出预算检查
+            if state.exceeded_total_output(self.config.max_total_output_tokens) {
+                return Ok(state.finish_output_budget(last_response.unwrap()));
+            }
 
             if !last_response.as_ref().unwrap().has_tool_calls() {
                 return Ok(state.finish_complete(last_response.unwrap()));
@@ -551,6 +643,7 @@ impl ToolUseLoop {
                 let tx_for_fallback = tx.clone();
                 let executor_for_fallback = executor.clone();
                 let budget_for_fallback = config.context_budget.clone();
+                let max_output_tokens_for_fallback = config.max_output_tokens;
                 let req_for_fallback = req.clone();
                 let state_for_clone = state.clone();
                 let iteration_count = state.iterations;
@@ -564,6 +657,7 @@ impl ToolUseLoop {
                             let tx = tx_for_fallback.clone();
                             let executor = executor_for_fallback.clone();
                             let budget = budget_for_fallback.clone();
+                            let max_output_tokens = max_output_tokens_for_fallback;
                             let req = req_for_fallback.clone();
                             let mut attempt_state = state_for_clone.clone();
 
@@ -582,6 +676,7 @@ impl ToolUseLoop {
                                     &mut thinking_buffer,
                                     &mut redacted_buffer,
                                     &budget,
+                                    max_output_tokens,
                                 )
                                 .await?;
 
@@ -607,9 +702,32 @@ impl ToolUseLoop {
                         response,
                         tool_calls: _,
                     }) => {
+                        // 累计本轮输出 Token
+                        state.add_output_from_content(&response.content);
                         last_response = Some(response);
+
+                        // 总输出预算检查
+                        if state.exceeded_total_output(config.max_total_output_tokens) {
+                            tracing::warn!(
+                                total_output_tokens = state.total_output_tokens,
+                                max = ?config.max_total_output_tokens,
+                                "total output budget exceeded"
+                            );
+                            let _ = emit(
+                                &tx,
+                                AgentEvent::LoopEnd {
+                                    result: state.finish_output_budget(
+                                        last_response.unwrap_or_else(empty_response),
+                                    ),
+                                },
+                            )
+                            .await;
+                            return;
+                        }
                     }
                     Ok(StreamIterResult::Complete { response }) => {
+                        // 累计本轮输出 Token
+                        state.add_output_from_content(&response.content);
                         let _ = emit(
                             &tx,
                             AgentEvent::LoopEnd {
@@ -627,6 +745,22 @@ impl ToolUseLoop {
                             &tx,
                             AgentEvent::LoopEnd {
                                 result: state.finish_cancelled(resp),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(StreamIterResult::OutputBudgetExceeded { response }) => {
+                        // 单轮输出预算超限 — 累计并立即停止
+                        state.add_output_from_content(&response.content);
+                        tracing::warn!(
+                            total_output_tokens = state.total_output_tokens,
+                            "single-round output budget exceeded, stopping agent"
+                        );
+                        let _ = emit(
+                            &tx,
+                            AgentEvent::LoopEnd {
+                                result: state.finish_output_budget(response),
                             },
                         )
                         .await;
@@ -666,11 +800,15 @@ enum StreamIterResult {
     Complete { response: ChatResponse },
     /// 消费者断开（不再继续）
     Cancelled { response: Option<ChatResponse> },
+    /// 单轮输出预算超限（Provider 忽略 max_tokens 或模型无限输出）
+    OutputBudgetExceeded { response: ChatResponse },
 }
 
 /// 处理流式单轮迭代。
 ///
 /// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
+///
+/// `max_output_tokens` — 单轮输出的 Token 上限（保险丝），在流式消费时实时检查。
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
@@ -680,8 +818,12 @@ async fn process_stream_iteration(
     thinking_buffer: &mut String,
     redacted_buffer: &mut Option<String>,
     budget: &ContextBudget,
+    max_output_tokens: u32,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
+
+    // ─── 输出预算保险丝 ───
+    let mut round_output_tokens: usize = 0;
 
     while let Some(result) = stream.next().await {
         let ev = match result {
@@ -694,9 +836,37 @@ async fn process_stream_iteration(
         // 统一透传 Provider 事件 — Provider 发一次，Agent 只负责转发
         match &ev {
             lellm_provider::ProviderEvent::Token { token } => {
+                round_output_tokens += estimate_text(token);
+                if (round_output_tokens as u32) > max_output_tokens {
+                    tracing::warn!(
+                        round_output_tokens,
+                        max_output_tokens,
+                        "single-round output budget exceeded, cutting stream"
+                    );
+                    let response = build_partial_response(
+                        text_buffer.clone(),
+                        thinking_buffer.clone(),
+                        redacted_buffer.clone(),
+                    );
+                    return Ok(StreamIterResult::OutputBudgetExceeded { response });
+                }
                 text_buffer.push_str(token);
             }
             lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
+                round_output_tokens += estimate_text(thinking);
+                if (round_output_tokens as u32) > max_output_tokens {
+                    tracing::warn!(
+                        round_output_tokens,
+                        max_output_tokens,
+                        "single-round output budget exceeded (thinking), cutting stream"
+                    );
+                    let response = build_partial_response(
+                        text_buffer.clone(),
+                        thinking_buffer.clone(),
+                        redacted_buffer.clone(),
+                    );
+                    return Ok(StreamIterResult::OutputBudgetExceeded { response });
+                }
                 thinking_buffer.push_str(thinking);
                 if let Some(r) = redacted {
                     if let Some(ref mut prev) = *redacted_buffer {

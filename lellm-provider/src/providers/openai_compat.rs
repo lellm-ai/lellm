@@ -237,7 +237,8 @@ impl ProviderAdapter for OpenAICompatAdapter {
                     }
 
                     // 推理/思考增量（Qwen 等模型的 reasoning_content 字段）
-                    if let Some(reasoning_text) = d.get("reasoning_content").and_then(|c| c.as_str())
+                    if let Some(reasoning_text) =
+                        d.get("reasoning_content").and_then(|c| c.as_str())
                         && !reasoning_text.is_empty()
                     {
                         results.push(StreamChunk::ThinkingDelta {

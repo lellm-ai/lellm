@@ -112,34 +112,101 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
     )
 }
 
+/// 其实应该拆成 tool resolve_city(address)
+/*
+    LLM负责：
+
+输入地址
+↓
+调用 resolve_city
+↓
+调用 wttr
+↓
+返回 JSON
+
+这样：
+
+Token 降低 90%+
+不会出现 "阿尔卡吉→Alcatraz" 这种幻觉
+不会浪费 reasoning budget
+Agent Loop 更稳定
+
+     */
 fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
+    let prompt = r#"你是天气查询助手。
+任务分两步：
+
+步骤1：地址归一化
+
+将用户输入地址映射为 wttr.in 可识别城市。
+
+规则：
+
+- 仅允许输出一个城市
+- 不允许多个候选
+- 不允许猜测
+- 不允许解释
+- 不允许分析过程
+- 无法确定时返回 unknown
+
+示例：
+
+宁海 -> ningbo
+浦东 -> shanghai
+新宿 -> tokyo
+未知地点 -> unknown
+
+步骤2：天气查询
+
+仅对非 unknown 城市调用 http_get：
+
+https://wttr.in/{city}?format=%c+%t+%h+%w
+
+失败处理：
+
+- 最多允许一个备用城市
+- 仅重试一次
+- 再失败返回 unknown
+
+最终输出：
+
+单地址：
+
+{
+  "city":"tokyo",
+  "city_source":"新宿",
+  "condition":"小雨",
+  "temperature":"17°C",
+  "humidity":"94%",
+  "wind":"7km/h"
+}
+
+多地址：
+
+[
+  {...},
+  {...}
+]
+
+最终回答必须为 JSON。
+禁止输出解释、分析、思考过程。
+地址推理属于简单映射任务。
+
+禁止进行地理分析。
+禁止进行多轮推理。
+禁止生成 reasoning。
+Think less.
+Use direct mapping only."#;
+
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
-    .system_prompt(
-        "天气查询助手。使用 wttr.in 获取天气：\n\
-         \n\
-         URL 模板：https://wttr.in/{city}?format=%c+%t+%h+%w\n\
-         城市名：英文小写，多词用连字符（new-york, san-francisco）\n\
-         **重要**：地址请推理到地级市（如 宁海→宁波→ningbo，浦东→上海→shanghai）\n\
-         返回：空格分隔的文本，如 '小雨 17°C 94% 7km/h'\n\
-         \n\
-         单地址：推理城市→调用 http_get→解析→输出 JSON\n\
-         多地址：推理所有城市→并行调用多个 http_get→汇总为 JSON 数组\n\
-         \n\
-         JSON 格式（每个对象）：\n\
-         {{\"city\":\"tokyo\",\"city_source\":\"新宿\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"7km/h\"}}\n\
-         city_source 为用户原始输入地址。多地址时输出 JSON 数组。\n\
-         \n\
-         若 API 报错或返回空→重新推理城市名→重试。\n\
-         最终回答必须是 JSON，不要其他文字。"
-            .to_string(),
-    )
+    .system_prompt(prompt.to_string())
     .tools(register_http_tools())
     .max_iterations(10)
-    .max_output_tokens(4000)
+    .max_output_tokens(2000)
     .build()
 }
 
@@ -176,7 +243,6 @@ async fn observe_react_loop(
                     current_tool: None,
                     step_start: Some(std::time::Instant::now()),
                 };
-                eprintln!("[DEBUG] >>> 第 {iteration} 轮 — 调用 {model}");
             }
 
             AgentEvent::Provider(ProviderEvent::Token { token }) => {
@@ -187,8 +253,6 @@ async fn observe_react_loop(
 
             AgentEvent::Provider(ProviderEvent::ThinkingDelta { thinking, .. }) => {
                 round.reasoning.push_str(&thinking);
-                print!("[思考] {thinking}");
-                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
 
             AgentEvent::Provider(ProviderEvent::ResponseComplete { tool_calls, usage }) => {
@@ -199,10 +263,6 @@ async fn observe_react_loop(
                 step_times.push((iteration, elapsed));
 
                 if tool_calls.is_empty() {
-                    eprintln!(
-                        "\n[DEBUG] >>> 第 {iteration} 轮 — 最终回答 ({:.2}s)",
-                        elapsed
-                    );
                     let _ = usage;
                 } else {
                     println!();
@@ -218,11 +278,6 @@ async fn observe_react_loop(
                         println!("  参数: {}", tc.arguments);
                     }
                     println!();
-                    eprintln!(
-                        "[DEBUG] >>> 第 {iteration} 轮 — {} 个工具调用 ({:.2}s)",
-                        tool_calls.len(),
-                        elapsed
-                    );
                 }
             }
 
@@ -255,7 +310,6 @@ async fn observe_react_loop(
                     }
                 }
                 round.current_tool = None;
-                eprintln!("[DEBUG] >>> 工具执行耗时 {:.2}s", tool_elapsed);
                 println!();
             }
 
@@ -280,9 +334,6 @@ async fn observe_react_loop(
                 println!("============================ 上下文压缩 ==============================");
                 println!(
                     "📦 上下文压缩: {before_tokens} → {after_tokens} tokens (移除 {removed_messages} 条消息)"
-                );
-                eprintln!(
-                    "[DEBUG] >>> 上下文压缩: {before_tokens} → {after_tokens} tokens, 移除 {removed_messages} 条消息"
                 );
                 println!();
             }

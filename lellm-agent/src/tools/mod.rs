@@ -17,7 +17,8 @@ pub mod signal_voter;
 
 pub use builder::AgentBuilder;
 pub use context::{
-    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_tokens,
+    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_text,
+    estimate_tokens,
 };
 pub use executor::{
     BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration,
@@ -130,6 +131,8 @@ pub enum StopReason {
     MaxIterationsReached,
     /// 外部取消（消费者断开、task 终止等）
     Cancelled,
+    /// 输出预算超限（单轮或总输出 token 超过限制）
+    OutputBudgetExceeded,
     // NOTE: LoopDetected 将在 v0.2 LoopDetector 实现时加回
 }
 

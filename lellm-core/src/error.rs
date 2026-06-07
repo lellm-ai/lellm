@@ -59,7 +59,7 @@ pub enum LlmError {
     #[error("request timeout: {detail}")]
     Timeout { detail: String },
 
-    #[error("provider error: {message}")]
+    #[error("provider error [{provider}]: {message}")]
     Provider {
         provider: String,
         status: Option<u16>,

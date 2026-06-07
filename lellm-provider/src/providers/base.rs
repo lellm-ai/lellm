@@ -133,7 +133,7 @@ impl EventSink for ChannelSink {
             match self.tx.try_send(mapped) {
                 Ok(()) => true,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    tracing::warn!("stream event dropped: channel full");
+                    // channel 满时静默丢弃 Token 事件（预期行为）
                     true // channel 没断，只是满
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
