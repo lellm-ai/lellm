@@ -557,6 +557,7 @@ enum StreamIterResult {
     /// 继续循环（有 tool_calls，应进入下一轮）
     Continue {
         response: ChatResponse,
+        #[allow(dead_code)]
         tool_calls: Vec<lellm_core::ToolCall>,
     },
     /// 正常完成（无 tool_calls，Agent 已获得最终答案）

@@ -105,7 +105,7 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
             std::env::var("OPENAI_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(120),
+                .unwrap_or(60),
         )),
     )
 }
@@ -113,7 +113,7 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
 fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
-        model: "gpt-4o".to_string(),
+        model: "Qwen3.6".to_string(),
     })
     .system_prompt(
         "天气查询助手。使用 wttr.in 获取天气：\n\
@@ -311,6 +311,14 @@ async fn observe_react_loop(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    yunli::setup_logger_debug().unwrap();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lellm_agent=debug,lellm_provider=debug,info".into()),
+        )
+        .try_init();
+
     if std::env::var("OPENAI_API_KEY").is_err() {
         eprintln!("错误：请设置 OPENAI_API_KEY 环境变量");
         eprintln!("用法：OPENAI_API_KEY=sk-xxx cargo run --example tool_use_react [地址]");
@@ -324,7 +332,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let question = match std::env::args().nth(1) {
         Some(addr) => format!("帮我查一下{addr}的天气"),
-        None => "帮我查一下金桥的天气".to_string(),
+        None => {
+            "帮我查一下陆家嘴潍坊街道/新宿/阿尔卡吉/奇台/龙爱路云视路/云锦东方的天气".to_string()
+        }
     };
 
     let stream = agent.execute_stream(vec![Message::User {
