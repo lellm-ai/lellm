@@ -119,6 +119,7 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
          \n\
          URL 模板：https://wttr.in/{city}?format=%c+%t+%h+%w\n\
          城市名：英文小写，多词用连字符（new-york, san-francisco）\n\
+         **重要**：地址请推理到地级市（如 宁海→宁波→ningbo，浦东→上海→shanghai）\n\
          返回：空格分隔的文本，如 '小雨 17°C 94% 7km/h'\n\
          \n\
          单地址：推理城市→调用 http_get→解析→输出 JSON\n\
@@ -290,7 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let question = match std::env::args().nth(1) {
         Some(addr) => format!("帮我查一下{addr}的天气"),
-        None => "帮我查一下金桥的天气".to_string(),
+        None => "帮我查一下金桥/宁海/新宿的天气".to_string(),
     };
 
     let stream = agent.execute_stream(vec![Message::User {
