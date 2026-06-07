@@ -573,3 +573,168 @@ fn serialize_message(msg: &Message) -> Result<serde_json::Value, LlmError> {
 - `extract_text()` 天然无法表示 `Vec<ContentBlock>` 结构化消息
 - OpenAI 与 Anthropic 的序列化规则不同，应在 Adapter 内部分开实现
 - v0.1 必须保证 `Assistant(tool_call) → ToolResult` 多轮历史保真，否则 Agent Loop 不是真正闭环
+
+## 11. 输出预算保险丝
+
+**问题：** Agent 层缺少对 LLM 输出总量的控制。存在多种失控场景：
+
+| 场景 | 原因 | 后果 |
+|------|------|------|
+| Provider 忽略 `max_tokens` | llama.cpp / vLLM / Ollama 等 OpenAI Compatible Server 实现不完整 | 单次响应无限长 |
+| 代理层吞参数 | 中间代理未转发 `max_tokens` 字段 | 同上 |
+| 多轮工具循环 | 每轮 4k × 10 轮 = 40k token | 总成本失控 |
+| 模型无限思维链 | 模型进入超长 reasoning 模式 | CPU/内存/带宽/费用耗尽 |
+
+**决定：** 两层保险丝，分别在流式消费层和 Agent Run 层。
+
+### 11.1 单轮输出预算（P0）
+
+`process_stream_iteration()` 在流式消费时实时累计 Token：
+
+```
+SSE Delta
+  ↓
+estimate_text(delta) → round_output_tokens += n
+  ↓
+round > max_output_tokens → OutputBudgetExceeded（立即切断流）
+```
+
+**关键设计：**
+- 边接收边检查，不是等 `ResponseComplete` 才判断
+- 使用 `estimate_text()`（CJK-aware 启发式）做增量估算
+- 统计范围：`Token` + `ThinkingDelta`（不含 Tool Call 结构开销）
+- 超限时构建 `build_partial_response()` 返回已接收的内容
+- 返回 `StreamIterResult::OutputBudgetExceeded`，Agent 层立即停止
+
+**为什么不用 `text.len()`：**
+- `"hello world"` = 11 chars ≈ 3 tokens
+- `"陆家嘴潍坊街道"` = 7 chars ≈ 10~15 tokens
+- 差异巨大，必须用 Token 估算
+
+### 11.2 总输出预算（P1）
+
+`ToolUseConfig` 新增 `max_total_output_tokens: Option<u32>`：
+
+```rust
+pub struct ToolUseConfig {
+    pub max_output_tokens: u32,           // 单轮 LLM 输出上限
+    pub max_total_output_tokens: Option<u32>, // 整个 Agent Run 输出上限
+    // ...
+}
+```
+
+**执行流程：**
+```
+每轮 LLM 调用完成
+  ↓
+state.add_output_from_content(&response.content)
+  ↓
+state.total_output_tokens += estimate_content_tokens(content)
+  ↓
+total > max_total_output_tokens → OutputBudgetExceeded（停止 Agent）
+```
+
+**统计时机：**
+- 非流式：`execute()` 在每次 `call()` 返回后累计
+- 流式：`execute_stream()` 在 `Continue` / `Complete` 时累计
+
+**Builder API：**
+```rust
+let agent = AgentBuilder::new(model)
+    .max_output_tokens(16_000)        // 单轮上限
+    .max_total_output_tokens(32_000)  // 总上限
+    .build();
+```
+
+### 11.3 StopReason::OutputBudgetExceeded
+
+**新增 `StopReason::OutputBudgetExceeded`**，不复用 `MaxIterationsReached`：
+
+```rust
+pub enum StopReason {
+    Complete,
+    MaxIterationsReached,
+    Cancelled,
+    OutputBudgetExceeded,  // 新增
+}
+```
+
+**理由：** 语义不同。`MaxIterationsReached` 表示轮次耗尽，`OutputBudgetExceeded` 表示 Token 超限。日志排查时，二者原因截然不同。
+
+### 11.4 LoopState 输出跟踪
+
+`LoopState` 新增字段与方法：
+
+```rust
+pub struct LoopState {
+    // ... 现有字段
+    pub total_output_tokens: usize,  // 整个 Run 的累计输出 Token
+}
+
+impl LoopState {
+    pub fn add_output_tokens(&mut self, tokens: usize);
+    pub fn add_output_from_content(&mut self, content: &[ContentBlock]);
+    pub fn exceeded_total_output(&self, max: Option<u32>) -> bool;
+    pub fn finish_output_budget(&self, response: ChatResponse) -> ToolUseResult;
+}
+```
+
+### 11.5 Token 估算函数
+
+`estimate_text()` 从 `context.rs` 导出为 `pub`：
+
+```rust
+pub fn estimate_text(s: &str) -> usize;
+```
+
+**估算规则：**
+- ASCII 字符: 4 chars ≈ 1 token（BPE 常见比例）
+- CJK 汉字: 2.5 tokens/字
+- 其他 Unicode: 1 token/字
+- 1.1x 安全系数
+
+**未来扩展：** v0.2 可替换为 `TokenEstimator` trait + Provider-specific tokenizer（如 `tiktoken-rs`）。
+
+### 11.6 保护层级总结
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 第 1 层: ChatRequest.max_tokens → Provider 侧限制         │ ← 可能失效
+├──────────────────────────────────────────────────────────┤
+│ 第 2 层: process_stream_iteration 单轮预算 → 客户端切断    │ ← P0 保险丝
+├──────────────────────────────────────────────────────────┤
+│ 第 3 层: max_total_output_tokens → Agent Run 总预算       │ ← P1 保险丝
+├──────────────────────────────────────────────────────────┤
+│ 第 4 层: max_iterations → 轮次上限                        │ ← 已有
+├──────────────────────────────────────────────────────────┤
+│ 第 5 层: ContextBudget.max_tokens → 输入上下文上限         │ ← 已有
+└──────────────────────────────────────────────────────────┘
+```
+
+即使 Provider 忽略 `max_tokens`、代理层吞参数、模型无限思维链 — Agent 仍有最后一道保险丝。
+
+## 12. 日志降噪
+
+**问题：** 流式推理路径上的高频日志淹没调试信息。
+
+### 12.1 移除的高频日志
+
+| 位置 | 原级别 | 触发频率 | 处理 |
+|------|--------|----------|------|
+| `stream_processor.rs` TCP chunk | `trace!` | 每个 TCP 包（数千次） | 移除 |
+| `base.rs` channel 满丢弃 | `warn!` | 消费者慢时持续触发 | 改为静默（预期行为） |
+| `stream_processor.rs` [DONE] frame | `trace!` | 每个 SSE frame | 移除 |
+
+### 12.2 保留的日志
+
+| 位置 | 级别 | 触发条件 |
+|------|------|----------|
+| `stream_processor.rs` stream error | `error!` | 流式读取错误 |
+| `stream_processor.rs` parse error | `warn!` | 非 [DONE] 解析失败 |
+| `base.rs` critical event lost | `error!` | 关键事件丢失 |
+| `runtime.rs` output budget exceeded | `warn!` | 预算超限（罕见） |
+| `runtime.rs` tool-use iteration | `debug!` | 每轮一次 |
+
+### 12.3 示例代码清理
+
+`tool_use_react.rs` 示例移除了所有 `[DEBUG]` 打印，只保留业务相关输出。ThinkingDelta 不再逐 token 打印到 stdout（避免与正常文本混排）。

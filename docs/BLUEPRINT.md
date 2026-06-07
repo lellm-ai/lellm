@@ -123,6 +123,8 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 | FallbackStrategy 路由决策 | [DESIGN.md §7.3](./DESIGN.md#73-fallbackstrategy---%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96%EF%BC%88%22%E6%8D%A2%E6%9D%A1%E8%B7%AF%E8%B5%B0%22%EF%BC%89) |
 | Message 语义校验 | [DESIGN.md §9](./DESIGN.md#9-message-%E8%AF%AD%E4%B9%89%E6%A0%A1%E9%AA%8C) |
 | build_request 序列化完整性 | [DESIGN.md §10](./DESIGN.md#10-build_request-%E5%BA%8F%E5%88%97%E5%8C%96%E5%AE%8C%E6%95%B4%E6%80%A7) |
+| 输出预算保险丝 | [DESIGN.md §11](./DESIGN.md#11-%E8%BE%93%E5%87%BA%E9%A4%88%E7%AE%97%E4%BF%9D%E9%99%A9%E4%B8%9D) |
+| 日志降噪 | [DESIGN.md §12](./DESIGN.md#12-%E6%97%A5%E5%BF%97%E5%87%8F%E5%99%B2) |
 
 ## 六、实现状态
 
@@ -148,6 +150,17 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | ModelRouter + Registry | ✅ |
 | ShortTermMemory | ✅ |
 | ToolRegistry | ✅ |
+| 输出预算保险丝 | ✅ |
+
+### 输出预算
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| `max_output_tokens` 单轮上限 | ✅ | 注入 `ChatRequest.max_tokens`，流式消费时实时检查 |
+| `max_total_output_tokens` 总上限 | ✅ | 整个 Agent Run 累计，防止多轮成本失控 |
+| `StopReason::OutputBudgetExceeded` | ✅ | 区分 token 超限与轮次超限 |
+| `estimate_text()` 导出 | ✅ | CJK-aware 启发式，供流式 delta 增量估算 |
+| 日志降噪 | ✅ | 移除 stream_processor 高频 trace，channel 满静默丢弃 |
 
 ### Resilience Layer
 
