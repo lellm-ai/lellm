@@ -1,18 +1,18 @@
 //! 工具调用 — 使用真实 Provider 的 ReAct 循环
 //!
-//! 天气查询链：LLM 推理城市 → 构造 wttr.in URL → `http_get` → 失败重试
+//! 天气查询链：LLM 推理城市 → 构造 wttr.in JSON URL → `http_get` → 解析 → 总结
 //!
 //! 核心设计：**工具层不硬编码任何业务 API**，仅提供通用 `http_get`。
-//! LLM 根据 system_prompt 中的 API 知识，自行推理请求 URL。
+//! LLM 根据 system_prompt 中的 API 知识，自行构造 URL 并解析 JSON 响应。
 //!
 //! ReAct 流程：
 //! ```text
 //! 用户: "帮我查一下浦东新区的天气"
 //!   → LLM 推理: 浦东新区 → 上海 → shanghai
 //!   → LLM 构造: https://wttr.in/shanghai?format=j1
-//!   → 调用: http_get(url)
-//!   → ✅ 成功 → 解析 JSON → 自然语言总结
-//!   → ❌ 失败 → LLM 重新推理 → 再次调用 → ...
+//!   → 调用: http_get(url) → 返回 JSON
+//!   → LLM 解析 current_condition[0] → 自然语言总结
+//!   → ❌ 失败 → 重新推理城市 → 再次调用 → ...
 //! ```
 //!
 //! 运行：
@@ -107,20 +107,21 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
         model: "gpt-4o".to_string(),
     })
     .system_prompt(
-        "你是一个天气查询助手，拥有以下 API 知识：\n\
+        "天气查询助手。使用 wttr.in JSON API 获取天气：\n\
          \n\
-         【wttr.in 天气 API】\n\
-         - 简洁格式：https://wttr.in/{城市}?format=%c+%t+%h+%w\n\
-         - 返回：天气状况 温度 湿度 风速（空格分隔），如 '小雨 17°C 94% 7km/h'\n\
-         - 城市未找到时返回空响应\n\
+         URL 模板：https://wttr.in/{city}?format=j1\n\
+         城市名：英文小写，多词用连字符（new-york, san-francisco）\n\
          \n\
-         工作流程：\n\
-         1. 用户给出地址 → 推理对应城市英文名（小写，多词用连字符，如 new-york）\n\
-         2. 构造 wttr.in URL，调用 http_get(url)\n\
-         3. 若返回空或错误 → 重新推理城市名 → 再次调用 http_get\n\
-         4. 获取天气后，用自然语言总结\n\
+         返回 JSON，当前天气在 current_condition[0]：\n\
+         - temp_C: 温度（°C）\n\
+         - humidity: 湿度（%）\n\
+         - weatherDesc[0].value: 天气状况\n\
+         - windspeedKmph: 风速（km/h）\n\
+         - FeelsLikeC: 体感温度\n\
          \n\
-         注意：直接调用 http_get 工具，不要尝试其他方式获取天气。"
+         用户给地址→推理城市英文名→调用 http_get(url)→\n\
+         解析 JSON 并用自然语言总结天气。若 API 报错或返回空，\n\
+         重新推理城市名后重试。"
             .to_string(),
     )
     .tools(register_http_tools())
