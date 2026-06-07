@@ -179,9 +179,9 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
     pub fn new(adapter: A, config: ProviderConfig) -> Self {
         let client = reqwest::Client::builder()
             // connect_timeout — 仅限制 TCP/TLS 握手时间
-            .connect_timeout(config.timeout)
-            // read_timeout — 防止 SSE 空闲连接挂死（300s，首 token 另有 tokio::time::timeout 控制）
-            .read_timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(config.connect_timeout)
+            // read_timeout — 作为 idle_timeout 的后置防线（取其 2 倍，给 TCP 层余量）
+            .read_timeout(config.idle_timeout.saturating_mul(2))
             .user_agent(format!("LeLLM/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();
@@ -370,10 +370,21 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         let adapter = self.adapter.clone();
 
         // 将首 chunk + 剩余流拼接为通用字节流
-        let remaining = first_token_guard.map(|item| {
-            item.map_err(|e| LlmError::Network {
-                detail: e.to_string(),
-            })
+        // 每个 chunk 施加 idle_timeout，防止代理或上游中途卡死
+        let idle_timeout = self.config.idle_timeout;
+        let remaining = first_token_guard.then(move |chunk| {
+            let idle_timeout = idle_timeout;
+            async move {
+                match tokio::time::timeout(idle_timeout, async { chunk }).await {
+                    Ok(Ok(bytes)) => Ok(bytes),
+                    Ok(Err(e)) => Err(LlmError::Network {
+                        detail: e.to_string(),
+                    }),
+                    Err(_) => Err(LlmError::Timeout {
+                        detail: format!("stream idle timed out after {:?}", idle_timeout),
+                    }),
+                }
+            }
         });
         let byte_stream =
             futures_util::stream::once(async move { Ok(first_bytes) }).chain(remaining);
@@ -411,8 +422,13 @@ pub struct ProviderConfig {
     pub base_url: url::Url,
     /// 认证配置
     pub auth: AuthConfig,
-    /// 请求超时
+    /// TCP/TLS 握手超时
+    pub connect_timeout: std::time::Duration,
+    /// 请求超时 — 控制 `.send()` + 首 token 等待
     pub timeout: std::time::Duration,
+    /// SSE 流空闲超时 — 连续无数据的最大时间（per-chunk）。
+    /// 防止代理或上游中途卡死导致无限等待。
+    pub idle_timeout: std::time::Duration,
 }
 
 impl ProviderConfig {
@@ -426,7 +442,9 @@ impl ProviderConfig {
             auth: AuthConfig::Bearer {
                 api_key: secrecy::SecretString::new(api_key.into().into()),
             },
+            connect_timeout: std::time::Duration::from_secs(10),
             timeout: std::time::Duration::from_secs(120),
+            idle_timeout: std::time::Duration::from_secs(30),
         })
     }
 
@@ -442,7 +460,9 @@ impl ProviderConfig {
                 header: header.into(),
                 value: secrecy::SecretString::new(value.into().into()),
             },
+            connect_timeout: std::time::Duration::from_secs(10),
             timeout: std::time::Duration::from_secs(120),
+            idle_timeout: std::time::Duration::from_secs(30),
         })
     }
 
@@ -451,7 +471,9 @@ impl ProviderConfig {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::None,
+            connect_timeout: std::time::Duration::from_secs(10),
             timeout: std::time::Duration::from_secs(120),
+            idle_timeout: std::time::Duration::from_secs(30),
         })
     }
 
@@ -466,6 +488,18 @@ impl ProviderConfig {
         self.timeout = timeout;
         self
     }
+
+    /// 修改连接超时
+    pub fn with_connect_timeout(mut self, connect_timeout: std::time::Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    /// 修改 SSE 流空闲超时
+    pub fn with_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
 }
 
 impl Default for ProviderConfig {
@@ -473,7 +507,9 @@ impl Default for ProviderConfig {
         Self {
             base_url: url::Url::parse("http://localhost").unwrap(),
             auth: AuthConfig::None,
+            connect_timeout: std::time::Duration::from_secs(10),
             timeout: std::time::Duration::from_secs(120),
+            idle_timeout: std::time::Duration::from_secs(30),
         }
     }
 }

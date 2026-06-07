@@ -13,13 +13,12 @@ use lellm_core::{ContentBlock, Message, text_block};
 /// 上下文预算配置。
 ///
 /// 控制 Agent Loop 中消息历史的 Token 上限与压缩行为。
-/// 设置为 `None` 时不做任何限制（兼容现有行为）。
 #[derive(Debug, Clone)]
 pub struct ContextBudget {
-    /// 消息历史的最大 Token 数（默认 50,000）
+    /// 消息历史的最大 Token 数（默认 128k）。
     ///
-    /// **方案 A (v0.1)**: 固定默认值 50k，适用于大多数模型
-    /// **方案 B (v0.2)**: 从 `ResolvedModel.context_window` 自动推导（window * 0.8）
+    /// **v0.1**: 固定默认值 128k，适用于大多数模型
+    /// **v0.2**: 从 `ResolvedModel.context_window` 自动推导（window * 0.8）
     pub max_tokens: usize,
     /// 达到此占比时触发压缩（默认 0.8 = 80%）
     pub warning_ratio: f32,
@@ -32,7 +31,7 @@ pub struct ContextBudget {
 impl Default for ContextBudget {
     fn default() -> Self {
         Self {
-            max_tokens: 50_000,
+            max_tokens: 128_000,
             warning_ratio: 0.8,
             keep_recent_turns: 5,
             max_tool_result_chars: 4096,

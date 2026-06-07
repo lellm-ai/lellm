@@ -101,12 +101,14 @@ fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
             std::env::var("OPENAI_API_KEY").expect("请设置 OPENAI_API_KEY"),
         )
         .expect("Invalid base URL")
+        .with_connect_timeout(std::time::Duration::from_secs(10))
         .with_timeout(std::time::Duration::from_secs(
             std::env::var("OPENAI_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60),
-        )),
+        ))
+        .with_idle_timeout(std::time::Duration::from_secs(30)),
     )
 }
 

@@ -38,7 +38,7 @@ pub struct ToolUseConfig {
     pub max_iterations: usize,
     /// 上下文预算管理（默认开启）
     ///
-    /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 50,000）
+    /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 128,000）
     /// **v0.2**: 从 `ResolvedModel.context_window` 自动推导（window * 0.8）
     ///
     /// 若要关闭限制，设置 `max_tokens = usize::MAX`。
@@ -523,36 +523,62 @@ impl ToolUseLoop {
 
                 let req = build_request_inner(&model, &executor, &state.messages);
 
-                // Provider 连接失败会触发 fallback 重试。
-                let stream_result: Result<lellm_provider::ProviderStream, LlmError> =
+                // 把 stream() + process_stream_iteration() 整体包进 fallback，
+                // 这样流消费失败（SSE 中途断掉）也能触发重试。
+                // 每次尝试克隆 state，成功后合并回主 state；重试时从干净状态开始。
+                let model_for_fallback = model.clone();
+                let tx_for_fallback = tx.clone();
+                let executor_for_fallback = executor.clone();
+                let budget_for_fallback = config.context_budget.clone();
+                let req_for_fallback = req.clone();
+                let state_for_clone = state.clone();
+                let iteration_count = state.iterations;
+                let state_messages = state.messages.clone();
+
+                let result: Result<(StreamIterResult, LoopState), LlmError> =
                     execute_with_fallback(
                         &deps.fallback,
-                        || model.provider.stream(&req),
-                        state.iterations,
-                        &state.messages,
+                        move || {
+                            let model = model_for_fallback.clone();
+                            let tx = tx_for_fallback.clone();
+                            let executor = executor_for_fallback.clone();
+                            let budget = budget_for_fallback.clone();
+                            let req = req_for_fallback.clone();
+                            let mut attempt_state = state_for_clone.clone();
+
+                            async move {
+                                let mut stream = model.provider.stream(&req).await?;
+                                let mut text_buffer = String::new();
+                                let mut thinking_buffer = String::new();
+                                let mut redacted_buffer: Option<String> = None;
+
+                                let iter_result = process_stream_iteration(
+                                    &tx,
+                                    &executor,
+                                    &mut attempt_state,
+                                    &mut stream,
+                                    &mut text_buffer,
+                                    &mut thinking_buffer,
+                                    &mut redacted_buffer,
+                                    &budget,
+                                )
+                                .await?;
+
+                                Ok((iter_result, attempt_state))
+                            }
+                        },
+                        iteration_count,
+                        &state_messages,
                     )
                     .await;
 
-                // process_stream_iteration 返回 Result，Err 直接传播为 LoopError。
-                let result: Result<StreamIterResult, LlmError> = match stream_result {
-                    Err(e) => Err(e),
-                    Ok(mut stream) => {
-                        let mut text_buffer = String::new();
-                        let mut thinking_buffer = String::new();
-                        let mut redacted_buffer: Option<String> = None;
-
-                        process_stream_iteration(
-                            &tx,
-                            &executor,
-                            &mut state,
-                            &mut stream,
-                            &mut text_buffer,
-                            &mut thinking_buffer,
-                            &mut redacted_buffer,
-                            &config.context_budget,
-                        )
-                        .await
+                // 成功时合并 state（process_stream_iteration 只在 ResponseComplete 时修改）
+                let result = match result {
+                    Ok((r, s)) => {
+                        state = s;
+                        Ok(r)
                     }
+                    Err(e) => Err(e),
                 };
 
                 match result {
