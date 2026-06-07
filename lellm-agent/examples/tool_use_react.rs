@@ -6,14 +6,21 @@
 //! LLM 根据 system_prompt 中的 API 知识，自行构造 URL，解析轻量文本响应，
 //! 并以 JSON 格式输出最终结果。
 //!
-//! ReAct 流程：
+//! 单地址流程：
 //! ```text
 //! 用户: "帮我查一下浦东新区的天气"
 //!   → LLM 推理: 浦东新区 → 上海 → shanghai
 //!   → LLM 构造: https://wttr.in/shanghai?format=%c+%t+%h+%w
 //!   → 调用: http_get(url) → 返回 '小雨 17°C 94% 7km/h'
-//!   → LLM 解析文本 → 输出 JSON: {"city":"shanghai","condition":"小雨",...}
-//!   → ❌ 失败 → 重新推理城市 → 再次调用 → ...
+//!   → LLM 解析 → {"city":"shanghai","city_source":"浦东新区","condition":"小雨",...}
+//! ```
+//!
+//! 多地址流程（并行工具调用）：
+//! ```text
+//! 用户: "查一下东京和纽约的天气"
+//!   → LLM 推理: 东京→tokyo, 纽约→new-york
+//!   → 并行调用: http_get(tokyo) + http_get(new-york)
+//!   → LLM 汇总 → [{"city":"tokyo","city_source":"东京",...},{"city":"new-york",...}]
 //! ```
 //!
 //! 运行：
@@ -114,13 +121,15 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
          城市名：英文小写，多词用连字符（new-york, san-francisco）\n\
          返回：空格分隔的文本，如 '小雨 17°C 94% 7km/h'\n\
          \n\
-         工作流程：\n\
-         1. 用户给地址 → 推理城市英文名 → 调用 http_get(url)\n\
-         2. 解析返回的文本，构造 JSON 输出：\n\
-         {{\"city\":\"tokyo\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"7km/h\"}}\n\
-         3. 若 API 报错或返回空 → 重新推理城市名 → 重试\n\
+         单地址：推理城市→调用 http_get→解析→输出 JSON\n\
+         多地址：推理所有城市→并行调用多个 http_get→汇总为 JSON 数组\n\
          \n\
-         最终回答必须是 JSON 格式，不要其他文字。"
+         JSON 格式（每个对象）：\n\
+         {{\"city\":\"tokyo\",\"city_source\":\"新宿\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"7km/h\"}}\n\
+         city_source 为用户原始输入地址。多地址时输出 JSON 数组。\n\
+         \n\
+         若 API 报错或返回空→重新推理城市名→重试。\n\
+         最终回答必须是 JSON，不要其他文字。"
             .to_string(),
     )
     .tools(register_http_tools())
