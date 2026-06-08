@@ -17,6 +17,43 @@ use super::stream::sse_frame::SseFrame;
 pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
 use super::stream::{EventSink, StreamEvent};
 
+// ─── Provider 认证风格与错误 ───
+
+/// 认证方式
+#[derive(Debug, Clone, Copy)]
+pub enum AuthStyle {
+    /// `Authorization: Bearer <key>`
+    Bearer,
+    /// 自定义 header，e.g. `x-api-key: <key>`
+    CustomHeader(&'static str),
+    /// 无认证
+    None,
+}
+
+/// 环境变量加载错误
+#[derive(Debug)]
+pub enum ProviderEnvError {
+    /// 缺少必需的 API Key
+    MissingApiKey { provider: String },
+    /// URL 解析失败
+    InvalidUrl { url: String, reason: String },
+}
+
+impl std::fmt::Display for ProviderEnvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderEnvError::MissingApiKey { provider } => {
+                write!(f, "Missing API key for provider '{}'", provider)
+            }
+            ProviderEnvError::InvalidUrl { url, reason } => {
+                write!(f, "Invalid URL '{}': {}", url, reason)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProviderEnvError {}
+
 // ─── Adapter → GenericProvider 的中间表示 ───
 
 /// Provider 请求 — Adapter 构建，GenericProvider 发送。
@@ -83,7 +120,15 @@ impl StreamParseResult {
 /// Adapter **不知道** ProviderConfig、reqwest、HTTP。
 /// 只负责：ChatRequest → ProviderRequest（请求），body bytes → ChatResponse（响应）。
 pub(crate) trait ProviderAdapter: Send + Sync {
-    fn name(&self) -> &str;
+    /// Provider 标识（全小写，如 "openai", "anthropic"）。
+    /// 环境变量前缀自动推导为 `provider_id().to_ascii_uppercase()`。
+    fn provider_id(&self) -> &str;
+
+    /// 默认基础 URL（当 `<PREFIX>_BASE_URL` 未设置时使用）。
+    fn default_base_url(&self) -> &'static str;
+
+    /// 认证方式（决定使用 `bearer()` 还是 `header()` 构造配置）。
+    fn auth_style(&self) -> AuthStyle;
 
     /// 构建 Provider 请求（路径 + 协议 Header + JSON Body 字节）
     fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError>;
@@ -193,6 +238,77 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
         }
     }
 
+    /// 从环境变量自动加载配置创建 Provider。
+    ///
+    /// 环境变量前缀 = `adapter.provider_id().to_ascii_uppercase()`。
+    /// 读取 `<PREFIX>_BASE_URL`（可选，有默认值）和 `<PREFIX>_API_KEY`（必需）。
+    ///
+    /// # 环境变量
+    ///
+    /// | Provider   | URL 变量            | Key 变量            | 默认 URL                            |
+    /// |-----------|-------------------|-------------------|-------------------------------------|
+    /// | openai    | `OPENAI_BASE_URL` | `OPENAI_API_KEY`  | `https://api.openai.com/v1`         |
+    /// | deepseek  | `DEEPSEEK_BASE_URL` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1`     |
+    /// | nvidia    | `NVIDIA_BASE_URL` | `NVIDIA_API_KEY`  | `https://integrate.api.nvidia.com/v1` |
+    /// | vllm      | `VLLM_BASE_URL`   | `VLLM_API_KEY`    | `http://localhost:8000/v1`          |
+    /// | llama     | `LLAMA_BASE_URL`  | `LLAMA_API_KEY`   | `http://localhost:8080/v1`          |
+    /// | anthropic | `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com`      |
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use lellm_provider::{GenericProvider, OpenAICompatAdapter};
+    ///
+    /// // 只需一行：
+    /// let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())?;
+    /// # Ok::<_, lellm_provider::providers::base::ProviderEnvError>(())
+    /// ```
+    pub fn from_env(adapter: A) -> Result<Self, ProviderEnvError> {
+        let provider_id = adapter.provider_id();
+        let env_prefix = provider_id.to_ascii_uppercase();
+        let default_url = adapter.default_base_url();
+        let auth_style = adapter.auth_style();
+
+        let base_url = std::env::var(format!("{}_BASE_URL", env_prefix)).unwrap_or_else(|_| {
+            tracing::debug!(
+                provider = provider_id,
+                url = default_url,
+                "{}_BASE_URL not set, using default",
+                env_prefix
+            );
+            default_url.to_string()
+        });
+
+        let api_key = std::env::var(format!("{}_API_KEY", env_prefix)).map_err(|_| {
+            tracing::error!(provider = provider_id, "{}_API_KEY not found", env_prefix);
+            ProviderEnvError::MissingApiKey {
+                provider: provider_id.to_string(),
+            }
+        })?;
+
+        let config = match auth_style {
+            AuthStyle::Bearer => ProviderConfig::bearer(&base_url, api_key).map_err(|e| {
+                ProviderEnvError::InvalidUrl {
+                    url: base_url.clone(),
+                    reason: e.to_string(),
+                }
+            })?,
+            AuthStyle::CustomHeader(header) => ProviderConfig::header(&base_url, header, api_key)
+                .map_err(|e| ProviderEnvError::InvalidUrl {
+                url: base_url.clone(),
+                reason: e.to_string(),
+            })?,
+            AuthStyle::None => {
+                ProviderConfig::none(&base_url).map_err(|e| ProviderEnvError::InvalidUrl {
+                    url: base_url.clone(),
+                    reason: e.to_string(),
+                })?
+            }
+        };
+
+        Ok(Self::new(adapter, config))
+    }
+
     /// 校验 ChatRequest：消息语义 + Provider 能力匹配。
     /// 在 build_request 之前调用，拦截非法请求。
     fn validate_request(&self, req: &ChatRequest) -> Result<(), LlmError> {
@@ -208,7 +324,10 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
                 for block in msg.content() {
                     if let ContentBlock::Image { .. } = block {
                         return Err(LlmError::UnsupportedFeature {
-                            feature: format!("Image input ({} adapter)", self.adapter.name()),
+                            feature: format!(
+                                "Image input ({} adapter)",
+                                self.adapter.provider_id()
+                            ),
                         });
                     }
                 }
@@ -270,25 +389,25 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
         let body_str = String::from_utf8_lossy(&resp.body);
         match resp.status {
             401 => LlmError::Provider {
-                provider: self.adapter.name().to_string(),
+                provider: self.adapter.provider_id().to_string(),
                 status: Some(401),
                 code: None,
                 message: body_str.into_owned(),
             },
             429 => LlmError::Provider {
-                provider: self.adapter.name().to_string(),
+                provider: self.adapter.provider_id().to_string(),
                 status: Some(429),
                 code: None,
                 message: "rate limited".into(),
             },
             status @ (400..=599) => LlmError::Provider {
-                provider: self.adapter.name().to_string(),
+                provider: self.adapter.provider_id().to_string(),
                 status: Some(status),
                 code: None,
                 message: body_str.into_owned(),
             },
             _ => LlmError::Provider {
-                provider: self.adapter.name().to_string(),
+                provider: self.adapter.provider_id().to_string(),
                 status: Some(resp.status),
                 code: None,
                 message: format!("Unexpected status: {}", resp.status),
@@ -417,7 +536,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
     }
 
     fn provider_id(&self) -> &str {
-        self.adapter.name()
+        self.adapter.provider_id()
     }
 }
 
@@ -547,3 +666,41 @@ impl AuthConfig {
         }
     }
 }
+
+// ─── ProviderFactory — 链式 API ───
+
+/// Provider 工厂 trait — 让 adapter 直接创建 GenericProvider。
+///
+/// 提供流畅的链式 API：
+///
+/// ```rust,no_run
+/// use lellm_provider::{GenericProvider, OpenAICompatAdapter, ProviderFactory};
+///
+/// let provider = OpenAICompatAdapter::openai().provider_from_env()?;
+/// # Ok::<_, lellm_provider::providers::base::ProviderEnvError>(())
+/// ```
+#[allow(private_bounds)]
+pub trait ProviderFactory: ProviderAdapter + Sized {
+    /// 从环境变量自动加载配置，创建 `GenericProvider<Self>`。
+    ///
+    /// 等价于 `GenericProvider::from_env(self)`，但 API 更流畅。
+    fn provider_from_env(self) -> Result<GenericProvider<Self>, ProviderEnvError>
+    where
+        Self: Clone,
+    {
+        GenericProvider::from_env(self)
+    }
+
+    /// 使用显式配置创建 `GenericProvider<Self>`。
+    ///
+    /// 等价于 `GenericProvider::new(self, config)`。
+    fn provider_with(self, config: ProviderConfig) -> GenericProvider<Self>
+    where
+        Self: Clone,
+    {
+        GenericProvider::new(self, config)
+    }
+}
+
+/// 所有 `ProviderAdapter + Clone` 自动获得 `ProviderFactory`。
+impl<T: ProviderAdapter + Clone> ProviderFactory for T {}

@@ -34,7 +34,7 @@ use lellm_agent::{
 };
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
 use lellm_macros::ToolDefinition;
-use lellm_provider::providers::base::{GenericProvider, ProviderConfig};
+use lellm_provider::providers::base::{GenericProvider, ProviderConfig, ProviderFactory};
 use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
 use lellm_provider::{ProviderEvent, ResolvedModel};
 use std::sync::Arc;
@@ -93,22 +93,27 @@ fn register_http_tools() -> Vec<ToolRegistration> {
 // ─── Provider / Agent 工厂 ──────────────────────────────────────
 
 fn create_provider() -> GenericProvider<OpenAICompatAdapter> {
+    let adapter = OpenAICompatAdapter::openai();
+    let provider_id = adapter.provider_id();
+    let env_prefix = provider_id.to_ascii_uppercase();
+    let default_url = adapter.default_base_url();
+
+    let base_url = std::env::var(format!("{}_BASE_URL", env_prefix))
+        .unwrap_or_else(|_| default_url.to_string());
+    let api_key = std::env::var(format!("{}_API_KEY", env_prefix)).expect("请设置 OPENAI_API_KEY");
+
     GenericProvider::new(
         OpenAICompatAdapter::openai(),
-        ProviderConfig::bearer(
-            &std::env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-            std::env::var("OPENAI_API_KEY").expect("请设置 OPENAI_API_KEY"),
-        )
-        .expect("Invalid base URL")
-        .with_connect_timeout(std::time::Duration::from_secs(10))
-        .with_timeout(std::time::Duration::from_secs(
-            std::env::var("OPENAI_TIMEOUT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(60),
-        ))
-        .with_idle_timeout(std::time::Duration::from_secs(30)),
+        ProviderConfig::bearer(&base_url, api_key)
+            .expect("Invalid base URL")
+            .with_connect_timeout(std::time::Duration::from_secs(10))
+            .with_timeout(std::time::Duration::from_secs(
+                std::env::var("OPENAI_TIMEOUT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(60),
+            ))
+            .with_idle_timeout(std::time::Duration::from_secs(30)),
     )
 }
 

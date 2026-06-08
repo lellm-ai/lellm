@@ -9,7 +9,7 @@ use lellm_core::{
 use std::borrow::Cow;
 
 use super::base::{
-    ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
+    AuthStyle, ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
 };
 use super::stream::sse_frame::SseFrame;
 
@@ -18,8 +18,16 @@ use super::stream::sse_frame::SseFrame;
 pub struct AnthropicAdapter;
 
 impl ProviderAdapter for AnthropicAdapter {
-    fn name(&self) -> &'static str {
+    fn provider_id(&self) -> &'static str {
         "anthropic"
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        "https://api.anthropic.com"
+    }
+
+    fn auth_style(&self) -> AuthStyle {
+        AuthStyle::CustomHeader("x-api-key")
     }
 
     fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {

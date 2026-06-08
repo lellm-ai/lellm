@@ -11,7 +11,7 @@ use lellm_core::{
 use std::borrow::Cow;
 
 use super::base::{
-    ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
+    AuthStyle, ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
 };
 use super::stream::sse_frame::SseFrame;
 
@@ -55,8 +55,23 @@ impl OpenAICompatAdapter {
 }
 
 impl ProviderAdapter for OpenAICompatAdapter {
-    fn name(&self) -> &str {
+    fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        match self.provider_id.as_str() {
+            "openai" => "https://api.openai.com/v1",
+            "deepseek" => "https://api.deepseek.com/v1",
+            "nvidia" => "https://integrate.api.nvidia.com/v1",
+            "vllm" => "http://localhost:8000/v1",
+            "llama" => "http://localhost:8080/v1",
+            _ => "http://localhost",
+        }
+    }
+
+    fn auth_style(&self) -> AuthStyle {
+        AuthStyle::Bearer
     }
 
     fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {
