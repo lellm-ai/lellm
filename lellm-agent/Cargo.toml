@@ -32,3 +32,31 @@ lellm-macros = { path = "../lellm-macros" }
 reqwest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yunli = "0.1"
+
+[[example]]
+name = "simple_agent"
+path = "examples/simple_agent.rs"
+
+[[example]]
+name = "streaming_agent"
+path = "examples/streaming_agent.rs"
+
+[[example]]
+name = "system_prompt"
+path = "examples/system_prompt.rs"
+
+[[example]]
+name = "tool_definition"
+path = "examples/tool_definition.rs"
+
+[[example]]
+name = "tool_use"
+path = "examples/tool_use.rs"
+
+[[example]]
+name = "tool_use_react"
+path = "examples/tool_use_react.rs"
+
+[[example]]
+name = "weather_agent"
+path = "examples/weather_agent.rs"
