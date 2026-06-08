@@ -2,7 +2,17 @@
 //!
 //! 工具链：`resolve_city(address) → http_get(wttr.in) → LLM 解析为 JSON`
 //!
-//! resolve_city 三级降级：本地别名表(O(1)) → Nominatim → unknown
+//! resolve_city 四级降级：
+//! ```text
+//! 本地别名表 (O(1), <1ms)
+//!     ↓ miss
+//! OpenStreetMap Nominatim (免费, 无需 API Key)
+//!     ↓ miss / 限流
+//! LLM 轻量推理 (temperature=0, max_tokens=20)
+//!     ↓ 无法确定
+//! "unknown"
+//! ```
+//!
 //! 工具层不硬编码业务 API，仅提供通用 `http_get`。LLM 自行构造 URL 并解析响应。
 //!
 //! ```text
@@ -16,8 +26,9 @@ mod shared;
 
 use city_aliases::CITY_ALIASES;
 use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema};
-use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
+use lellm_core::{ChatRequest, Message, ToolError, ToolErrorKind, text_block};
 use lellm_macros::ToolDefinition;
+use lellm_provider::LlmProvider;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::GenericProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
@@ -28,13 +39,14 @@ use std::sync::Arc;
 #[derive(Debug, Clone, serde::Serialize)]
 struct CityResult {
     city_en: String, // wttr.in 城市名 (kebab-case)，未知 → "unknown"
-    source: String,  // alias / nominatim / unknown
+    source: String,  // alias / nominatim / llm / unknown
+    address: String, // 原始请求地址
 }
 
 #[derive(JsonSchema, ToolDefinition)]
 #[tool(
     name = "resolve_city",
-    description = "将地址解析为 wttr.in 城市英文名。三级降级：别名表 → Nominatim → unknown。始终调用此工具，不要猜测。"
+    description = "将地址解析为 wttr.in 城市英文名。四级降级：别名表 → Nominatim → LLM → unknown。始终调用此工具，不要猜测。"
 )]
 #[allow(dead_code)]
 struct ResolveCityArgs {
@@ -47,6 +59,7 @@ fn resolve_city(address: &str) -> CityResult {
         return CityResult {
             city_en: city_en.to_string(),
             source: "alias".to_string(),
+            address: address.to_string(),
         };
     }
     if let Some(result) = resolve_via_nominatim(address) {
@@ -55,6 +68,7 @@ fn resolve_city(address: &str) -> CityResult {
     CityResult {
         city_en: "unknown".to_string(),
         source: "unknown".to_string(),
+        address: address.to_string(),
     }
 }
 
@@ -102,6 +116,7 @@ fn resolve_via_nominatim(address: &str) -> Option<CityResult> {
     Some(CityResult {
         city_en,
         source: "nominatim".to_string(),
+        address: address.to_string(),
     })
 }
 
@@ -161,29 +176,92 @@ fn http_get(url: &str) -> Result<String, ToolError> {
         })
 }
 
+// ─── LLM 城市解析器 ──────────────────────────────────────────────
+
+/// 第四级降级：用 LLM 轻量推理地址所属城市。
+///
+/// temperature=0, max_tokens=20，成本极低。
+/// 仅当前三级（别名表 + Nominatim）均 miss 时触发。
+async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Option<CityResult> {
+    let prompt = format!(
+        "地址「{}」属于哪个城市？\n只返回 wttr.in 可用的城市英文名（kebab-case），如 tokyo、new-york、shanghai。\n无法确定则返回 unknown。",
+        address
+    );
+
+    let req = ChatRequest {
+        model: "Qwen3.6".to_string(),
+        messages: vec![Message::User {
+            content: text_block(prompt),
+        }],
+        tools: None,
+        temperature: Some(0.0),
+        max_tokens: Some(20),
+        ..Default::default()
+    };
+
+    let resp = provider.call(&req).await.ok()?;
+    // 从响应中提取文本
+    let city_text = resp
+        .content
+        .iter()
+        .filter_map(|b| {
+            if let lellm_core::ContentBlock::Text(t) = b {
+                Some(&t.text)
+            } else {
+                None
+            }
+        })
+        .next()?
+        .trim()
+        .to_lowercase();
+
+    // 过滤无效响应
+    if city_text.is_empty() || city_text == "unknown" {
+        return None;
+    }
+
+    Some(CityResult {
+        city_en: city_text,
+        source: "llm".to_string(),
+        address: address.to_string(),
+    })
+}
+
 // ─── 工具注册 ────────────────────────────────────────────────────
 
-fn register_weather_tools() -> Vec<ToolRegistration> {
+fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<ToolRegistration> {
     vec![
-        ToolRegistration::safe(ResolveCityArgs::tool_definition(), |args| {
+        ToolRegistration::safe(ResolveCityArgs::tool_definition(), move |args| {
             let address = args
                 .get("address")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let provider = llm_provider.clone();
             async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    serde_json::to_string(&resolve_city(&address)).map_err(|e| ToolError {
-                        kind: ToolErrorKind::Internal,
-                        message: format!("序列化失败: {e}"),
-                    })
-                })
-                .await
-                .map_err(|e| ToolError {
+                // 第一、二级：alias + nominatim（阻塞线程）
+                let address_for_blocking = address.clone();
+                let mut result =
+                    tokio::task::spawn_blocking(move || resolve_city(&address_for_blocking))
+                        .await
+                        .map_err(|e| ToolError {
+                            kind: ToolErrorKind::Internal,
+                            message: format!("任务失败: {e}"),
+                        })?;
+
+                // 第三级 miss → 第四级：LLM 轻量推理
+                if result.source == "unknown" {
+                    if let Some(ref p) = provider {
+                        if let Some(city) = resolve_via_llm(p, &address).await {
+                            result = city;
+                        }
+                    }
+                }
+
+                serde_json::to_string(&result).map_err(|e| ToolError {
                     kind: ToolErrorKind::Internal,
-                    message: format!("任务失败: {e}"),
-                })?;
-                result
+                    message: format!("序列化失败: {e}"),
+                })
             }
         }),
         ToolRegistration::safe(HttpGetArgs::tool_definition(), |args| {
@@ -207,6 +285,9 @@ fn register_weather_tools() -> Vec<ToolRegistration> {
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
 fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
+    // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
+    let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
+
     let prompt = r#"你是天气查询助手。
 
 流程：
@@ -227,12 +308,12 @@ wttr.in 返回格式: "小雨 17°C 94% 7km/h"
 - 最终回答必须为纯 JSON"#;
 
     AgentBuilder::new(ResolvedModel {
-        provider: Arc::new(provider),
+        provider: shared_provider.clone(),
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
     .system_prompt(prompt.to_string())
-    .tools(register_weather_tools())
+    .tools(register_weather_tools(Some(shared_provider)))
     .max_iterations(10)
     .max_output_tokens(2000)
     .build()
@@ -253,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("OpenAI provider env error");
     let agent = create_agent(provider);
 
-    println!("=== Weather Agent — resolve_city + http_get ===\n");
+    println!("=== Weather Agent — resolve_city(四级降级) + http_get ===\n");
 
     let question = match std::env::args().nth(1) {
         Some(addr) => format!("帮我查一下{addr}的天气"),
