@@ -17,5 +17,5 @@ pub use error::{
 pub use message::{
     ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall, text_block,
 };
-pub use request::{ChatRequest, ToolChoice, ToolDefinition};
+pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};

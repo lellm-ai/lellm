@@ -444,6 +444,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         })?;
 
         let model = request.model.clone();
+        let stream_thinking = request.stream_thinking;
         let adapter = self.adapter.clone();
 
         // 将首 chunk + 剩余流拼接为通用字节流
@@ -478,6 +479,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
                 &mut sink,
                 &adapter,
                 model,
+                stream_thinking,
                 boxed_stream,
             )
             .await;

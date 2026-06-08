@@ -133,6 +133,8 @@ pub enum StopReason {
     Cancelled,
     /// 输出预算超限（单轮或总输出 token 超过限制）
     OutputBudgetExceeded,
+    /// 推理预算超限（thinking token 超过限制）
+    ReasoningBudgetExceeded,
     // NOTE: LoopDetected 将在 v0.2 LoopDetector 实现时加回
 }
 

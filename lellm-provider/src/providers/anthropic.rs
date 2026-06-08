@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
-    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, ThinkingBlock,
-    TokenUsage, ToolCall, ToolChoice,
+    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, ReasoningConfig, TextBlock,
+    ThinkingBlock, TokenUsage, ToolCall, ToolChoice,
 };
 use std::borrow::Cow;
 
@@ -101,6 +101,18 @@ impl ProviderAdapter for AnthropicAdapter {
             message: "Anthropic requires max_tokens".into(),
         })?;
         body.insert("max_tokens".into(), (max_tokens as u64).into());
+
+        // 推理配置校验 — Anthropic 不支持推理级别配置
+        match &req.reasoning {
+            None => {}                            // 不干预，使用默认行为
+            Some(ReasoningConfig::Disabled) => {} // 显式关闭 — Anthropic 默认不推理，静默 OK
+            Some(_) => {
+                return Err(LlmError::UnsupportedFeature {
+                    feature: "reasoning levels (Anthropic adapter)".into(),
+                });
+            }
+        }
+
         if stream {
             body.insert("stream".into(), true.into());
         }

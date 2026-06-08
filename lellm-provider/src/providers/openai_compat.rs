@@ -5,8 +5,8 @@
 use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
-    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
-    ToolChoice, ToolDefinition,
+    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, ReasoningConfig, TextBlock,
+    TokenUsage, ToolCall, ToolChoice, ToolDefinition,
 };
 use std::borrow::Cow;
 
@@ -117,6 +117,15 @@ impl ProviderAdapter for OpenAICompatAdapter {
         }
         if let Some(ref stop_sequences) = req.stop_sequences {
             body.insert("stop".into(), serde_json::to_value(stop_sequences).unwrap());
+        }
+        // 推理配置映射 — OpenAI Compatible 协议
+        // Disabled → "low"（尽最大努力关闭）; Low/Medium/High → 同名字符串
+        // None → 不插入字段（Provider 默认行为）
+        if let Some(ref reasoning) = req.reasoning {
+            body.insert(
+                "reasoning_effort".into(),
+                serialize_openai_reasoning_effort(reasoning).into(),
+            );
         }
         if let Some(ref tools) = req.tools {
             body.insert(
@@ -483,5 +492,20 @@ fn serialize_openai_tool_choice(choice: &ToolChoice) -> serde_json::Value {
             serde_json::json!({"type": "function", "function": {"name": name}})
         }
         ToolChoice::Any => "required".into(),
+    }
+}
+
+/// 将 ReasoningConfig 序列化为 OpenAI reasoning_effort 字符串。
+///
+/// Disabled → "low"（最小推理努力，尽最大努力关闭）
+/// Low → "low"
+/// Medium → "medium"
+/// High → "high"
+fn serialize_openai_reasoning_effort(config: &ReasoningConfig) -> &'static str {
+    match config {
+        ReasoningConfig::Disabled => "low",
+        ReasoningConfig::Low => "low",
+        ReasoningConfig::Medium => "medium",
+        ReasoningConfig::High => "high",
     }
 }

@@ -76,6 +76,15 @@ impl AgentBuilder {
         self
     }
 
+    /// 设置单轮推理（thinking）Token 上限（默认无限制）。
+    ///
+    /// 与 `max_output_tokens` 分离：thinking 是模型内部推理，不计入输出预算。
+    /// 开启后可防止模型疯狂推理导致超时。
+    pub fn max_reasoning_tokens(mut self, max: u32) -> Self {
+        self.config.max_reasoning_tokens = Some(max);
+        self
+    }
+
     /// 设置整个 Agent Run 的最大输出 token 总数。
     ///
     /// 防止多轮工具调用导致总输出失控。达到阈值时立即停止，

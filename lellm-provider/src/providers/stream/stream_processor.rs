@@ -31,12 +31,24 @@ struct FrameResult {
 ///
 /// 管道：Bytes → SseParser → SseFrame → Adapter → StreamChunk → StreamEvent
 ///
+/// # 参数
+/// - `sink`: 事件输出端
+/// - `adapter`: Provider 适配器，负责 SSE data → StreamChunk 的协议解析
+/// - `model`: 模型标识
+/// - `stream_thinking`: 是否向消费者发射 ThinkingDelta 事件
+/// - `bytes_stream`: 任意字节流（reqwest、hyper、mock、file...）
+///
 /// # 泛型参数
-/// - `S`: 任意字节流（reqwest、hyper、mock、file...）
-/// - `A`: Provider 适配器，负责 SSE data → StreamChunk 的协议解析
-/// - `E`: 事件输出端，负责将 StreamEvent 转发给消费者
-pub async fn process_stream<S, A, E>(sink: &mut E, adapter: &A, model: String, mut bytes_stream: S)
-where
+/// - `S`: 任意字节流
+/// - `A`: Provider 适配器
+/// - `E`: 事件输出端
+pub async fn process_stream<S, A, E>(
+    sink: &mut E,
+    adapter: &A,
+    model: String,
+    stream_thinking: bool,
+    mut bytes_stream: S,
+) where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
     A: ProviderAdapter,
     E: EventSink,
@@ -72,16 +84,18 @@ where
                         }
                     }
 
-                    // 思考增量
-                    if let Some(thinking) = fr.thinking {
-                        if !sink
-                            .emit(StreamEvent::ThinkingDelta {
-                                thinking,
-                                redacted: fr.thinking_redacted,
-                            })
-                            .await
-                        {
-                            return;
+                    // 思考增量 — 根据 stream_thinking 决定是否发射
+                    if stream_thinking {
+                        if let Some(thinking) = fr.thinking {
+                            if !sink
+                                .emit(StreamEvent::ThinkingDelta {
+                                    thinking,
+                                    redacted: fr.thinking_redacted,
+                                })
+                                .await
+                            {
+                                return;
+                            }
                         }
                     }
 

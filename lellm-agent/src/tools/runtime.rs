@@ -46,13 +46,18 @@ pub struct ToolUseConfig {
     /// 若需要长文本生成，可通过 Builder 调大。
     /// 会自动注入到 `ChatRequest.max_tokens`。
     pub max_output_tokens: u32,
+    /// 单轮推理（thinking）Token 上限（可选，默认无限制）。
+    ///
+    /// 与 `max_output_tokens` 分离：thinking 是模型内部推理，不计入输出预算。
+    /// 开启后可防止模型疯狂推理导致超时。
+    pub max_reasoning_tokens: Option<u32>,
     /// 整个 Agent Run 的最大输出 token 总数（可选，默认无限制）。
     ///
     /// 即使每轮的 `max_output_tokens` 设置合理，多轮工具调用仍可能导致
     /// 总输出巨大（如 10 轮 × 4k = 40k）。此字段提供聚合层面的保险丝，
     /// 防止因工具循环或 Provider 忽略 max_tokens 而导致的成本失控。
     ///
-    /// 统计范围：Assistant Text + Thinking（不含 Tool Call 结构开销）。
+    /// 统计范围：Assistant Text（不含 Thinking，不含 Tool Call 结构开销）。
     /// 在流式模式下边接收边检查，达到阈值立即停止。
     pub max_total_output_tokens: Option<u32>,
     /// 上下文预算管理（默认开启）
@@ -70,6 +75,7 @@ impl Default for ToolUseConfig {
             system_prompt: None,
             max_iterations: 10,
             max_output_tokens: 4_000,
+            max_reasoning_tokens: None,
             max_total_output_tokens: None,
             context_budget: ContextBudget::default(),
         }
@@ -149,9 +155,12 @@ pub struct LoopState {
     pub estimated_tokens: usize,
     pub iterations: usize,
     pub tool_calls_executed: usize,
-    /// 整个 Agent Run 的累计输出 Token 数（Text + Thinking，不含 Tool Call）
+    /// 整个 Agent Run 的累计输出 Token 数（Text，不含 Thinking 和 Tool Call）
     /// 用于 max_total_output_tokens 预算检查。
     pub total_output_tokens: usize,
+    /// 整个 Agent Run 的累计推理 Token 数（Thinking，不含 Text 和 Tool Call）
+    /// 用于 max_reasoning_tokens 预算检查。
+    pub total_reasoning_tokens: usize,
 }
 
 impl LoopState {
@@ -163,12 +172,18 @@ impl LoopState {
             iterations: 0,
             tool_calls_executed: 0,
             total_output_tokens: 0,
+            total_reasoning_tokens: 0,
         }
     }
 
-    /// 累计输出 Token（Text + Thinking delta）
+    /// 累计输出 Token（Text）
     pub fn add_output_tokens(&mut self, tokens: usize) {
         self.total_output_tokens += tokens;
+    }
+
+    /// 累计推理 Token（Thinking）
+    pub fn add_reasoning_tokens(&mut self, tokens: usize) {
+        self.total_reasoning_tokens += tokens;
     }
 
     /// 检查是否超过总输出预算
@@ -179,18 +194,29 @@ impl LoopState {
         }
     }
 
-    /// 从 ContentBlock 估算输出 Token（Text + Thinking，不含 ToolCall）
+    /// 检查是否超过总推理预算
+    pub fn exceeded_total_reasoning(&self, max: Option<u32>) -> bool {
+        match max {
+            Some(limit) => self.total_reasoning_tokens >= limit as usize,
+            None => false,
+        }
+    }
+
+    /// 从 ContentBlock 分离估算 Output（Text）和 Reasoning（Thinking）Token
     pub fn add_output_from_content(&mut self, content: &[lellm_core::ContentBlock]) {
-        let tokens: usize = content
-            .iter()
-            .map(|b| match b {
-                lellm_core::ContentBlock::Text(t) => estimate_text(&t.text),
-                lellm_core::ContentBlock::Thinking(th) => estimate_text(&th.thinking),
-                lellm_core::ContentBlock::Image { .. } => 0,
-                lellm_core::ContentBlock::ToolCall(_) => 0,
-            })
-            .sum();
-        self.total_output_tokens += tokens;
+        let mut output_tokens: usize = 0;
+        let mut reasoning_tokens: usize = 0;
+        for b in content {
+            match b {
+                lellm_core::ContentBlock::Text(t) => output_tokens += estimate_text(&t.text),
+                lellm_core::ContentBlock::Thinking(th) => {
+                    reasoning_tokens += estimate_text(&th.thinking)
+                }
+                lellm_core::ContentBlock::Image { .. } | lellm_core::ContentBlock::ToolCall(_) => {}
+            }
+        }
+        self.total_output_tokens += output_tokens;
+        self.total_reasoning_tokens += reasoning_tokens;
     }
 
     /// 追加 Assistant 响应到历史
@@ -270,6 +296,11 @@ impl LoopState {
     /// 构建输出预算超限结果
     pub fn finish_output_budget(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::OutputBudgetExceeded, response)
+    }
+
+    /// 构建推理预算超限结果
+    pub fn finish_reasoning_budget(&self, response: ChatResponse) -> ToolUseResult {
+        self.finish(StopReason::ReasoningBudgetExceeded, response)
     }
 }
 
@@ -510,6 +541,11 @@ impl ToolUseLoop {
                 return Ok(state.finish_output_budget(last_response.unwrap()));
             }
 
+            // 总推理预算检查
+            if state.exceeded_total_reasoning(self.config.max_reasoning_tokens) {
+                return Ok(state.finish_reasoning_budget(last_response.unwrap()));
+            }
+
             if !last_response.as_ref().unwrap().has_tool_calls() {
                 return Ok(state.finish_complete(last_response.unwrap()));
             }
@@ -644,6 +680,7 @@ impl ToolUseLoop {
                 let executor_for_fallback = executor.clone();
                 let budget_for_fallback = config.context_budget.clone();
                 let max_output_tokens_for_fallback = config.max_output_tokens;
+                let max_reasoning_tokens_for_fallback = config.max_reasoning_tokens;
                 let req_for_fallback = req.clone();
                 let state_for_clone = state.clone();
                 let iteration_count = state.iterations;
@@ -658,6 +695,7 @@ impl ToolUseLoop {
                             let executor = executor_for_fallback.clone();
                             let budget = budget_for_fallback.clone();
                             let max_output_tokens = max_output_tokens_for_fallback;
+                            let max_reasoning_tokens = max_reasoning_tokens_for_fallback;
                             let req = req_for_fallback.clone();
                             let mut attempt_state = state_for_clone.clone();
 
@@ -677,6 +715,7 @@ impl ToolUseLoop {
                                     &mut redacted_buffer,
                                     &budget,
                                     max_output_tokens,
+                                    max_reasoning_tokens,
                                 )
                                 .await?;
 
@@ -717,6 +756,25 @@ impl ToolUseLoop {
                                 &tx,
                                 AgentEvent::LoopEnd {
                                     result: state.finish_output_budget(
+                                        last_response.unwrap_or_else(empty_response),
+                                    ),
+                                },
+                            )
+                            .await;
+                            return;
+                        }
+
+                        // 总推理预算检查
+                        if state.exceeded_total_reasoning(config.max_reasoning_tokens) {
+                            tracing::warn!(
+                                total_reasoning_tokens = state.total_reasoning_tokens,
+                                max = ?config.max_reasoning_tokens,
+                                "total reasoning budget exceeded"
+                            );
+                            let _ = emit(
+                                &tx,
+                                AgentEvent::LoopEnd {
+                                    result: state.finish_reasoning_budget(
                                         last_response.unwrap_or_else(empty_response),
                                     ),
                                 },
@@ -766,6 +824,22 @@ impl ToolUseLoop {
                         .await;
                         return;
                     }
+                    Ok(StreamIterResult::ReasoningBudgetExceeded { response }) => {
+                        // 单轮推理预算超限 — 累计并立即停止
+                        state.add_output_from_content(&response.content);
+                        tracing::warn!(
+                            total_reasoning_tokens = state.total_reasoning_tokens,
+                            "single-round reasoning budget exceeded, stopping agent"
+                        );
+                        let _ = emit(
+                            &tx,
+                            AgentEvent::LoopEnd {
+                                result: state.finish_reasoning_budget(response),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
                     Err(e) => {
                         let _ = emit(
                             &tx,
@@ -802,6 +876,8 @@ enum StreamIterResult {
     Cancelled { response: Option<ChatResponse> },
     /// 单轮输出预算超限（Provider 忽略 max_tokens 或模型无限输出）
     OutputBudgetExceeded { response: ChatResponse },
+    /// 单轮推理预算超限（Provider 忽略 max_tokens 或模型疯狂推理）
+    ReasoningBudgetExceeded { response: ChatResponse },
 }
 
 /// 处理流式单轮迭代。
@@ -809,6 +885,7 @@ enum StreamIterResult {
 /// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
 ///
 /// `max_output_tokens` — 单轮输出的 Token 上限（保险丝），在流式消费时实时检查。
+/// `max_reasoning_tokens` — 单轮推理的 Token 上限（保险丝），可选。
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
@@ -819,11 +896,13 @@ async fn process_stream_iteration(
     redacted_buffer: &mut Option<String>,
     budget: &ContextBudget,
     max_output_tokens: u32,
+    max_reasoning_tokens: Option<u32>,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
     // ─── 输出预算保险丝 ───
     let mut round_output_tokens: usize = 0;
+    let mut round_reasoning_tokens: usize = 0;
 
     while let Some(result) = stream.next().await {
         let ev = match result {
@@ -853,19 +932,21 @@ async fn process_stream_iteration(
                 text_buffer.push_str(token);
             }
             lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
-                round_output_tokens += estimate_text(thinking);
-                if (round_output_tokens as u32) > max_output_tokens {
-                    tracing::warn!(
-                        round_output_tokens,
-                        max_output_tokens,
-                        "single-round output budget exceeded (thinking), cutting stream"
-                    );
-                    let response = build_partial_response(
-                        text_buffer.clone(),
-                        thinking_buffer.clone(),
-                        redacted_buffer.clone(),
-                    );
-                    return Ok(StreamIterResult::OutputBudgetExceeded { response });
+                round_reasoning_tokens += estimate_text(thinking);
+                if let Some(limit) = max_reasoning_tokens {
+                    if (round_reasoning_tokens as u32) > limit {
+                        tracing::warn!(
+                            round_reasoning_tokens,
+                            max_reasoning_tokens = limit,
+                            "single-round reasoning budget exceeded, cutting stream"
+                        );
+                        let response = build_partial_response(
+                            text_buffer.clone(),
+                            thinking_buffer.clone(),
+                            redacted_buffer.clone(),
+                        );
+                        return Ok(StreamIterResult::ReasoningBudgetExceeded { response });
+                    }
                 }
                 thinking_buffer.push_str(thinking);
                 if let Some(r) = redacted {
