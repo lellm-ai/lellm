@@ -238,74 +238,27 @@ impl<A: ProviderAdapter + Clone> GenericProvider<A> {
         }
     }
 
-    /// 从环境变量自动加载配置创建 Provider。
+    /// 从环境变量自动加载配置创建 Provider（便捷方法）。
     ///
-    /// 环境变量前缀 = `adapter.provider_id().to_ascii_uppercase()`。
-    /// 读取 `<PREFIX>_BASE_URL`（可选，有默认值）和 `<PREFIX>_API_KEY`（必需）。
+    /// 内部委托给 `ProviderConfig::from_adapter(&adapter)`。
+    /// 如果需要自定义超时等配置，使用 `ProviderConfig::from_adapter` + `GenericProvider::new`。
     ///
     /// # 环境变量
     ///
-    /// | Provider   | URL 变量            | Key 变量            | 默认 URL                            |
-    /// |-----------|-------------------|-------------------|-------------------------------------|
-    /// | openai    | `OPENAI_BASE_URL` | `OPENAI_API_KEY`  | `https://api.openai.com/v1`         |
-    /// | deepseek  | `DEEPSEEK_BASE_URL` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1`     |
-    /// | nvidia    | `NVIDIA_BASE_URL` | `NVIDIA_API_KEY`  | `https://integrate.api.nvidia.com/v1` |
-    /// | vllm      | `VLLM_BASE_URL`   | `VLLM_API_KEY`    | `http://localhost:8000/v1`          |
-    /// | llama     | `LLAMA_BASE_URL`  | `LLAMA_API_KEY`   | `http://localhost:8080/v1`          |
-    /// | anthropic | `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com`      |
+    /// 前缀 = `adapter.provider_id().to_ascii_uppercase()`
+    /// 读取 `<PREFIX>_BASE_URL`（可选）和 `<PREFIX>_API_KEY`（必需）。
     ///
     /// # 示例
     ///
     /// ```rust,no_run
     /// use lellm_provider::{GenericProvider, OpenAICompatAdapter};
     ///
-    /// // 只需一行：
+    /// // 一行搞定：
     /// let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())?;
     /// # Ok::<_, lellm_provider::providers::base::ProviderEnvError>(())
     /// ```
     pub fn from_env(adapter: A) -> Result<Self, ProviderEnvError> {
-        let provider_id = adapter.provider_id();
-        let env_prefix = provider_id.to_ascii_uppercase();
-        let default_url = adapter.default_base_url();
-        let auth_style = adapter.auth_style();
-
-        let base_url = std::env::var(format!("{}_BASE_URL", env_prefix)).unwrap_or_else(|_| {
-            tracing::debug!(
-                provider = provider_id,
-                url = default_url,
-                "{}_BASE_URL not set, using default",
-                env_prefix
-            );
-            default_url.to_string()
-        });
-
-        let api_key = std::env::var(format!("{}_API_KEY", env_prefix)).map_err(|_| {
-            tracing::error!(provider = provider_id, "{}_API_KEY not found", env_prefix);
-            ProviderEnvError::MissingApiKey {
-                provider: provider_id.to_string(),
-            }
-        })?;
-
-        let config = match auth_style {
-            AuthStyle::Bearer => ProviderConfig::bearer(&base_url, api_key).map_err(|e| {
-                ProviderEnvError::InvalidUrl {
-                    url: base_url.clone(),
-                    reason: e.to_string(),
-                }
-            })?,
-            AuthStyle::CustomHeader(header) => ProviderConfig::header(&base_url, header, api_key)
-                .map_err(|e| ProviderEnvError::InvalidUrl {
-                url: base_url.clone(),
-                reason: e.to_string(),
-            })?,
-            AuthStyle::None => {
-                ProviderConfig::none(&base_url).map_err(|e| ProviderEnvError::InvalidUrl {
-                    url: base_url.clone(),
-                    reason: e.to_string(),
-                })?
-            }
-        };
-
+        let config = ProviderConfig::from_adapter(&adapter)?;
         Ok(Self::new(adapter, config))
     }
 
@@ -604,6 +557,71 @@ impl ProviderConfig {
         })
     }
 
+    /// 从 adapter 元数据 + 环境变量自动加载配置。
+    ///
+    /// 环境变量前缀 = `adapter.provider_id().to_ascii_uppercase()`。
+    /// 读取 `<PREFIX>_BASE_URL`（可选，有默认值）和 `<PREFIX>_API_KEY`（必需）。
+    ///
+    /// 返回 `ProviderConfig`，可链式修改超时后再传给 `GenericProvider::new()`。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use lellm_provider::{GenericProvider, OpenAICompatAdapter};
+    /// use lellm_provider::providers::base::ProviderConfig;
+    ///
+    /// let adapter = OpenAICompatAdapter::openai();
+    /// let provider = GenericProvider::new(
+    ///     adapter.clone(),
+    ///     ProviderConfig::from_adapter(&adapter)?
+    ///         .with_timeout(std::time::Duration::from_secs(60))
+    ///         .with_idle_timeout(std::time::Duration::from_secs(30)),
+    /// );
+    /// # Ok::<_, lellm_provider::providers::base::ProviderEnvError>(())
+    /// ```
+    pub(crate) fn from_adapter(adapter: &dyn ProviderAdapter) -> Result<Self, ProviderEnvError> {
+        let provider_id = adapter.provider_id();
+        let env_prefix = provider_id.to_ascii_uppercase();
+        let default_url = adapter.default_base_url();
+        let auth_style = adapter.auth_style();
+
+        let base_url = std::env::var(format!("{}_BASE_URL", env_prefix)).unwrap_or_else(|_| {
+            tracing::debug!(
+                provider = provider_id,
+                url = default_url,
+                "{}_BASE_URL not set, using default",
+                env_prefix
+            );
+            default_url.to_string()
+        });
+
+        let api_key = std::env::var(format!("{}_API_KEY", env_prefix)).map_err(|_| {
+            tracing::error!(provider = provider_id, "{}_API_KEY not found", env_prefix);
+            ProviderEnvError::MissingApiKey {
+                provider: provider_id.to_string(),
+            }
+        })?;
+
+        match auth_style {
+            AuthStyle::Bearer => {
+                Self::bearer(&base_url, api_key).map_err(|e| ProviderEnvError::InvalidUrl {
+                    url: base_url.clone(),
+                    reason: e.to_string(),
+                })
+            }
+            AuthStyle::CustomHeader(header) => {
+                Self::header(&base_url, header, api_key).map_err(|e| ProviderEnvError::InvalidUrl {
+                    url: base_url.clone(),
+                    reason: e.to_string(),
+                })
+            }
+            AuthStyle::None => Self::none(&base_url).map_err(|e| ProviderEnvError::InvalidUrl {
+                url: base_url.clone(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
     /// 修改认证配置
     pub fn with_auth(mut self, auth: AuthConfig) -> Self {
         self.auth = auth;
@@ -666,41 +684,3 @@ impl AuthConfig {
         }
     }
 }
-
-// ─── ProviderFactory — 链式 API ───
-
-/// Provider 工厂 trait — 让 adapter 直接创建 GenericProvider。
-///
-/// 提供流畅的链式 API：
-///
-/// ```rust,no_run
-/// use lellm_provider::{GenericProvider, OpenAICompatAdapter, ProviderFactory};
-///
-/// let provider = OpenAICompatAdapter::openai().provider_from_env()?;
-/// # Ok::<_, lellm_provider::providers::base::ProviderEnvError>(())
-/// ```
-#[allow(private_bounds)]
-pub trait ProviderFactory: ProviderAdapter + Sized {
-    /// 从环境变量自动加载配置，创建 `GenericProvider<Self>`。
-    ///
-    /// 等价于 `GenericProvider::from_env(self)`，但 API 更流畅。
-    fn provider_from_env(self) -> Result<GenericProvider<Self>, ProviderEnvError>
-    where
-        Self: Clone,
-    {
-        GenericProvider::from_env(self)
-    }
-
-    /// 使用显式配置创建 `GenericProvider<Self>`。
-    ///
-    /// 等价于 `GenericProvider::new(self, config)`。
-    fn provider_with(self, config: ProviderConfig) -> GenericProvider<Self>
-    where
-        Self: Clone,
-    {
-        GenericProvider::new(self, config)
-    }
-}
-
-/// 所有 `ProviderAdapter + Clone` 自动获得 `ProviderFactory`。
-impl<T: ProviderAdapter + Clone> ProviderFactory for T {}
