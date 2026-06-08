@@ -100,7 +100,9 @@ pub(crate) struct ProviderRequest {
 }
 
 pub(crate) trait ProviderAdapter: Send + Sync {
-    fn name(&self) -> &str;
+    fn provider_id(&self) -> &str;              // "openai", "anthropic"
+    fn default_base_url(&self) -> &'static str; // 默认 URL
+    fn auth_style(&self) -> AuthStyle;          // Bearer / CustomHeader / None
     fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError>;
     fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError>;
     fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
@@ -137,8 +139,61 @@ pub struct GenericProvider<A: ProviderAdapter> {
 pub struct ProviderConfig {
     pub base_url: url::Url,
     pub auth: AuthConfig,
+    pub connect_timeout: std::time::Duration,
     pub timeout: std::time::Duration,
+    pub idle_timeout: std::time::Duration,
 }
+```
+
+### ProviderConfig::from_adapter — 环境变量自动加载
+
+**问题：** 每次创建 provider 都需要手写 10+ 行 boilerplate：
+
+```rust
+// 旧写法 — 重复读取环境变量、构造 ProviderConfig
+GenericProvider::new(
+    OpenAICompatAdapter::openai(),
+    ProviderConfig::bearer(
+        &env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
+        env::var("OPENAI_API_KEY").expect("..."),
+    )?.with_timeout(...),
+)
+```
+
+**决定：** `ProviderAdapter` 暴露三个元数据方法，`ProviderConfig::from_adapter()` 自动推导环境变量：
+
+```rust
+pub(crate) trait ProviderAdapter: Send + Sync {
+    fn provider_id(&self) -> &str;              // "openai" → 推导 OPENAI_*
+    fn default_base_url(&self) -> &'static str; // "https://api.openai.com/v1"
+    fn auth_style(&self) -> AuthStyle;          // Bearer / CustomHeader / None
+    // ...
+}
+
+impl ProviderConfig {
+    pub(crate) fn from_adapter(adapter: &dyn ProviderAdapter)
+        -> Result<Self, ProviderEnvError>;
+}
+```
+
+环境变量前缀 = `provider_id().to_ascii_uppercase()`，无需额外字段。
+
+**为什么不引入 `ProviderMetadata` 结构体：** 当前阶段只有三个字段，直接放在 trait 上更直观。以后字段多了再考虑抽取。
+
+**用法：**
+
+```rust
+// 便捷方法 — 一行搞定
+let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())?;
+
+// 自定义超时 — 配置加载与构建分离
+let adapter = OpenAICompatAdapter::openai();
+let provider = GenericProvider::new(
+    adapter.clone(),
+    ProviderConfig::from_adapter(&adapter)?
+        .with_timeout(Duration::from_secs(60)),
+);
 ```
 
 ### AuthConfig — apply() 替代 get_header()

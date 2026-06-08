@@ -365,7 +365,7 @@ async fn observe_react_loop(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    yunli::setup_logger_debug().unwrap();
+    //yunli::setup_logger_debug().unwrap();
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

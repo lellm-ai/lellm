@@ -43,18 +43,39 @@ full          — core + provider + agent + macros
 
 ### 初始化 Provider
 
+**方式一：从环境变量自动加载（推荐）**
+
+```rust
+use lellm::provider::providers::base::GenericProvider;
+use lellm::provider::providers::openai_compat::OpenAICompatAdapter;
+
+// 自动读取 OPENAI_BASE_URL（可选）+ OPENAI_API_KEY（必需）
+let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())?;
+```
+
+**方式二：自定义超时等配置**
+
 ```rust
 use lellm::provider::providers::base::{GenericProvider, ProviderConfig};
 use lellm::provider::providers::openai_compat::OpenAICompatAdapter;
 
+let adapter = OpenAICompatAdapter::openai();
 let provider = GenericProvider::new(
-    OpenAICompatAdapter::openai(),
-    ProviderConfig::bearer(
-        "https://api.openai.com/v1",
-        std::env::var("OPENAI_API_KEY").unwrap(),
-    )?,
+    adapter.clone(),
+    ProviderConfig::from_adapter(&adapter)?
+        .with_timeout(std::time::Duration::from_secs(60))
+        .with_idle_timeout(std::time::Duration::from_secs(30)),
 );
 ```
+
+**环境变量约定：** 前缀 = `provider_id().to_ascii_uppercase()`
+
+| Provider | URL 变量 | Key 变量 | 默认 URL |
+|----------|----------|----------|----------|
+| openai | `OPENAI_BASE_URL` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+| deepseek | `DEEPSEEK_BASE_URL` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` |
+| nvidia | `NVIDIA_BASE_URL` | `NVIDIA_API_KEY` | `https://integrate.api.nvidia.com/v1` |
+| anthropic | `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` |
 
 ### 单条消息调用
 
