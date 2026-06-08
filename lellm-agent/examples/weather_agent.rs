@@ -180,7 +180,7 @@ fn http_get(url: &str) -> Result<String, ToolError> {
 
 /// 第四级降级：用 LLM 轻量推理地址所属城市。
 ///
-/// temperature=0, max_tokens=20，成本极低。
+/// temperature=0, max_tokens=800（推理模型需要足够 tokens 完成思考）。
 /// 仅当前三级（别名表 + Nominatim）均 miss 时触发。
 async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Option<CityResult> {
     let prompt = format!(
@@ -195,36 +195,124 @@ async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Opti
         }],
         tools: None,
         temperature: Some(0.0),
-        max_tokens: Some(20),
+        max_tokens: Some(800),
         ..Default::default()
     };
 
     let resp = provider.call(&req).await.ok()?;
-    // 从响应中提取文本
-    let city_text = resp
+
+    // 从响应中提取全部文本（含 reasoning_content 回退）
+    let all_text: String = resp
         .content
         .iter()
         .filter_map(|b| {
             if let lellm_core::ContentBlock::Text(t) = b {
-                Some(&t.text)
+                Some(t.text.as_str())
             } else {
                 None
             }
         })
-        .next()?
-        .trim()
-        .to_lowercase();
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if all_text.is_empty() {
+        tracing::debug!("resolve_via_llm: no text in response");
+        return None;
+    }
+
+    // 尝试直接提取（短文本 = 直接答案），或从推理文本中提取城市名
+    let city_text = if all_text.lines().count() <= 2 {
+        all_text.trim().to_lowercase()
+    } else {
+        extract_kebab_city(&all_text.to_lowercase())
+    };
 
     // 过滤无效响应
     if city_text.is_empty() || city_text == "unknown" {
+        tracing::debug!(city = %city_text, "resolve_via_llm: filtered out");
         return None;
     }
+
+    tracing::debug!(city = %city_text, address = %address, "resolve_via_llm: success");
 
     Some(CityResult {
         city_en: city_text,
         source: "llm".to_string(),
         address: address.to_string(),
     })
+}
+
+/// 从 LLM 推理文本中提取 kebab-case 城市名。
+///
+/// 排除提示词示例，找合理的城市名候选。
+fn extract_kebab_city(text: &str) -> String {
+    // 提示词示例 + 常见非城市词汇
+    let skip: std::collections::HashSet<&str> = [
+        "tokyo",
+        "new-york",
+        "shanghai",
+        "unknown",
+        "wttr",
+        "kebab",
+        "case",
+        "format",
+        "thinking",
+        "process",
+        "analyze",
+        "user",
+        "input",
+        "output",
+        "question",
+        "requirement",
+        "return",
+        "only",
+        "identify",
+        "location",
+        "china",
+        "county",
+        "level",
+        "division",
+        "prefecture",
+        "autonomous",
+        "region",
+        "specifically",
+        "located",
+        "administration",
+        "verify",
+        "actually",
+        "administered",
+        "indeed",
+        "part",
+        "sometimes",
+        "associated",
+        "prefecture-level",
+        "belong",
+        "which",
+        "city",
+        "english",
+        "name",
+        "address",
+        "here",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut best: Option<&str> = None;
+    for word in text.split(|c: char| !c.is_ascii_lowercase() && c != '-') {
+        let s = word.trim_matches('-');
+        if s.is_empty() || s.len() < 2 || s.len() > 15 {
+            continue;
+        }
+        if !s.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
+            continue;
+        }
+        if skip.contains(s) {
+            continue;
+        }
+        best = Some(s);
+    }
+
+    best.map(|s| s.to_string()).unwrap_or_default()
 }
 
 // ─── 工具注册 ────────────────────────────────────────────────────
@@ -251,8 +339,10 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
 
                 // 第三级 miss → 第四级：LLM 轻量推理
                 if result.source == "unknown" {
+                    tracing::debug!(address = %address, "alias+nominatim miss, trying LLM fallback");
                     if let Some(ref p) = provider {
                         if let Some(city) = resolve_via_llm(p, &address).await {
+                            tracing::debug!(city = %city.city_en, "LLM fallback success");
                             result = city;
                         }
                     }
