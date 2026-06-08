@@ -72,50 +72,90 @@ fn resolve_city(address: &str) -> CityResult {
     }
 }
 
+// fn resolve_via_nominatim(address: &str) -> Option<CityResult> {
+//     let url = format!(
+//         "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1&addressdetails=1",
+//         url_encode(address)
+//     );
+//     let resp = reqwest::blocking::Client::builder()
+//         .user_agent("LeLLM-WeatherAgent/0.1")
+//         .build()
+//         .ok()?
+//         .get(&url)
+//         .header("Accept-Language", "zh-CN")
+//         .send()
+//         .ok()?;
+//     if !resp.status().is_success() {
+//         return None;
+//     }
+//     let bodies: Vec<serde_json::Value> = resp.json().ok()?;
+//     let first = bodies.first()?;
+//     let addr = first.get("address")?;
+//     let city_en = addr
+//         .get("city")
+//         .or_else(|| addr.get("town"))
+//         .or_else(|| addr.get("county"))
+//         .or_else(|| addr.get("village"))
+//         .and_then(|v| v.as_str())
+//         .map(|s| to_kebab(s))
+//         .or_else(|| {
+//             first
+//                 .get("display_name")
+//                 .and_then(|v| v.as_str())
+//                 .map(|name| {
+//                     name.split(',')
+//                         .next()
+//                         .unwrap_or("")
+//                         .split(' ')
+//                         .filter(|w| !w.is_empty())
+//                         .collect::<Vec<_>>()
+//                         .join("-")
+//                 })
+//         })
+//         .unwrap_or_default();
+//     Some(CityResult {
+//         city_en,
+//         source: "nominatim".to_string(),
+//         address: address.to_string(),
+//     })
+// }
+
+//fn resolve_via_tencent(address: &str) -> Option<CityResult> {
 fn resolve_via_nominatim(address: &str) -> Option<CityResult> {
+    let api_key = match std::env::var("TENCENT_MAP_KEY") {
+        Ok(ak) => ak,
+        Err(e) => {
+            eprint!("Err. No QQ Map Key: {}", e);
+            return None;
+        }
+    };
     let url = format!(
-        "https://nominatim.openstreetmap.org/search?q={}&format=json&limit=1&addressdetails=1",
-        url_encode(address)
+        "https://apis.map.qq.com/ws/geocoder/v1/?address={}&key={}&output=json",
+        url_encode(address),
+        api_key
     );
-    let resp = reqwest::blocking::Client::builder()
-        .user_agent("LeLLM-WeatherAgent/0.1")
-        .build()
-        .ok()?
-        .get(&url)
-        .header("Accept-Language", "zh-CN")
-        .send()
-        .ok()?;
-    if !resp.status().is_success() {
+
+    let resp = reqwest::blocking::Client::new().get(&url).send().ok()?;
+
+    let body: serde_json::Value = resp.json().ok()?;
+
+    if body.get("status")?.as_i64()? != 0 {
         return None;
     }
-    let bodies: Vec<serde_json::Value> = resp.json().ok()?;
-    let first = bodies.first()?;
-    let addr = first.get("address")?;
-    let city_en = addr
+
+    let result = body.get("result")?;
+    let address_component = result.get("address_component")?;
+
+    // 腾讯可以返回拼音城市名
+    let city_en = address_component
         .get("city")
-        .or_else(|| addr.get("town"))
-        .or_else(|| addr.get("county"))
-        .or_else(|| addr.get("village"))
         .and_then(|v| v.as_str())
         .map(|s| to_kebab(s))
-        .or_else(|| {
-            first
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|name| {
-                    name.split(',')
-                        .next()
-                        .unwrap_or("")
-                        .split(' ')
-                        .filter(|w| !w.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("-")
-                })
-        })
         .unwrap_or_default();
+
     Some(CityResult {
         city_en,
-        source: "nominatim".to_string(),
+        source: "tencent".to_string(),
         address: address.to_string(),
     })
 }
@@ -180,11 +220,14 @@ fn http_get(url: &str) -> Result<String, ToolError> {
 
 /// 第四级降级：用 LLM 轻量推理地址所属城市。
 ///
-/// temperature=0, max_tokens=800（推理模型需要足够 tokens 完成思考）。
-/// 仅当前三级（别名表 + Nominatim）均 miss 时触发。
+/// 要求 LLM 输出 JSON `{"city":"xxx"}`，结构化解析（rfind 取最后一个 city 值）。
+/// max_tokens=1000，推理模型需要足够 tokens 完成思考。
+/// 仅当前三级（别名表 + 地图 API）均 miss 时触发。
 async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Option<CityResult> {
     let prompt = format!(
-        "地址「{}」属于哪个城市？\n只返回 wttr.in 可用的城市英文名（kebab-case），如 tokyo、new-york、shanghai。\n无法确定则返回 unknown。",
+        "地址「{0}」属于哪个城市？\n\
+         输出 wttr.in 可用的城市英文名（全小写，多词用连字符，如 new-york）。\n\
+         只输出 JSON：{{\"city\": \"城市英文名\"}}，不确定则 {{\"city\": \"unknown\"}}",
         address
     );
 
@@ -195,7 +238,7 @@ async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Opti
         }],
         tools: None,
         temperature: Some(0.0),
-        max_tokens: Some(800),
+        max_tokens: Some(1000),
         ..Default::default()
     };
 
@@ -220,14 +263,10 @@ async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Opti
         return None;
     }
 
-    // 尝试直接提取（短文本 = 直接答案），或从推理文本中提取城市名
-    let city_text = if all_text.lines().count() <= 2 {
-        all_text.trim().to_lowercase()
-    } else {
-        extract_kebab_city(&all_text.to_lowercase())
-    };
+    // 从文本中查找 JSON 对象并解析
+    let city_text = parse_city_from_json(&all_text)?;
+    let city_text = city_text.to_lowercase();
 
-    // 过滤无效响应
     if city_text.is_empty() || city_text == "unknown" {
         tracing::debug!(city = %city_text, "resolve_via_llm: filtered out");
         return None;
@@ -242,77 +281,38 @@ async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> Opti
     })
 }
 
-/// 从 LLM 推理文本中提取 kebab-case 城市名。
+/// 从 LLM 响应文本中查找 JSON 并提取 city 字段。
 ///
-/// 排除提示词示例，找合理的城市名候选。
-fn extract_kebab_city(text: &str) -> String {
-    // 提示词示例 + 常见非城市词汇
-    let skip: std::collections::HashSet<&str> = [
-        "tokyo",
-        "new-york",
-        "shanghai",
-        "unknown",
-        "wttr",
-        "kebab",
-        "case",
-        "format",
-        "thinking",
-        "process",
-        "analyze",
-        "user",
-        "input",
-        "output",
-        "question",
-        "requirement",
-        "return",
-        "only",
-        "identify",
-        "location",
-        "china",
-        "county",
-        "level",
-        "division",
-        "prefecture",
-        "autonomous",
-        "region",
-        "specifically",
-        "located",
-        "administration",
-        "verify",
-        "actually",
-        "administered",
-        "indeed",
-        "part",
-        "sometimes",
-        "associated",
-        "prefecture-level",
-        "belong",
-        "which",
-        "city",
-        "english",
-        "name",
-        "address",
-        "here",
-    ]
-    .into_iter()
-    .collect();
-
-    let mut best: Option<&str> = None;
-    for word in text.split(|c: char| !c.is_ascii_lowercase() && c != '-') {
-        let s = word.trim_matches('-');
-        if s.is_empty() || s.len() < 2 || s.len() > 15 {
-            continue;
+/// 策略：总是取**最后一个** `"city"` 的值。
+/// 因为推理文本中可能包含 prompt 示例（如参考列表），
+/// 而模型的实际答案通常在最后输出。
+fn parse_city_from_json(text: &str) -> Option<String> {
+    // 尝试直接解析整个文本
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+        if let Some(city) = val.get("city").and_then(|c| c.as_str()) {
+            let city = city.trim().to_string();
+            if !city.is_empty() {
+                return Some(city);
+            }
         }
-        if !s.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
-            continue;
-        }
-        if skip.contains(s) {
-            continue;
-        }
-        best = Some(s);
     }
 
-    best.map(|s| s.to_string()).unwrap_or_default()
+    // 查找最后一个 "city" 键后的字符串值（逆向搜索，取最后一个匹配）
+    if let Some(last_pos) = text.rfind("\"city\"") {
+        let after = &text[last_pos + 6..];
+        let after = after.trim_start_matches(':').trim_start();
+        if let Some(quote) = after.find('"') {
+            let after_quote = &after[quote + 1..];
+            if let Some(end_quote) = after_quote.find('"') {
+                let city = after_quote[..end_quote].trim();
+                if !city.is_empty() {
+                    return Some(city.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // ─── 工具注册 ────────────────────────────────────────────────────
