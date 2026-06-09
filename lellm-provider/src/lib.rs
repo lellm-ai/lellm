@@ -20,6 +20,19 @@ pub use router::{ModelRouter, ProviderRegistry, ResolvedModel, RouteEntry, TaskL
 /// 流式调用返回的 Stream 类型别名。
 pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ProviderEvent, LlmError>> + Send>>;
 
+/// 流式调用选项 — 控制框架行为，不属于协议参数。
+///
+/// 这些选项影响 Provider 如何向消费者发射事件，
+/// 不影响发送给 LLM 的 HTTP 请求内容。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StreamOptions {
+    /// 是否向消费者发射 ThinkingDelta 事件。
+    ///
+    /// `false`（默认）= 模型可推理，但不向消费者发射 ThinkingDelta
+    /// `true` = 将推理内容以 ThinkingDelta 事件流式输出
+    pub stream_thinking: bool,
+}
+
 /// Provider 层流式事件
 #[derive(Debug, Clone)]
 pub enum ProviderEvent {
@@ -49,7 +62,12 @@ pub trait LlmProvider: Send + Sync {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// 流式调用，返回标准 Stream。
-    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError>;
+    /// `options` 控制框架行为（如是否发射 ThinkingDelta），不影响协议内容。
+    async fn stream(
+        &self,
+        request: &ChatRequest,
+        options: &StreamOptions,
+    ) -> Result<ProviderStream, LlmError>;
 
     /// Provider 标识
     fn provider_id(&self) -> &str;

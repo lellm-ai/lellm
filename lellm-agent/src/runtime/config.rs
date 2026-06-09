@@ -58,6 +58,14 @@ pub struct ToolUseConfig {
     ///
     /// `model`、`messages`、`tools` 由 Agent 层注入，不会被覆盖。
     pub request_options: RequestOptions,
+    /// 是否向消费者流式输出推理过程（ThinkingDelta 事件）。
+    ///
+    /// `false`（默认）= 模型可推理，但不向消费者发射 ThinkingDelta 事件
+    /// `true` = 将推理内容以 ThinkingDelta 事件流式输出
+    ///
+    /// **重要：** 此字段控制框架行为（Event 管道），不属于协议参数。
+    /// 不应出现在 `ChatRequest` 中（Codec 不应看到此字段）。
+    pub stream_thinking: bool,
 }
 
 impl Default for ToolUseConfig {
@@ -69,6 +77,7 @@ impl Default for ToolUseConfig {
             max_total_output_tokens: None,
             context_budget: ContextBudget::default(),
             request_options: RequestOptions::default(),
+            stream_thinking: false,
         }
     }
 }
@@ -141,7 +150,6 @@ pub(super) fn build_request_inner(
         stop_sequences: None,
         prefill: None,
         reasoning: None,
-        stream_thinking: false,
         max_reasoning_tokens: None,
         extra: None,
     };

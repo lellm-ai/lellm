@@ -149,7 +149,7 @@ impl AgentBuilder {
 
     /// 设置是否流式输出推理过程。
     pub fn stream_thinking(mut self, enable: bool) -> Self {
-        self.config.request_options.chat_request.stream_thinking = enable;
+        self.config.stream_thinking = enable;
         self
     }
 

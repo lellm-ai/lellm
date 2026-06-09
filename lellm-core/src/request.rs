@@ -22,11 +22,6 @@ pub struct ChatRequest {
     /// `Some(Low/Medium/High)` = 开启对应级别的推理
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
-    /// 是否向客户端流式输出推理过程（仅影响流式行为）。
-    ///
-    /// `false`（默认）= 模型可推理，但不向消费者发射 ThinkingDelta 事件
-    /// `true` = 将推理内容以 ThinkingDelta 事件流式输出
-    pub stream_thinking: bool,
     /// 单次 LLM 调用的推理 Token 上限（可选，默认无限制）。
     ///
     /// 与 `max_tokens` 分离：reasoning 是模型内部推理，不计入输出预算。
@@ -57,7 +52,6 @@ impl Default for ChatRequest {
             stop_sequences: None,
             prefill: None,
             reasoning: None,
-            stream_thinking: false,
             max_reasoning_tokens: None,
             extra: None,
         }
@@ -119,12 +113,6 @@ impl ChatRequest {
     /// 设置推理配置
     pub fn with_reasoning(mut self, reasoning: ReasoningConfig) -> Self {
         self.reasoning = Some(reasoning);
-        self
-    }
-
-    /// 设置是否流式输出推理过程
-    pub fn with_stream_thinking(mut self, stream_thinking: bool) -> Self {
-        self.stream_thinking = stream_thinking;
         self
     }
 

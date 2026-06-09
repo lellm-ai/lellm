@@ -11,7 +11,7 @@ use secrecy::ExposeSecret;
 use std::borrow::Cow;
 use tokio_stream::StreamExt;
 
-use crate::{LlmProvider, ProviderEvent, ProviderStream};
+use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
 
 use super::stream::sse_frame::SseFrame;
 pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
@@ -393,7 +393,11 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         }
     }
 
-    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
+    async fn stream(
+        &self,
+        request: &ChatRequest,
+        options: &StreamOptions,
+    ) -> Result<ProviderStream, LlmError> {
         self.validate_request(request)?;
         let http_req = self.adapter.build_request(request, true)?;
 
@@ -444,7 +448,7 @@ impl<A: ProviderAdapter + Clone + 'static> LlmProvider for GenericProvider<A> {
         })?;
 
         let model = request.model.clone();
-        let stream_thinking = request.stream_thinking;
+        let stream_thinking = options.stream_thinking;
         let adapter = self.adapter.clone();
 
         // 将首 chunk + 剩余流拼接为通用字节流

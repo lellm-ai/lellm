@@ -28,7 +28,6 @@ use lellm_core::ChatRequest;
 /// ```ignore
 /// let opts = RequestOptions::new()
 ///     .temperature(0.1)
-///     .stream_thinking(true)
 ///     .reasoning(ReasoningConfig::High);
 ///
 /// let agent = AgentBuilder::new(model)
@@ -88,9 +87,6 @@ impl RequestOptions {
         if o.reasoning.is_some() {
             req.reasoning = o.reasoning;
         }
-        if o.stream_thinking {
-            req.stream_thinking = o.stream_thinking;
-        }
         if o.max_reasoning_tokens.is_some() {
             req.max_reasoning_tokens = o.max_reasoning_tokens;
         }
@@ -141,11 +137,6 @@ impl RequestOptions {
 
     pub fn reasoning(mut self, r: lellm_core::ReasoningConfig) -> Self {
         self.chat_request.reasoning = Some(r);
-        self
-    }
-
-    pub fn stream_thinking(mut self, enable: bool) -> Self {
-        self.chat_request.stream_thinking = enable;
         self
     }
 

@@ -446,6 +446,7 @@ impl ToolUseLoop {
                         req.clone(),
                         config.context_budget.clone(),
                         config.max_output_tokens,
+                        config.stream_thinking,
                     )
                     .await
                     {

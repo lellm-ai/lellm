@@ -3,7 +3,7 @@
 //! 包含带 Fallback 的重试执行器、流式迭代、工具串行执行等。
 
 use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
-use lellm_provider::ResolvedModel;
+use lellm_provider::{ResolvedModel, StreamOptions};
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
@@ -351,9 +351,11 @@ pub(super) async fn do_stream_iteration(
     req: ChatRequest,
     budget: ContextBudget,
     max_output_tokens: u32,
+    stream_thinking: bool,
 ) -> Result<(StreamIterResult, LoopState), LlmError> {
     let max_reasoning_tokens = req.max_reasoning_tokens;
-    let mut stream = model.provider.stream(&req).await?;
+    let stream_opts = StreamOptions { stream_thinking };
+    let mut stream = model.provider.stream(&req, &stream_opts).await?;
     let mut text_buffer = String::new();
     let mut thinking_buffer = String::new();
     let mut redacted_buffer: Option<String> = None;

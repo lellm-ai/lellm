@@ -11,7 +11,7 @@ mod common;
 
 use futures_util::StreamExt;
 use lellm_core::{ChatRequest, LlmError, ToolCall};
-use lellm_provider::{LlmProvider, ProviderEvent};
+use lellm_provider::{LlmProvider, ProviderEvent, StreamOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), LlmError> {
@@ -20,7 +20,7 @@ async fn main() -> Result<(), LlmError> {
     let request = ChatRequest::user_prompt("用三句话介绍 Rust 编程语言。".into());
 
     // ─── 流式调用 ───
-    let mut stream = provider.stream(&request).await?;
+    let mut stream = provider.stream(&request, &StreamOptions::default()).await?;
 
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
