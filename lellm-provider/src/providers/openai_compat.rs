@@ -11,7 +11,8 @@ use lellm_core::{
 use std::borrow::Cow;
 
 use super::codec::{
-    AuthStyle, Capabilities, CodecRequest, ProviderCodec, StreamChunk, StreamParseResult, ToolCallDelta,
+    AuthStyle, Capabilities, ChatCodec, CodecRequest, ModelCapabilities, ProviderMeta, StreamChunk,
+    StreamParseResult, ToolCallDelta,
 };
 use super::stream::sse_frame::SseFrame;
 
@@ -54,7 +55,9 @@ impl OpenAICompatCodec {
     }
 }
 
-impl ProviderCodec for OpenAICompatCodec {
+// ── ProviderMeta ──
+
+impl ProviderMeta for OpenAICompatCodec {
     fn provider_id(&self) -> &str {
         &self.provider_id
     }
@@ -73,12 +76,16 @@ impl ProviderCodec for OpenAICompatCodec {
     fn auth_style(&self) -> AuthStyle {
         AuthStyle::Bearer
     }
+}
 
+// ── ChatCodec ──
+
+impl ChatCodec for OpenAICompatCodec {
     fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError> {
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
-            .map(|m| serialize_openai_message(m))
+            .map(serialize_openai_message)
             .collect::<Result<_, _>>()?;
 
         let mut body = serde_json::Map::new();
@@ -126,10 +133,10 @@ impl ProviderCodec for OpenAICompatCodec {
             }
         }
         // 推理 Token 上限 — 按 Provider 协议差异化映射
-        if let Some(tokens) = req.max_reasoning_tokens {
-            if let Some((key, value)) = serialize_max_reasoning_tokens(&self.provider_id, tokens) {
-                body.insert(key, value);
-            }
+        if let Some(tokens) = req.max_reasoning_tokens
+            && let Some((key, value)) = serialize_max_reasoning_tokens(&self.provider_id, tokens)
+        {
+            body.insert(key, value);
         }
         if let Some(ref tools) = req.tools {
             body.insert(
@@ -339,7 +346,11 @@ impl ProviderCodec for OpenAICompatCodec {
             Ok(StreamParseResult { chunks: results })
         }
     }
+}
 
+// ── ModelCapabilities ──
+
+impl ModelCapabilities for OpenAICompatCodec {
     fn capabilities_for(&self, model: &str) -> Capabilities {
         let mut caps = Capabilities::default();
         let lower = model.to_lowercase();
@@ -348,7 +359,9 @@ impl ProviderCodec for OpenAICompatCodec {
             caps.supports_image_input = true;
         }
         // o1, o3, r1-style models support reasoning
-        if lower.contains("o1-") || lower.contains("o3-") || lower.contains("-r1")
+        if lower.contains("o1-")
+            || lower.contains("o3-")
+            || lower.contains("-r1")
             || lower == "o1"
             || lower == "o3"
         {

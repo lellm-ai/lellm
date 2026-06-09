@@ -27,8 +27,8 @@ use lellm_core::{ChatRequest, Message, ToolError, ToolErrorKind, text_block};
 use lellm_macros::ToolDefinition;
 use lellm_provider::LlmProvider;
 use lellm_provider::ResolvedModel;
-use lellm_provider::providers::base::GenericProvider;
-use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
+use lellm_provider::providers::base::CodecProvider;
+use lellm_provider::providers::openai_compat::OpenAICompatCodec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -727,7 +727,7 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
     // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
     let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
 
@@ -788,7 +788,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let provider =
-        GenericProvider::from_env(OpenAICompatAdapter::llama()).expect("LLaMA provider env error");
+        CodecProvider::from_env(OpenAICompatCodec::llama()).expect("LLaMA provider env error");
     let agent = create_agent(provider);
 
     println!("=== Weather Agent — resolve_city(四级降级) + http_get ===\n");

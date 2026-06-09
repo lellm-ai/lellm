@@ -9,8 +9,8 @@ use lellm_core::{
 use std::borrow::Cow;
 
 use super::codec::{
-    AuthStyle, Capabilities, CodecRequest, ProviderCodec, StreamChunk, StreamParseResult,
-    ToolCallDelta,
+    AuthStyle, Capabilities, ChatCodec, CodecRequest, ModelCapabilities, ProviderMeta, StreamChunk,
+    StreamParseResult, ToolCallDelta,
 };
 use super::stream::sse_frame::SseFrame;
 
@@ -18,7 +18,9 @@ use super::stream::sse_frame::SseFrame;
 #[derive(Debug, Clone)]
 pub struct AnthropicCodec;
 
-impl ProviderCodec for AnthropicCodec {
+// ── ProviderMeta ──
+
+impl ProviderMeta for AnthropicCodec {
     fn provider_id(&self) -> &'static str {
         "anthropic"
     }
@@ -30,7 +32,11 @@ impl ProviderCodec for AnthropicCodec {
     fn auth_style(&self) -> AuthStyle {
         AuthStyle::CustomHeader("x-api-key")
     }
+}
 
+// ── ChatCodec ──
+
+impl ChatCodec for AnthropicCodec {
     fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError> {
         // Anthropic 需要 {"role": "...", "content": [...]} 格式
         // system 消息必须放在单独的 system 字段，不能在 messages 数组中
@@ -371,7 +377,11 @@ impl ProviderCodec for AnthropicCodec {
 
         Ok(StreamParseResult::empty())
     }
+}
 
+// ── ModelCapabilities ──
+
+impl ModelCapabilities for AnthropicCodec {
     fn capabilities_for(&self, model: &str) -> Capabilities {
         let mut caps = Capabilities::default();
         let lower = model.to_lowercase();
@@ -388,9 +398,7 @@ impl ProviderCodec for AnthropicCodec {
 /// - `Text` → `{"type": "text", "text": "..."}`
 /// - `ToolCall` → `{"type": "tool_use", "id": ..., "name": ..., "input": {...}}`
 /// - `Thinking` → `{"type": "thinking", "thinking": "..."}`
-/// - `Image` → 暂不支持，返回空数组（v0.2 补齐）
-/// 将 ContentBlock 序列化为 Anthropic 格式。
-/// v0.1 不支持图片，遇到 Image 返回 UnsupportedFeature 错误。
+/// - `Image` → 暂不支持，返回 `UnsupportedFeature` 错误
 fn serialize_anthropic_content_blocks(
     blocks: &[ContentBlock],
 ) -> Result<serde_json::Value, LlmError> {

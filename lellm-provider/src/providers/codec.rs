@@ -1,12 +1,14 @@
-//! ProviderCodec — 协议编解码 SPI。
+//! ProviderCodec — 三权分立的协议编解码 SPI。
 //!
-//! 将 `ProviderAdapter` 的职责拆分为三类：
-//! - **协议编解码**：`encode()` / `decode()` / `decode_sse()` — Codec 的核心职责
-//! - **连接元数据**：`provider_id()` / `default_base_url()` / `auth_style()` — 框架约定
-//! - **能力声明**：`capabilities_for()` — 模型感知的能力矩阵
+//! 将 Provider 的职责拆分为三个独立 trait：
+//! - **ChatCodec** — 协议编解码（encode/decode/decode_sse），无状态物理层互转
+//! - **ModelCapabilities** — 模型感知能力矩阵，逻辑校验层
+//! - **ProviderMeta** — 连接元数据（provider_id/base_url/auth），框架环境约定
 //!
-//! `CodecProvider`（原 `GenericProvider`）持有 Codec + 连接配置，
-//! 统一负责 HTTP 发送、认证注入、超时控制。
+//! 生态扩展统一入口：`ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta`
+//! 开发者只需实现 `ProviderExtension`，框架内部按需消费子 trait。
+//!
+//! `CodecProvider` 持有 Codec + 连接配置，统一负责 HTTP 发送、认证注入、超时控制。
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -98,7 +100,7 @@ pub enum AuthStyle {
 #[derive(Debug)]
 pub enum ProviderEnvError {
     /// 缺少必需的 API Key
-    MissingApiKey { provider: String },
+    MissingApiKey { provider: String, env_var: String },
     /// URL 解析失败
     InvalidUrl { url: String, reason: String },
 }
@@ -106,8 +108,12 @@ pub enum ProviderEnvError {
 impl std::fmt::Display for ProviderEnvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProviderEnvError::MissingApiKey { provider } => {
-                write!(f, "Missing API key for provider '{}'", provider)
+            ProviderEnvError::MissingApiKey { provider, env_var } => {
+                write!(
+                    f,
+                    "Missing API key for provider '{}' (env: {})",
+                    provider, env_var
+                )
             }
             ProviderEnvError::InvalidUrl { url, reason } => {
                 write!(f, "Invalid URL '{}': {}", url, reason)
@@ -118,30 +124,13 @@ impl std::fmt::Display for ProviderEnvError {
 
 impl std::error::Error for ProviderEnvError {}
 
-// ─── ProviderCodec SPI (pub(crate)) ───
+// ─── 1. ChatCodec — 协议编解码（无状态、纯粹的物理层互转）──
 
-/// Provider 协议编解码器 trait。
+/// 协议编解码 trait — 无状态、纯粹的物理层互转。
 ///
 /// Codec **不知道** `CodecProvider`、`reqwest`、HTTP。
 /// 只负责：`ChatRequest → CodecRequest`（编码），`body bytes → ChatResponse`（解码）。
-///
-/// 连接元数据（provider_id / base_url / auth）与能力声明也在此 trait 上，
-/// 便于 `CodecProvider::from_env()` 自动推导配置。
-pub(crate) trait ProviderCodec: Send + Sync {
-    // ── 连接元数据（框架约定）──
-
-    /// Provider 标识（全小写，如 "openai", "anthropic"）。
-    /// 环境变量前缀自动推导为 `provider_id().to_ascii_uppercase()`。
-    fn provider_id(&self) -> &str;
-
-    /// 默认基础 URL（当 `<PREFIX>_BASE_URL` 未设置时使用）。
-    fn default_base_url(&self) -> &'static str;
-
-    /// 认证方式（决定使用 `bearer()` 还是 `header()` 构造配置）。
-    fn auth_style(&self) -> AuthStyle;
-
-    // ── 协议编解码（核心职责）──
-
+pub(crate) trait ChatCodec: Send + Sync {
     /// 编码 ChatRequest 为 CodecRequest（路径 + 协议 Header + JSON Body 字节）。
     fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError>;
 
@@ -151,14 +140,72 @@ pub(crate) trait ProviderCodec: Send + Sync {
     /// 解码单个 SSE 帧的 data 字段。
     /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 CodecProvider 统一处理，构建 SseFrame。
     fn decode_sse(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
+}
 
-    // ── 能力声明（模型感知）──
+// ─── 2. ModelCapabilities — 能力声明（模型感知、逻辑校验层）──
 
-    /// 返回该 model 支持的能力矩阵。
+/// 模型感知能力矩阵 — 逻辑校验层。
+///
+/// 框架提供默认的基于命名的启发式匹配，Codec 可 override 精确控制。
+pub(crate) trait ModelCapabilities: Send + Sync {
+    /// 结合模型名称，返回该模型的能力矩阵。
     ///
-    /// 若 model 未知，返回最保守的默认值（全 false）。
-    /// Codec 可结合精确 match + 启发式模糊匹配来识别主流模型。
-    fn capabilities_for(&self, _model: &str) -> Capabilities {
-        Capabilities::default()
+    /// 默认实现提供基于命名的启发式猜测（如 contains("vision") → supports_image）。
+    /// Codec 应 override 此方法以提供精确的能力声明。
+    fn capabilities_for(&self, model: &str) -> Capabilities {
+        Capabilities::heuristic_guess(model)
     }
 }
+
+impl Capabilities {
+    /// 基于模型名称的启发式能力猜测（默认实现）。
+    fn heuristic_guess(model: &str) -> Self {
+        let mut caps = Capabilities::default();
+        let lower = model.to_lowercase();
+        if lower.contains("vision")
+            || lower.contains("-4o")
+            || lower.contains("gpt-4.5")
+            || lower.contains("claude-3")
+            || lower.contains("claude-4")
+        {
+            caps.supports_image_input = true;
+        }
+        caps
+    }
+}
+
+// ─── 3. ProviderMeta — 连接元数据（框架环境约定、控制层）──
+
+/// 连接元数据 trait — 框架环境约定。
+pub(crate) trait ProviderMeta: Send + Sync {
+    /// Provider 标识（全小写，如 "openai", "anthropic"）。
+    fn provider_id(&self) -> &str;
+
+    /// 默认基础 URL（当 `<PREFIX>_BASE_URL` 未设置时使用）。
+    fn default_base_url(&self) -> &'static str;
+
+    /// 认证方式（决定使用 `bearer()` 还是 `header()` 构造配置）。
+    fn auth_style(&self) -> AuthStyle;
+
+    /// API Key 环境变量名，默认 `{PROVIDER_ID}_API_KEY`。
+    ///
+    /// 子类可 override 以支持非标准命名（如 `DASHSCOPE_API_KEY` vs `QWEN_API_KEY`），
+    /// 或支持多实例（`OPENAI_API_KEY_PRIMARY`）。
+    fn api_key_env(&self) -> Cow<'static, str> {
+        format!("{}_API_KEY", self.provider_id().to_ascii_uppercase()).into()
+    }
+}
+
+// ─── ProviderExtension — 生态扩展统一入口 ───
+
+/// 生态扩展统一插件接口。
+///
+/// 开发者实现一个新 Provider 时，只需同时满足这三个轴向的职责。
+/// 框架内部按需消费子 trait（如 `process_stream` 只需 `ChatCodec`）。
+pub(crate) trait ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta {}
+
+// 毯式实现：任何同时实现了这三个 trait 的类型，自动成为合格的 ProviderExtension。
+impl<T> ProviderExtension for T where T: ChatCodec + ModelCapabilities + ProviderMeta {}
+
+// NOTE: ProviderCodec 已拆分为 ChatCodec + ModelCapabilities + ProviderMeta。
+// 框架内部使用 ProviderExtension 超级 trait。

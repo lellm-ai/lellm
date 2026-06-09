@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 统一的聊天请求。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<crate::Message>,
@@ -38,25 +38,7 @@ pub struct ChatRequest {
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-impl Default for ChatRequest {
-    fn default() -> Self {
-        Self {
-            model: String::new(),
-            messages: Vec::new(),
-            tools: None,
-            temperature: None,
-            max_tokens: None,
-            top_p: None,
-            seed: None,
-            tool_choice: None,
-            stop_sequences: None,
-            prefill: None,
-            reasoning: None,
-            max_reasoning_tokens: None,
-            extra: None,
-        }
-    }
-}
+// Default is derived - all fields have valid default values
 
 impl ChatRequest {
     /// 便捷构造：单条用户消息

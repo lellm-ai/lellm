@@ -27,7 +27,10 @@ async fn test_mock_provider_stream() {
     let provider = MockProvider::reply_with(response);
 
     let request = ChatRequest::user_prompt("test".to_string());
-    let mut stream = provider.stream(&request, &StreamOptions::default()).await.unwrap();
+    let mut stream = provider
+        .stream(&request, &StreamOptions::default())
+        .await
+        .unwrap();
 
     // 应该收到 Start, Token, ResponseComplete 事件
     let mut events = Vec::new();

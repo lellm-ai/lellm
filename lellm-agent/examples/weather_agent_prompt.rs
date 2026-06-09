@@ -14,8 +14,8 @@ use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemar
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
 use lellm_macros::ToolDefinition;
 use lellm_provider::ResolvedModel;
-use lellm_provider::providers::base::GenericProvider;
-use lellm_provider::providers::openai_compat::OpenAICompatAdapter;
+use lellm_provider::providers::base::CodecProvider;
+use lellm_provider::providers::openai_compat::OpenAICompatCodec;
 use std::sync::Arc;
 
 // ─── 通用 HTTP GET 工具 ─────────────────────────────────────────
@@ -67,7 +67,7 @@ fn register_http_tools() -> Vec<ToolRegistration> {
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
     let prompt = r#"你是天气查询助手。
 任务分两步：
 
@@ -154,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let provider =
-        GenericProvider::from_env(OpenAICompatAdapter::llama()).expect("OpenAI provider env error");
+        CodecProvider::from_env(OpenAICompatCodec::llama()).expect("OpenAI provider env error");
     let agent = create_agent(provider);
 
     println!("=== LeLLM Agent — 天气查询链（纯 http_get）===\n");

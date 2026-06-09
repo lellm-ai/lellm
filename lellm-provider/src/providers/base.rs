@@ -13,7 +13,7 @@ use tokio_stream::StreamExt;
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
 
-use super::codec::{CodecRequest, ProviderCodec, ProviderEnvError};
+use super::codec::{CodecRequest, ProviderEnvError, ProviderExtension, ProviderMeta};
 use super::stream::{EventSink, StreamEvent};
 
 // ─── HTTP 原始响应 ───
@@ -82,18 +82,18 @@ fn map_stream_event(event: StreamEvent) -> Result<ProviderEvent, LlmError> {
 
 // ─── CodecProvider — 持有 codec + config + client ───
 
-/// 通用 Provider，适配任何 ProviderCodec。
+/// 通用 Provider，适配任何 ProviderExtension。
 ///
 /// Codec 必须 Clone，以便在流式调用时克隆进 tokio::spawn。
 #[allow(private_bounds)]
-pub struct CodecProvider<C: ProviderCodec> {
+pub struct CodecProvider<C: ProviderExtension> {
     codec: C,
     config: ProviderConfig,
     client: reqwest::Client,
 }
 
 #[allow(private_bounds)]
-impl<C: ProviderCodec + Clone> CodecProvider<C> {
+impl<C: ProviderExtension + Clone> CodecProvider<C> {
     pub fn new(codec: C, config: ProviderConfig) -> Self {
         let client = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
@@ -139,10 +139,7 @@ impl<C: ProviderCodec + Clone> CodecProvider<C> {
                 for block in msg.content() {
                     if let ContentBlock::Image { .. } = block {
                         return Err(LlmError::UnsupportedFeature {
-                            feature: format!(
-                                "Image input ({} adapter)",
-                                self.codec.provider_id()
-                            ),
+                            feature: format!("Image input ({} adapter)", self.codec.provider_id()),
                         });
                     }
                 }
@@ -227,7 +224,7 @@ impl<C: ProviderCodec + Clone> CodecProvider<C> {
 
 #[async_trait]
 #[allow(private_bounds)]
-impl<C: ProviderCodec + Clone + 'static> LlmProvider for CodecProvider<C> {
+impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.validate_request(request)?;
         let http_req = self.codec.encode(request, false)?;
@@ -373,7 +370,7 @@ impl ProviderConfig {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Bearer {
-                api_key: secrecy::SecretString::new(api_key.into().into()),
+                api_key: secrecy::SecretString::new(api_key.into()),
             },
             connect_timeout: std::time::Duration::from_secs(10),
             timeout: std::time::Duration::from_secs(120),
@@ -391,7 +388,7 @@ impl ProviderConfig {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::Header {
                 header: header.into(),
-                value: secrecy::SecretString::new(value.into().into()),
+                value: secrecy::SecretString::new(value.into()),
             },
             connect_timeout: std::time::Duration::from_secs(10),
             timeout: std::time::Duration::from_secs(120),
@@ -411,11 +408,12 @@ impl ProviderConfig {
     }
 
     /// 从 codec 元数据 + 环境变量自动加载配置。
-    pub(crate) fn from_codec(codec: &dyn ProviderCodec) -> Result<Self, ProviderEnvError> {
-        let provider_id = codec.provider_id();
+    pub(crate) fn from_codec(meta: &dyn ProviderMeta) -> Result<Self, ProviderEnvError> {
+        let provider_id = meta.provider_id();
         let env_prefix = provider_id.to_ascii_uppercase();
-        let default_url = codec.default_base_url();
-        let auth_style = codec.auth_style();
+        let default_url = meta.default_base_url();
+        let auth_style = meta.auth_style();
+        let api_key_env = meta.api_key_env();
 
         let base_url = std::env::var(format!("{}_BASE_URL", env_prefix)).unwrap_or_else(|_| {
             tracing::debug!(
@@ -427,12 +425,11 @@ impl ProviderConfig {
             default_url.to_string()
         });
 
-        let api_key = std::env::var(format!("{}_API_KEY", env_prefix)).map_err(|_| {
-            tracing::error!(provider = provider_id, "{}_API_KEY not found", env_prefix);
-            ProviderEnvError::MissingApiKey {
+        let api_key =
+            std::env::var(&*api_key_env).map_err(|_| ProviderEnvError::MissingApiKey {
                 provider: provider_id.to_string(),
-            }
-        })?;
+                env_var: api_key_env.into_owned(),
+            })?;
 
         match auth_style {
             super::codec::AuthStyle::Bearer => {
@@ -492,7 +489,9 @@ impl Default for ProviderConfig {
 /// 认证配置。
 #[derive(Clone, Debug)]
 pub enum AuthConfig {
-    Bearer { api_key: secrecy::SecretString },
+    Bearer {
+        api_key: secrecy::SecretString,
+    },
     Header {
         header: String,
         value: secrecy::SecretString,

@@ -15,7 +15,7 @@ use super::{
     EventSink, SseFrame, SseParser, StreamEvent, ToolCallAccumulator, ToolCallDelta,
     UsageAccumulator, UsageDelta,
 };
-use crate::providers::codec::{ProviderCodec, StreamChunk};
+use crate::providers::codec::{ChatCodec, StreamChunk};
 
 /// 单个 SseFrame 的解析结果。
 struct FrameResult {
@@ -29,28 +29,28 @@ struct FrameResult {
 
 /// 处理 SSE 字节流，将 StreamEvent 发送到 sink。
 ///
-/// 管道：Bytes → SseParser → SseFrame → Adapter → StreamChunk → StreamEvent
+/// 管道：Bytes → SseParser → SseFrame → Codec → StreamChunk → StreamEvent
 ///
 /// # 参数
 /// - `sink`: 事件输出端
-/// - `adapter`: Provider 适配器，负责 SSE data → StreamChunk 的协议解析
+/// - `codec`: ChatCodec，负责 SSE data → StreamChunk 的协议解析
 /// - `model`: 模型标识
 /// - `stream_thinking`: 是否向消费者发射 ThinkingDelta 事件
 /// - `bytes_stream`: 任意字节流（reqwest、hyper、mock、file...）
 ///
 /// # 泛型参数
 /// - `S`: 任意字节流
-/// - `A`: Provider 适配器
+/// - `A`: ChatCodec 实现
 /// - `E`: 事件输出端
 pub async fn process_stream<S, A, E>(
     sink: &mut E,
-    adapter: &A,
+    codec: &A,
     model: String,
     stream_thinking: bool,
     mut bytes_stream: S,
 ) where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
-    A: ProviderCodec,
+    A: ChatCodec,
     E: EventSink,
 {
     // Start 事件 — 消费者尚未连接则立即退出
@@ -75,28 +75,26 @@ pub async fn process_stream<S, A, E>(
                 let frames = parser.feed(&bytes);
 
                 for frame in frames {
-                    let fr = handle_frame(adapter, &frame);
+                    let fr = handle_frame(codec, &frame);
 
                     // 文本增量
-                    if let Some(text) = fr.text {
-                        if !sink.emit(StreamEvent::Token { token: text }).await {
-                            return;
-                        }
+                    if let Some(text) = fr.text
+                        && !sink.emit(StreamEvent::Token { token: text }).await
+                    {
+                        return;
                     }
 
                     // 思考增量 — 根据 stream_thinking 决定是否发射
-                    if stream_thinking {
-                        if let Some(thinking) = fr.thinking {
-                            if !sink
-                                .emit(StreamEvent::ThinkingDelta {
-                                    thinking,
-                                    redacted: fr.thinking_redacted,
-                                })
-                                .await
-                            {
-                                return;
-                            }
-                        }
+                    if stream_thinking
+                        && let Some(thinking) = fr.thinking
+                        && !sink
+                            .emit(StreamEvent::ThinkingDelta {
+                                thinking,
+                                redacted: fr.thinking_redacted,
+                            })
+                            .await
+                    {
+                        return;
                     }
 
                     // ToolCall 增量
@@ -145,8 +143,8 @@ pub async fn process_stream<S, A, E>(
     .await;
 }
 
-/// 处理单个 SseFrame — 调用 Adapter 解析，返回结构化结果。
-fn handle_frame<A: ProviderCodec>(adapter: &A, frame: &SseFrame) -> FrameResult {
+/// 处理单个 SseFrame — 调用 Codec 解析，返回结构化结果。
+fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> FrameResult {
     let mut result = FrameResult {
         text: None,
         thinking: None,
@@ -156,7 +154,7 @@ fn handle_frame<A: ProviderCodec>(adapter: &A, frame: &SseFrame) -> FrameResult 
         is_done: false,
     };
 
-    match adapter.decode_sse(frame) {
+    match codec.decode_sse(frame) {
         Ok(parse_result) => {
             for chunk in parse_result.chunks {
                 match chunk {
