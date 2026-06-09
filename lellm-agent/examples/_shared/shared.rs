@@ -80,7 +80,7 @@ pub async fn observe_react_loop(
                         if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
                             println!(
                                 "{}",
-                                serde_json::to_string_pretty(&value).unwrap_or(output.clone())
+                                serde_json::to_string(&value).unwrap_or(output.clone())
                             );
                         } else {
                             println!("{output}");
@@ -118,6 +118,15 @@ pub async fn observe_react_loop(
 
             AgentEvent::LoopEnd { result } => {
                 let total = total_start.elapsed();
+                println!();
+                println!(
+                    "================================ 最终结果 ================================="
+                );
+                for block in &result.response.content {
+                    if let Some(text) = block.as_text() {
+                        println!("{text}");
+                    }
+                }
                 println!();
                 println!("--- 执行摘要 ---");
                 println!("停止原因: {:?}", result.stop_reason);

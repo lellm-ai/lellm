@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .try_init();
 
-    let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())
+    let provider = GenericProvider::from_env(OpenAICompatAdapter::llama())
         .expect("OpenAI provider env error");
     let agent = create_agent(provider);
 
