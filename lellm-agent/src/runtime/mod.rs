@@ -9,11 +9,11 @@ pub mod context;
 pub mod event;
 pub mod fallback;
 pub(crate) mod iteration;
-pub mod loop_;
 #[cfg(feature = "v02-preview")]
 pub mod loop_detector;
 pub mod request_opts;
 pub mod retry;
+pub mod runtime;
 #[cfg(feature = "v02-preview")]
 pub mod signal_voter;
 pub mod tools;
@@ -36,11 +36,11 @@ pub use context::{
 pub use event::{AgentEvent, AgentStream, StopReason};
 pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 pub use lellm_provider::ResolvedModel;
-pub use loop_::{LoopState, ToolUseLoop, ToolUseResult};
 #[cfg(feature = "v02-preview")]
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
+pub use runtime::{LoopState, ToolUseLoop, ToolUseResult};
 #[cfg(feature = "v02-preview")]
 pub use signal_voter::{NegativeSignal, SignalVoter};
 
