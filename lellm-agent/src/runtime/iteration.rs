@@ -1,16 +1,14 @@
 //! 迭代辅助函数 — execute() 与 execute_stream() 共享的工具箱。
 //!
-//! 包含带 Fallback 的重试执行器、流式事件发射、工具串行执行等。
-//!
-//! **设计笔记：** 曾尝试提取 `Iteration` 结构体封装单轮迭代流程，
-//! 但 Rust borrow checker 不允许 `&mut state` 与 `state.iterations` 共存。
-//! 未来可探索 `split_mut` 或 `cell` 模式。
+//! 包含带 Fallback 的重试执行器、流式迭代、工具串行执行等。
 
-use lellm_core::{ChatResponse, LlmError, Message};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
+use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-use super::context::ContextBudget;
+use super::LoopState;
+use super::context::{ContextBudget, estimate_text};
 use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::tools::ToolExecutor;
@@ -162,4 +160,218 @@ pub fn build_partial_response(
         lellm_core::TokenUsage::default(),
         serde_json::json!(null),
     )
+}
+
+// ─── 流式单轮迭代结果 ─────────────────────────────────────────────
+
+/// 流式单轮迭代的合法结果 — 枚举保证类型安全。
+///
+/// **设计原则：** 仅表达"一次迭代成功完成后的状态"。
+/// 错误通过 `Result<StreamIterResult, LlmError>` 的 `Err` 表达。
+#[must_use]
+pub(super) enum StreamIterResult {
+    /// 继续循环（有 tool_calls，应进入下一轮）
+    Continue { response: ChatResponse },
+    /// 正常完成（无 tool_calls，Agent 已获得最终答案）
+    Complete { response: ChatResponse },
+    /// 消费者断开（不再继续）
+    Cancelled { response: Option<ChatResponse> },
+    /// 单轮输出预算超限（Provider 忽略 max_tokens 或模型无限输出）
+    OutputBudgetExceeded { response: ChatResponse },
+    /// 单轮推理预算超限（Provider 忽略 max_tokens 或模型疯狂推理）
+    ReasoningBudgetExceeded { response: ChatResponse },
+}
+
+// ─── 流式单轮迭代（含 stream 打开）────────────────────────────────
+
+/// 处理流式单轮迭代（不含打开 stream）。
+///
+/// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
+///
+/// `max_output_tokens` — 单轮输出的 Token 上限（保险丝），在流式消费时实时检查。
+/// `max_reasoning_tokens` — 单轮推理的 Token 上限（保险丝），可选。
+async fn process_stream_iteration(
+    tx: &Sender<AgentEvent>,
+    executor: &ToolExecutor,
+    state: &mut LoopState,
+    stream: &mut lellm_provider::ProviderStream,
+    text_buffer: &mut String,
+    thinking_buffer: &mut String,
+    redacted_buffer: &mut Option<String>,
+    budget: &ContextBudget,
+    max_output_tokens: u32,
+    max_reasoning_tokens: Option<u32>,
+) -> Result<StreamIterResult, LlmError> {
+    use futures_util::StreamExt;
+
+    let mut round_output_tokens: usize = 0;
+    let mut round_reasoning_tokens: usize = 0;
+
+    while let Some(result) = stream.next().await {
+        let ev = match result {
+            Ok(ev) => ev,
+            Err(e) => return Err(e),
+        };
+
+        // 统一透传 Provider 事件 — Provider 发一次，Agent 只负责转发
+        match &ev {
+            lellm_provider::ProviderEvent::Token { token } => {
+                round_output_tokens += estimate_text(token);
+                if (round_output_tokens as u32) > max_output_tokens {
+                    tracing::warn!(
+                        round_output_tokens,
+                        max_output_tokens,
+                        "single-round output budget exceeded, cutting stream"
+                    );
+                    let response = build_partial_response(
+                        text_buffer.clone(),
+                        thinking_buffer.clone(),
+                        redacted_buffer.clone(),
+                    );
+                    return Ok(StreamIterResult::OutputBudgetExceeded { response });
+                }
+                text_buffer.push_str(token);
+            }
+            lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
+                round_reasoning_tokens += estimate_text(thinking);
+                if let Some(limit) = max_reasoning_tokens {
+                    if (round_reasoning_tokens as u32) > limit {
+                        tracing::warn!(
+                            round_reasoning_tokens,
+                            max_reasoning_tokens = limit,
+                            "single-round reasoning budget exceeded, cutting stream"
+                        );
+                        let response = build_partial_response(
+                            text_buffer.clone(),
+                            thinking_buffer.clone(),
+                            redacted_buffer.clone(),
+                        );
+                        return Ok(StreamIterResult::ReasoningBudgetExceeded { response });
+                    }
+                }
+                thinking_buffer.push_str(thinking);
+                if let Some(r) = redacted {
+                    if let Some(ref mut prev) = *redacted_buffer {
+                        prev.push_str(r);
+                    } else {
+                        *redacted_buffer = Some(r.clone());
+                    }
+                }
+            }
+            lellm_provider::ProviderEvent::Start { .. }
+            | lellm_provider::ProviderEvent::ResponseComplete { .. } => {}
+        }
+
+        if !emit(tx, AgentEvent::Provider(ev.clone())).await {
+            return Ok(StreamIterResult::Cancelled { response: None });
+        }
+
+        // ResponseComplete 事件需要特殊处理：工具执行、终止判断
+        if let lellm_provider::ProviderEvent::ResponseComplete { tool_calls, usage } = ev {
+            let pending_tool_calls = tool_calls;
+            let usage_val = usage.unwrap_or_default();
+
+            // 统一构建 ChatResponse
+            let mut content: Vec<lellm_core::ContentBlock> = Vec::new();
+
+            if !thinking_buffer.is_empty() {
+                content.push(lellm_core::ContentBlock::Thinking(
+                    lellm_core::ThinkingBlock {
+                        thinking: thinking_buffer.clone(),
+                        redacted: redacted_buffer.clone(),
+                    },
+                ));
+            }
+
+            if !text_buffer.is_empty() {
+                content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
+                    text: text_buffer.clone(),
+                }));
+            }
+
+            content.extend(
+                pending_tool_calls
+                    .iter()
+                    .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
+            );
+
+            let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
+
+            if !pending_tool_calls.is_empty() {
+                state.push_assistant(response.content.clone());
+                state.add_tool_calls(pending_tool_calls.len());
+
+                let results =
+                    emit_and_execute_tools(tx, executor, &pending_tool_calls, budget).await;
+                if results.is_none() {
+                    return Ok(StreamIterResult::Cancelled {
+                        response: Some(response),
+                    });
+                }
+                state.push_tool_results(results.unwrap());
+
+                tracing::debug!(
+                    iteration = state.iterations,
+                    tool_calls = pending_tool_calls.len(),
+                    "tool-use stream iteration"
+                );
+
+                return Ok(StreamIterResult::Continue { response });
+            } else {
+                if !emit(
+                    tx,
+                    AgentEvent::LoopEnd {
+                        result: state.finish_complete(response.clone()),
+                    },
+                )
+                .await
+                {
+                    return Ok(StreamIterResult::Cancelled {
+                        response: Some(response),
+                    });
+                }
+
+                return Ok(StreamIterResult::Complete { response });
+            }
+        }
+    }
+
+    Err(LlmError::UnexpectedEof)
+}
+
+/// 执行单次流式迭代：打开 stream → 消费事件 → 处理工具调用。
+///
+/// 接收 owned 参数（Arc-clone 为 O(1)），避免闭包捕获带来的变量爆炸。
+/// 返回迭代结果和更新后的 LoopState。
+pub(super) async fn do_stream_iteration(
+    model: ResolvedModel,
+    tx: Sender<AgentEvent>,
+    executor: ToolExecutor,
+    state: LoopState,
+    req: ChatRequest,
+    budget: ContextBudget,
+    max_output_tokens: u32,
+) -> Result<(StreamIterResult, LoopState), LlmError> {
+    let max_reasoning_tokens = req.max_reasoning_tokens;
+    let mut stream = model.provider.stream(&req).await?;
+    let mut text_buffer = String::new();
+    let mut thinking_buffer = String::new();
+    let mut redacted_buffer: Option<String> = None;
+    let mut attempt_state = state;
+
+    let iter_result = process_stream_iteration(
+        &tx,
+        &executor,
+        &mut attempt_state,
+        &mut stream,
+        &mut text_buffer,
+        &mut thinking_buffer,
+        &mut redacted_buffer,
+        &budget,
+        max_output_tokens,
+        max_reasoning_tokens,
+    )
+    .await?;
+
+    Ok((iter_result, attempt_state))
 }

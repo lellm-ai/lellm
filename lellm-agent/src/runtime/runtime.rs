@@ -15,7 +15,6 @@
 
 use lellm_core::{ChatResponse, LlmError, Message};
 use lellm_provider::ResolvedModel;
-use tokio::sync::mpsc::Sender;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_messages_inner, empty_response};
 use super::context::{
@@ -23,9 +22,8 @@ use super::context::{
     estimate_tokens,
 };
 use super::event::{AgentEvent, AgentStream, StopReason};
-use super::iteration::{
-    build_partial_response, emit, emit_and_execute_tools, execute_with_fallback,
-};
+use super::fallback::{FallbackAction, FallbackContext};
+use super::iteration::{StreamIterResult, do_stream_iteration, emit, execute_with_fallback};
 use super::tools::ToolExecutor;
 
 // ─── 循环状态机 ───────────────────────────────────────────────
@@ -434,58 +432,49 @@ impl ToolUseLoop {
                     state.iterations,
                 );
 
-                // 把 stream() + process_stream_iteration() 整体包进 fallback，
-                // 这样流消费失败（SSE 中途断掉）也能触发重试。
-                let model_for_fallback = model.clone();
-                let tx_for_fallback = tx.clone();
-                let executor_for_fallback = executor.clone();
-                let budget_for_fallback = config.context_budget.clone();
-                let max_output_tokens_for_fallback = config.max_output_tokens;
-                let req_for_fallback = req.clone();
-                let state_for_clone = state.clone();
-                let iteration_count = state.iterations;
-                let state_messages = state.messages.clone();
+                // 内联 fallback 重试循环 — 不用闭包捕获，消除 _for_fallback 变量爆炸。
+                let iteration = state.iterations;
+                let attempt_state = state.clone();
+                let mut attempt: usize = 1;
 
-                let result: Result<(StreamIterResult, LoopState), LlmError> =
-                    execute_with_fallback(
-                        &deps.fallback,
-                        move || {
-                            let model = model_for_fallback.clone();
-                            let tx = tx_for_fallback.clone();
-                            let executor = executor_for_fallback.clone();
-                            let budget = budget_for_fallback.clone();
-                            let max_output_tokens = max_output_tokens_for_fallback;
-                            let req = req_for_fallback.clone();
-                            let max_reasoning_tokens = req.max_reasoning_tokens;
-                            let mut attempt_state = state_for_clone.clone();
-
-                            async move {
-                                let mut stream = model.provider.stream(&req).await?;
-                                let mut text_buffer = String::new();
-                                let mut thinking_buffer = String::new();
-                                let mut redacted_buffer: Option<String> = None;
-
-                                let iter_result = process_stream_iteration(
-                                    &tx,
-                                    &executor,
-                                    &mut attempt_state,
-                                    &mut stream,
-                                    &mut text_buffer,
-                                    &mut thinking_buffer,
-                                    &mut redacted_buffer,
-                                    &budget,
-                                    max_output_tokens,
-                                    max_reasoning_tokens,
-                                )
-                                .await?;
-
-                                Ok((iter_result, attempt_state))
-                            }
-                        },
-                        iteration_count,
-                        &state_messages,
+                let result = loop {
+                    match do_stream_iteration(
+                        model.clone(),
+                        tx.clone(),
+                        executor.clone(),
+                        attempt_state.clone(),
+                        req.clone(),
+                        config.context_budget.clone(),
+                        config.max_output_tokens,
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(v) => break Ok(v),
+                        Err(err) => {
+                            tracing::warn!(
+                                attempt = attempt,
+                                error = %err,
+                                "stream iteration failed, fallback handling"
+                            );
+                            let ctx = FallbackContext {
+                                error: &err,
+                                attempt,
+                                iterations: iteration,
+                                conversation: std::sync::Arc::from(
+                                    attempt_state.messages.as_slice(),
+                                ),
+                            };
+                            match deps.fallback.handle(&ctx).await {
+                                FallbackAction::Retry => {
+                                    attempt += 1;
+                                }
+                                FallbackAction::Abort => {
+                                    break Err(err);
+                                }
+                            }
+                        }
+                    }
+                };
 
                 // 成功时合并 state
                 let result = match result {
@@ -568,178 +557,4 @@ impl ToolUseLoop {
 
         rx
     }
-}
-
-// ─── 流式单轮迭代 ────────────────────────────────────────────────
-
-/// 流式单轮迭代的合法结果 — 枚举保证类型安全。
-///
-/// **设计原则：** 仅表达"一次迭代成功完成后的状态"。
-/// 错误通过 `Result<StreamIterResult, LlmError>` 的 `Err` 表达。
-enum StreamIterResult {
-    /// 继续循环（有 tool_calls，应进入下一轮）
-    Continue { response: ChatResponse },
-    /// 正常完成（无 tool_calls，Agent 已获得最终答案）
-    Complete { response: ChatResponse },
-    /// 消费者断开（不再继续）
-    Cancelled { response: Option<ChatResponse> },
-    /// 单轮输出预算超限（Provider 忽略 max_tokens 或模型无限输出）
-    OutputBudgetExceeded { response: ChatResponse },
-    /// 单轮推理预算超限（Provider 忽略 max_tokens 或模型疯狂推理）
-    ReasoningBudgetExceeded { response: ChatResponse },
-}
-
-/// 处理流式单轮迭代。
-///
-/// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
-///
-/// `max_output_tokens` — 单轮输出的 Token 上限（保险丝），在流式消费时实时检查。
-/// `max_reasoning_tokens` — 单轮推理的 Token 上限（保险丝），可选。
-async fn process_stream_iteration(
-    tx: &Sender<AgentEvent>,
-    executor: &ToolExecutor,
-    state: &mut LoopState,
-    stream: &mut lellm_provider::ProviderStream,
-    text_buffer: &mut String,
-    thinking_buffer: &mut String,
-    redacted_buffer: &mut Option<String>,
-    budget: &ContextBudget,
-    max_output_tokens: u32,
-    max_reasoning_tokens: Option<u32>,
-) -> Result<StreamIterResult, LlmError> {
-    use futures_util::StreamExt;
-
-    let mut round_output_tokens: usize = 0;
-    let mut round_reasoning_tokens: usize = 0;
-
-    while let Some(result) = stream.next().await {
-        let ev = match result {
-            Ok(ev) => ev,
-            Err(e) => return Err(e),
-        };
-
-        // 统一透传 Provider 事件 — Provider 发一次，Agent 只负责转发
-        match &ev {
-            lellm_provider::ProviderEvent::Token { token } => {
-                round_output_tokens += estimate_text(token);
-                if (round_output_tokens as u32) > max_output_tokens {
-                    tracing::warn!(
-                        round_output_tokens,
-                        max_output_tokens,
-                        "single-round output budget exceeded, cutting stream"
-                    );
-                    let response = build_partial_response(
-                        text_buffer.clone(),
-                        thinking_buffer.clone(),
-                        redacted_buffer.clone(),
-                    );
-                    return Ok(StreamIterResult::OutputBudgetExceeded { response });
-                }
-                text_buffer.push_str(token);
-            }
-            lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
-                round_reasoning_tokens += estimate_text(thinking);
-                if let Some(limit) = max_reasoning_tokens {
-                    if (round_reasoning_tokens as u32) > limit {
-                        tracing::warn!(
-                            round_reasoning_tokens,
-                            max_reasoning_tokens = limit,
-                            "single-round reasoning budget exceeded, cutting stream"
-                        );
-                        let response = build_partial_response(
-                            text_buffer.clone(),
-                            thinking_buffer.clone(),
-                            redacted_buffer.clone(),
-                        );
-                        return Ok(StreamIterResult::ReasoningBudgetExceeded { response });
-                    }
-                }
-                thinking_buffer.push_str(thinking);
-                if let Some(r) = redacted {
-                    if let Some(ref mut prev) = *redacted_buffer {
-                        prev.push_str(r);
-                    } else {
-                        *redacted_buffer = Some(r.clone());
-                    }
-                }
-            }
-            lellm_provider::ProviderEvent::Start { .. }
-            | lellm_provider::ProviderEvent::ResponseComplete { .. } => {}
-        }
-
-        if !emit(tx, AgentEvent::Provider(ev.clone())).await {
-            return Ok(StreamIterResult::Cancelled { response: None });
-        }
-
-        // ResponseComplete 事件需要特殊处理：工具执行、终止判断
-        if let lellm_provider::ProviderEvent::ResponseComplete { tool_calls, usage } = ev {
-            let pending_tool_calls = tool_calls;
-            let usage_val = usage.unwrap_or_default();
-
-            // 统一构建 ChatResponse
-            let mut content: Vec<lellm_core::ContentBlock> = Vec::new();
-
-            if !thinking_buffer.is_empty() {
-                content.push(lellm_core::ContentBlock::Thinking(
-                    lellm_core::ThinkingBlock {
-                        thinking: thinking_buffer.clone(),
-                        redacted: redacted_buffer.clone(),
-                    },
-                ));
-            }
-
-            if !text_buffer.is_empty() {
-                content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
-                    text: text_buffer.clone(),
-                }));
-            }
-
-            content.extend(
-                pending_tool_calls
-                    .iter()
-                    .map(|tc| lellm_core::ContentBlock::ToolCall(tc.clone())),
-            );
-
-            let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
-
-            if !pending_tool_calls.is_empty() {
-                state.push_assistant(response.content.clone());
-                state.add_tool_calls(pending_tool_calls.len());
-
-                let results =
-                    emit_and_execute_tools(tx, executor, &pending_tool_calls, budget).await;
-                if results.is_none() {
-                    return Ok(StreamIterResult::Cancelled {
-                        response: Some(response),
-                    });
-                }
-                state.push_tool_results(results.unwrap());
-
-                tracing::debug!(
-                    iteration = state.iterations,
-                    tool_calls = pending_tool_calls.len(),
-                    "tool-use stream iteration"
-                );
-
-                return Ok(StreamIterResult::Continue { response });
-            } else {
-                if !emit(
-                    tx,
-                    AgentEvent::LoopEnd {
-                        result: state.finish_complete(response.clone()),
-                    },
-                )
-                .await
-                {
-                    return Ok(StreamIterResult::Cancelled {
-                        response: Some(response),
-                    });
-                }
-
-                return Ok(StreamIterResult::Complete { response });
-            }
-        }
-    }
-
-    Err(LlmError::UnexpectedEof)
 }
