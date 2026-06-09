@@ -142,10 +142,11 @@ pub struct ToolDefinition {
 /// - `Some(High)` = 高推理预算（深度思考）
 ///
 /// Adapter 映射示例：
-/// - OpenAI Compatible: `Disabled` → `reasoning_effort="low"`; `Low` → "low"; `Medium` → "medium"; `High` → "high"
-/// - DeepSeek: `Disabled` → `enable_thinking=false`; 其余 → `reasoning_effort=<level>`
-/// - Anthropic: `Disabled` → 静默忽略（不支持推理配置）; 其余 → `UnsupportedFeature`
-/// - 不支持推理的 Provider: `Disabled` → 静默忽略; 其余 → `UnsupportedFeature`
+/// - OpenAI / NVIDIA / vLLM: `Disabled` → 不插字段；`Low` → "low"；`Medium` → "medium"；`High` → "high"
+/// - DeepSeek: `Disabled` → `enable_thinking=false`；其余 → `reasoning_effort=<level>`
+/// - llama.cpp: `Disabled` → `thinking=false`；其余 → `reasoning_effort=<level>`
+/// - Anthropic: `Disabled` → 静默忽略（不支持推理配置）；其余 → `UnsupportedFeature`
+/// - 不支持推理的 Provider: `Disabled` → 静默忽略；其余 → `UnsupportedFeature`
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ReasoningConfig {
     /// 显式关闭推理

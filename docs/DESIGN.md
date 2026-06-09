@@ -793,3 +793,75 @@ pub fn estimate_text(s: &str) -> usize;
 ### 12.3 示例代码清理
 
 `tool_use_react.rs` 示例移除了所有 `[DEBUG]` 打印，只保留业务相关输出。ThinkingDelta 不再逐 token 打印到 stdout（避免与正常文本混排）。
+
+## 13. 推理控制 — ReasoningConfig + stream_thinking 两层模型
+
+### 背景
+
+部分 LLM（如 OpenAI o 系列、DeepSeek R 系列、Qwen 推理版）支持"深度推理"模式，模型在输出最终答案前会先生成推理/思考过程。这需要两个正交的控制维度：
+
+1. **是否允许模型推理** — 请求级别的参数，影响模型行为
+2. **是否向客户端输出推理过程** — 流式级别的开关，影响事件发射
+
+### 设计
+
+#### `ReasoningConfig` 枚举
+
+```rust
+pub enum ReasoningConfig {
+    Disabled, // 显式关闭推理
+    Low,      // 低推理预算
+    Medium,   // 中等推理预算
+    High,     // 高推理预算
+}
+```
+
+放在 `ChatRequest` 上：
+
+```rust
+pub reasoning: Option<ReasoningConfig>,
+pub stream_thinking: bool,
+```
+
+#### 四值语义
+
+| 值 | 含义 |
+|---|---|
+| `None` | 不干预，Provider 自行决定默认行为 |
+| `Some(Disabled)` | 显式关闭推理（尽最大努力） |
+| `Some(Low)` | 低推理预算（快速、轻量） |
+| `Some(Medium)` | 中等推理预算 |
+| `Some(High)` | 高推理预算（深度思考） |
+
+**关键区分：** `None` ≠ `Some(Disabled)`。前者是"我不关心"，后者是"我不要"。
+
+#### `stream_thinking` 布尔值
+
+- `false`（默认）= 模型可推理，但不向消费者发射 `ThinkingDelta` 事件
+- `true` = 将推理内容以 `ThinkingDelta` 事件流式输出
+
+典型组合：
+
+| reasoning | stream_thinking | 场景 |
+|---|---|---|
+| `Some(Low)` | `false` | Agent Tool Loop — 后台轻量推理，不污染工具输出 |
+| `Some(High)` | `true` | 用户想看完整思考过程 |
+| `Some(Disabled)` | `false` | 明确不要推理，只要答案 |
+| `None` | `false` | 让 Provider 自己决定 |
+
+### Adapter 映射规则
+
+**核心原则：** `Disabled` 对任何 Provider 都是"静默成功"。只有"请求了能力但 Provider 没有"才报 `UnsupportedFeature`。
+
+| Provider | Disabled | Low/Medium/High |
+|---|---|---|
+| OpenAI Compatible | `reasoning_effort="low"` | 映射为对应字符串 |
+| DeepSeek | `enable_thinking=false` | `reasoning_effort=<level>` |
+| Anthropic | 静默忽略（不支持推理配置） | `UnsupportedFeature` |
+| 不支持推理的 Provider | 静默忽略 | `UnsupportedFeature` |
+
+### 实现位置
+
+- `ReasoningConfig` 枚举：`lellm-core/src/request.rs`
+- `stream_thinking` 过滤：`lellm-provider/.../stream_processor.rs` — `process_stream()` 中根据标志决定是否发射 `ThinkingDelta`
+- Adapter 映射：各 Adapter 的 `build_request()` 中

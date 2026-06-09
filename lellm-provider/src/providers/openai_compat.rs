@@ -118,14 +118,12 @@ impl ProviderAdapter for OpenAICompatAdapter {
         if let Some(ref stop_sequences) = req.stop_sequences {
             body.insert("stop".into(), serde_json::to_value(stop_sequences).unwrap());
         }
-        // 推理配置映射 — OpenAI Compatible 协议
-        // Disabled → "low"（尽最大努力关闭）; Low/Medium/High → 同名字符串
+        // 推理配置映射 — 按 Provider 协议差异化序列化
         // None → 不插入字段（Provider 默认行为）
         if let Some(ref reasoning) = req.reasoning {
-            body.insert(
-                "reasoning_effort".into(),
-                serialize_openai_reasoning_effort(reasoning).into(),
-            );
+            for (key, value) in serialize_reasoning_fields(&self.provider_id, reasoning) {
+                body.insert(key, value);
+            }
         }
         if let Some(ref tools) = req.tools {
             body.insert(
@@ -495,17 +493,62 @@ fn serialize_openai_tool_choice(choice: &ToolChoice) -> serde_json::Value {
     }
 }
 
-/// 将 ReasoningConfig 序列化为 OpenAI reasoning_effort 字符串。
+/// 将 ReasoningConfig 序列化为 Provider 特定的 JSON 字段。
 ///
-/// Disabled → "low"（最小推理努力，尽最大努力关闭）
-/// Low → "low"
-/// Medium → "medium"
-/// High → "high"
-fn serialize_openai_reasoning_effort(config: &ReasoningConfig) -> &'static str {
+/// 不同 Provider 对推理控制的协议不同：
+/// - **DeepSeek**:
+///   - `Disabled` → `enable_thinking: false`
+///   - `Low/Medium/High` → `reasoning_effort: <level>`
+/// - **llama.cpp**:
+///   - `Disabled` → `thinking: false`
+///   - `Low/Medium/High` → `reasoning_effort: <level>`
+/// - **OpenAI / NVIDIA / vLLM / Anthropic**: `Disabled` → 不插字段（默认行为）
+fn serialize_reasoning_fields(
+    provider_id: &str,
+    config: &ReasoningConfig,
+) -> Vec<(String, serde_json::Value)> {
+    match provider_id {
+        "deepseek" => match config {
+            ReasoningConfig::Disabled => {
+                vec![("enable_thinking".into(), serde_json::Value::Bool(false))]
+            }
+            level => {
+                vec![(
+                    "reasoning_effort".into(),
+                    serde_json::Value::String(openai_reasoning_effort(level)),
+                )]
+            }
+        },
+        "llama" => match config {
+            ReasoningConfig::Disabled => {
+                vec![("thinking".into(), serde_json::Value::Bool(false))]
+            }
+            level => {
+                vec![(
+                    "reasoning_effort".into(),
+                    serde_json::Value::String(openai_reasoning_effort(level)),
+                )]
+            }
+        },
+        // OpenAI, NVIDIA, vLLM — Disabled 不插字段，其余映射 reasoning_effort
+        _ => match config {
+            ReasoningConfig::Disabled => vec![],
+            level => vec![(
+                "reasoning_effort".into(),
+                serde_json::Value::String(openai_reasoning_effort(level)),
+            )],
+        },
+    }
+}
+
+/// 将 ReasoningConfig 等级映射为 OpenAI 标准 reasoning_effort 字符串。
+///
+/// **注意：** `Disabled` 不会传入此函数 — 调用方在各 Provider 分支已处理。
+fn openai_reasoning_effort(config: &ReasoningConfig) -> String {
     match config {
-        ReasoningConfig::Disabled => "low",
-        ReasoningConfig::Low => "low",
-        ReasoningConfig::Medium => "medium",
-        ReasoningConfig::High => "high",
+        ReasoningConfig::Low => "low".into(),
+        ReasoningConfig::Medium => "medium".into(),
+        ReasoningConfig::High => "high".into(),
+        ReasoningConfig::Disabled => unreachable!("Disabled should be handled by caller"),
     }
 }
