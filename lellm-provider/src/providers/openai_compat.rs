@@ -527,14 +527,12 @@ fn serialize_reasoning_fields(
         },
         "llama" => match config {
             ReasoningConfig::Disabled => {
-                vec![("thinking".into(), serde_json::Value::Bool(false))]
-            }
-            level => {
                 vec![(
-                    "reasoning_effort".into(),
-                    serde_json::Value::String(openai_reasoning_effort(level)),
+                    "reasoning".into(),
+                    serde_json::Value::String("off".to_string()),
                 )]
             }
+            _ => vec![],
         },
         // OpenAI, NVIDIA, vLLM — Disabled 不插字段，其余映射 reasoning_effort
         _ => match config {

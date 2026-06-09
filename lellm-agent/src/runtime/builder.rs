@@ -22,9 +22,9 @@ use lellm_provider::ResolvedModel;
 use super::config::{ToolUseConfig, ToolUseDeps};
 use super::context::ContextBudget;
 use super::fallback::FallbackStrategy;
-use super::loop_::ToolUseLoop;
 use super::request_opts::RequestOptions;
 use super::retry::RetryPolicy;
+use super::runtime::ToolUseLoop;
 use super::tools::{ToolExecutor, ToolRegistration};
 
 /// Agent 链式构建器 — 推荐的 Agent 创建方式。

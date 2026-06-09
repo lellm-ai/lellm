@@ -30,8 +30,8 @@ pub use tools::{
 pub use builder::AgentBuilder;
 pub use config::{ToolUseConfig, ToolUseDeps};
 pub use context::{
-    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_text,
-    estimate_tokens,
+    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_message,
+    estimate_text, estimate_tokens,
 };
 pub use event::{AgentEvent, AgentStream, StopReason};
 pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};

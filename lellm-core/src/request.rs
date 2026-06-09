@@ -135,10 +135,7 @@ impl ChatRequest {
     }
 
     /// 设置 Provider 特有参数
-    pub fn with_extra(
-        mut self,
-        extra: serde_json::Map<String, serde_json::Value>,
-    ) -> Self {
+    pub fn with_extra(mut self, extra: serde_json::Map<String, serde_json::Value>) -> Self {
         self.extra = Some(extra);
         self
     }

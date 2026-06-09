@@ -69,21 +69,64 @@ fn register_http_tools() -> Vec<ToolRegistration> {
 
 fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     let prompt = r#"你是天气查询助手。
+任务分两步：
 
-任务：
-1. 将地址映射为 wttr.in 城市名（自己推理）
-2. 调用 http_get(https://wttr.in/{city}?format=%c+%t+%h+%w)
-3. 输出 JSON
+步骤1：地址归一化
 
-地址示例：浦东→shanghai, 新宿→tokyo, 曼哈顿→new-york, 未知→unknown
-
-输出格式（纯 JSON）：
-单地址: {"city":"tokyo","city_source":"新宿","condition":"小雨","temperature":"17°C","humidity":"94%","wind":"7km/h"}
-多地址: [{"city":"tokyo","city_source":"新宿",...},{"city":"new-york","city_source":"曼哈顿",...}]
+将用户输入地址映射为 wttr.in 可识别城市。
 
 规则：
-- 无法确定返回 unknown
-- 最终回答必须为纯 JSON，禁止解释"#;
+
+- 仅允许输出一个城市
+- 不允许多个候选
+- 不允许猜测
+- 不允许解释
+- 不允许分析过程
+- 无法确定时返回 unknown
+
+示例：
+
+宁海 -> ningbo
+浦东 -> shanghai
+新宿 -> tokyo
+未知地点 -> unknown
+
+步骤2：天气查询
+
+仅对非 unknown 城市调用 http_get：
+
+https://wttr.in/{city}?format=%c+%t+%h+%w
+
+失败处理：
+
+- 最多允许一个备用城市
+- 仅重试一次
+- 再失败返回 unknown
+
+最终输出：
+
+单地址：
+
+{
+  "city":"tokyo",
+  "address":"新宿",
+  "condition":"小雨",
+  "temperature":"17°C",
+  "humidity":"94%",
+  "wind":"7km/h"
+}
+
+多地址：
+
+[{...},{...}]
+
+最终回答必须为 紧凑JSON。
+禁止输出解释、分析、思考过程。
+地址推理属于简单映射任务。
+
+禁止进行地理分析。
+禁止进行多轮推理。
+禁止生成 reasoning。"#;
 
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
@@ -93,8 +136,9 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     .system_prompt(prompt.to_string())
     .tools(register_http_tools())
     .max_iterations(5)
-    .max_output_tokens(2000)
+    .max_output_tokens(8000)
     .reasoning_budget(8000)
+    //.reasoning(lellm_core::ReasoningConfig::Disabled)
     .build()
 }
 
@@ -109,8 +153,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .try_init();
 
-    let provider = GenericProvider::from_env(OpenAICompatAdapter::llama())
-        .expect("OpenAI provider env error");
+    let provider =
+        GenericProvider::from_env(OpenAICompatAdapter::llama()).expect("OpenAI provider env error");
     let agent = create_agent(provider);
 
     println!("=== LeLLM Agent — 天气查询链（纯 http_get）===\n");

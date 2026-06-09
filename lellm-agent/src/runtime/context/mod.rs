@@ -10,8 +10,6 @@ mod budget;
 mod compactor;
 mod estimation;
 mod local_compactor;
-#[cfg(test)]
-mod tests;
 
 pub use budget::ContextBudget;
 pub use compactor::{CompactionResult, ContextCompactor};

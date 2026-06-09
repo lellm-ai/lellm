@@ -16,7 +16,7 @@ pub use runtime::{
     FallbackStrategy, LocalCompactor, ParallelSafety, ResolvedModel, RetryPolicy, StopReason,
     ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry,
     ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop,
-    ToolUseResult, estimate_tokens,
+    ToolUseResult, estimate_message, estimate_tokens,
 };
 #[cfg(feature = "v02-preview")]
 pub use runtime::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};

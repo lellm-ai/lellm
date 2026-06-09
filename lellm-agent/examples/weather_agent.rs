@@ -745,9 +745,6 @@ wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
 1. condition（emoji → 中文）：
    - 🌧️/🌦️/🌧 → 小雨/中雨/大雨
    - ☀️/🌤 → 晴/多云
-   - 🌥/⛅ → 多云/阴
-   - 🌨/❄️ → 雪/大雪
-   - 🌪/🌫 → 沙尘暴/雾
    - 其他 emoji 自行翻译为对应的中文天气描述
 
 2. temperature（格式修正）：
@@ -760,17 +757,11 @@ wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
    - "↖11km/h" → "东北风11km/h"
    - 无箭头（如 "7km/h"）→ 保持原样
 
-输出格式（纯 JSON，禁止 pretty 格式化，禁止任何解释文字）：
+输出格式（纯 紧凑JSON，禁止任何解释文字）：
 单地址: {"city":"tokyo","address":"新宿","condition":"小雨","temperature":"17°C","humidity":"94%","wind":"东风7km/h"}
-多地址: [{"city":"tokyo","address":"新宿","condition":"小雨","temperature":"17°C","humidity":"94%","wind":"东风7km/h"},{"city":"new-york","address":"曼哈顿","condition":"晴","temperature":"25°C","humidity":"60%","wind":"西风12km/h"}]
+多地址: [{...},{...}]
 
-规则：
-- 地址推理交给 resolve_city，不要猜测
-- unknown 城市跳过天气查询
-- condition 必须是中文文字（如"小雨"、"晴"、"多云"、"沙尘暴"），禁止使用 emoji
-- temperature 禁止出现 + 号，负数显示"零下xx°C"
-- wind 必须包含中文方向描述（如"东北风11km/h"）
-- 最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释"#;
+最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释"#;
 
     AgentBuilder::new(ResolvedModel {
         provider: shared_provider.clone(),
@@ -780,9 +771,8 @@ wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
     .system_prompt(prompt.to_string())
     .tools(register_weather_tools(Some(shared_provider)))
     .max_iterations(10)
-    .max_output_tokens(3000)
-    .reasoning(lellm_core::ReasoningConfig::Disabled)
-    .
+    .max_output_tokens(8000)
+    //.reasoning(lellm_core::ReasoningConfig::Disabled)
     .build()
 }
 
