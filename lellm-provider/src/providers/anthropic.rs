@@ -8,16 +8,17 @@ use lellm_core::{
 };
 use std::borrow::Cow;
 
-use super::base::{
-    AuthStyle, ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
+use super::codec::{
+    AuthStyle, Capabilities, CodecRequest, ProviderCodec, StreamChunk, StreamParseResult,
+    ToolCallDelta,
 };
 use super::stream::sse_frame::SseFrame;
 
-/// Anthropic 适配器。
+/// Anthropic 协议编解码器。
 #[derive(Debug, Clone)]
-pub struct AnthropicAdapter;
+pub struct AnthropicCodec;
 
-impl ProviderAdapter for AnthropicAdapter {
+impl ProviderCodec for AnthropicCodec {
     fn provider_id(&self) -> &'static str {
         "anthropic"
     }
@@ -30,7 +31,7 @@ impl ProviderAdapter for AnthropicAdapter {
         AuthStyle::CustomHeader("x-api-key")
     }
 
-    fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {
+    fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError> {
         // Anthropic 需要 {"role": "...", "content": [...]} 格式
         // system 消息必须放在单独的 system 字段，不能在 messages 数组中
         let mut system_text = String::new();
@@ -161,14 +162,14 @@ impl ProviderAdapter for AnthropicAdapter {
             })?,
         );
 
-        Ok(ProviderRequest {
+        Ok(CodecRequest {
             path: Cow::Borrowed("/v1/messages"),
             headers,
             body: Bytes::from(body_bytes),
         })
     }
 
-    fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
+    fn decode(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
         let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| LlmError::Parse {
             detail: format!("Invalid JSON: {}", e),
         })?;
@@ -251,7 +252,7 @@ impl ProviderAdapter for AnthropicAdapter {
         Ok(ChatResponse::new(content, usage, raw))
     }
 
-    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError> {
+    fn decode_sse(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError> {
         let data = &frame.data;
         if data.is_empty() {
             return Ok(StreamParseResult::empty());
@@ -369,6 +370,15 @@ impl ProviderAdapter for AnthropicAdapter {
         }
 
         Ok(StreamParseResult::empty())
+    }
+
+    fn capabilities_for(&self, model: &str) -> Capabilities {
+        let mut caps = Capabilities::default();
+        let lower = model.to_lowercase();
+        if lower.contains("claude-3") || lower.contains("claude-4") {
+            caps.supports_image_input = true;
+        }
+        caps
     }
 }
 

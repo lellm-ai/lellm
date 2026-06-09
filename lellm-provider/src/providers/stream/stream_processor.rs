@@ -15,7 +15,7 @@ use super::{
     EventSink, SseFrame, SseParser, StreamEvent, ToolCallAccumulator, ToolCallDelta,
     UsageAccumulator, UsageDelta,
 };
-use crate::providers::base::{ProviderAdapter, StreamChunk};
+use crate::providers::codec::{ProviderCodec, StreamChunk};
 
 /// 单个 SseFrame 的解析结果。
 struct FrameResult {
@@ -50,7 +50,7 @@ pub async fn process_stream<S, A, E>(
     mut bytes_stream: S,
 ) where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
-    A: ProviderAdapter,
+    A: ProviderCodec,
     E: EventSink,
 {
     // Start 事件 — 消费者尚未连接则立即退出
@@ -146,7 +146,7 @@ pub async fn process_stream<S, A, E>(
 }
 
 /// 处理单个 SseFrame — 调用 Adapter 解析，返回结构化结果。
-fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResult {
+fn handle_frame<A: ProviderCodec>(adapter: &A, frame: &SseFrame) -> FrameResult {
     let mut result = FrameResult {
         text: None,
         thinking: None,
@@ -156,7 +156,7 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
         is_done: false,
     };
 
-    match adapter.parse_sse_frame(frame) {
+    match adapter.decode_sse(frame) {
         Ok(parse_result) => {
             for chunk in parse_result.chunks {
                 match chunk {
@@ -206,6 +206,6 @@ fn handle_frame<A: ProviderAdapter>(adapter: &A, frame: &SseFrame) -> FrameResul
 }
 
 // NOTE: process_stream 的单元测试需要 Mock Adapter。
-// 由于 ProviderAdapter trait 涉及 parse_sse_frame(JSON 解析)，
+// 由于 ProviderCodec trait 涉及 parse_sse_frame(JSON 解析)，
 // 完整的集成测试放在 tests/integration.rs 中。
 // SseParser, ToolCallAccumulator, UsageAccumulator 已有独立的单元测试。

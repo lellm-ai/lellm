@@ -10,19 +10,19 @@ use lellm_core::{
 };
 use std::borrow::Cow;
 
-use super::base::{
-    AuthStyle, ProviderAdapter, ProviderRequest, StreamChunk, StreamParseResult, ToolCallDelta,
+use super::codec::{
+    AuthStyle, Capabilities, CodecRequest, ProviderCodec, StreamChunk, StreamParseResult, ToolCallDelta,
 };
 use super::stream::sse_frame::SseFrame;
 
 /// OpenAI 兼容适配器 — 一个实现覆盖所有 OpenAI 兼容 provider。
 #[derive(Debug, Clone)]
-pub struct OpenAICompatAdapter {
+pub struct OpenAICompatCodec {
     /// Provider 标识
     pub provider_id: String,
 }
 
-impl OpenAICompatAdapter {
+impl OpenAICompatCodec {
     pub fn openai() -> Self {
         Self {
             provider_id: "openai".into(),
@@ -54,7 +54,7 @@ impl OpenAICompatAdapter {
     }
 }
 
-impl ProviderAdapter for OpenAICompatAdapter {
+impl ProviderCodec for OpenAICompatCodec {
     fn provider_id(&self) -> &str {
         &self.provider_id
     }
@@ -74,7 +74,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
         AuthStyle::Bearer
     }
 
-    fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError> {
+    fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError> {
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
@@ -160,14 +160,14 @@ impl ProviderAdapter for OpenAICompatAdapter {
             })?,
         );
 
-        Ok(ProviderRequest {
+        Ok(CodecRequest {
             path: Cow::Borrowed("/v1/chat/completions"),
             headers,
             body: Bytes::from(body_bytes),
         })
     }
 
-    fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
+    fn decode(&self, body: &[u8]) -> Result<ChatResponse, LlmError> {
         let raw: serde_json::Value = serde_json::from_slice(body).map_err(|e| LlmError::Parse {
             detail: format!("Invalid JSON: {}", e),
         })?;
@@ -240,7 +240,7 @@ impl ProviderAdapter for OpenAICompatAdapter {
         Ok(ChatResponse::new(content, usage, raw))
     }
 
-    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError> {
+    fn decode_sse(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError> {
         let data = &frame.data;
         if data.is_empty() {
             return Ok(StreamParseResult::empty());
@@ -338,6 +338,27 @@ impl ProviderAdapter for OpenAICompatAdapter {
         } else {
             Ok(StreamParseResult { chunks: results })
         }
+    }
+
+    fn capabilities_for(&self, model: &str) -> Capabilities {
+        let mut caps = Capabilities::default();
+        let lower = model.to_lowercase();
+        // Most OpenAI models with "vision" or "4o" support image input
+        if lower.contains("vision") || lower.contains("-4o") || lower.contains("gpt-4.5") {
+            caps.supports_image_input = true;
+        }
+        // o1, o3, r1-style models support reasoning
+        if lower.contains("o1-") || lower.contains("o3-") || lower.contains("-r1")
+            || lower == "o1"
+            || lower == "o3"
+        {
+            caps.supports_reasoning = true;
+        }
+        // DeepSeek models support reasoning
+        if self.provider_id == "deepseek" && lower.contains("r1") {
+            caps.supports_reasoning = true;
+        }
+        caps
     }
 }
 
