@@ -4,22 +4,22 @@
 //! 循环检测、重试策略、Fallback 降级等。
 
 pub mod memory;
-pub mod tools;
+pub mod runtime;
 
 // Re-export schemars so derive(ToolDefinition) macro can reference it.
 pub use schemars;
 
 pub use memory::ShortTermMemory;
-pub use tools::{
-    AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, CompactionResult, ContextBudget,
-    ContextCompactor, DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy,
-    LocalCompactor, ParallelSafety, ResolvedModel, RetryPolicy, StopReason, ToolArgs, ToolCategory,
-    ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry, ToolResult,
-    ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult,
-    estimate_tokens,
+pub use runtime::{
+    AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, BatchExecutionResult, CompactionResult,
+    ContextBudget, ContextCompactor, DefaultFallback, FallbackAction, FallbackContext,
+    FallbackStrategy, LocalCompactor, ParallelSafety, ResolvedModel, RetryPolicy, StopReason,
+    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry,
+    ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop,
+    ToolUseResult, estimate_tokens,
 };
 #[cfg(feature = "v02-preview")]
-pub use tools::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};
+pub use runtime::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};
 
 // ─── 糖衣 API（第三层原型） ───
 

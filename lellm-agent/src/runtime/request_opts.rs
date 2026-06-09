@@ -56,9 +56,7 @@ impl RequestOptions {
 
     /// 从 ChatRequest 直接构造。
     pub fn from_request(req: ChatRequest) -> Self {
-        Self {
-            chat_request: req,
-        }
+        Self { chat_request: req }
     }
 
     /// 将非默认值覆盖到基础 ChatRequest 上。

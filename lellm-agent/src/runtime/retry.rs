@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use lellm_core::{ToolErrorKind, ToolResult};
 
-use super::ToolFn;
+use super::tools::ToolFn;
 
 /// 退避策略
 #[derive(Debug, Clone)]

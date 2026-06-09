@@ -19,13 +19,13 @@ use std::sync::Arc;
 use lellm_core::{ReasoningConfig, ToolChoice};
 use lellm_provider::ResolvedModel;
 
-use super::ToolRegistration;
+use super::config::{ToolUseConfig, ToolUseDeps};
 use super::context::ContextBudget;
-use super::executor::ToolExecutor;
 use super::fallback::FallbackStrategy;
+use super::loop_::ToolUseLoop;
 use super::request_opts::RequestOptions;
 use super::retry::RetryPolicy;
-use super::runtime::{ToolUseConfig, ToolUseDeps, ToolUseLoop};
+use super::tools::{ToolExecutor, ToolRegistration};
 
 /// Agent 链式构建器 — 推荐的 Agent 创建方式。
 ///

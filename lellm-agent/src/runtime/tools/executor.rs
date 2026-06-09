@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use lellm_core::{Message, ToolCall, ToolDefinition, ToolError, ToolErrorKind, ToolResult};
 
-use super::{RetryPolicy, ToolFn};
+use super::super::retry::RetryPolicy;
+use super::ToolFn;
 
 /// 工具安全分级
 #[derive(Debug, Clone, PartialEq, Eq)]
