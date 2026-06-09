@@ -8,6 +8,7 @@ pub mod config;
 pub mod context;
 pub mod event;
 pub mod fallback;
+pub(crate) mod iteration;
 pub mod loop_;
 #[cfg(feature = "v02-preview")]
 pub mod loop_detector;

@@ -189,39 +189,3 @@ pub(super) fn empty_response() -> lellm_core::ChatResponse {
         serde_json::Value::Null,
     )
 }
-
-/// 从累积的 buffer 构建部分 ChatResponse（输出预算超限时使用）
-pub(super) fn build_partial_response(
-    text_buffer: String,
-    thinking_buffer: String,
-    redacted_buffer: Option<String>,
-) -> lellm_core::ChatResponse {
-    let mut content: Vec<lellm_core::ContentBlock> = Vec::new();
-
-    if !thinking_buffer.is_empty() {
-        content.push(lellm_core::ContentBlock::Thinking(
-            lellm_core::ThinkingBlock {
-                thinking: thinking_buffer,
-                redacted: redacted_buffer,
-            },
-        ));
-    }
-
-    if !text_buffer.is_empty() {
-        content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
-            text: text_buffer,
-        }));
-    }
-
-    if content.is_empty() {
-        content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
-            text: String::new(),
-        }));
-    }
-
-    lellm_core::ChatResponse::new(
-        content,
-        lellm_core::TokenUsage::default(),
-        serde_json::json!(null),
-    )
-}

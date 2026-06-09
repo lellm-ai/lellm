@@ -13,21 +13,17 @@
 //! └── deps:        ToolUseDeps       (策略服务, Arc 包裹)
 //! ```
 
-use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
+use lellm_core::{ChatResponse, LlmError, Message};
 use lellm_provider::ResolvedModel;
-use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-use super::config::{
-    ToolUseConfig, ToolUseDeps, build_partial_response, build_request_inner_with_round,
-    build_request_messages_inner, empty_response,
+use super::config::{ToolUseConfig, ToolUseDeps, build_request_messages_inner, empty_response};
+use super::context::{ContextCompactor, LocalCompactor, estimate_text, estimate_tokens};
+use super::event::{AgentEvent, AgentStream, StopReason};
+use super::iteration::{
+    build_partial_response, emit, emit_and_execute_tools, execute_with_fallback,
 };
-use super::context::{
-    ContextBudget, ContextCompactor, LocalCompactor, estimate_text, estimate_tokens,
-};
-use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::tools::ToolExecutor;
-use super::{AgentEvent, AgentStream, StopReason};
 
 // ─── 循环状态机 ───────────────────────────────────────────────
 
@@ -141,7 +137,7 @@ impl LoopState {
     /// 返回压缩结果（用于发射事件），`None` 表示无需压缩。
     pub fn compact(
         &mut self,
-        budget: &ContextBudget,
+        budget: &super::context::ContextBudget,
         compactor: &dyn ContextCompactor,
     ) -> Option<super::context::CompactionResult> {
         if !budget.should_compact(self.estimated_tokens) {
@@ -210,60 +206,6 @@ impl ToolUseResult {
     }
 }
 
-// ─── 辅助函数 ───────────────────────────────────────────────────
-
-/// 发送事件，消费者丢弃 Receiver 时返回 `false`。
-async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
-    tx.send(event).await.is_ok()
-}
-
-/// 带 Fallback 重试的通用操作执行器（自由函数，spawned task 可用）。
-///
-/// **职责划分：**
-/// - `FallbackContext` = 观察窗口（借用 `&LlmError`）
-/// - Retry Loop = 错误所有者（Abort 时直接返回 owned `err`）
-///
-/// 零成本抽象 — 泛型 `F: FnMut() -> Fut`，无 `Box<dyn Future>`。
-async fn execute_with_fallback<T, F, Fut>(
-    fallback: &Arc<dyn FallbackStrategy>,
-    mut op: F,
-    iteration: usize,
-    messages: &[Message],
-) -> Result<T, LlmError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, LlmError>>,
-{
-    let mut attempt: usize = 1;
-
-    loop {
-        match op().await {
-            Ok(v) => return Ok(v),
-            Err(err) => {
-                tracing::warn!(
-                    attempt = attempt,
-                    error = %err,
-                    "provider operation failed, fallback handling"
-                );
-                let ctx = FallbackContext {
-                    error: &err,
-                    attempt,
-                    iterations: iteration,
-                    conversation: messages.to_vec().into(),
-                };
-                match fallback.handle(&ctx).await {
-                    FallbackAction::Retry => {
-                        attempt += 1;
-                    }
-                    FallbackAction::Abort => {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ─── ToolUseLoop ────────────────────────────────────────────────
 
 /// 管理 LLM 与工具调用闭环。
@@ -321,26 +263,6 @@ impl ToolUseLoop {
         )
     }
 
-    // ─── 内部方法 ─────────────────────────────────────────────
-
-    /// 构建有效的请求消息列表：system_prompt + conversation_messages。
-    /// 双来源冲突时返回 DuplicateSystemPrompt 错误。
-    fn build_request_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
-        build_request_messages_inner(&self.config, messages)
-    }
-
-    /// 构建 ChatRequest，自动注入工具 Schema、max_tokens 和 RequestOptions。
-    fn build_request(&self, messages: &[Message], iteration: usize) -> ChatRequest {
-        build_request_inner_with_round(
-            &self.model,
-            &self.executor,
-            messages,
-            self.config.max_output_tokens,
-            &self.config.request_options,
-            iteration,
-        )
-    }
-
     /// 非流式执行
     ///
     /// 语义：
@@ -349,61 +271,61 @@ impl ToolUseLoop {
     ///
     /// `&self` 借用，不消费 self — 支持复用同一个 agent 做多次对话。
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
-        let initial_messages = self.build_request_messages(&messages)?;
+        let initial_messages = build_request_messages_inner(&self.config, &messages)?;
         let mut state = LoopState::new(initial_messages);
         let mut last_response: Option<ChatResponse> = None;
         let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
         loop {
+            // 1. 检查终止 + 推进迭代（借用 state）
             if state.reached_max(self.config.max_iterations) {
                 return Ok(
                     state.finish_max_iterations(last_response.unwrap_or_else(empty_response))
                 );
             }
-
             state.next_iteration();
-
-            // 上下文压缩检查 — ToolResult 加入后、下一轮请求前
             state.compact(&self.config.context_budget, &*compactor);
 
-            let req = self.build_request(&state.messages, state.iterations);
+            // 2. 构建请求（借用 state）
+            let req = super::config::build_request_inner_with_round(
+                &self.model,
+                &self.executor,
+                &state.messages,
+                self.config.max_output_tokens,
+                &self.config.request_options,
+                state.iterations,
+            );
+
+            // 3. 执行 Provider（需要 state 快照）
+            let iteration = state.iterations;
+            let msg_snapshot = state.messages.clone();
             let response = execute_with_fallback(
                 &self.deps.fallback,
                 || self.model.provider.call(&req),
-                state.iterations,
-                &state.messages,
+                iteration,
+                &msg_snapshot,
             )
             .await?;
-            last_response = Some(response);
+            last_response = Some(response.clone());
 
-            // 累计本轮输出 Token
-            state.add_output_from_content(&last_response.as_ref().unwrap().content);
+            // 4. 后处理响应（借用 state）
+            state.add_output_from_content(&response.content);
 
-            // 总输出预算检查
             if state.exceeded_total_output(self.config.max_total_output_tokens) {
-                return Ok(state.finish_output_budget(last_response.unwrap()));
+                return Ok(state.finish_output_budget(response));
             }
 
-            if !last_response.as_ref().unwrap().has_tool_calls() {
-                return Ok(state.finish_complete(last_response.unwrap()));
+            if !response.has_tool_calls() {
+                return Ok(state.finish_complete(response));
             }
 
-            let tool_calls: Vec<_> = last_response
-                .as_ref()
-                .unwrap()
-                .tool_calls()
-                .cloned()
-                .collect();
-
-            let response_content = last_response.as_ref().unwrap().content.clone();
-            state.push_assistant(response_content);
+            let tool_calls: Vec<_> = response.tool_calls().cloned().collect();
+            state.push_assistant(response.content.clone());
             state.add_tool_calls(tool_calls.len());
 
             let batch = self.executor.execute_batch(&tool_calls).await;
 
-            // 追加已成功的结果
             let results = if let Some(e) = &batch.panicked {
-                // spawned task panic — 为未完成的 tool_call 生成错误结果
                 tracing::error!(error = %e, "tool batch task panicked");
                 let mut results = batch.completed;
                 let completed_ids: std::collections::HashSet<String> = results
@@ -455,7 +377,6 @@ impl ToolUseLoop {
         let deps = self.deps.clone();
 
         tokio::spawn(async move {
-            // 构建初始消息
             let initial_messages = match build_request_messages_inner(&config, &messages) {
                 Ok(m) => m,
                 Err(e) => {
@@ -489,21 +410,19 @@ impl ToolUseLoop {
                 }
 
                 state.next_iteration();
-
-                // 上下文压缩检查
-                if let Some(result) = state.compact(&config.context_budget, &*compactor) {
+                if let Some(compact_result) = state.compact(&config.context_budget, &*compactor) {
                     let _ = emit(
                         &tx,
                         AgentEvent::ContextCompacted {
-                            before_tokens: result.before_tokens,
-                            after_tokens: result.after_tokens,
-                            removed_messages: result.removed_messages,
+                            before_tokens: compact_result.before_tokens,
+                            after_tokens: compact_result.after_tokens,
+                            removed_messages: compact_result.removed_messages,
                         },
                     )
                     .await;
                 }
 
-                let req = build_request_inner_with_round(
+                let req = super::config::build_request_inner_with_round(
                     &model,
                     &executor,
                     &state.messages,
@@ -514,7 +433,6 @@ impl ToolUseLoop {
 
                 // 把 stream() + process_stream_iteration() 整体包进 fallback，
                 // 这样流消费失败（SSE 中途断掉）也能触发重试。
-                // 每次尝试克隆 state，成功后合并回主 state；重试时从干净状态开始。
                 let model_for_fallback = model.clone();
                 let tx_for_fallback = tx.clone();
                 let executor_for_fallback = executor.clone();
@@ -566,7 +484,7 @@ impl ToolUseLoop {
                     )
                     .await;
 
-                // 成功时合并 state（process_stream_iteration 只在 ResponseComplete 时修改）
+                // 成功时合并 state
                 let result = match result {
                     Ok((r, s)) => {
                         state = s;
@@ -576,36 +494,10 @@ impl ToolUseLoop {
                 };
 
                 match result {
-                    Ok(StreamIterResult::Continue {
-                        response,
-                        tool_calls: _,
-                    }) => {
-                        // 累计本轮输出 Token
-                        state.add_output_from_content(&response.content);
+                    Ok(StreamIterResult::Continue { response, .. }) => {
                         last_response = Some(response);
-
-                        // 总输出预算检查
-                        if state.exceeded_total_output(config.max_total_output_tokens) {
-                            tracing::warn!(
-                                total_output_tokens = state.total_output_tokens,
-                                max = ?config.max_total_output_tokens,
-                                "total output budget exceeded"
-                            );
-                            let _ = emit(
-                                &tx,
-                                AgentEvent::LoopEnd {
-                                    result: state.finish_output_budget(
-                                        last_response.unwrap_or_else(empty_response),
-                                    ),
-                                },
-                            )
-                            .await;
-                            return;
-                        }
                     }
                     Ok(StreamIterResult::Complete { response }) => {
-                        // 累计本轮输出 Token
-                        state.add_output_from_content(&response.content);
                         let _ = emit(
                             &tx,
                             AgentEvent::LoopEnd {
@@ -629,8 +521,6 @@ impl ToolUseLoop {
                         return;
                     }
                     Ok(StreamIterResult::OutputBudgetExceeded { response }) => {
-                        // 单轮输出预算超限 — 累计并立即停止
-                        state.add_output_from_content(&response.content);
                         tracing::warn!(
                             total_output_tokens = state.total_output_tokens,
                             "single-round output budget exceeded, stopping agent"
@@ -645,8 +535,6 @@ impl ToolUseLoop {
                         return;
                     }
                     Ok(StreamIterResult::ReasoningBudgetExceeded { response }) => {
-                        // 单轮推理预算超限 — 累计并立即停止
-                        state.add_output_from_content(&response.content);
                         tracing::warn!(
                             total_reasoning_tokens = state.total_reasoning_tokens,
                             "single-round reasoning budget exceeded, stopping agent"
@@ -679,17 +567,15 @@ impl ToolUseLoop {
     }
 }
 
+// ─── 流式单轮迭代 ────────────────────────────────────────────────
+
 /// 流式单轮迭代的合法结果 — 枚举保证类型安全。
 ///
 /// **设计原则：** 仅表达"一次迭代成功完成后的状态"。
 /// 错误通过 `Result<StreamIterResult, LlmError>` 的 `Err` 表达。
 enum StreamIterResult {
     /// 继续循环（有 tool_calls，应进入下一轮）
-    Continue {
-        response: ChatResponse,
-        #[allow(dead_code)]
-        tool_calls: Vec<lellm_core::ToolCall>,
-    },
+    Continue { response: ChatResponse },
     /// 正常完成（无 tool_calls，Agent 已获得最终答案）
     Complete { response: ChatResponse },
     /// 消费者断开（不再继续）
@@ -714,22 +600,19 @@ async fn process_stream_iteration(
     text_buffer: &mut String,
     thinking_buffer: &mut String,
     redacted_buffer: &mut Option<String>,
-    budget: &ContextBudget,
+    budget: &super::context::ContextBudget,
     max_output_tokens: u32,
     max_reasoning_tokens: Option<u32>,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
-    // ─── 输出预算保险丝 ───
     let mut round_output_tokens: usize = 0;
     let mut round_reasoning_tokens: usize = 0;
 
     while let Some(result) = stream.next().await {
         let ev = match result {
             Ok(ev) => ev,
-            Err(e) => {
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
 
         // 统一透传 Provider 事件 — Provider 发一次，Agent 只负责转发
@@ -793,7 +676,6 @@ async fn process_stream_iteration(
             // 统一构建 ChatResponse
             let mut content: Vec<lellm_core::ContentBlock> = Vec::new();
 
-            // Thinking 块优先于 Text（符合 Anthropic 响应顺序）
             if !thinking_buffer.is_empty() {
                 content.push(lellm_core::ContentBlock::Thinking(
                     lellm_core::ThinkingBlock {
@@ -818,12 +700,11 @@ async fn process_stream_iteration(
             let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
 
             if !pending_tool_calls.is_empty() {
-                // 有工具调用 — 追加历史并执行
                 state.push_assistant(response.content.clone());
                 state.add_tool_calls(pending_tool_calls.len());
 
                 let results =
-                    emit_and_execute_tools(tx, executor, &pending_tool_calls, &budget).await;
+                    emit_and_execute_tools(tx, executor, &pending_tool_calls, budget).await;
                 if results.is_none() {
                     return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
@@ -837,12 +718,8 @@ async fn process_stream_iteration(
                     "tool-use stream iteration"
                 );
 
-                return Ok(StreamIterResult::Continue {
-                    response,
-                    tool_calls: pending_tool_calls,
-                });
+                return Ok(StreamIterResult::Continue { response });
             } else {
-                // 无工具调用 — 正常结束（ResponseComplete 已在上方统一透传）
                 if !emit(
                     tx,
                     AgentEvent::LoopEnd {
@@ -862,63 +739,4 @@ async fn process_stream_iteration(
     }
 
     Err(LlmError::UnexpectedEof)
-}
-
-/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具。
-///
-/// **设计决策（见 docs/DESIGN.md §8）：** 流式模式工具执行强制串行，
-/// 即使工具标记为 Safe。原因：ToolStart/ToolEnd 与 Token 交错会让消费者解析更复杂。
-/// v0.2 再优化流式分组并发。
-async fn emit_and_execute_tools(
-    tx: &Sender<AgentEvent>,
-    executor: &ToolExecutor,
-    tool_calls: &[lellm_core::ToolCall],
-    budget: &ContextBudget,
-) -> Option<Vec<Message>> {
-    let mut results = Vec::new();
-
-    for tc in tool_calls {
-        if !emit(
-            tx,
-            AgentEvent::ToolStart {
-                tool_call_id: tc.id.clone(),
-                name: tc.name.clone(),
-            },
-        )
-        .await
-        {
-            return None;
-        }
-
-        let raw_result = executor.execute(tc).await;
-
-        // 工具结果截断
-        let truncated_result = match &raw_result {
-            Ok(text) => {
-                let truncated = budget.truncate_tool_result(text.clone());
-                if truncated != *text {
-                    Ok(truncated)
-                } else {
-                    raw_result
-                }
-            }
-            Err(_) => raw_result, // 错误消息不截断
-        };
-
-        if !emit(
-            tx,
-            AgentEvent::ToolEnd {
-                tool_call_id: tc.id.clone(),
-                result: truncated_result.clone(),
-            },
-        )
-        .await
-        {
-            return None;
-        }
-
-        results.push(Message::tool_result(tc, &truncated_result));
-    }
-
-    Some(results)
 }
