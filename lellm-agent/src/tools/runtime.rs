@@ -23,6 +23,7 @@ use super::context::{
 };
 use super::executor::ToolExecutor;
 use super::fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
+use super::request_opts::RequestOptions;
 use super::{AgentEvent, AgentStream, StopReason};
 
 // ─── 配置（纯参数）──────────────────────────────────────────────
@@ -46,11 +47,6 @@ pub struct ToolUseConfig {
     /// 若需要长文本生成，可通过 Builder 调大。
     /// 会自动注入到 `ChatRequest.max_tokens`。
     pub max_output_tokens: u32,
-    /// 单轮推理（thinking）Token 上限（可选，默认无限制）。
-    ///
-    /// 与 `max_output_tokens` 分离：thinking 是模型内部推理，不计入输出预算。
-    /// 开启后可防止模型疯狂推理导致超时。
-    pub max_reasoning_tokens: Option<u32>,
     /// 整个 Agent Run 的最大输出 token 总数（可选，默认无限制）。
     ///
     /// 即使每轮的 `max_output_tokens` 设置合理，多轮工具调用仍可能导致
@@ -67,6 +63,14 @@ pub struct ToolUseConfig {
     ///
     /// 若要关闭限制，设置 `max_tokens = usize::MAX`。
     pub context_budget: ContextBudget,
+    /// 每轮 LLM 调用的生成参数覆盖。
+    ///
+    /// 内部包裹 `ChatRequest`，与 core 层零重复定义。
+    /// `apply()` 方法将非默认值（temperature、top_p、reasoning 等）
+    /// 覆盖到 Agent 层构建的基础 `ChatRequest` 上。
+    ///
+    /// `model`、`messages`、`tools` 由 Agent 层注入，不会被覆盖。
+    pub request_options: RequestOptions,
 }
 
 impl Default for ToolUseConfig {
@@ -75,9 +79,9 @@ impl Default for ToolUseConfig {
             system_prompt: None,
             max_iterations: 10,
             max_output_tokens: 4_000,
-            max_reasoning_tokens: None,
             max_total_output_tokens: None,
             context_budget: ContextBudget::default(),
+            request_options: RequestOptions::default(),
         }
     }
 }
@@ -128,19 +132,71 @@ fn build_request_messages_inner(
 }
 
 /// 构建 ChatRequest（用于 spawned task）
+///
+/// 先构建基础请求（Agent 层注入 model/messages/tools/max_tokens），
+/// 再应用 RequestOptions 非默认值覆盖。
 fn build_request_inner(
     model: &ResolvedModel,
     executor: &ToolExecutor,
     messages: &[Message],
     max_output_tokens: u32,
+    request_options: &RequestOptions,
 ) -> ChatRequest {
-    ChatRequest {
+    let mut req = ChatRequest {
         model: model.model.clone(),
         messages: messages.to_vec(),
         tools: executor.has_tools().then(|| executor.definitions()),
         max_tokens: Some(max_output_tokens),
-        ..Default::default()
+        temperature: None,
+        top_p: None,
+        seed: None,
+        tool_choice: None,
+        stop_sequences: None,
+        prefill: None,
+        reasoning: None,
+        stream_thinking: false,
+        max_reasoning_tokens: None,
+        extra: None,
+    };
+
+    // 应用 RequestOptions 非默认值覆盖
+    request_options.apply(&mut req);
+
+    req
+}
+
+/// 构建首轮 ChatRequest，支持强制指定工具（仅第一轮生效）。
+///
+/// 当 `RequestOptions` 设置了 `tool_choice` 时，仅在第一轮注入；
+/// 后续轮次由 LLM 自主决定是否调用工具。
+fn build_request_inner_with_round(
+    model: &ResolvedModel,
+    executor: &ToolExecutor,
+    messages: &[Message],
+    max_output_tokens: u32,
+    request_options: &RequestOptions,
+    iteration: usize,
+) -> ChatRequest {
+    let mut req = build_request_inner(
+        model,
+        executor,
+        messages,
+        max_output_tokens,
+        request_options,
+    );
+
+    // 如果 RequestOptions 设置了 tool_choice 且不是第一轮，清除它
+    // 让 LLM 在工具调用后自主选择
+    if iteration > 0
+        && request_options
+            .chat_request
+            .tool_choice
+            .is_some()
+    {
+        req.tool_choice = None;
     }
+
+    req
 }
 
 // ─── 循环状态机 ───
@@ -159,7 +215,7 @@ pub struct LoopState {
     /// 用于 max_total_output_tokens 预算检查。
     pub total_output_tokens: usize,
     /// 整个 Agent Run 的累计推理 Token 数（Thinking，不含 Text 和 Tool Call）
-    /// 用于 max_reasoning_tokens 预算检查。
+    /// 用于可观测性；单轮推理预算通过 `ChatRequest.max_reasoning_tokens` 透传给 Provider。
     pub total_reasoning_tokens: usize,
 }
 
@@ -488,13 +544,15 @@ impl ToolUseLoop {
         build_request_messages_inner(&self.config, messages)
     }
 
-    /// 构建 ChatRequest，自动注入工具 Schema 和 max_tokens。
-    fn build_request(&self, messages: &[Message]) -> ChatRequest {
-        build_request_inner(
+    /// 构建 ChatRequest，自动注入工具 Schema、max_tokens 和 RequestOptions。
+    fn build_request(&self, messages: &[Message], iteration: usize) -> ChatRequest {
+        build_request_inner_with_round(
             &self.model,
             &self.executor,
             messages,
             self.config.max_output_tokens,
+            &self.config.request_options,
+            iteration,
         )
     }
 
@@ -523,7 +581,7 @@ impl ToolUseLoop {
             // 上下文压缩检查 — ToolResult 加入后、下一轮请求前
             state.compact(&self.config.context_budget, &*compactor);
 
-            let req = self.build_request(&state.messages);
+            let req = self.build_request(&state.messages, state.iterations);
             let response = execute_with_fallback(
                 &self.deps.fallback,
                 || self.model.provider.call(&req),
@@ -539,11 +597,6 @@ impl ToolUseLoop {
             // 总输出预算检查
             if state.exceeded_total_output(self.config.max_total_output_tokens) {
                 return Ok(state.finish_output_budget(last_response.unwrap()));
-            }
-
-            // 总推理预算检查
-            if state.exceeded_total_reasoning(self.config.max_reasoning_tokens) {
-                return Ok(state.finish_reasoning_budget(last_response.unwrap()));
             }
 
             if !last_response.as_ref().unwrap().has_tool_calls() {
@@ -665,11 +718,13 @@ impl ToolUseLoop {
                     .await;
                 }
 
-                let req = build_request_inner(
+                let req = build_request_inner_with_round(
                     &model,
                     &executor,
                     &state.messages,
                     config.max_output_tokens,
+                    &config.request_options,
+                    state.iterations,
                 );
 
                 // 把 stream() + process_stream_iteration() 整体包进 fallback，
@@ -680,7 +735,6 @@ impl ToolUseLoop {
                 let executor_for_fallback = executor.clone();
                 let budget_for_fallback = config.context_budget.clone();
                 let max_output_tokens_for_fallback = config.max_output_tokens;
-                let max_reasoning_tokens_for_fallback = config.max_reasoning_tokens;
                 let req_for_fallback = req.clone();
                 let state_for_clone = state.clone();
                 let iteration_count = state.iterations;
@@ -695,8 +749,8 @@ impl ToolUseLoop {
                             let executor = executor_for_fallback.clone();
                             let budget = budget_for_fallback.clone();
                             let max_output_tokens = max_output_tokens_for_fallback;
-                            let max_reasoning_tokens = max_reasoning_tokens_for_fallback;
                             let req = req_for_fallback.clone();
+                            let max_reasoning_tokens = req.max_reasoning_tokens;
                             let mut attempt_state = state_for_clone.clone();
 
                             async move {
@@ -756,25 +810,6 @@ impl ToolUseLoop {
                                 &tx,
                                 AgentEvent::LoopEnd {
                                     result: state.finish_output_budget(
-                                        last_response.unwrap_or_else(empty_response),
-                                    ),
-                                },
-                            )
-                            .await;
-                            return;
-                        }
-
-                        // 总推理预算检查
-                        if state.exceeded_total_reasoning(config.max_reasoning_tokens) {
-                            tracing::warn!(
-                                total_reasoning_tokens = state.total_reasoning_tokens,
-                                max = ?config.max_reasoning_tokens,
-                                "total reasoning budget exceeded"
-                            );
-                            let _ = emit(
-                                &tx,
-                                AgentEvent::LoopEnd {
-                                    result: state.finish_reasoning_budget(
                                         last_response.unwrap_or_else(empty_response),
                                     ),
                                 },

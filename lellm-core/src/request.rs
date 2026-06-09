@@ -27,6 +27,17 @@ pub struct ChatRequest {
     /// `false`（默认）= 模型可推理，但不向消费者发射 ThinkingDelta 事件
     /// `true` = 将推理内容以 ThinkingDelta 事件流式输出
     pub stream_thinking: bool,
+    /// 单次 LLM 调用的推理 Token 上限（可选，默认无限制）。
+    ///
+    /// 与 `max_tokens` 分离：reasoning 是模型内部推理，不计入输出预算。
+    /// 透传给 Provider Adapter，由 Adapter 映射为协议特定字段。
+    ///
+    /// Adapter 映射示例：
+    /// - DeepSeek: `max_thinking_tokens`
+    /// - OpenAI: 无直接对应，由 `reasoning` 级别间接控制
+    /// - 其他: 放入 `extra` 或忽略
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_reasoning_tokens: Option<u32>,
     /// Provider 特有参数（如 OpenAI 的 presence_penalty），由 Adapter 自行处理。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Map<String, serde_json::Value>>,
@@ -47,6 +58,7 @@ impl Default for ChatRequest {
             prefill: None,
             reasoning: None,
             stream_thinking: false,
+            max_reasoning_tokens: None,
             extra: None,
         }
     }
@@ -113,6 +125,21 @@ impl ChatRequest {
     /// 设置是否流式输出推理过程
     pub fn with_stream_thinking(mut self, stream_thinking: bool) -> Self {
         self.stream_thinking = stream_thinking;
+        self
+    }
+
+    /// 设置单次调用的推理 Token 上限
+    pub fn with_max_reasoning_tokens(mut self, max: u32) -> Self {
+        self.max_reasoning_tokens = Some(max);
+        self
+    }
+
+    /// 设置 Provider 特有参数
+    pub fn with_extra(
+        mut self,
+        extra: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.extra = Some(extra);
         self
     }
 }

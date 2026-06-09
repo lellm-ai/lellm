@@ -94,7 +94,7 @@ fn create_agent(provider: GenericProvider<OpenAICompatAdapter>) -> ToolUseLoop {
     .tools(register_http_tools())
     .max_iterations(5)
     .max_output_tokens(2000)
-    .max_reasoning_tokens(8000)
+    .reasoning_budget(8000)
     .build()
 }
 

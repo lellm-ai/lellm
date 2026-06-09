@@ -125,6 +125,12 @@ impl ProviderAdapter for OpenAICompatAdapter {
                 body.insert(key, value);
             }
         }
+        // 推理 Token 上限 — 按 Provider 协议差异化映射
+        if let Some(tokens) = req.max_reasoning_tokens {
+            if let Some((key, value)) = serialize_max_reasoning_tokens(&self.provider_id, tokens) {
+                body.insert(key, value);
+            }
+        }
         if let Some(ref tools) = req.tools {
             body.insert(
                 "tools".into(),
@@ -550,5 +556,24 @@ fn openai_reasoning_effort(config: &ReasoningConfig) -> String {
         ReasoningConfig::Medium => "medium".into(),
         ReasoningConfig::High => "high".into(),
         ReasoningConfig::Disabled => unreachable!("Disabled should be handled by caller"),
+    }
+}
+
+/// 将 max_reasoning_tokens 映射为 Provider 协议特定字段。
+///
+/// Adapter 映射：
+/// - DeepSeek: `max_thinking_tokens`（DeepSeek 支持 thinking budget）
+/// - OpenAI / NVIDIA / vLLM / 其他: `None`（无直接对应字段）
+fn serialize_max_reasoning_tokens(
+    provider_id: &str,
+    tokens: u32,
+) -> Option<(String, serde_json::Value)> {
+    match provider_id {
+        "deepseek" => Some((
+            "max_thinking_tokens".into(),
+            serde_json::Value::Number(tokens.into()),
+        )),
+        // OpenAI, NVIDIA, vLLM, llama — 无直接对应字段
+        _ => None,
     }
 }

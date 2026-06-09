@@ -10,6 +10,7 @@ pub mod fallback;
 #[cfg(feature = "v02-preview")]
 pub mod loop_detector;
 pub mod registry;
+pub mod request_opts;
 pub mod retry;
 pub mod runtime;
 #[cfg(feature = "v02-preview")]
@@ -28,6 +29,7 @@ pub use lellm_provider::ResolvedModel;
 #[cfg(feature = "v02-preview")]
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
+pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{LoopState, ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult};
 #[cfg(feature = "v02-preview")]

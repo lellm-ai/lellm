@@ -781,6 +781,8 @@ wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
     .tools(register_weather_tools(Some(shared_provider)))
     .max_iterations(10)
     .max_output_tokens(3000)
+    .reasoning(lellm_core::ReasoningConfig::Disabled)
+    .
     .build()
 }
 
