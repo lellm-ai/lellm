@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use lellm_core::{Message, ToolCall, ToolDefinition, ToolError, ToolErrorKind, ToolResult};
 
+use super::super::event::AgentEvent;
 use super::super::retry::RetryPolicy;
 use super::ToolFn;
+use tokio::sync::mpsc::Sender;
 
 /// 工具安全分级
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +172,29 @@ impl ToolExecutor {
             Some(entry) => self
                 .retry_policy
                 .execute_with_retry(&entry.func, &call.arguments)
+                .await,
+            None => Err(ToolError {
+                kind: ToolErrorKind::NotFound,
+                message: format!("unknown tool: {}", call.name),
+            }),
+        }
+    }
+
+    /// 执行单个工具调用，自带重试 + Retry 事件发射。
+    pub async fn execute_with_emission(
+        &self,
+        call: &ToolCall,
+        tx: &Sender<AgentEvent>,
+    ) -> ToolResult {
+        match self.tools.get(&call.name) {
+            Some(entry) => self
+                .retry_policy
+                .execute_with_retry_and_emission(
+                    &entry.func,
+                    &call.arguments,
+                    tx,
+                    &call.id,
+                )
                 .await,
             None => Err(ToolError {
                 kind: ToolErrorKind::NotFound,

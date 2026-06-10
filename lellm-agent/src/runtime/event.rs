@@ -17,16 +17,11 @@ pub enum AgentEvent {
         tool_call_id: String,
         result: super::ToolResult,
     },
-    /// 工具重试（v0.2 RetryPolicy 事件化）
-    #[cfg(feature = "v02-preview")]
+    /// 工具重试（RetryPolicy 触发）
     Retry {
-        #[allow(dead_code)]
         tool_call_id: String,
-        #[allow(dead_code)]
         attempt: usize,
-        #[allow(dead_code)]
         max_attempts: usize,
-        #[allow(dead_code)]
         reason: String,
     },
     /// 上下文压缩完成（可观测性事件）

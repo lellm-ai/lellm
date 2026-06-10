@@ -94,7 +94,7 @@ pub async fn emit_and_execute_tools(
             return None;
         }
 
-        let raw_result = executor.execute(tc).await;
+        let raw_result = executor.execute_with_emission(tc, tx).await;
 
         if !emit(
             tx,

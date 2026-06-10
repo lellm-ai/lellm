@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use lellm_core::ToolResult;
 
+use super::event::AgentEvent;
 use super::tools::ToolFn;
+use tokio::sync::mpsc::Sender;
 
 /// 退避策略
 #[derive(Debug, Clone)]
@@ -83,6 +85,53 @@ impl RetryPolicy {
                 Err(e) if e.kind.is_retriable() => {}
                 _ => return last_result,
             }
+
+            let delay = self.backoff.delay(attempt);
+            tracing::warn!(
+                attempt,
+                max = self.max_attempts,
+                delay_ms = delay.as_millis(),
+                "tool execution failed, retrying"
+            );
+            tokio::time::sleep(delay).await;
+
+            last_result = tool_fn(args).await;
+            if last_result.is_ok() {
+                return last_result;
+            }
+        }
+
+        last_result
+    }
+
+    /// 执行工具函数并自动重试可重试的错误，同时发射 Retry 事件。
+    ///
+    /// 与 [`execute_with_retry`] 的区别：每次重试前通过 `tx` 发射 `AgentEvent::Retry`。
+    pub async fn execute_with_retry_and_emission(
+        &self,
+        tool_fn: &ToolFn,
+        args: &serde_json::Value,
+        tx: &Sender<AgentEvent>,
+        tool_call_id: &str,
+    ) -> ToolResult {
+        let mut last_result = tool_fn(args).await;
+        if last_result.is_ok() {
+            return last_result;
+        }
+
+        for attempt in 1..self.max_attempts {
+            let reason = match &last_result {
+                Err(e) if e.kind.is_retriable() => format!("[{}] {}", e.kind, e.message),
+                _ => return last_result,
+            };
+            let _ = tx
+                .send(AgentEvent::Retry {
+                    tool_call_id: tool_call_id.to_string(),
+                    attempt: (attempt + 1) as usize,
+                    max_attempts: self.max_attempts as usize,
+                    reason: reason.clone(),
+                })
+                .await;
 
             let delay = self.backoff.delay(attempt);
             tracing::warn!(
