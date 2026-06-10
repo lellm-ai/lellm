@@ -201,7 +201,7 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | ToolError (类型化) | ✅ | ✅ | ✅ 必须 |
 | RetryPolicy → ToolExecutor | ✅ | ✅ | ✅ 必须 |
 | FallbackStrategy → ToolUseLoop | ✅ | ✅ | ✅ 必须 |
-| AgentEvent::Retry | ✅ | — | ⚠️ v0.2 |
+| AgentEvent::Retry | ✅ | ✅ | ✅ 已接入 |
 | LoopDetector | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
 | SignalVoter | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
 
