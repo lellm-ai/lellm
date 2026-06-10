@@ -152,3 +152,10 @@ pub enum ReasoningConfig {
     /// 高推理预算
     High,
 }
+
+impl ReasoningConfig {
+    /// 判断是否为 Disabled
+    pub fn is_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+}

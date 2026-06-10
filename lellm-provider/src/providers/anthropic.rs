@@ -420,6 +420,10 @@ impl ModelCapabilities for AnthropicCodec {
         {
             caps.supports_reasoning = true;
         }
+        // Claude 3+ 均支持工具调用
+        if lower.contains("claude-3") || lower.contains("claude-4") {
+            caps.supports_tool_call = true;
+        }
         caps
     }
 }

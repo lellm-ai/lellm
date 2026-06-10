@@ -83,6 +83,57 @@ pub struct Capabilities {
     pub supports_reasoning: bool,
     /// 支持工具调用（Function Calling / Tool Use）
     pub supports_tool_call: bool,
+    /// 支持 JSON Mode 响应格式
+    pub supports_json_mode: bool,
+    /// 支持预填充文本（引导模型输出方向）
+    pub supports_prefill: bool,
+    /// 支持流式输出推理过程（ThinkingDelta 事件）
+    pub supports_stream_thinking: bool,
+}
+
+/// 校验请求与模型能力的匹配。
+///
+/// 统一入口：如果请求了某项能力但模型不支持，返回 `UnsupportedFeature`。
+/// 设计原则：`Disabled` 对任何 Provider 都是"静默成功"。
+/// 只有"请求了能力但 Provider 没有"才报错。
+pub fn validate_capabilities(req: &ChatRequest, caps: &Capabilities) -> Result<(), LlmError> {
+    // 校验图片输入
+    if !caps.supports_image_input {
+        for msg in &req.messages {
+            for block in msg.content() {
+                if let lellm_core::ContentBlock::Image { .. } = block {
+                    return Err(LlmError::UnsupportedFeature {
+                        feature: "image input".into(),
+                    });
+                }
+            }
+        }
+    }
+
+    // 校验推理控制 — Disabled 静默成功
+    if let Some(ref reasoning) = req.reasoning {
+        if !reasoning.is_disabled() && !caps.supports_reasoning {
+            return Err(LlmError::UnsupportedFeature {
+                feature: "reasoning".into(),
+            });
+        }
+    }
+
+    // 校验工具调用
+    if req.tools.is_some() && !caps.supports_tool_call {
+        return Err(LlmError::UnsupportedFeature {
+            feature: "tool call".into(),
+        });
+    }
+
+    // 校验预填充
+    if req.prefill.is_some() && !caps.supports_prefill {
+        return Err(LlmError::UnsupportedFeature {
+            feature: "prefill".into(),
+        });
+    }
+
+    Ok(())
 }
 
 // ─── Provider 认证风格 ───

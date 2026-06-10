@@ -7,13 +7,15 @@
 
 use async_trait::async_trait;
 use http::HeaderMap;
-use lellm_core::{ChatRequest, ChatResponse, ContentBlock, LlmError};
+use lellm_core::{ChatRequest, ChatResponse, LlmError};
 use secrecy::ExposeSecret;
 use tokio_stream::StreamExt;
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
 
-use super::codec::{CodecRequest, ProviderEnvError, ProviderExtension, ProviderMeta};
+use super::codec::{
+    validate_capabilities, CodecRequest, ProviderEnvError, ProviderExtension, ProviderMeta,
+};
 use super::stream::{EventSink, StreamEvent};
 
 // ─── HTTP 原始响应 ───
@@ -143,17 +145,7 @@ impl<C: ProviderExtension + Clone> CodecProvider<C> {
         }
 
         let caps = self.codec.capabilities_for(&req.model);
-        if !caps.supports_image_input {
-            for msg in &req.messages {
-                for block in msg.content() {
-                    if let ContentBlock::Image { .. } = block {
-                        return Err(LlmError::UnsupportedFeature {
-                            feature: format!("Image input ({} adapter)", self.codec.provider_id()),
-                        });
-                    }
-                }
-            }
-        }
+        validate_capabilities(req, &caps)?;
 
         Ok(())
     }
