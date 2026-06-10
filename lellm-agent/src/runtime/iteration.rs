@@ -72,11 +72,12 @@ pub async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
 /// **设计决策（见 docs/DESIGN.md §8）：** 流式模式工具执行强制串行，
 /// 即使工具标记为 Safe。原因：ToolStart/ToolEnd 与 Token 交错会让消费者解析更复杂。
 /// v0.2 再优化流式分组并发。
+///
+/// **工具结果截断**统一在 `LoopState.push_tool_results()` 中执行，此处不截断。
 pub async fn emit_and_execute_tools(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
     tool_calls: &[lellm_core::ToolCall],
-    budget: &ContextBudget,
 ) -> Option<Vec<Message>> {
     let mut results = Vec::new();
 
@@ -95,24 +96,11 @@ pub async fn emit_and_execute_tools(
 
         let raw_result = executor.execute(tc).await;
 
-        // 工具结果截断
-        let truncated_result = match &raw_result {
-            Ok(text) => {
-                let truncated = budget.truncate_tool_result(text.clone());
-                if truncated != *text {
-                    Ok(truncated)
-                } else {
-                    raw_result
-                }
-            }
-            Err(_) => raw_result, // 错误消息不截断
-        };
-
         if !emit(
             tx,
             AgentEvent::ToolEnd {
                 tool_call_id: tc.id.clone(),
-                result: truncated_result.clone(),
+                result: raw_result.clone(),
             },
         )
         .await
@@ -120,7 +108,7 @@ pub async fn emit_and_execute_tools(
             return None;
         }
 
-        results.push(Message::tool_result(tc, &truncated_result));
+        results.push(Message::tool_result(tc, &raw_result));
     }
 
     Some(results)
@@ -302,13 +290,13 @@ async fn process_stream_iteration(
                 state.add_tool_calls(pending_tool_calls.len());
 
                 let results =
-                    emit_and_execute_tools(tx, executor, &pending_tool_calls, budget).await;
+                    emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
                 if results.is_none() {
                     return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
                     });
                 }
-                state.push_tool_results(results.unwrap());
+                state.push_tool_results(results.unwrap(), budget);
 
                 tracing::debug!(
                     iteration = state.iterations,

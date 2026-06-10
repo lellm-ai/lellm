@@ -1,21 +1,19 @@
 //! lellm-agent — Agent 运行时。
 //!
-//! 提供完整的 Agent 运行时能力：工具系统、记忆管理、Agent Loop、
+//! 提供完整的 Agent 运行时能力：工具系统、Agent Loop、
 //! 循环检测、重试策略、Fallback 降级等。
 
-pub mod memory;
 pub mod runtime;
 
 // Re-export schemars so derive(ToolDefinition) macro can reference it.
 pub use schemars;
 
-pub use memory::ShortTermMemory;
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, BatchExecutionResult, CompactionResult,
     ContextBudget, ContextCompactor, DefaultFallback, FallbackAction, FallbackContext,
     FallbackStrategy, LocalCompactor, ParallelSafety, ResolvedModel, RetryPolicy, StopReason,
-    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration, ToolRegistry,
-    ToolResult, ToolSearchResult, ToolSource, ToolUseConfig, ToolUseDeps, ToolUseLoop,
+    ToolArgs, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration,
+    ToolResult, ToolUseConfig, ToolUseDeps, ToolUseLoop,
     ToolUseResult, estimate_message, estimate_tokens,
 };
 #[cfg(feature = "v02-preview")]

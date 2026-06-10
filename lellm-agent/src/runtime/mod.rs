@@ -20,10 +20,7 @@ pub mod tools;
 
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
-pub use tools::{
-    ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, ToolRegistry, ToolSearchResult,
-    ToolSource,
-};
+pub use tools::{ToolArgs, ToolCategory, ToolExecutor, ToolRegistration};
 
 // ─── 运行时 re-export ────────────────────────────────────────────
 

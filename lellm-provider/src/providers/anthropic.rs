@@ -109,14 +109,36 @@ impl ChatCodec for AnthropicCodec {
         })?;
         body.insert("max_tokens".into(), (max_tokens as u64).into());
 
-        // 推理配置校验 — Anthropic 不支持推理级别配置
-        match &req.reasoning {
-            None => {}                            // 不干预，使用默认行为
-            Some(ReasoningConfig::Disabled) => {} // 显式关闭 — Anthropic 默认不推理，静默 OK
-            Some(_) => {
-                return Err(LlmError::UnsupportedFeature {
-                    feature: "reasoning levels (Anthropic adapter)".into(),
-                });
+        // 推理配置映射 — Anthropic thinking.enabled + budget_tokens
+        //
+        // | ReasoningConfig | thinking 字段 | budget_tokens |
+        // | Disabled        | omit          | —             |
+        // | Low             | enabled       | 2048          |
+        // | Medium          | enabled       | 8192          |
+        // | High            | enabled       | 32768         |
+        //
+        // max_reasoning_tokens 存在时 → 覆盖默认 budget
+        if let Some(ref reasoning) = req.reasoning {
+            match reasoning {
+                ReasoningConfig::Disabled => {} // 不推理，omit thinking 字段
+                ReasoningConfig::Low
+                | ReasoningConfig::Medium
+                | ReasoningConfig::High => {
+                    let default_budget = match reasoning {
+                        ReasoningConfig::Low => 2048,
+                        ReasoningConfig::Medium => 8192,
+                        ReasoningConfig::High => 32768,
+                        _ => unreachable!(),
+                    };
+                    let budget_tokens = req.max_reasoning_tokens.unwrap_or(default_budget) as u64;
+                    body.insert(
+                        "thinking".into(),
+                        serde_json::json!({
+                            "type": "enabled",
+                            "budget_tokens": budget_tokens
+                        }),
+                    );
+                }
             }
         }
 
@@ -387,6 +409,13 @@ impl ModelCapabilities for AnthropicCodec {
         let lower = model.to_lowercase();
         if lower.contains("claude-3") || lower.contains("claude-4") {
             caps.supports_image_input = true;
+        }
+        // Claude 3.5 Sonnet+ 和 Claude 4 系列支持 thinking 模式
+        if lower.contains("sonnet")
+            || lower.contains("opus")
+            || (lower.contains("claude-4") && lower.contains("sonnet"))
+        {
+            caps.supports_reasoning = true;
         }
         caps
     }

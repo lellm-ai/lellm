@@ -21,13 +21,13 @@
 | `lellm` | 门面 crate | Feature-gated re-export 所有子 crate；用户统一入口 |
 | `lellm-core` | 协议对象 | Message, ContentBlock, ChatRequest/Response, ToolDefinition, TokenUsage, LlmError |
 | `lellm-provider` | Provider trait + 适配器 | LlmProvider, ProviderAdapter, GenericProvider, ModelRouter, ProviderRegistry, MockProvider |
-| `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, ParallelSafety, ToolRegistry, RetryPolicy, FallbackStrategy, ShortTermMemory |
+| `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, ParallelSafety, RetryPolicy, FallbackStrategy |
 | `lellm-macros` | 派生宏 | `#[derive(ToolDefinition)]` — Stub |
 
 ### 不包含（v0.2+）
 
 - Graph/Node/Edge 编排层
-- MCP Client/Server（v0.1 仅预留 `ToolSource::Mcp`）
+- MCP Client/Server（v0.2+）
 - Sandbox / Harness Orchestrator
 - LongTermMemory / MemoryStore
 
@@ -159,13 +159,13 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | ToolUseLoop | ✅ |
 | AgentBuilder | ✅ |
 | ModelRouter + Registry | ✅ |
-| ShortTermMemory | ✅ |
-| ToolRegistry | ✅ |
+| ShortTermMemory | ❌ v0.1 删除（LoopState 足够） |
+| ToolRegistry | ❌ v0.1 删除（ToolExecutor 内置 HashMap） |
 | 输出预算保险丝 | ✅ |
 | 推理预算保险丝 | ✅ |
 | Context Compaction | ✅ |
 | RequestOptions | ✅ |
-| derive(ToolDefinition) | 🟡 Stub |
+| derive(ToolDefinition) | ✅ |
 
 ### 输出预算
 
@@ -184,7 +184,7 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | `ChatRequest.max_reasoning_tokens` 单轮上限 | ✅ | 流式消费 ThinkingDelta 时实时检查 |
 | `StopReason::ReasoningBudgetExceeded` | ✅ | 区分推理超限与输出超限 |
 | `LoopState.total_reasoning_tokens` | ✅ | 累计推理 Token |
-| `max_total_reasoning_tokens` 总上限 | ⚠️ | 待补（grill 决策：对齐双层设计） |
+| `max_total_reasoning_tokens` 总上限 | ✅ | 非流式 + 流式均已接入 |
 
 ### Context Compaction
 

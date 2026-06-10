@@ -94,6 +94,7 @@ async fn main() {
                     result.as_ref().map(|s| s.as_str()).unwrap_or("error")
                 );
             }
+            #[cfg(feature = "v02-preview")]
             AgentEvent::Retry {
                 tool_call_id,
                 attempt,

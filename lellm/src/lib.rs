@@ -1,15 +1,12 @@
 //! LeLLM — Rust LLM orchestration framework.
 //!
-//! 所有 feature 均需显式开启（`default = []`）：
+//! 默认开启 `provider`（core + provider 适配层）。
 //!
 //! ```toml
-//! # 仅协议对象（零运行时依赖）
-//! lellm = { version = "0.1", features = ["core"] }
+//! # 默认：core + provider
+//! lellm = "0.1"
 //!
-//! # 协议 + Provider 适配层
-//! lellm = { version = "0.1", features = ["provider"] }
-//!
-//! # 协议 + Provider + Agent 运行时
+//! # 需要 Agent 运行时
 //! lellm = { version = "0.1", features = ["agent"] }
 //!
 //! # 全部启用

@@ -91,6 +91,7 @@ pub async fn observe_react_loop(
                 println!();
             }
 
+            #[cfg(feature = "v02-preview")]
             AgentEvent::Retry {
                 tool_call_id,
                 attempt,

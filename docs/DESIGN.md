@@ -740,8 +740,8 @@ pub enum StopReason {
 ```rust
 let agent = AgentBuilder::new(model)
     .reasoning(ReasoningConfig::High)
-    .reasoning_budget(8_000)         // 单轮推理上限
-    .total_reasoning_budget(32_000)  // 总推理上限（可选）
+    .reasoning_budget(8_000)            // 单轮推理上限
+    .max_total_reasoning_tokens(32_000) // 总推理上限（可选）
     .build();
 ```
 
@@ -898,10 +898,14 @@ pub struct StreamOptions {
 
 | Provider | Disabled | Low/Medium/High |
 |---|---|---|
-| OpenAI Compatible | `reasoning_effort="low"` | 映射为对应字符串 |
-| DeepSeek | `enable_thinking=false` | `reasoning_effort=<level>` |
-| Anthropic | 静默忽略（不支持推理配置） | `UnsupportedFeature` |
+| OpenAI Compatible | omit reasoning 字段 | `reasoning_effort="low/medium/high"` |
+| DeepSeek | `enable_thinking=false` | `reasoning_effort=<level>` + `max_reasoning_tokens` |
+| Anthropic | omit thinking 字段 | `thinking.type="enabled"` + `budget_tokens`（Low=2048, Medium=8192, High=32768） |
 | 不支持推理的 Provider | 静默忽略 | `UnsupportedFeature` |
+
+**Anthropic budget_tokens 优先级：** `max_reasoning_tokens` 存在时 → 覆盖默认值；不存在时 → 用 Config 对应的默认值。
+
+**OpenAI 兼容协议注意：** OpenAI o 系列不支持 `max_reasoning_tokens` 的请求级传递，推理预算控制完全依赖客户端侧的流式保险丝（`process_stream_iteration` 中的 `max_reasoning_tokens` 检查）。
 
 ### 实现位置
 
@@ -998,13 +1002,13 @@ pub struct CompactionResult {
 ```
 [Previous conversation summary]
 Compressed 3 turns:
-  [Assistant]: The user asked about weather in Beijing
-  [Tool] called get_weather: {"city": "beijing"}
-  [Result] (success): Temperature is 22°C
-  [User]: What about Shanghai?
+  Assistant: The user asked about weather in Beijing
+  Tool(get_weather): {"city": "beijing"}
+  Result: Temperature is 22°C
+  User: What about Shanghai?
 ```
 
-- 纯文本标记（`[Assistant]`/`[Tool]`/`[Result]`/`[User]`），不使用 emoji
+- 纯文本标记（`Assistant:`/`Tool(...)`/`Result:`/`User:`），不使用 emoji
 - 摘要注入为 `Message::System`，避免干扰对话结构
 - Assistant 文本截 200 字符，Tool 参数截 100 字符，ToolResult 截 100 字符
 
@@ -1025,7 +1029,7 @@ AgentEvent::ContextCompacted {
 
 **两条路径统一截断：** 流式和非流式执行路径均在工具结果注入历史前截断。
 
-截断逻辑统一在 `LoopState.push_tool_results()` 中执行，确保所有进入历史的工具结果受 `max_tool_result_chars` 控制。
+截断逻辑统一在 `LoopState.push_tool_results()` 中执行，两条路径（流式/非流式）在调用 `push_tool_results()` 时传入 `ContextBudget`，由该方法统一处理截断。确保所有进入历史的工具结果受 `max_tool_result_chars` 控制。
 
 ## 16. 门面 Crate Feature Gate
 

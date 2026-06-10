@@ -159,35 +159,36 @@ while let Some(event) = stream.next().await {
 ### Agent Loop — 工具调用闭环
 
 ```rust
-use lellm::agent::{ToolExecutor, ToolRegistry, ToolUseLoop, ResolvedModel, StopReason};
-use lellm::provider::ResolvedModel;
+use lellm::agent::{AgentBuilder, ToolRegistration, StopReason};
 
 // 注册工具
-let mut registry = ToolRegistry::new();
-registry.register_search(); // 示例工具
+let search_tool = ToolRegistration::new(
+    "search",
+    "搜索互联网信息",
+    search_fn,  // 你的异步工具函数
+);
 
-// 构建 executor
-let executor = ToolExecutor::from_registry(registry);
+// 解析模型（通过 Router + ProviderRegistry）
+let resolved = /* ... */;
 
-// 解析模型（通过 Router + Registry）
-let route = router.resolve(lellm::provider::TaskLevel::Flash)?;
-let resolved = registry_provider.resolve(route)?;
+// 构建 Agent
+let agent = AgentBuilder::new(resolved)
+    .tool(search_tool)
+    .max_iterations(10)  // 最多 10 次 Provider 调用
+    .build();
 
 // 执行 Agent Loop
-let loop_ = ToolUseLoop::new(resolved, executor)
-    .set_max_iterations(10); // 最多 10 次 Provider 调用
-
-let result = loop_.execute(messages).await?;
+let result = agent.execute(messages).await?;
 
 match result.stop_reason {
     StopReason::Complete => {
         println!("Agent 完成，共 {} 轮", result.iterations);
     }
     StopReason::MaxIterationsReached => {
-        eprintln!("达到最大轮次 ({})，Agent 未完成", result.iterations);
+        eprintln!("达到最大轮次 ({})", result.iterations);
     }
-    StopReason::LoopDetected => {
-        eprintln!("检测到循环，已中止");
+    _ => {
+        eprintln!("Agent 因 {:?} 停止", result.stop_reason);
     }
 }
 ```

@@ -4,13 +4,11 @@
 
 mod args;
 mod executor;
-mod registry;
 
 pub use args::ToolArgs;
 pub use executor::{
     BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration,
 };
-pub use registry::{ToolRegistry, ToolSearchResult, ToolSource};
 
 /// 异步工具函数类型（executor 内部使用）
 pub(crate) type ToolFn = std::sync::Arc<

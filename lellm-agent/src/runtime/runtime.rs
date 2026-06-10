@@ -112,8 +112,36 @@ impl LoopState {
         self.messages.push(Message::Assistant { content });
     }
 
-    /// 追加工具执行结果到历史
-    pub fn push_tool_results(&mut self, results: Vec<Message>) {
+    /// 追加工具执行结果到历史。
+    ///
+    /// 在注入前对成功结果执行截断（`max_tool_result_chars`），
+    /// 失败结果不截断（错误信息应完整保留）。
+    pub fn push_tool_results(
+        &mut self,
+        results: Vec<Message>,
+        budget: &ContextBudget,
+    ) {
+        let results: Vec<Message> = results
+            .into_iter()
+            .map(|m| {
+                if let Message::ToolResult {
+                    ref tool_call_id,
+                    is_error: false,
+                    ref content,
+                } = m
+                {
+                    let truncated = budget.truncate_tool_result_blocks(content);
+                    if truncated != *content {
+                        return Message::ToolResult {
+                            tool_call_id: tool_call_id.clone(),
+                            is_error: false,
+                            content: truncated,
+                        };
+                    }
+                }
+                m
+            })
+            .collect();
         let tokens = estimate_tokens(&results);
         self.estimated_tokens += tokens;
         self.messages.extend(results);
@@ -330,7 +358,7 @@ impl ToolUseLoop {
 
             let batch = self.executor.execute_batch(&tool_calls).await;
 
-            let mut results = if let Some(e) = &batch.panicked {
+            let results = if let Some(e) = &batch.panicked {
                 tracing::error!(error = %e, "tool batch task panicked");
                 let mut results = batch.completed;
                 let completed_ids: std::collections::HashSet<String> = results
@@ -357,33 +385,8 @@ impl ToolUseLoop {
                 batch.completed
             };
 
-            // 工具结果截断（非流式路径）
-            results = results
-                .into_iter()
-                .map(|m| {
-                    if let Message::ToolResult {
-                        ref is_error,
-                        ref content,
-                        ..
-                    } = m
-                    {
-                        if !*is_error {
-                            let truncated =
-                                self.config.context_budget.truncate_tool_result_blocks(content);
-                            if truncated != *content {
-                                return Message::ToolResult {
-                                    tool_call_id: m.tool_call_id(),
-                                    is_error: *is_error,
-                                    content: truncated,
-                                };
-                            }
-                        }
-                    }
-                    m
-                })
-                .collect();
-
-            state.push_tool_results(results);
+            // 工具结果截断统一在 push_tool_results() 中执行
+            state.push_tool_results(results, &self.config.context_budget);
 
             tracing::debug!(
                 iteration = state.iterations,
@@ -516,6 +519,29 @@ impl ToolUseLoop {
                     }
                     Err(e) => Err(e),
                 };
+
+                // 总预算检查（与非流式路径对齐）
+                if state.exceeded_total_output(config.max_total_output_tokens) {
+                    let _ = emit(
+                        &tx,
+                        AgentEvent::LoopEnd {
+                            result: state.finish_output_budget(last_response.unwrap_or_else(empty_response)),
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
+                if state.exceeded_total_reasoning(config.max_total_reasoning_tokens) {
+                    let _ = emit(
+                        &tx,
+                        AgentEvent::LoopEnd {
+                            result: state.finish_reasoning_budget(last_response.unwrap_or_else(empty_response)),
+                        },
+                    )
+                    .await;
+                    return;
+                }
 
                 match result {
                     Ok(StreamIterResult::Continue { response, .. }) => {

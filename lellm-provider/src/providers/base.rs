@@ -22,6 +22,8 @@ use super::stream::{EventSink, StreamEvent};
 #[derive(Debug)]
 pub(crate) struct RawResponse {
     pub status: u16,
+    /// 响应 Header — 为 `Retry-After` 限流控制预留。
+    /// v0.1 未消费，v0.2+ 用于 RateLimited 错误的智能退避。
     #[allow(dead_code)]
     pub headers: HeaderMap,
     pub body: bytes::Bytes,
@@ -95,9 +97,16 @@ pub struct CodecProvider<C: ProviderExtension> {
 #[allow(private_bounds)]
 impl<C: ProviderExtension + Clone> CodecProvider<C> {
     pub fn new(codec: C, config: ProviderConfig) -> Self {
+        // Network-level idle guard: significantly larger than stream idle timeout.
+        // Stream idle detection is handled separately by the SSE runtime (idle_timeout).
+        // This is a hard bottom-line to prevent hung connections.
+        let network_idle_guard = std::cmp::max(
+            config.idle_timeout.saturating_mul(3),
+            std::time::Duration::from_secs(120),
+        );
         let client = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
-            .read_timeout(config.idle_timeout.saturating_mul(2))
+            .read_timeout(network_idle_guard)
             .user_agent(format!("LeLLM/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .unwrap_or_default();
