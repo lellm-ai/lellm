@@ -257,7 +257,7 @@ impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
     async fn stream(
         &self,
         request: &ChatRequest,
-        options: &StreamOptions,
+        _options: &StreamOptions,
     ) -> Result<ProviderStream, LlmError> {
         self.validate_request(request)?;
         let http_req = self.codec.encode(request, true)?;
@@ -305,7 +305,6 @@ impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
         })?;
 
         let model = request.model.clone();
-        let stream_thinking = options.stream_thinking;
         let codec = self.codec.clone();
 
         let idle_timeout = self.config.idle_timeout;
@@ -337,7 +336,6 @@ impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
                 &mut sink,
                 &codec,
                 model,
-                stream_thinking,
                 boxed_stream,
             )
             .await;

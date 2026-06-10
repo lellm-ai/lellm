@@ -31,11 +31,13 @@ struct FrameResult {
 ///
 /// 管道：Bytes → SseParser → SseFrame → Codec → StreamChunk → StreamEvent
 ///
+/// **永远转发所有协议事件**（含 ThinkingDelta）。
+/// 是否向消费者展示 ThinkingDelta 由 Agent 层 `stream_thinking` 控制。
+///
 /// # 参数
 /// - `sink`: 事件输出端
 /// - `codec`: ChatCodec，负责 SSE data → StreamChunk 的协议解析
 /// - `model`: 模型标识
-/// - `stream_thinking`: 是否向消费者发射 ThinkingDelta 事件
 /// - `bytes_stream`: 任意字节流（reqwest、hyper、mock、file...）
 ///
 /// # 泛型参数
@@ -46,7 +48,6 @@ pub async fn process_stream<S, A, E>(
     sink: &mut E,
     codec: &A,
     model: String,
-    stream_thinking: bool,
     mut bytes_stream: S,
 ) where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
@@ -84,9 +85,9 @@ pub async fn process_stream<S, A, E>(
                         return;
                     }
 
-                    // 思考增量 — 根据 stream_thinking 决定是否发射
-                    if stream_thinking
-                        && let Some(thinking) = fr.thinking
+                    // 思考增量 — 永远转发（协议事件）。
+                    // 是否向消费者展示由 Agent 层 stream_thinking 控制。
+                    if let Some(thinking) = fr.thinking
                         && !sink
                             .emit(StreamEvent::ThinkingDelta {
                                 thinking,

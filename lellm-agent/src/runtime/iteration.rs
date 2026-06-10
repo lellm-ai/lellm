@@ -178,6 +178,7 @@ pub(super) enum StreamIterResult {
 ///
 /// `max_output_tokens` — 单轮输出的 Token 上限（保险丝），在流式消费时实时检查。
 /// `max_reasoning_tokens` — 单轮推理的 Token 上限（保险丝），可选。
+/// `stream_thinking` — 是否向消费者发射 ThinkingDelta 事件（不影响预算检查）。
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
@@ -189,6 +190,7 @@ async fn process_stream_iteration(
     budget: &ContextBudget,
     max_output_tokens: u32,
     max_reasoning_tokens: Option<u32>,
+    stream_thinking: bool,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
@@ -250,7 +252,13 @@ async fn process_stream_iteration(
             | lellm_provider::ProviderEvent::ResponseComplete { .. } => {}
         }
 
-        if !emit(tx, AgentEvent::Provider(ev.clone())).await {
+        // ThinkingDelta 根据 stream_thinking 决定是否向消费者发射。
+        // 注意：预算检查和累积始终执行，不受 stream_thinking 影响。
+        if matches!(&ev, lellm_provider::ProviderEvent::ThinkingDelta { .. })
+            && !stream_thinking
+        {
+            // 跳过 ThinkingDelta 发射，继续下一事件
+        } else if !emit(tx, AgentEvent::Provider(ev.clone())).await {
             return Ok(StreamIterResult::Cancelled { response: None });
         }
 
@@ -360,6 +368,7 @@ pub(super) async fn do_stream_iteration(
         &budget,
         max_output_tokens,
         max_reasoning_tokens,
+        stream_thinking,
     )
     .await?;
 
