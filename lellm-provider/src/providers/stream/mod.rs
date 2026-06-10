@@ -22,20 +22,24 @@ pub(crate) use usage_accumulator::{UsageAccumulator, UsageDelta};
 ///
 /// 这是 stream/ 模块对外的唯一数据契约，
 /// 不耦合 ProviderEvent（lib.rs 中的消费者概念）。
+///
+/// 关键性分类（决定 ChannelSink 的发送策略）：
+/// - **Critical** (Start, Error, ResponseComplete) — 阻塞发送，绝不丢弃
+/// - **Non-critical** (Token, ThinkingDelta) — try_send，channel 满时丢弃并计数
 #[derive(Debug)]
 pub(crate) enum StreamEvent {
-    /// 流式开始
+    /// 流式开始（关键）
     Start { model: String },
-    /// 文本增量（可丢弃）
+    /// 文本增量（非关键 — channel 满时可丢弃）
     Token { token: String },
-    /// 思考块增量（可丢弃）
+    /// 思考块增量（非关键 — channel 满时可丢弃）
     ThinkingDelta {
         thinking: String,
         redacted: Option<String>,
     },
-    /// 解析错误（不可丢弃）
+    /// 解析错误（关键）
     Error(LlmError),
-    /// 单次 LLM 响应结束（HTTP/SSE 请求完成，不可丢弃）
+    /// 单次 LLM 响应结束（关键）
     ResponseComplete {
         tool_calls: Vec<ToolCall>,
         usage: Option<TokenUsage>,
@@ -44,10 +48,14 @@ pub(crate) enum StreamEvent {
 
 impl StreamEvent {
     /// 事件是否为关键状态机事件——丢失会导致消费者状态错乱。
+    /// Start 丢失 → 消费者不知流已开始；Error 丢失 → 错误不被感知；
+    /// ResponseComplete 丢失 → tool_calls/usage 丢失。
     pub(crate) fn is_critical(&self) -> bool {
         matches!(
             self,
-            StreamEvent::Error(_) | StreamEvent::ResponseComplete { .. }
+            StreamEvent::Start { .. }
+                | StreamEvent::Error(_)
+                | StreamEvent::ResponseComplete { .. }
         )
     }
 }

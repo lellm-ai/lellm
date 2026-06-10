@@ -20,7 +20,7 @@
 |-------|------|----------|
 | `lellm` | 门面 crate | Feature-gated re-export 所有子 crate；用户统一入口 |
 | `lellm-core` | 协议对象 | Message, ContentBlock, ChatRequest/Response, ToolDefinition, TokenUsage, LlmError |
-| `lellm-provider` | Provider trait + 适配器 | LlmProvider, ProviderAdapter, GenericProvider, ModelRouter, ProviderRegistry, MockProvider |
+| `lellm-provider` | Provider trait + Codec | LlmProvider, CodecProvider, ProviderExtension (三权分立), ModelRouter, ProviderRegistry, MockProvider |
 | `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, ParallelSafety, RetryPolicy, FallbackStrategy |
 | `lellm-macros` | 派生宏 | `#[derive(ToolDefinition)]` — Stub |
 
@@ -110,11 +110,14 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 
 ```
 用户 → LlmProvider (public API)
-       → GenericProvider<A> (框架内部)
-          → ProviderAdapter (pub(crate) SPI)
+       → CodecProvider<C> (框架内部)
+          → ProviderExtension 三权分立 (生态扩展 SPI)
+              ├── ChatCodec (协议编解码)
+              ├── ModelCapabilities (能力矩阵)
+              └── ProviderMeta (连接元数据)
 ```
 
-详见 [DESIGN.md §5](./DESIGN.md#5-provideradapter-spi--providerrequest-中间层)
+详见 [DESIGN.md §5](./DESIGN.md#5-providercodec---%E4%B8%89%E6%9D%83%E5%88%86%E7%AB%8B%E7%9A%84%E5%8D%8F%E8%AE%AE%E7%BC%96%E8%A7%A3%E7%A0%81-spi)
 
 ## 五、关键设计决策索引
 
@@ -215,8 +218,8 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 |--------|------|------|
 | P0 | `ToolError` 类型化 + `ToolResult = Result<String, ToolError>` | ✅ 已完成（core/error.rs） |
 | P0 | `ToolExecutor` 集成 `RetryPolicy` | ✅ 已完成（agent/tools/executor.rs） |
-| P1-H | AnthropicAdapter `parse_response` / `parse_sse_frame` 完善 | ✅ 已完成 |
-| P1-H | OpenAICompatAdapter `build_request` 完善 | ✅ 已完成 |
+| P1-H | AnthropicCodec `encode` / `decode_sse` 完善 | ✅ 已完成 |
+| P1-H | OpenAICompatCodec `encode` 完善 | ✅ 已完成 |
 | P3 | lellm-macros derive | 🟡 Stub |
 | P4 | examples/ | 🟡 部分 |
 

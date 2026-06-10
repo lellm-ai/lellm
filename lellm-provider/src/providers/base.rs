@@ -1,7 +1,7 @@
 //! CodecProvider — 持有 Codec + 连接配置，统一 HTTP 传输。
 //!
 //! CodecProvider 封装通用逻辑（HTTP 发送、认证、超时、流式解析），
-//! ProviderCodec 只负责请求/响应的协议格式转换。
+//! Codec 只负责请求/响应的协议格式转换。
 //!
 //! 协议编解码 SPI 定义在 [`codec`] 模块中。
 
@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use http::HeaderMap;
 use lellm_core::{ChatRequest, ChatResponse, LlmError};
 use secrecy::ExposeSecret;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
@@ -38,8 +40,12 @@ pub(crate) struct RawResponse {
 ///
 /// 这是 stream/ 模块与 CodecProvider 之间的唯一桥接点。
 /// `emit` 返回 `false` 表示消费者已断开。
+///
+/// 关键事件（Start, Error, ResponseComplete）：阻塞发送，绝不丢弃。
+/// 非关键事件（Token, ThinkingDelta）：try_send，channel 满时丢弃并计数。
 struct ChannelSink {
     tx: tokio::sync::mpsc::Sender<Result<ProviderEvent, LlmError>>,
+    dropped: Arc<AtomicU64>,
 }
 
 impl EventSink for ChannelSink {
@@ -60,7 +66,10 @@ impl EventSink for ChannelSink {
             let mapped = map_stream_event(event);
             match self.tx.try_send(mapped) {
                 Ok(()) => true,
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    true
+                }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
             }
         }
@@ -89,16 +98,18 @@ fn map_stream_event(event: StreamEvent) -> Result<ProviderEvent, LlmError> {
 
 /// 通用 Provider，适配任何 ProviderExtension。
 ///
-/// Codec 必须 Clone，以便在流式调用时克隆进 tokio::spawn。
+/// Codec 通过 `Arc<C>` 持有，支持零开销共享（无状态 Codec）
+/// 或共享状态（如调用计数器、tokenize 缓存）。
+/// 不需要 `Clone` bound。
 #[allow(private_bounds)]
 pub struct CodecProvider<C: ProviderExtension> {
-    codec: C,
+    codec: Arc<C>,
     config: ProviderConfig,
     client: reqwest::Client,
 }
 
 #[allow(private_bounds)]
-impl<C: ProviderExtension + Clone> CodecProvider<C> {
+impl<C: ProviderExtension> CodecProvider<C> {
     pub fn new(codec: C, config: ProviderConfig) -> Self {
         // Network-level idle guard: significantly larger than stream idle timeout.
         // Stream idle detection is handled separately by the SSE runtime (idle_timeout).
@@ -115,7 +126,7 @@ impl<C: ProviderExtension + Clone> CodecProvider<C> {
             .unwrap_or_default();
 
         Self {
-            codec,
+            codec: Arc::new(codec),
             config,
             client,
         }
@@ -226,7 +237,7 @@ impl<C: ProviderExtension + Clone> CodecProvider<C> {
 
 #[async_trait]
 #[allow(private_bounds)]
-impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
+impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.validate_request(request)?;
         let http_req = self.codec.encode(request, false)?;
@@ -298,7 +309,7 @@ impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
         })?;
 
         let model = request.model.clone();
-        let codec = self.codec.clone();
+        let codec = Arc::clone(&self.codec);
 
         let idle_timeout = self.config.idle_timeout;
         let remaining = first_token_guard
@@ -323,15 +334,25 @@ impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
         let boxed_stream = Box::pin(byte_stream);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let mut sink = ChannelSink { tx };
+        let dropped = Arc::new(AtomicU64::new(0));
+        let dropped_clone = Arc::clone(&dropped);
+        let mut sink = ChannelSink { tx, dropped };
         tokio::spawn(async move {
             super::stream::stream_processor::process_stream(
                 &mut sink,
-                &codec,
+                &*codec,
                 model,
                 boxed_stream,
             )
             .await;
+            // 流式处理结束后，报告丢弃的事件数
+            let n = dropped_clone.load(Ordering::Relaxed);
+            if n > 0 {
+                tracing::warn!(
+                    dropped_events = n,
+                    "non-critical stream events were dropped due to full channel"
+                );
+            }
         });
 
         let rx_stream = tokio_stream::wrappers::ReceiverStream::new(rx);

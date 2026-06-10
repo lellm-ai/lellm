@@ -46,23 +46,23 @@ full          — core + provider + agent + macros
 **方式一：从环境变量自动加载（推荐）**
 
 ```rust
-use lellm::provider::providers::base::GenericProvider;
-use lellm::provider::providers::openai_compat::OpenAICompatAdapter;
+use lellm::provider::CodecProvider;
+use lellm::provider::OpenAICompatCodec;
 
 // 自动读取 OPENAI_BASE_URL（可选）+ OPENAI_API_KEY（必需）
-let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())?;
+let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
 ```
 
 **方式二：自定义超时等配置**
 
 ```rust
-use lellm::provider::providers::base::{GenericProvider, ProviderConfig};
-use lellm::provider::providers::openai_compat::OpenAICompatAdapter;
+use lellm::provider::{CodecProvider, ProviderConfig};
+use lellm::provider::OpenAICompatCodec;
 
-let adapter = OpenAICompatAdapter::openai();
-let provider = GenericProvider::new(
-    adapter.clone(),
-    ProviderConfig::from_adapter(&adapter)?
+let codec = OpenAICompatCodec::openai();
+let provider = CodecProvider::new(
+    codec,
+    ProviderConfig::from_codec(&codec)?
         .with_timeout(std::time::Duration::from_secs(60))
         .with_idle_timeout(std::time::Duration::from_secs(30)),
 );
@@ -236,14 +236,14 @@ max_iterations = 3 的执行流程：
 
 ## 支持的 Provider
 
-| Provider | Adapter | 说明 |
-|----------|---------|------|
-| OpenAI | `OpenAICompatAdapter::openai()` | GPT-4o, GPT-5.4 等 |
-| Anthropic | `AnthropicAdapter` | Claude Sonnet, Opus 等 |
-| NVIDIA | `OpenAICompatAdapter::nvidia()` | OpenAI 兼容接口 |
-| DeepSeek | `OpenAICompatAdapter::deepseek()` | OpenAI 兼容接口 |
-| vLLM | `OpenAICompatAdapter::vllm()` | OpenAI 兼容接口 |
-| LLaMA | `OpenAICompatAdapter::llama()` | OpenAI 兼容接口 |
+| Provider | Codec | 说明 |
+|----------|-------|------|
+| OpenAI | `OpenAICompatCodec::openai()` | GPT-4o, GPT-5.4 等 |
+| Anthropic | `AnthropicCodec` | Claude Sonnet, Opus 等 |
+| NVIDIA | `OpenAICompatCodec::nvidia()` | OpenAI 兼容接口 |
+| DeepSeek | `OpenAICompatCodec::deepseek()` | OpenAI 兼容接口 |
+| vLLM | `OpenAICompatCodec::vllm()` | OpenAI 兼容接口 |
+| LLaMA | `OpenAICompatCodec::llama()` | OpenAI 兼容接口 |
 
 ## 运行示例
 
@@ -271,14 +271,17 @@ cargo run -p lellm-provider --example streaming
 
 ```
 用户 → LlmProvider (public API)
-       → GenericProvider<A> (框架内部)
-          → ProviderAdapter (pub(crate) SPI)
+       → CodecProvider<C> (框架内部)
+          → ProviderExtension 三权分立 (生态扩展 SPI)
+              ├── ChatCodec (协议编解码)
+              ├── ModelCapabilities (能力矩阵)
+              └── ProviderMeta (连接元数据)
 ```
 
 **职责切分：**
 
-| 职责 | Adapter | stream/ 模块 | GenericProvider |
-|------|---------|-------------|-----------------|
+| 职责 | Codec | stream/ 模块 | CodecProvider |
+|------|-------|-------------|---------------|
 | Endpoint 路径 | ✅ | ❌ | ❌ |
 | JSON 请求体格式 | ✅ | ❌ | ❌ |
 | 协议特定 Header | ✅ | ❌ | ❌ |
@@ -296,7 +299,7 @@ cargo run -p lellm-provider --example streaming
 
 ```
 ┌─────────────────────────────────────┐
-│ GenericProvider (base.rs)           │
+│ CodecProvider (base.rs)             │
 │ 知道: reqwest, tokio channel        │
 │ 职责: HTTP 发送, ChannelSink 桥接    │
 └─────────────────────────────────────┘
@@ -309,7 +312,7 @@ cargo run -p lellm-provider --example streaming
 └─────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────┐
-│ SseParser + Adapter + Accumulator   │
+│ SseParser + Codec + Accumulator     │
 │ 纯逻辑，无 IO                       │
 └─────────────────────────────────────┘
 ```
@@ -321,7 +324,7 @@ let stream = futures_util::stream::iter(vec![
     Ok(Bytes::from("data: {\"text\": \"hel\"}\n\n")),
     Ok(Bytes::from("data: {\"text\": \"lo\"}\n\n")),
 ]);
-process_stream(&mut mock_sink, &adapter, "test".into(), stream).await;
+process_stream(&mut mock_sink, &codec, "test".into(), stream).await;
 ```
 
 ## 项目结构
@@ -331,8 +334,9 @@ lellm/
 ├── lellm/               # Facade 统一入口
 ├── lellm-core/          # 协议（Message, ChatRequest, LlmError 等）
 ├── lellm-provider/      # Provider 适配层（OpenAI, Anthropic, ...）
-│   ├── providers/       # Adapter + GenericProvider
-│   │   ├── base.rs      # ProviderAdapter, GenericProvider, ProviderConfig
+│   ├── providers/       # Codec + CodecProvider
+│   │   ├── base.rs      # CodecProvider, ProviderConfig, AuthConfig
+│   │   ├── codec.rs     # ChatCodec, ModelCapabilities, ProviderMeta, ProviderExtension
 │   │   ├── stream/      # 传输层解耦的流式处理管道
 │   │   │   ├── sse_parser.rs
 │   │   │   ├── stream_processor.rs

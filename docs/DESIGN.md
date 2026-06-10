@@ -73,7 +73,7 @@ ResolvedModel.model  ← 路由层唯一来源
        ↓ (ToolUseLoop 注入)
 ChatRequest.model    ← 实际发送给 Provider 的模型
        ↓
-GenericProvider      ← 只读取 ChatRequest.model
+CodecProvider        ← 只读取 ChatRequest.model
 ```
 
 **使用模式：**
@@ -172,7 +172,7 @@ pub trait ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta {}
 
 ```rust
 pub struct CodecProvider<C: ProviderExtension> {
-    codec: C,
+    codec: Arc<C>,        // Arc 共享，无需 Clone bound
     config: ProviderConfig,
     client: reqwest::Client,
 }

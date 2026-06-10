@@ -83,7 +83,11 @@ pub struct Capabilities {
     pub supports_reasoning: bool,
     /// 支持工具调用（Function Calling / Tool Use）
     pub supports_tool_call: bool,
-    /// 支持预填充文本（引导模型输出方向）
+    /// 支持预填充文本（引导模型输出方向）。
+    ///
+    /// ⚠️ TODO: 目前没有任何 Codec 真正实现 prefill 编码。
+    /// 所有 Codec 默认返回 `false`。实现后恢复 `validate_capabilities` 中的校验。
+    #[allow(dead_code)]
     pub supports_prefill: bool,
     /// 支持流式输出推理过程（ThinkingDelta 事件）
     pub supports_stream_thinking: bool,
