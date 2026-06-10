@@ -376,10 +376,9 @@ impl ModelCapabilities for OpenAICompatCodec {
             caps.supports_reasoning = true;
             caps.supports_stream_thinking = true;
         }
-        // GPT-4+ and most modern models support tool calls
-        if lower.contains("gpt-4") || lower.contains("gpt-3.5") || lower.contains("o1") || lower.contains("o3") {
-            caps.supports_tool_call = true;
-        }
+        // OpenAI 兼容协议本身定义了 tool_calls 标准字段，
+        // 所有通过 /v1/chat/completions 接入的模型都默认支持。
+        caps.supports_tool_call = true;
         caps
     }
 }
