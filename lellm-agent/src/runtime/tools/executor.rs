@@ -167,11 +167,10 @@ impl ToolExecutor {
     /// 执行单个工具调用，自带重试。
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {
         match self.tools.get(&call.name) {
-            Some(entry) => {
-                self.retry_policy
-                    .execute_with_retry(&entry.func, &call.arguments)
-                    .await
-            }
+            Some(entry) => self
+                .retry_policy
+                .execute_with_retry(&entry.func, &call.arguments)
+                .await,
             None => Err(ToolError {
                 kind: ToolErrorKind::NotFound,
                 message: format!("unknown tool: {}", call.name),
@@ -188,55 +187,66 @@ impl ToolExecutor {
     ///
     /// 返回 `BatchExecutionResult` — 保留已成功的工具结果，
     /// 不因单个 spawned task panic 丢失所有结果。
+    ///
+    /// **结果顺序：** 按原始 tool_call 顺序回填，保证确定性历史。
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> BatchExecutionResult {
-        let mut safe_calls = Vec::new();
-        let mut category_calls: HashMap<ToolCategory, Vec<ToolCall>> = HashMap::new();
-        let mut exclusive_calls = Vec::new();
+        // 分组时保留原始索引
+        let mut safe_calls: Vec<(usize, ToolCall)> = Vec::new();
+        let mut category_calls: HashMap<ToolCategory, Vec<(usize, ToolCall)>> = HashMap::new();
+        let mut exclusive_calls: Vec<(usize, ToolCall)> = Vec::new();
 
-        for call in calls {
+        for (idx, call) in calls.iter().enumerate() {
             match self.safety_for(&call.name) {
-                ParallelSafety::Safe => safe_calls.push(call.clone()),
+                ParallelSafety::Safe => safe_calls.push((idx, call.clone())),
                 ParallelSafety::CategoryExclusive => {
                     if let Some(cat) = self.category_for(&call.name) {
-                        category_calls.entry(cat).or_default().push(call.clone());
+                        category_calls
+                            .entry(cat)
+                            .or_default()
+                            .push((idx, call.clone()));
                     } else {
-                        exclusive_calls.push(call.clone());
+                        exclusive_calls.push((idx, call.clone()));
                     }
                 }
-                ParallelSafety::Exclusive => exclusive_calls.push(call.clone()),
+                ParallelSafety::Exclusive => exclusive_calls.push((idx, call.clone())),
             }
         }
 
         let executor = Arc::new(self.clone());
-        let mut group_handles: Vec<tokio::task::JoinHandle<Vec<Message>>> = Vec::new();
+        let mut group_handles: Vec<tokio::task::JoinHandle<Vec<(usize, Message)>>> = Vec::new();
 
         if !safe_calls.is_empty() {
             let exe = Arc::clone(&executor);
-            group_handles.push(tokio::spawn(
-                async move { exe.run_parallel(safe_calls).await },
-            ));
+            group_handles.push(tokio::spawn(async move {
+                exe.run_parallel_indexed(safe_calls).await
+            }));
         }
 
         for group_calls in category_calls.into_values() {
             let exe = Arc::clone(&executor);
-            group_handles.push(tokio::spawn(
-                async move { exe.run_serial(group_calls).await },
-            ));
+            group_handles.push(tokio::spawn(async move {
+                exe.run_serial_indexed(group_calls).await
+            }));
         }
 
         if !exclusive_calls.is_empty() {
             let exe = Arc::clone(&executor);
             group_handles.push(tokio::spawn(async move {
-                exe.run_serial(exclusive_calls).await
+                exe.run_serial_indexed(exclusive_calls).await
             }));
         }
 
-        let all_results = futures_util::future::join_all(group_handles).await;
-        let mut completed = Vec::new();
+        // 按原始索引回填结果，保证确定性顺序
+        let mut results: Vec<Option<Message>> = vec![None; calls.len()];
+        let all_handles = futures_util::future::join_all(group_handles).await;
         let mut panicked = None;
-        for handle_result in all_results {
+        for handle_result in all_handles {
             match handle_result {
-                Ok(messages) => completed.extend(messages),
+                Ok(indexed_messages) => {
+                    for (idx, msg) in indexed_messages {
+                        results[idx] = Some(msg);
+                    }
+                }
                 Err(join_err) => {
                     if panicked.is_none() {
                         panicked = Some(ToolError {
@@ -248,26 +258,32 @@ impl ToolExecutor {
             }
         }
         BatchExecutionResult {
-            completed,
+            completed: results.into_iter().flatten().collect(),
             panicked,
         }
     }
 
-    async fn run_parallel(&self, calls: Vec<ToolCall>) -> Vec<Message> {
-        let futures: Vec<_> = calls.iter().map(|call| self.execute(call)).collect();
+    async fn run_parallel_indexed(
+        &self,
+        calls: Vec<(usize, ToolCall)>,
+    ) -> Vec<(usize, Message)> {
+        let futures: Vec<_> = calls.iter().map(|(_, call)| self.execute(call)).collect();
         let results = futures_util::future::join_all(futures).await;
         calls
             .into_iter()
             .zip(results)
-            .map(|(call, result)| Message::tool_result(&call, &result))
+            .map(|((idx, call), result)| (idx, Message::tool_result(&call, &result)))
             .collect()
     }
 
-    async fn run_serial(&self, calls: Vec<ToolCall>) -> Vec<Message> {
+    async fn run_serial_indexed(
+        &self,
+        calls: Vec<(usize, ToolCall)>,
+    ) -> Vec<(usize, Message)> {
         let mut results = Vec::with_capacity(calls.len());
-        for call in calls {
+        for (idx, call) in calls {
             let result = self.execute(&call).await;
-            results.push(Message::tool_result(&call, &result));
+            results.push((idx, Message::tool_result(&call, &result)));
         }
         results
     }
