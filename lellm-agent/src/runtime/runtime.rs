@@ -495,7 +495,7 @@ impl ToolUseLoop {
                 let mut attempt: usize = 1;
 
                 let result = loop {
-                    match do_stream_iteration(
+                    let iter_result = do_stream_iteration(
                         model.clone(),
                         tx.clone(),
                         executor.clone(),
@@ -505,17 +505,26 @@ impl ToolUseLoop {
                         config.max_output_tokens,
                         config.stream_thinking,
                     )
-                    .await
-                    {
+                    .await;
+
+                    match iter_result.result {
                         Ok(v) => break Ok(v),
-                        Err(err) => {
+                        Err(ref err) => {
                             tracing::warn!(
                                 attempt = attempt,
                                 error = %err,
+                                stream_started = iter_result.stream_started,
                                 "stream iteration failed, fallback handling"
                             );
+
+                            // stream 已打开 → 事件可能已发出 → 禁止 Retry，直接 Abort
+                            if iter_result.stream_started {
+                                let e: LlmError = err.clone();
+                                break Err(e);
+                            }
+
                             let ctx = FallbackContext {
-                                error: &err,
+                                error: err,
                                 attempt,
                                 iterations: iteration,
                                 conversation: std::sync::Arc::from(
@@ -527,7 +536,7 @@ impl ToolUseLoop {
                                     attempt += 1;
                                 }
                                 FallbackAction::Abort => {
-                                    break Err(err);
+                                    break Err(err.clone());
                                 }
                             }
                         }

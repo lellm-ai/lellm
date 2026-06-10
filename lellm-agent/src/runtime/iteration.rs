@@ -335,6 +335,15 @@ async fn process_stream_iteration(
     Err(LlmError::UnexpectedEof)
 }
 
+/// 流式迭代结果，附带 stream_started 标记。
+///
+/// `stream_started = true` 表示 stream 已打开（可能已发出事件），
+/// 此时失败禁止 Retry（防止重复 Token）。
+pub(super) struct StreamIterationResult {
+    pub(super) result: Result<(StreamIterResult, LoopState), LlmError>,
+    pub(super) stream_started: bool,
+}
+
 /// 执行单次流式迭代：打开 stream → 消费事件 → 处理工具调用。
 ///
 /// 接收 owned 参数（Arc-clone 为 O(1)），避免闭包捕获带来的变量爆炸。
@@ -348,15 +357,27 @@ pub(super) async fn do_stream_iteration(
     budget: ContextBudget,
     max_output_tokens: u32,
     stream_thinking: bool,
-) -> Result<(StreamIterResult, LoopState), LlmError> {
+) -> StreamIterationResult {
     let max_reasoning_tokens = req.max_reasoning_tokens;
     let stream_opts = StreamOptions { stream_thinking };
-    let mut stream = model.provider.stream(&req, &stream_opts).await?;
+
+    // stream() 失败 → 未发出任何事件，允许 Retry
+    let mut stream = match model.provider.stream(&req, &stream_opts).await {
+        Ok(s) => s,
+        Err(e) => {
+            return StreamIterationResult {
+                result: Err(e),
+                stream_started: false,
+            };
+        }
+    };
+
     let mut text_buffer = String::new();
     let mut thinking_buffer = String::new();
     let mut redacted_buffer: Option<String> = None;
     let mut attempt_state = state;
 
+    // stream 已打开 → 事件可能已发出，失败后禁止 Retry
     let iter_result = process_stream_iteration(
         &tx,
         &executor,
@@ -370,7 +391,10 @@ pub(super) async fn do_stream_iteration(
         max_reasoning_tokens,
         stream_thinking,
     )
-    .await?;
+    .await;
 
-    Ok((iter_result, attempt_state))
+    StreamIterationResult {
+        result: iter_result.map(|r| (r, attempt_state)),
+        stream_started: true,
+    }
 }
