@@ -262,6 +262,9 @@ impl ChatCodec for AnthropicCodec {
         }
 
         // 解析 usage
+        // NOTE: Anthropic also returns cache_creation_input_tokens and cache_read_input_tokens.
+        // These are currently ignored because Usage is provider-agnostic.
+        // Consider extending Usage or adding provider-specific metadata in v0.2.
         let usage_val = raw.get("usage");
         let prompt_tokens = usage_val
             .and_then(|u| u.get("input_tokens"))
