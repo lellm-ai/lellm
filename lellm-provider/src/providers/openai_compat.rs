@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, ReasoningConfig, TextBlock,
-    TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    ThinkingBlock, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
 };
 use std::borrow::Cow;
 
@@ -197,17 +197,20 @@ impl ChatCodec for OpenAICompatCodec {
             detail: "Missing message in choice".into(),
         })?;
 
-        // 解析 content（含 reasoning_content 回退，支持 Qwen3 等推理模型）
+        // 解析 content（含 reasoning_content，支持 o 系列等推理模型）
         let mut content: Vec<ContentBlock> = Vec::new();
         if let Some(text) = message.get("content").and_then(|c| c.as_str())
             && !text.is_empty()
         {
             content.push(ContentBlock::Text(TextBlock { text: text.into() }));
-        } else if let Some(reasoning) = message.get("reasoning_content").and_then(|c| c.as_str())
+        }
+        // reasoning_content 独立于 content — o 系列同时返回两者
+        if let Some(reasoning) = message.get("reasoning_content").and_then(|c| c.as_str())
             && !reasoning.is_empty()
         {
-            content.push(ContentBlock::Text(TextBlock {
-                text: reasoning.into(),
+            content.push(ContentBlock::Thinking(ThinkingBlock {
+                thinking: reasoning.into(),
+                redacted: None,
             }));
         }
 
