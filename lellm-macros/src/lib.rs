@@ -50,14 +50,26 @@ fn generate_for_struct(input: &DeriveInput, _data: &DataStruct) -> TokenStream {
             const DESCRIPTION: &'static str = #description;
 
             fn __schema() -> serde_json::Value {
-                ::serde_json::to_value(
+                // schemars 生成完整 schema（含 $schema, definitions 等元数据），
+                // 提取 inner schema 以匹配 OpenAI parameters 的预期格式。
+                let full = ::serde_json::to_value(
                     ::lellm_agent::schemars::schema_for!(#struct_name)
-                ).expect("schemars schema_for always produces valid JSON")
+                ).expect("schemars schema_for always produces valid JSON");
+                Self::extract_inner_schema(&full)
             }
         }
 
         impl #struct_name {
-            /// 自动生成 JSON Schema（schemars 驱动）— 向后兼容
+            /// 从 schemars 完整 schema 中提取 inner schema。
+            ///
+            /// schemars 输出：
+            /// ```json
+            /// { "$schema": "...", "definitions": { "SearchArgs": { "type": "object", ... } } }
+            /// ```
+            /// 提取后：
+            /// ```json
+            /// { "type": "object", "properties": { ... }, "required": [...] }
+            /// ```
             pub fn __schema() -> serde_json::Value {
                 <Self as ::lellm_agent::ToolArgs>::__schema()
             }
@@ -70,6 +82,28 @@ fn generate_for_struct(input: &DeriveInput, _data: &DataStruct) -> TokenStream {
             /// 工具描述 — 向后兼容
             pub fn __description() -> &'static str {
                 Self::DESCRIPTION
+            }
+
+            fn extract_inner_schema(full: &serde_json::Value) -> serde_json::Value {
+                // schemars schema_for! 直接在内层生成 schema（含 type, properties, required...）
+                // 同时可能在 definitions 中放一份副本。
+                // 策略：从顶层提取，去掉元数据字段。
+                let source = if let Some(obj) = full.as_object() {
+                    obj
+                } else {
+                    return full.clone();
+                };
+
+                // 去掉 $schema, title, description, definitions, $id 等元数据
+                // 保留 type, properties, required, additionalProperties 等 OpenAI 需要的字段
+                let skip = ["$schema", "title", "description", "definitions", "$id", "$ref"];
+                let mut cleaned = serde_json::Map::new();
+                for (k, v) in source {
+                    if !skip.contains(&k.as_str()) {
+                        cleaned.insert(k.clone(), v.clone());
+                    }
+                }
+                serde_json::Value::Object(cleaned)
             }
         }
     };
