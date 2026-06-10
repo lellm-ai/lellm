@@ -296,6 +296,7 @@ async fn process_stream_iteration(
 
             if !pending_tool_calls.is_empty() {
                 state.push_assistant(response.content.clone());
+                state.add_output_from_content(&response.content);
                 state.add_tool_calls(pending_tool_calls.len());
 
                 let results =
@@ -315,6 +316,8 @@ async fn process_stream_iteration(
 
                 return Ok(StreamIterResult::Continue { response });
             } else {
+                state.add_output_from_content(&response.content);
+
                 if !emit(
                     tx,
                     AgentEvent::LoopEnd {

@@ -220,8 +220,8 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | P0 | `ToolExecutor` 集成 `RetryPolicy` | ✅ 已完成（agent/tools/executor.rs） |
 | P1-H | AnthropicCodec `encode` / `decode_sse` 完善 | ✅ 已完成 |
 | P1-H | OpenAICompatCodec `encode` 完善 | ✅ 已完成 |
-| P3 | lellm-macros derive | 🟡 Stub |
-| P4 | examples/ | 🟡 部分 |
+| P3 | lellm-macros derive | ✅ 已完成 |
+| P4 | examples/ | ✅ 已完成 |
 
 ## 七、版本路线图
 
