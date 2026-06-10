@@ -876,12 +876,10 @@ pub max_reasoning_tokens: Option<u32>,  // 单轮推理 Token 上限
 ```rust
 // ToolUseConfig
 pub stream_thinking: bool;  // false = 不发射 ThinkingDelta, true = 发射
-
-// StreamOptions (Provider 层)
-pub struct StreamOptions {
-    pub stream_thinking: bool,
-}
 ```
+
+**过滤位置：** Agent 层 `process_stream_iteration()` 根据 `stream_thinking` 决定是否向消费者发射 ThinkingDelta。
+Provider 层是无脑管道，永远转发所有协议事件。
 
 典型组合：
 

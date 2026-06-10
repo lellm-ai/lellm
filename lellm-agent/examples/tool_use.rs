@@ -110,7 +110,6 @@ impl lellm_provider::LlmProvider for ReActMockProvider {
     async fn stream(
         &self,
         _request: &lellm_core::ChatRequest,
-        _options: &lellm_provider::StreamOptions,
     ) -> Result<lellm_provider::ProviderStream, lellm_core::LlmError> {
         unimplemented!("stream not needed for this example")
     }

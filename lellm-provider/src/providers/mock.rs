@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures_util::stream;
 use lellm_core::{ChatRequest, ChatResponse, LlmError};
 
-use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
+use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
 /// 测试用 Mock Provider。
 pub struct MockProvider {
@@ -47,7 +47,6 @@ impl LlmProvider for MockProvider {
     async fn stream(
         &self,
         request: &ChatRequest,
-        _options: &StreamOptions,
     ) -> Result<ProviderStream, LlmError> {
         self.received_requests.lock().unwrap().push(request.clone());
 

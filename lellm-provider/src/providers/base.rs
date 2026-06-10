@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
-use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
+use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
 use super::codec::{
     Capabilities, validate_capabilities, CodecRequest, ProviderEnvError, ProviderExtension,
@@ -261,7 +261,6 @@ impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
     async fn stream(
         &self,
         request: &ChatRequest,
-        _options: &StreamOptions,
     ) -> Result<ProviderStream, LlmError> {
         self.validate_request(request)?;
         let http_req = self.codec.encode(request, true)?;

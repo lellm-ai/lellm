@@ -53,13 +53,8 @@ pub trait LlmProvider: Send + Sync {
     async fn stream(
         &self,
         request: &ChatRequest,
-        options: &StreamOptions,
     ) -> Result<ProviderStream, LlmError>;
     fn provider_id(&self) -> &str;
-}
-
-pub struct StreamOptions {
-    pub stream_thinking: bool,  // 是否发射 ThinkingDelta 事件
 }
 ```
 

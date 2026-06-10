@@ -1,5 +1,5 @@
 use lellm_core::{ChatRequest, ChatResponse, ContentBlock, TokenUsage};
-use lellm_provider::{LlmProvider, MockProvider, ProviderEvent, StreamOptions};
+use lellm_provider::{LlmProvider, MockProvider, ProviderEvent};
 
 #[tokio::test]
 async fn test_mock_provider_call() {
@@ -28,7 +28,7 @@ async fn test_mock_provider_stream() {
 
     let request = ChatRequest::user_prompt("test".to_string());
     let mut stream = provider
-        .stream(&request, &StreamOptions::default())
+        .stream(&request)
         .await
         .unwrap();
 
