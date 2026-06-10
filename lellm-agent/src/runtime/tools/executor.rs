@@ -84,20 +84,20 @@ impl ToolRegistration {
     }
 }
 
-/// 批量执行结果 — 保留已成功的工具结果，不因单个 task panic 全部丢失。
+/// 批量执行结果 — 长度、顺序、完整性三重保证。
+///
+/// **不变量：**
+/// 1. `results.len() == calls.len()` 永远成立
+/// 2. `results[i]` 对应 `calls[i]` 的执行结果（原始顺序）
+/// 3. panic 永远被转换成 `ToolResult(is_error: true)`，不会丢失
+/// 4. `panicked` 仅作为观测信号，不改变结果完整性
 #[derive(Debug)]
 pub struct BatchExecutionResult {
-    /// 已成功执行的工具结果（含 ToolError 包装的 Message::ToolResult { is_error: true }）
-    pub completed: Vec<Message>,
-    /// 首个 spawned task panic 错误（如有）
-    pub panicked: Option<ToolError>,
-}
-
-impl BatchExecutionResult {
-    /// 是否有 spawned task panic
-    pub fn is_ok(&self) -> bool {
-        self.panicked.is_none()
-    }
+    /// 按原始调用顺序排列的工具结果，长度等于输入 calls 长度。
+    /// 执行失败的工具调用会被填充为 `ToolResult { is_error: true }`。
+    pub results: Vec<Message>,
+    /// 是否有任意 spawned task panic（仅作为观测信号）
+    pub panicked: bool,
 }
 
 /// 工具执行器 — 按名称分派 ToolCall 到实际工具函数。
@@ -178,18 +178,31 @@ impl ToolExecutor {
         }
     }
 
-    /// 批量执行 tool_calls。
+  /// 批量执行 tool_calls。
     ///
-    /// 执行策略：
-    /// - `Safe` → 全部并发（`join_all`）
-    /// - `CategoryExclusive` → 按 category 分组，组内串行、组间并发
-    /// - `Exclusive` → 全部串行
+    /// # ParallelSafety 契约
     ///
-    /// 返回 `BatchExecutionResult` — 保留已成功的工具结果，
-    /// 不因单个 spawned task panic 丢失所有结果。
+    /// - `Safe`: 全并发（每个 tool 独立 spawn）
+    /// - `CategoryExclusive(cat)`: 组内串行，组间并发（同 category 串行，不同 category 并发）
+    /// - `Exclusive`: 全串行（全局一个 task，tool 依次执行）
     ///
-    /// **结果顺序：** 按原始 tool_call 顺序回填，保证确定性历史。
+    /// # Panic 隔离
+    ///
+    /// panic 被转换为 `ToolResult(error)`，永远不会中止兄弟 tool 调用。
+    ///
+    /// # 不变量
+    ///
+    /// - `results.len() == calls.len()` 永远成立
+    /// - `results[i]` 对应 `calls[i]`（原始顺序）
+    /// - `panicked` 仅作为观测信号
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> BatchExecutionResult {
+        if calls.is_empty() {
+            return BatchExecutionResult {
+                results: Vec::new(),
+                panicked: false,
+            };
+        }
+
         // 分组时保留原始索引
         let mut safe_calls: Vec<(usize, ToolCall)> = Vec::new();
         let mut category_calls: HashMap<ToolCategory, Vec<(usize, ToolCall)>> = HashMap::new();
@@ -212,35 +225,49 @@ impl ToolExecutor {
             }
         }
 
-        let executor = Arc::new(self.clone());
+        // 构建 group handles — 每个 group 是一个 spawned task
         let mut group_handles: Vec<tokio::task::JoinHandle<Vec<(usize, Message)>>> = Vec::new();
+        // 记录每个 group 的索引列表，用于 panic 恢复时精准回填
+        let mut group_indices: Vec<Vec<usize>> = Vec::new();
 
+        let executor = Arc::new(self.clone());
+
+        // Safe: 每个 tool 独立 spawn（全并发）
         if !safe_calls.is_empty() {
             let exe = Arc::clone(&executor);
+            let indices: Vec<usize> = safe_calls.iter().map(|(i, _)| *i).collect();
             group_handles.push(tokio::spawn(async move {
                 exe.run_parallel_indexed(safe_calls).await
             }));
+            group_indices.push(indices);
         }
 
+        // CategoryExclusive: 按 category 分组，组内串行、组间并发
         for group_calls in category_calls.into_values() {
             let exe = Arc::clone(&executor);
+            let indices: Vec<usize> = group_calls.iter().map(|(i, _)| *i).collect();
             group_handles.push(tokio::spawn(async move {
                 exe.run_serial_indexed(group_calls).await
             }));
+            group_indices.push(indices);
         }
 
+        // Exclusive: 全部串行，一个 task
         if !exclusive_calls.is_empty() {
             let exe = Arc::clone(&executor);
+            let indices: Vec<usize> = exclusive_calls.iter().map(|(i, _)| *i).collect();
             group_handles.push(tokio::spawn(async move {
                 exe.run_serial_indexed(exclusive_calls).await
             }));
+            group_indices.push(indices);
         }
 
-        // 按原始索引回填结果，保证确定性顺序
+        // 按原始索引回填结果；panic 的 group 按索引列表精准回填错误
         let mut results: Vec<Option<Message>> = vec![None; calls.len()];
+        let mut panicked = false;
         let all_handles = futures_util::future::join_all(group_handles).await;
-        let mut panicked = None;
-        for handle_result in all_handles {
+
+        for (handle_result, indices) in all_handles.into_iter().zip(group_indices.into_iter()) {
             match handle_result {
                 Ok(indexed_messages) => {
                     for (idx, msg) in indexed_messages {
@@ -248,58 +275,92 @@ impl ToolExecutor {
                     }
                 }
                 Err(join_err) => {
-                    if panicked.is_none() {
-                        panicked = Some(ToolError {
-                            kind: ToolErrorKind::Internal,
-                            message: format!("tool task failed: {join_err}"),
-                        });
+                    panicked = true;
+                    // panic 只影响该 group 的索引
+                    for idx in indices {
+                        let call = &calls[idx];
+                        results[idx] = Some(Message::tool_result(
+                            call,
+                            &Err(ToolError {
+                                kind: ToolErrorKind::Internal,
+                                message: format!("tool group task panicked: {join_err}"),
+                            }),
+                        ));
                     }
                 }
             }
         }
+
         BatchExecutionResult {
-            completed: results.into_iter().flatten().collect(),
+            results: results.into_iter().flatten().collect(),
             panicked,
         }
     }
 
+    /// Safe group: 每个 tool 独立 spawn，全并发。
+    /// 如果某个 tool panic，被 JoinHandle 捕获并转为 ToolResult(error)。
     async fn run_parallel_indexed(
         &self,
         calls: Vec<(usize, ToolCall)>,
     ) -> Vec<(usize, Message)> {
-        let futures: Vec<_> = calls.iter().map(|(_, call)| self.execute(call)).collect();
-        let results = futures_util::future::join_all(futures).await;
-        calls
-            .into_iter()
-            .zip(results)
-            .map(|((idx, call), result)| (idx, Message::tool_result(&call, &result)))
+        // 每个 spawn 携带 idx — 当前 join_all 保证顺序一致，idx 是冗余的。
+        // 但为未来切换到 JoinSet/FuturesUnordered 预留正确性。
+        let handles: Vec<_> = calls
+            .iter()
+            .map(|(idx, call)| {
+                let exe = self.clone();
+                let call = call.clone();
+                let idx = *idx;
+                tokio::spawn(async move {
+                    let result = exe.execute(&call).await;
+                    (idx, Message::tool_result(&call, &result))
+                })
+            })
+            .collect();
+
+        let raw = futures_util::future::join_all(handles).await;
+        // zip 回原始 calls，确保 panic 时也能构造错误结果
+        raw.into_iter()
+            .zip(calls.into_iter())
+            .map(|(h, (idx, call))| match h {
+                Ok((_, msg)) => (idx, msg),
+                Err(join_err) => (
+                    idx,
+                    Message::tool_result(
+                        &call,
+                        &Err(ToolError {
+                            kind: ToolErrorKind::Internal,
+                            message: format!("tool '{}' task panicked: {join_err}", call.name),
+                        }),
+                    ),
+                ),
+            })
             .collect()
     }
 
+   /// 组内串行执行，每个 tool spawn+await 实现 panic 隔离。
+    ///
+    /// 所有路径（CategoryExclusive, Exclusive）统一 tool 级隔离：
+    /// 一个 tool panic 不会丢失同组中已完成的 tool 结果。
     async fn run_serial_indexed(
         &self,
         calls: Vec<(usize, ToolCall)>,
     ) -> Vec<(usize, Message)> {
         let mut results = Vec::with_capacity(calls.len());
         for (idx, call) in calls {
-            let result = self.execute(&call).await;
-            results.push((idx, Message::tool_result(&call, &result)));
+            let exe = self.clone();
+            let call_clone = call.clone();
+            let name = call_clone.name.clone();
+            let exec_result =
+                match tokio::spawn(async move { exe.execute(&call_clone).await }).await {
+                    Ok(tool_result) => tool_result,
+                    Err(join_err) => Err(ToolError {
+                        kind: ToolErrorKind::Internal,
+                        message: format!("tool '{name}' panicked: {join_err}"),
+                    }),
+                };
+            results.push((idx, Message::tool_result(&call, &exec_result)));
         }
         results
-    }
-
-    pub fn partition_calls(&self, calls: &[ToolCall]) -> (Vec<ToolCall>, Vec<ToolCall>) {
-        let mut safe = Vec::new();
-        let mut exclusive = Vec::new();
-        for call in calls {
-            let safety = self.safety_for(&call.name);
-            match safety {
-                ParallelSafety::Safe => safe.push(call.clone()),
-                ParallelSafety::CategoryExclusive | ParallelSafety::Exclusive => {
-                    exclusive.push(call.clone());
-                }
-            }
-        }
-        (safe, exclusive)
     }
 }

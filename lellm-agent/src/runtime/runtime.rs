@@ -18,8 +18,8 @@ use lellm_provider::ResolvedModel;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_messages_inner, empty_response};
 use super::context::{
-    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_text,
-    estimate_tokens,
+    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_reasoning_block,
+    estimate_text, estimate_tokens,
 };
 use super::event::{AgentEvent, AgentStream, StopReason};
 use super::fallback::{FallbackAction, FallbackContext};
@@ -93,7 +93,7 @@ impl LoopState {
             match b {
                 lellm_core::ContentBlock::Text(t) => output_tokens += estimate_text(&t.text),
                 lellm_core::ContentBlock::Thinking(th) => {
-                    reasoning_tokens += estimate_text(&th.thinking)
+                    reasoning_tokens += estimate_reasoning_block(th)
                 }
                 lellm_core::ContentBlock::Image { .. } | lellm_core::ContentBlock::ToolCall(_) => {}
             }
@@ -274,6 +274,19 @@ impl ToolUseLoop {
         config: ToolUseConfig,
         deps: ToolUseDeps,
     ) -> Self {
+        // 启动时检查：stream_thinking 开启但 Provider 不支持
+        if config.stream_thinking {
+            let caps = model.provider.capabilities_for(&model.model);
+            if !caps.supports_stream_thinking {
+                tracing::warn!(
+                    provider = %model.provider.provider_id(),
+                    model = %model.model,
+                    "stream_thinking=true but provider does not support thinking deltas; \
+                     reasoning content will only be available in the final response"
+                );
+            }
+        }
+
         Self {
             model,
             executor,
@@ -338,23 +351,28 @@ impl ToolUseLoop {
             last_response = Some(response.clone());
 
             // 4. 单轮推理预算检查（非流式路径）
+            //
+            // `max_reasoning_tokens` 的两种语义：
+            // - 流式: Hard limit — 达到限额当场切断 stream，省钱
+            // - 非流式: Soft limit — response 已完整返回，只能事后检测并标记
+            //
+            // 这里做的是"检测"：发现超额就终止 agent loop，
+            // 把完整 response 包成 `ReasoningBudgetExceeded` 返回，
+            // 让调用方知道这一轮推理超标了。
             if let Some(limit) = self.config.request_options.max_reasoning_tokens {
                 let round_reasoning: usize = response
                     .content
                     .iter()
-                    .filter_map(|b| {
-                        if let lellm_core::ContentBlock::Thinking(th) = b {
-                            Some(estimate_text(&th.thinking))
-                        } else {
-                            None
-                        }
+                    .filter_map(|b| match b {
+                        lellm_core::ContentBlock::Thinking(th) => Some(estimate_reasoning_block(th)),
+                        _ => None,
                     })
                     .sum();
                 if round_reasoning > limit as usize {
                     tracing::warn!(
                         round_reasoning,
                         max_reasoning_tokens = limit,
-                        "single-round reasoning budget exceeded (non-stream)"
+                        "single-round reasoning budget exceeded (non-stream, soft limit)"
                     );
                     return Ok(state.finish_reasoning_budget(response));
                 }
@@ -381,35 +399,12 @@ impl ToolUseLoop {
 
             let batch = self.executor.execute_batch(&tool_calls).await;
 
-            let results = if let Some(e) = &batch.panicked {
-                tracing::error!(error = %e, "tool batch task panicked");
-                let mut results = batch.completed;
-                let completed_ids: std::collections::HashSet<String> = results
-                    .iter()
-                    .filter_map(|m| {
-                        if let Message::ToolResult { tool_call_id, .. } = m {
-                            Some(tool_call_id.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                for tc in &tool_calls {
-                    if !completed_ids.contains(&tc.id) {
-                        results.push(Message::ToolResult {
-                            tool_call_id: tc.id.clone(),
-                            is_error: true,
-                            content: lellm_core::text_block(format!("tool task failed: {e}")),
-                        });
-                    }
-                }
-                results
-            } else {
-                batch.completed
-            };
+            if batch.panicked {
+                tracing::warn!("tool batch task panicked — error results filled in by executor");
+            }
 
             // 工具结果截断统一在 push_tool_results() 中执行
-            state.push_tool_results(results, &self.config.context_budget);
+            state.push_tool_results(batch.results, &self.config.context_budget);
 
             tracing::debug!(
                 iteration = state.iterations,

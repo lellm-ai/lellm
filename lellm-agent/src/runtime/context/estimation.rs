@@ -48,13 +48,20 @@ pub fn estimate_message(msg: &Message) -> usize {
     total
 }
 
+/// 估算推理块（ThinkingBlock）的 Token 数。
+///
+/// reasoning token = thinking + redacted
+///
+/// 这是推理 token 估算的唯一真相源。`estimate_block()` 和预算检查都调用它。
+pub fn estimate_reasoning_block(th: &lellm_core::ThinkingBlock) -> usize {
+    estimate_text(&th.thinking)
+        + th.redacted.as_ref().map(|r| estimate_text(r)).unwrap_or(0)
+}
+
 fn estimate_block(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text(t) => estimate_text(&t.text),
-        ContentBlock::Thinking(th) => {
-            estimate_text(&th.thinking)
-                + th.redacted.as_ref().map(|r| estimate_text(r)).unwrap_or(0)
-        }
+        ContentBlock::Thinking(th) => estimate_reasoning_block(th),
         ContentBlock::Image { .. } => 1000,
         ContentBlock::ToolCall(tc) => {
             // id + name + arguments

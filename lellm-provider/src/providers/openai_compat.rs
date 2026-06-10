@@ -369,10 +369,12 @@ impl ModelCapabilities for OpenAICompatCodec {
             || lower == "o3"
         {
             caps.supports_reasoning = true;
+            caps.supports_stream_thinking = true;
         }
         // DeepSeek models support reasoning
         if self.provider_id == "deepseek" && lower.contains("r1") {
             caps.supports_reasoning = true;
+            caps.supports_stream_thinking = true;
         }
         // GPT-4+ and most modern models support tool calls
         if lower.contains("gpt-4") || lower.contains("gpt-3.5") || lower.contains("o1") || lower.contains("o3") {

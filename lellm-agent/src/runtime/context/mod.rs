@@ -13,5 +13,5 @@ mod local_compactor;
 
 pub use budget::ContextBudget;
 pub use compactor::{CompactionResult, ContextCompactor};
-pub use estimation::{estimate_message, estimate_text, estimate_tokens};
+pub use estimation::{estimate_message, estimate_reasoning_block, estimate_text, estimate_tokens};
 pub use local_compactor::LocalCompactor;

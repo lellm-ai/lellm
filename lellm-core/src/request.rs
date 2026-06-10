@@ -27,6 +27,10 @@ pub struct ChatRequest {
     /// 与 `max_tokens` 分离：reasoning 是模型内部推理，不计入输出预算。
     /// 透传给 Provider Adapter，由 Adapter 映射为协议特定字段。
     ///
+    /// **两种语义：**
+    /// - 流式: Hard limit — 达到限额当场切断 stream，省钱
+    /// - 非流式: Soft limit — response 已完整返回，事后检测并标记
+    ///
     /// Adapter 映射示例：
     /// - DeepSeek: `max_thinking_tokens`
     /// - OpenAI: 无直接对应，由 `reasoning` 级别间接控制

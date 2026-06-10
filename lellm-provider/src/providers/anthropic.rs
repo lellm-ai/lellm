@@ -414,11 +414,13 @@ impl ModelCapabilities for AnthropicCodec {
             caps.supports_image_input = true;
         }
         // Claude 3.5 Sonnet+ 和 Claude 4 系列支持 thinking 模式
+        // TODO: 当前靠模型名启发式匹配。P2 应替换为模型元数据 API
         if lower.contains("sonnet")
             || lower.contains("opus")
             || (lower.contains("claude-4") && lower.contains("sonnet"))
         {
             caps.supports_reasoning = true;
+            caps.supports_stream_thinking = true;
         }
         // Claude 3+ 均支持工具调用
         if lower.contains("claude-3") || lower.contains("claude-4") {

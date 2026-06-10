@@ -71,4 +71,12 @@ pub trait LlmProvider: Send + Sync {
 
     /// Provider 标识
     fn provider_id(&self) -> &str;
+
+    /// 返回指定模型的能力矩阵。
+    ///
+    /// 默认实现返回全 false（最保守假设）。
+    /// Provider 应 override 以提供精确的能力声明。
+    fn capabilities_for(&self, _model: &str) -> Capabilities {
+        Capabilities::default()
+    }
 }

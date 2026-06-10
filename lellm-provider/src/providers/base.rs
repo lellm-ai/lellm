@@ -14,7 +14,8 @@ use tokio_stream::StreamExt;
 use crate::{LlmProvider, ProviderEvent, ProviderStream, StreamOptions};
 
 use super::codec::{
-    validate_capabilities, CodecRequest, ProviderEnvError, ProviderExtension, ProviderMeta,
+    Capabilities, validate_capabilities, CodecRequest, ProviderEnvError, ProviderExtension,
+    ProviderMeta,
 };
 use super::stream::{EventSink, StreamEvent};
 
@@ -340,6 +341,10 @@ impl<C: ProviderExtension + Clone + 'static> LlmProvider for CodecProvider<C> {
 
     fn provider_id(&self) -> &str {
         self.codec.provider_id()
+    }
+
+    fn capabilities_for(&self, model: &str) -> Capabilities {
+        self.codec.capabilities_for(model)
     }
 }
 

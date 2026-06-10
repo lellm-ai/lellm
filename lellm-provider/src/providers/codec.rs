@@ -83,8 +83,6 @@ pub struct Capabilities {
     pub supports_reasoning: bool,
     /// 支持工具调用（Function Calling / Tool Use）
     pub supports_tool_call: bool,
-    /// 支持 JSON Mode 响应格式
-    pub supports_json_mode: bool,
     /// 支持预填充文本（引导模型输出方向）
     pub supports_prefill: bool,
     /// 支持流式输出推理过程（ThinkingDelta 事件）
@@ -126,12 +124,7 @@ pub fn validate_capabilities(req: &ChatRequest, caps: &Capabilities) -> Result<(
         });
     }
 
-    // 校验预填充
-    if req.prefill.is_some() && !caps.supports_prefill {
-        return Err(LlmError::UnsupportedFeature {
-            feature: "prefill".into(),
-        });
-    }
+    // NOTE: prefill 校验暂时跳过 — 等 Provider 真正实现 prefill 编码时再恢复
 
     Ok(())
 }

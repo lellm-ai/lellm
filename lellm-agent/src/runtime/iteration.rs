@@ -223,7 +223,8 @@ async fn process_stream_iteration(
                 text_buffer.push_str(token);
             }
             lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
-                round_reasoning_tokens += estimate_text(thinking);
+                round_reasoning_tokens += estimate_text(thinking)
+                    + redacted.as_ref().map(|r| estimate_text(r)).unwrap_or(0);
                 if let Some(limit) = max_reasoning_tokens {
                     if (round_reasoning_tokens as u32) > limit {
                         tracing::warn!(
