@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use lellm_core::{ToolErrorKind, ToolResult};
+use lellm_core::ToolResult;
 
 use super::tools::ToolFn;
 
@@ -100,19 +100,5 @@ impl RetryPolicy {
         }
 
         last_result
-    }
-}
-
-/// 根据错误类型获取默认退避策略
-pub fn default_backoff_for(kind: ToolErrorKind) -> BackoffStrategy {
-    match kind {
-        ToolErrorKind::Timeout => BackoffStrategy::Exponential {
-            base: Duration::from_secs(1),
-            max: Duration::from_secs(60),
-        },
-        ToolErrorKind::Network | ToolErrorKind::RateLimited => {
-            BackoffStrategy::Fixed(Duration::from_secs(3))
-        }
-        _ => BackoffStrategy::Fixed(Duration::ZERO),
     }
 }
