@@ -337,7 +337,30 @@ impl ToolUseLoop {
             .await?;
             last_response = Some(response.clone());
 
-            // 4. 后处理响应（借用 state）
+            // 4. 单轮推理预算检查（非流式路径）
+            if let Some(limit) = self.config.request_options.max_reasoning_tokens {
+                let round_reasoning: usize = response
+                    .content
+                    .iter()
+                    .filter_map(|b| {
+                        if let lellm_core::ContentBlock::Thinking(th) = b {
+                            Some(estimate_text(&th.thinking))
+                        } else {
+                            None
+                        }
+                    })
+                    .sum();
+                if round_reasoning > limit as usize {
+                    tracing::warn!(
+                        round_reasoning,
+                        max_reasoning_tokens = limit,
+                        "single-round reasoning budget exceeded (non-stream)"
+                    );
+                    return Ok(state.finish_reasoning_budget(response));
+                }
+            }
+
+            // 5. 后处理响应（借用 state）
             state.add_output_from_content(&response.content);
 
             if state.exceeded_total_output(self.config.max_total_output_tokens) {
