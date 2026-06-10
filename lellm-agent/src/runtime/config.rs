@@ -43,6 +43,13 @@ pub struct ToolUseConfig {
     /// 统计范围：Assistant Text（不含 Thinking，不含 Tool Call 结构开销）。
     /// 在流式模式下边接收边检查，达到阈值立即停止。
     pub max_total_output_tokens: Option<u32>,
+    /// 整个 Agent Run 的最大推理 token 总数（可选，默认无限制）。
+    ///
+    /// 与 `max_total_output_tokens` 分离：thinking 是模型内部推理，不计入输出预算。
+    /// 双层设计：
+    /// - 单轮：`RequestOptions.max_reasoning_tokens` → 透传给 Provider
+    /// - 总计：`max_total_reasoning_tokens` → Agent 层累计检查
+    pub max_total_reasoning_tokens: Option<u32>,
     /// 上下文预算管理（默认开启）
     ///
     /// **v0.1**: 默认 `ContextBudget::default()`（max_tokens = 128,000）
@@ -52,7 +59,7 @@ pub struct ToolUseConfig {
     pub context_budget: ContextBudget,
     /// 每轮 LLM 调用的生成参数覆盖。
     ///
-    /// 内部包裹 `ChatRequest`，与 core 层零重复定义。
+    /// 独立字段定义，不与 `ChatRequest` 耦合。
     /// `apply()` 方法将非默认值（temperature、top_p、reasoning 等）
     /// 覆盖到 Agent 层构建的基础 `ChatRequest` 上。
     ///
@@ -75,6 +82,7 @@ impl Default for ToolUseConfig {
             max_iterations: 10,
             max_output_tokens: 4_000,
             max_total_output_tokens: None,
+            max_total_reasoning_tokens: None,
             context_budget: ContextBudget::default(),
             request_options: RequestOptions::default(),
             stream_thinking: false,
@@ -182,7 +190,7 @@ pub(super) fn build_request_inner_with_round(
 
     // 如果 RequestOptions 设置了 tool_choice 且不是第一轮，清除它
     // 让 LLM 在工具调用后自主选择
-    if iteration > 0 && request_options.chat_request.tool_choice.is_some() {
+    if iteration > 0 && request_options.tool_choice.is_some() {
         req.tool_choice = None;
     }
 

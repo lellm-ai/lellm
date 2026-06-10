@@ -408,7 +408,7 @@ impl ProviderConfig {
     }
 
     /// 从 codec 元数据 + 环境变量自动加载配置。
-    pub(crate) fn from_codec(meta: &dyn ProviderMeta) -> Result<Self, ProviderEnvError> {
+    pub fn from_codec(meta: &dyn ProviderMeta) -> Result<Self, ProviderEnvError> {
         let provider_id = meta.provider_id();
         let env_prefix = provider_id.to_ascii_uppercase();
         let default_url = meta.default_base_url();

@@ -50,8 +50,16 @@ lellm/
 ```rust
 pub trait LlmProvider: Send + Sync {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
-    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError>;
+    async fn stream(
+        &self,
+        request: &ChatRequest,
+        options: &StreamOptions,
+    ) -> Result<ProviderStream, LlmError>;
     fn provider_id(&self) -> &str;
+}
+
+pub struct StreamOptions {
+    pub stream_thinking: bool,  // 是否发射 ThinkingDelta 事件
 }
 ```
 
@@ -112,19 +120,21 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 
 | 主题 | 详见 |
 |------|------|
-| 门面 crate 与 Feature Gate | [DESIGN.md §0](./DESIGN.md#0-lellm-门面-crate) |
+| 门面 crate 与 Feature Gate | [DESIGN.md §0](./DESIGN.md#0-lellm-门面-crate) / [§16](./DESIGN.md#16-门面-crate-feature-gate) |
 | MaxIterationsReached 归 Ok | [DESIGN.md §1](./DESIGN.md#1-maxiterationsreached--ok-还是-err) |
 | AgentEvent 终态契约 | [DESIGN.md §2](./DESIGN.md#2-agentevent-终态契约) |
 | ToolUseLoop 与 model 单向流动 | [DESIGN.md §3](./DESIGN.md#3-tooluseloop-不知道-router--registry--model-单向流动) |
-| ProviderAdapter SPI / ProviderRequest | [DESIGN.md §5](./DESIGN.md#5-provideradapter-spi--providerrequest-中间层) |
-| SSE 解析 / SseFrame | [DESIGN.md §5.1](./DESIGN.md#51-sse-解析--sseframe-中间表示) |
-| 流式传输层解耦 | [DESIGN.md §5.2](./DESIGN.md#52-流式处理--传输层解耦eventsink--streamevent) |
+| ProviderCodec 三权分立 | [DESIGN.md §5](./DESIGN.md#5-providercodec---三权分立的协议编解码-spi) |
 | ToolError 类型化 + RetryPolicy 集成 | [DESIGN.md §7.1-7.2](./DESIGN.md#7-%E5%87%86%E5%A4%8D%E5%B1%82---retypolicy%E5%8B%BE%E6%97%B6%E6%95%85%E9%9A%9C%E4%B8%8E-fallbackstrategy%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96) |
 | FallbackStrategy 路由决策 | [DESIGN.md §7.3](./DESIGN.md#73-fallbackstrategy---%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96%EF%BC%88%22%E6%8D%A2%E6%9D%A1%E8%B7%AF%E8%B5%B0%22%EF%BC%89) |
+| AgentEvent 流式阶段事件 | [DESIGN.md §8](./DESIGN.md#8-agentevent-流式阶段事件) |
 | Message 语义校验 | [DESIGN.md §9](./DESIGN.md#9-message-%E8%AF%AD%E4%B9%89%E6%A0%A1%E9%AA%8C) |
 | build_request 序列化完整性 | [DESIGN.md §10](./DESIGN.md#10-build_request-%E5%BA%8F%E5%88%97%E5%8C%96%E5%AE%8C%E6%95%B4%E6%80%A7) |
-| 输出预算保险丝 | [DESIGN.md §11](./DESIGN.md#11-%E8%BE%93%E5%87%BA%E9%A4%88%E7%AE%97%E4%BF%9D%E9%99%A9%E4%B8%9D) |
+| 输出 + 推理预算保险丝 | [DESIGN.md §11](./DESIGN.md#11-%E8%BE%93%E5%87%BA%E9%A4%88%E7%AE%97%E4%BF%9D%E9%99%A9%E4%B8%9D) |
 | 日志降噪 | [DESIGN.md §12](./DESIGN.md#12-%E6%97%A5%E5%BF%97%E5%87%8F%E5%99%B2) |
+| 推理控制 | [DESIGN.md §13](./DESIGN.md#13-%E6%8E%A8%E7%90%86%E6%8E%A7%E5%88%B6--reasoningconfig-stream_thinking-%E4%B8%A4%E5%B1%82%E6%A8%A1%E5%9E%8B) |
+| RequestOptions | [DESIGN.md §14](./DESIGN.md#14-requestoptions--agent-%E5%B1%8F%E7%94%9F%E6%88%90%E5%8F%82%E6%95%B0%E8%A6%BD%E7%9B%96) |
+| Context Compaction | [DESIGN.md §15](./DESIGN.md#15-context-compaction---%E4%B8%8A%E4%B8%8B%E6%96%87%E5%8E%8B%E7%BC%A9) |
 
 ## 六、实现状态
 
@@ -140,17 +150,22 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 |------|------|
 | lellm-core 协议对象 | ✅ |
 | LlmProvider trait | ✅ |
-| ProviderAdapter SPI | ✅ |
-| GenericProvider | ✅ |
+| ProviderCodec 三权分立 | ✅ |
+| CodecProvider | ✅ |
 | stream/ 传输层解耦 | ✅ |
 | SseParser + ToolCallAccumulator | ✅ |
 | EventSink + StreamEvent | ✅ |
 | ToolExecutor | ✅ |
 | ToolUseLoop | ✅ |
+| AgentBuilder | ✅ |
 | ModelRouter + Registry | ✅ |
 | ShortTermMemory | ✅ |
 | ToolRegistry | ✅ |
 | 输出预算保险丝 | ✅ |
+| 推理预算保险丝 | ✅ |
+| Context Compaction | ✅ |
+| RequestOptions | ✅ |
+| derive(ToolDefinition) | 🟡 Stub |
 
 ### 输出预算
 
@@ -162,6 +177,25 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | `estimate_text()` 导出 | ✅ | CJK-aware 启发式，供流式 delta 增量估算 |
 | 日志降噪 | ✅ | 移除 stream_processor 高频 trace，channel 满静默丢弃 |
 
+### 推理预算
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| `ChatRequest.max_reasoning_tokens` 单轮上限 | ✅ | 流式消费 ThinkingDelta 时实时检查 |
+| `StopReason::ReasoningBudgetExceeded` | ✅ | 区分推理超限与输出超限 |
+| `LoopState.total_reasoning_tokens` | ✅ | 累计推理 Token |
+| `max_total_reasoning_tokens` 总上限 | ⚠️ | 待补（grill 决策：对齐双层设计） |
+
+### Context Compaction
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| ContextBudget 配置 | ✅ | max_tokens / warning_ratio / keep_recent_turns |
+| ContextCompactor trait | ✅ | 可插拔压缩策略 |
+| LocalCompactor | ✅ | 滑动窗口 + 纯文本摘要 |
+| ContextCompacted 事件 | ✅ | 可观测性 |
+| 工具结果截断 | ✅ | 两条路径统一截断 |
+
 ### Resilience Layer
 
 | 模块 | 类型定义 | 集成状态 | v0.1 范围 |
@@ -169,7 +203,7 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | ToolError (类型化) | ✅ | ✅ | ✅ 必须 |
 | RetryPolicy → ToolExecutor | ✅ | ✅ | ✅ 必须 |
 | FallbackStrategy → ToolUseLoop | ✅ | ✅ | ✅ 必须 |
-| Retry AgentEvent | ✅ | — | ⚠️ v0.2 |
+| AgentEvent::Retry | ✅ | — | ⚠️ v0.2 |
 | LoopDetector | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
 | SignalVoter | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
 

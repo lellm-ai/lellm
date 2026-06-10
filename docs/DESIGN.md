@@ -88,31 +88,91 @@ ToolUseLoop::new(resolved, executor).execute(messages).await
 
 `ResolvedModel` 绑定 `Arc<dyn LlmProvider>`，自然属于 provider 层。agent 层通过 `pub use` 再导出。
 
-## 5. ProviderAdapter SPI / ProviderRequest 中间层
+## 5. ProviderCodec — 三权分立的协议编解码 SPI
 
-**决定：** `ProviderAdapter` 完全不知道 `ProviderConfig` 和 `reqwest`。通过 `ProviderRequest` 中间层解耦。
+> **v2026-06-10 重构：** `ProviderAdapter` 拆分为三个独立 trait + `ProviderExtension` 超级 trait。
+
+**背景：** 原 `ProviderAdapter` trait 混杂了三类职责——协议编解码、能力声明、连接元数据——导致 trait 臃肿、难以独立演进。
+
+**决定：** 拆分为三个正交 trait，通过 `ProviderExtension` 超级 trait 统一消费：
+
+### 5.1 ChatCodec — 协议编解码（物理层互转）
 
 ```rust
-pub(crate) struct ProviderRequest {
-    pub path: Cow<'static, str>,
-    pub headers: HeaderMap,
-    pub body: Bytes,
-}
-
-pub(crate) trait ProviderAdapter: Send + Sync {
-    fn provider_id(&self) -> &str;              // "openai", "anthropic"
-    fn default_base_url(&self) -> &'static str; // 默认 URL
-    fn auth_style(&self) -> AuthStyle;          // Bearer / CustomHeader / None
-    fn build_request(&self, req: &ChatRequest, stream: bool) -> Result<ProviderRequest, LlmError>;
-    fn parse_response(&self, body: &[u8]) -> Result<ChatResponse, LlmError>;
-    fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
+pub trait ChatCodec: Send + Sync {
+    fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError>;
+    fn decode(&self, body: &[u8]) -> Result<ChatResponse, LlmError>;
+    fn decode_sse(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
 }
 ```
 
-**`GenericProvider` 持有 config + client，统一组装 HTTP 请求：**
+**职责：** 纯粹的物理层互转。Codec **不知道** `CodecProvider`、`reqwest`、HTTP。
+
+**中间表示：**
 ```rust
-pub struct GenericProvider<A: ProviderAdapter> {
-    adapter: A,
+pub struct CodecRequest {
+    pub path: Cow<'static, str>,    // "/v1/chat/completions"
+    pub headers: HeaderMap,          // 协议特定 Header
+    pub body: Bytes,                 // 序列化后的 JSON
+}
+
+pub enum StreamChunk {
+    TextDelta(String),
+    ThinkingDelta { thinking: String, redacted: Option<String> },
+    ToolCallDelta(ToolCallDelta),
+    Usage(TokenUsage),
+    InputTokens(u32),
+    OutputTokens(u32),
+    Done,
+}
+```
+
+### 5.2 ModelCapabilities — 能力声明（逻辑校验层）
+
+```rust
+pub trait ModelCapabilities: Send + Sync {
+    fn capabilities_for(&self, model: &str) -> Capabilities;
+}
+
+pub struct Capabilities {
+    pub supports_image_input: bool,
+    pub supports_reasoning: bool,
+    pub supports_tool_call: bool,
+}
+```
+
+**设计原则：**
+- 模型感知——不同模型支持不同能力，Codec 通过 `capabilities_for(model)` 精确声明
+- **移除 `heuristic_guess()`**——不再基于模型名猜测能力，Codec 必须精确实现
+- v0.1 最小集（image, reasoning, tool_call），v0.2 按需扩展
+
+### 5.3 ProviderMeta — 连接元数据（控制层）
+
+```rust
+pub trait ProviderMeta: Send + Sync {
+    fn provider_id(&self) -> &str;
+    fn default_base_url(&self) -> &'static str;
+    fn auth_style(&self) -> AuthStyle;
+    fn api_key_env(&self) -> Cow<'static, str>;  // 默认 {PROVIDER_ID}_API_KEY
+}
+```
+
+### ProviderExtension — 生态扩展统一入口
+
+```rust
+pub trait ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta {}
+// 毯式实现：任何同时实现三个 trait 的类型，自动成为 ProviderExtension
+```
+
+开发者实现新 Provider 时，只需实现 `ProviderExtension`（或其三个子 trait），框架内部按需消费。
+
+### CodecProvider — 持有 Codec + 连接配置
+
+> 原 `GenericProvider` 已重命名为 `CodecProvider`。
+
+```rust
+pub struct CodecProvider<C: ProviderExtension> {
+    codec: C,
     config: ProviderConfig,
     client: reqwest::Client,
 }
@@ -120,8 +180,8 @@ pub struct GenericProvider<A: ProviderAdapter> {
 
 **职责切分：**
 
-| 职责 | Adapter | stream/ 模块 | GenericProvider |
-|------|---------|-------------|-----------------|
+| 职责 | ChatCodec | stream/ 模块 | CodecProvider |
+|------|-----------|-------------|---------------|
 | Endpoint 路径 | ✅ | ❌ | ❌ |
 | JSON 请求体格式 | ✅ | ❌ | ❌ |
 | 协议特定 Header | ✅ | ❌ | ❌ |
@@ -134,7 +194,8 @@ pub struct GenericProvider<A: ProviderAdapter> {
 | base_url / api_key / timeout | ❌ | ❌ | ✅ |
 | ChannelSink (桥接) | ❌ | ❌ | ✅ |
 
-**`ProviderConfig` 精简为连接配置（不含 model）：**
+### ProviderConfig — 连接配置
+
 ```rust
 pub struct ProviderConfig {
     pub base_url: url::Url,
@@ -145,56 +206,21 @@ pub struct ProviderConfig {
 }
 ```
 
-### ProviderConfig::from_adapter — 环境变量自动加载
-
-**问题：** 每次创建 provider 都需要手写 10+ 行 boilerplate：
-
-```rust
-// 旧写法 — 重复读取环境变量、构造 ProviderConfig
-GenericProvider::new(
-    OpenAICompatAdapter::openai(),
-    ProviderConfig::bearer(
-        &env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-        env::var("OPENAI_API_KEY").expect("..."),
-    )?.with_timeout(...),
-)
-```
-
-**决定：** `ProviderAdapter` 暴露三个元数据方法，`ProviderConfig::from_adapter()` 自动推导环境变量：
-
-```rust
-pub(crate) trait ProviderAdapter: Send + Sync {
-    fn provider_id(&self) -> &str;              // "openai" → 推导 OPENAI_*
-    fn default_base_url(&self) -> &'static str; // "https://api.openai.com/v1"
-    fn auth_style(&self) -> AuthStyle;          // Bearer / CustomHeader / None
-    // ...
-}
-
-impl ProviderConfig {
-    pub(crate) fn from_adapter(adapter: &dyn ProviderAdapter)
-        -> Result<Self, ProviderEnvError>;
-}
-```
-
-环境变量前缀 = `provider_id().to_ascii_uppercase()`，无需额外字段。
-
-**为什么不引入 `ProviderMetadata` 结构体：** 当前阶段只有三个字段，直接放在 trait 上更直观。以后字段多了再考虑抽取。
-
-**用法：**
-
+**环境变量自动加载：**
 ```rust
 // 便捷方法 — 一行搞定
-let provider = GenericProvider::from_env(OpenAICompatAdapter::openai())?;
+let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
 
-// 自定义超时 — 配置加载与构建分离
-let adapter = OpenAICompatAdapter::openai();
-let provider = GenericProvider::new(
-    adapter.clone(),
-    ProviderConfig::from_adapter(&adapter)?
+// 自定义超时
+let codec = OpenAICompatCodec::openai();
+let provider = CodecProvider::new(
+    codec.clone(),
+    ProviderConfig::from_codec(&codec)?
         .with_timeout(Duration::from_secs(60)),
 );
 ```
+
+环境变量前缀 = `provider_id().to_ascii_uppercase()`。
 
 ### AuthConfig — apply() 替代 get_header()
 
@@ -204,59 +230,43 @@ let provider = GenericProvider::new(
 
 ```rust
 impl AuthConfig {
-    pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self {
-            AuthConfig::Bearer { api_key } => {
-                builder.bearer_auth(api_key.expose_secret())
-            }
-            AuthConfig::Header { header, value } => {
-                builder.header(header, value.expose_secret())
-            }
-            AuthConfig::None => builder,
-        }
-    }
+    pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder;
 }
 ```
 
 **好处：**
-1. **Secret 生命周期最短** — `expose_secret()` 在 `header()` 内部直接消费，不经过中间变量
-2. **不暴露认证细节** — `GenericProvider` 不需要知道 `Authorization`、`Bearer` 等协议细节
+1. **Secret 生命周期最短** — `expose_secret()` 在 `header()` 内部直接消费
+2. **不暴露认证细节** — `CodecProvider` 不需要知道 `Authorization`、`Bearer` 等协议细节
 3. **未来可扩展** — 支持 `AuthConfig::OAuth` 时只需加一个变体，API 不变
 
-## 5.1 SSE 解析 — SseFrame 中间表示
+### Trait 可见性
 
-**决定：** `SseParser` 负责 SSE 协议解析（行缓冲、`data:` 提取、空行检测），构建 `SseFrame` 交给 Adapter 解析 JSON payload。
+> **v0.1 决策：** 核心 trait 全部公开（`pub`），外部开发者可实现自定义 Provider。
+
+`ChatCodec`、`ModelCapabilities`、`ProviderMeta`、`ProviderExtension`、`CodecProvider` 均为 `pub`。
+`CodecRequest`、`StreamChunk`、`StreamParseResult` 随之公开。
+`stream/` 模块保持 `pub(crate)`（传输层细节不对外暴露）。
+
+### SSE 解析 — SseFrame 中间表示
+
+**决定：** `SseParser` 负责 SSE 协议解析（行缓冲、`data:` 提取、空行检测），构建 `SseFrame` 交给 ChatCodec 解析 JSON payload。
 
 ```rust
-/// SSE 帧 — SseParser 从字节流中构建，Adapter 只解析 data 字段。
 pub(crate) struct SseFrame {
-    /// event 字段（可选），如 "message_start", "content_block_delta"
     pub event: Option<String>,
-    /// data 字段内容（通常是 JSON 字符串或标记如 "[DONE]"）
     pub data: String,
 }
 ```
 
-**签名：**
-```rust
-fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
-```
+ChatCodec 的 `decode_sse()` 方法接收 `SseFrame`，返回 `StreamParseResult<Vec<StreamChunk>>`。
 
 **理由：**
-- Adapter 完全不知道 SSE 协议细节，只关心 `event` 类型和 `data` 内容
+- Codec 完全不知道 SSE 协议细节，只关心 `event` 类型和 `data` 内容
 - `event` 字段对 Anthropic 等 provider 有用（区分 `message_start` / `content_block_delta` / `message_stop`）
-- OpenAI 的 `[DONE]` 直接出现在 `data` 字段中，Adapter 自行判断
+- OpenAI 的 `[DONE]` 直接出现在 `data` 字段中，Codec 自行判断
 - SSE 行缓冲只在 `SseParser` 一处实现，可独立测试
 
-**SseParser 的解析逻辑：**
-```rust
-// 1. 字节 → 字符串，按 \n 分割
-// 2. 提取 event:xxx / data:xxx → SseFrame { event, data }
-// 3. 空行表示 SSE 帧边界，提交 SseFrame
-// 4. 不完整的帧保留在 buffer 中，等待下一块数据
-```
-
-### 5.2 流式处理 — 传输层解耦（EventSink + StreamEvent）
+### 流式处理 — 传输层解耦（EventSink + StreamEvent）
 
 **问题：** `process_stream()` 直接接收 `reqwest::Response`，耦合 HTTP 客户端。测试需要 mockito/wiremock。
 
@@ -264,7 +274,7 @@ fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmErro
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ GenericProvider (base.rs)                           │
+│ CodecProvider (base.rs)                             │
 │ 知道: reqwest, tokio::sync::mpsc, ProviderEvent     │
 │ 职责: HTTP 发送, 错误处理, ChannelSink 桥接          │
 └─────────────────────────────────────────────────────┘
@@ -272,13 +282,13 @@ fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmErro
 ┌─────────────────────────────────────────────────────┐
 │ process_stream (stream_processor.rs)                │
 │ 签名: S: Stream<Item=Result<Bytes,LlmError>>        │
-│       E: EventSink  (fn emit(StreamEvent))          │
+│       E: EventSink  (async fn emit(StreamEvent))   │
 │ 知道: bytes::Bytes, futures_core::Stream            │
 │ 不知道: reqwest, tokio channel, ProviderEvent        │
 └─────────────────────────────────────────────────────┘
                       ↓
 ┌─────────────────────────────────────────────────────┐
-│ SseParser + Adapter + ToolCallAccumulator            │
+│ SseParser + ChatCodec + ToolCallAccumulator          │
 │ 纯逻辑，无 IO                                       │
 └─────────────────────────────────────────────────────┘
 ```
@@ -287,49 +297,43 @@ fn parse_sse_frame(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmErro
 ```rust
 pub(crate) enum StreamEvent {
     Start { model: String },
-    Token { token: String },
-    Error(LlmError),
-    Done { tool_calls: Vec<ToolCall>, usage: Option<TokenUsage> },
+    Token { token: String },                        // 可丢弃
+    ThinkingDelta { thinking, redacted },           // 可丢弃
+    Error(LlmError),                                // 不可丢弃（关键）
+    ResponseComplete { tool_calls, usage },         // 不可丢弃（关键）
 }
 ```
 
 **`EventSink` — 解耦输出端：**
 ```rust
 pub trait EventSink {
-    fn emit(&mut self, event: StreamEvent);
+    async fn emit(&mut self, event: StreamEvent) -> bool;  // false = 消费者断开
+    fn is_closed(&self) -> bool { false }                  // 快速探测
 }
 ```
 
-**`ChannelSink` — 桥接 EventSink ←→ tokio channel：**
-```rust
-struct ChannelSink {
-    tx: tokio::sync::mpsc::Sender<Result<ProviderEvent, LlmError>>,
-}
-
-impl EventSink for ChannelSink {
-    fn emit(&mut self, event: StreamEvent) {
-        let _ = self.tx.try_send(map_stream_event(event));
-    }
-}
-```
+**关键事件 vs 可丢弃事件：**
+- `Error` 和 `ResponseComplete` 通过 `async send()` 阻塞等待送达
+- `Token` 和 `ThinkingDelta` 通过 `try_send()` 非阻塞发送，channel 满时静默丢弃
 
 **`process_stream` 泛型签名：**
 ```rust
 pub async fn process_stream<S, A, E>(
     sink: &mut E,
-    adapter: &A,
+    codec: &A,
     model: String,
+    stream_thinking: bool,
     mut bytes_stream: S,
 ) where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
-    A: ProviderAdapter,
+    A: ChatCodec,
     E: EventSink,
 {
     // ...
 }
 ```
 
-**GenericProvider::stream() 中的调用：**
+**CodecProvider::stream() 中的调用：**
 ```rust
 // 将 reqwest::Response 转换为通用字节流
 let byte_stream = resp
@@ -338,7 +342,7 @@ let byte_stream = resp
 
 let mut sink = ChannelSink { tx };
 tokio::spawn(async move {
-    process_stream(&mut sink, &adapter, model, Box::pin(byte_stream)).await;
+    process_stream(&mut sink, &codec, model, stream_thinking, Box::pin(byte_stream)).await;
 });
 ```
 
@@ -349,21 +353,22 @@ let stream = futures_util::stream::iter(vec![
     Ok(Bytes::from("data: {\"text\": \"hel\"}\n\n")),
     Ok(Bytes::from("data: {\"text\": \"lo\"}\n\n")),
 ]);
-process_stream(&mut mock_sink, &adapter, "test".into(), stream).await;
+process_stream(&mut mock_sink, &codec, "test".into(), false, stream).await;
 ```
 
 **未来扩展：** 接入 hyper、aws-smithy、mock transport，`process_stream()` 完全不用改。
 
-## 6. GenericProvider 已实现 LlmProvider
+## 6. CodecProvider 已实现 LlmProvider
 
-`GenericProvider<A: ProviderAdapter + Clone>` 自动 `impl LlmProvider`。
+`CodecProvider<C: ProviderExtension + Clone>` 自动 `impl LlmProvider`。
 
 **关键实现细节：**
 - SSE 行缓冲由 `SseParser` 独立处理，`bytes_stream()` 的截断问题（跨 chunk 拼包）在 `SseParser` 内部解决
 - `ToolCallAccumulator` 在 `stream_processor.rs` 中组装增量 delta
 - `process_stream()` 通过 `EventSink` trait 输出事件，不知 reqwest / tokio channel
 - `ChannelSink` 在 `base.rs` 中桥接 `EventSink` ←→ tokio channel + `ProviderEvent`
-- `ProviderAdapter` 是 `pub(crate)`，外部只能通过 `LlmProvider` trait 使用
+- `validate_request()` 在 `call()`/`stream()` 入口调用，校验消息语义 + 能力匹配
+- 核心 trait（`ChatCodec` 等）全部 `pub`，外部可实现自定义 Provider
 
 ## 7. 恢复层 — RetryPolicy（瞬时故障）与 FallbackStrategy（路由决策）
 
@@ -701,40 +706,67 @@ let agent = AgentBuilder::new(model)
     .build();
 ```
 
-### 11.3 StopReason::OutputBudgetExceeded
-
-**新增 `StopReason::OutputBudgetExceeded`**，不复用 `MaxIterationsReached`：
+### 11.3 StopReason 枚举
 
 ```rust
 pub enum StopReason {
-    Complete,
-    MaxIterationsReached,
-    Cancelled,
-    OutputBudgetExceeded,  // 新增
+    Complete,                  // Agent 已获得最终答案并正常结束
+    MaxIterationsReached,      // 达到最大轮次
+    Cancelled,                 // 外部取消（消费者断开、task 终止等）
+    OutputBudgetExceeded,      // 输出预算超限（Text token）
+    ReasoningBudgetExceeded,   // 推理预算超限（Thinking token）
 }
 ```
 
-**理由：** 语义不同。`MaxIterationsReached` 表示轮次耗尽，`OutputBudgetExceeded` 表示 Token 超限。日志排查时，二者原因截然不同。
+**设计原则：** 每个停止原因语义独立，不复用。日志排查时，原因截然不同。
 
-### 11.4 LoopState 输出跟踪
+### 11.4 推理预算 — 对齐输出预算的双层设计
 
-`LoopState` 新增字段与方法：
+> **v2026-06-10 新增：** 推理预算与输出预算对称设计。
+
+**背景：** 模型推理（Thinking）可能消耗大量 Token，需要独立于输出预算的控制。
+
+**两层保险丝：**
+
+| 层级 | 字段 | 作用域 | 默认值 |
+|------|------|--------|--------|
+| 单轮推理预算 | `ChatRequest.max_reasoning_tokens` | 单次 LLM 调用 | 无限制 |
+| 总推理预算 | `ToolUseConfig.max_total_reasoning_tokens` | 整个 Agent Run | 无限制 |
+
+**单轮推理预算：** 在流式消费时实时累计 `ThinkingDelta`，超过 `max_reasoning_tokens` 立即切断。
+**总推理预算：** `LoopState.total_reasoning_tokens` 累计所有轮次，超过阈值返回 `ReasoningBudgetExceeded`。
+
+**Builder API：**
+```rust
+let agent = AgentBuilder::new(model)
+    .reasoning(ReasoningConfig::High)
+    .reasoning_budget(8_000)         // 单轮推理上限
+    .total_reasoning_budget(32_000)  // 总推理上限（可选）
+    .build();
+```
+
+### 11.5 LoopState 输出 + 推理跟踪
+
+`LoopState` 同时跟踪 Output（Text）和 Reasoning（Thinking）Token：
 
 ```rust
 pub struct LoopState {
     // ... 现有字段
-    pub total_output_tokens: usize,  // 整个 Run 的累计输出 Token
+    pub total_output_tokens: usize,      // 累计输出 Token（Text）
+    pub total_reasoning_tokens: usize,   // 累计推理 Token（Thinking）
 }
 
 impl LoopState {
-    pub fn add_output_tokens(&mut self, tokens: usize);
     pub fn add_output_from_content(&mut self, content: &[ContentBlock]);
+    // Text → total_output_tokens, Thinking → total_reasoning_tokens
     pub fn exceeded_total_output(&self, max: Option<u32>) -> bool;
+    pub fn exceeded_total_reasoning(&self, max: Option<u32>) -> bool;
     pub fn finish_output_budget(&self, response: ChatResponse) -> ToolUseResult;
+    pub fn finish_reasoning_budget(&self, response: ChatResponse) -> ToolUseResult;
 }
 ```
 
-### 11.5 Token 估算函数
+### 11.6 Token 估算函数
 
 `estimate_text()` 从 `context.rs` 导出为 `pub`：
 
@@ -750,7 +782,7 @@ pub fn estimate_text(s: &str) -> usize;
 
 **未来扩展：** v0.2 可替换为 `TokenEstimator` trait + Provider-specific tokenizer（如 `tiktoken-rs`）。
 
-### 11.6 保护层级总结
+### 11.7 保护层级总结
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -816,11 +848,11 @@ pub enum ReasoningConfig {
 }
 ```
 
-放在 `ChatRequest` 上：
+放在 `ChatRequest` 上（仅推理配置，不影响事件管道）：
 
 ```rust
 pub reasoning: Option<ReasoningConfig>,
-pub stream_thinking: bool,
+pub max_reasoning_tokens: Option<u32>,  // 单轮推理 Token 上限
 ```
 
 #### 四值语义
@@ -835,10 +867,21 @@ pub stream_thinking: bool,
 
 **关键区分：** `None` ≠ `Some(Disabled)`。前者是"我不关心"，后者是"我不要"。
 
-#### `stream_thinking` 布尔值
+#### `stream_thinking` — 从 ChatRequest 移至 ToolUseConfig
 
-- `false`（默认）= 模型可推理，但不向消费者发射 `ThinkingDelta` 事件
-- `true` = 将推理内容以 `ThinkingDelta` 事件流式输出
+> **v2026-06-07 重构：** `stream_thinking` 从 `ChatRequest` 移至 `ToolUseConfig`。
+
+**原因：** `stream_thinking` 控制框架行为（Event 管道），不属于协议参数。Codec 不应看到此字段。
+
+```rust
+// ToolUseConfig
+pub stream_thinking: bool;  // false = 不发射 ThinkingDelta, true = 发射
+
+// StreamOptions (Provider 层)
+pub struct StreamOptions {
+    pub stream_thinking: bool,
+}
+```
 
 典型组合：
 
@@ -864,4 +907,138 @@ pub stream_thinking: bool,
 
 - `ReasoningConfig` 枚举：`lellm-core/src/request.rs`
 - `stream_thinking` 过滤：`lellm-provider/.../stream_processor.rs` — `process_stream()` 中根据标志决定是否发射 `ThinkingDelta`
-- Adapter 映射：各 Adapter 的 `build_request()` 中
+- Codec 映射：各 Codec 的 `encode()` 中
+
+## 14. RequestOptions — Agent 层生成参数覆盖
+
+> **v2026-06-10 新增：** 独立于 ChatRequest 的 Agent 层参数覆盖。
+
+**背景：** AgentBuilder 需要支持 temperature、top_p、seed、tool_choice 等生成参数的便捷设置。
+
+**设计原则：**
+- **解耦**：RequestOptions 定义自己的字段，不包裹 ChatRequest
+- **选择性覆盖**：`apply()` 只覆盖非默认值（Some 字段）
+- **Agent 保留字段**：`model`、`messages`、`tools` 由 Agent 层注入，`apply()` 跳过
+
+```rust
+pub struct RequestOptions {
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub seed: Option<u64>,
+    pub tool_choice: Option<ToolChoice>,
+    pub stop_sequences: Option<Vec<String>>,
+    pub prefill: Option<String>,
+    pub reasoning: Option<ReasoningConfig>,
+    pub max_reasoning_tokens: Option<u32>,
+    pub extra: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl RequestOptions {
+    pub fn apply(&self, req: &mut ChatRequest);  // 非默认值覆盖
+}
+```
+
+**Builder API：**
+```rust
+AgentBuilder::new(model)
+    .temperature(0.1)
+    .reasoning(ReasoningConfig::High)
+    .tool_choice(ToolChoice::Any)
+    .build();
+```
+
+**`tool_choice` 仅首轮生效：** `build_request_inner_with_round()` 在 `iteration > 0` 时清除 `tool_choice`，让 LLM 自主决定。
+
+## 15. Context Compaction — 上下文压缩
+
+> **v2026-06-10 新增：** 可插拔的上下文压缩机制。
+
+**背景：** 长对话场景下，消息历史不断增长，最终超出模型上下文窗口。需要在运行时自动压缩。
+
+### 15.1 ContextBudget — 预算配置
+
+```rust
+pub struct ContextBudget {
+    pub max_tokens: usize,              // 默认 128k
+    pub warning_ratio: f32,             // 80% 触发压缩
+    pub keep_recent_turns: usize,       // 保留最近 5 个 Turn
+    pub max_tool_result_chars: usize,   // 单条工具结果最大 4096 字符
+}
+```
+
+**v0.1：** 固定默认值 128k。
+**v0.2：** 从 `ResolvedModel.context_window` 自动推导（window * 0.8）。
+
+### 15.2 ContextCompactor — 可插拔策略
+
+```rust
+pub trait ContextCompactor: Send + Sync {
+    fn compact(&self, messages: &[Message], budget: &ContextBudget) -> CompactionResult;
+}
+
+pub struct CompactionResult {
+    pub messages: Vec<Message>,
+    pub before_tokens: usize,
+    pub after_tokens: usize,
+    pub removed_messages: usize,
+}
+```
+
+**关键约束：** Assistant(tool_call) + 对应的 ToolResult 是原子块，不可拆分。
+
+### 15.3 LocalCompactor — v0.1 默认实现
+
+**策略：**
+1. 保留 System 消息
+2. 按 Turn 分组（Assistant + ToolResult = 原子 Turn）
+3. 保留最近 N 个 Turn
+4. 旧 Turns 压缩为纯文本摘要
+
+**摘要格式：**
+```
+[Previous conversation summary]
+Compressed 3 turns:
+  [Assistant]: The user asked about weather in Beijing
+  [Tool] called get_weather: {"city": "beijing"}
+  [Result] (success): Temperature is 22°C
+  [User]: What about Shanghai?
+```
+
+- 纯文本标记（`[Assistant]`/`[Tool]`/`[Result]`/`[User]`），不使用 emoji
+- 摘要注入为 `Message::System`，避免干扰对话结构
+- Assistant 文本截 200 字符，Tool 参数截 100 字符，ToolResult 截 100 字符
+
+### 15.4 压缩时机与事件
+
+**时机：** 每轮迭代前，`estimated_tokens > max_tokens * warning_ratio` 时触发。
+
+**事件：** 压缩完成后发射 `AgentEvent::ContextCompacted`：
+```rust
+AgentEvent::ContextCompacted {
+    before_tokens: usize,
+    after_tokens: usize,
+    removed_messages: usize,
+}
+```
+
+### 15.5 工具结果截断
+
+**两条路径统一截断：** 流式和非流式执行路径均在工具结果注入历史前截断。
+
+截断逻辑统一在 `LoopState.push_tool_results()` 中执行，确保所有进入历史的工具结果受 `max_tool_result_chars` 控制。
+
+## 16. 门面 Crate Feature Gate
+
+> **v2026-06-10 更新：** provider 作为默认 feature。
+
+```toml
+[features]
+default = ["provider"]
+core = ["dep:lellm-core"]
+provider = ["dep:lellm-core", "dep:lellm-provider"]
+agent = ["dep:lellm-core", "dep:lellm-agent"]
+macros = ["dep:lellm-macros"]
+full = ["provider", "agent", "macros"]
+```
+
+**用户体验：** `cargo add lellm` 即可获得 core + provider。需要 Agent 运行时加 `--features agent`。

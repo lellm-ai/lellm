@@ -105,19 +105,19 @@ impl AgentBuilder {
 
     /// 设置生成温度（0.0 ~ 2.0）。
     pub fn temperature(mut self, t: f64) -> Self {
-        self.config.request_options.chat_request.temperature = Some(t);
+        self.config.request_options.temperature = Some(t);
         self
     }
 
     /// 设置 nucleus sampling 阈值（0.0 ~ 1.0）。
     pub fn top_p(mut self, p: f64) -> Self {
-        self.config.request_options.chat_request.top_p = Some(p);
+        self.config.request_options.top_p = Some(p);
         self
     }
 
     /// 设置随机种子，保证可复现性。
     pub fn seed(mut self, s: u64) -> Self {
-        self.config.request_options.chat_request.seed = Some(s);
+        self.config.request_options.seed = Some(s);
         self
     }
 
@@ -125,25 +125,25 @@ impl AgentBuilder {
     ///
     /// 第一轮强制指定工具选择，后续轮次由 LLM 自主决定。
     pub fn tool_choice(mut self, choice: ToolChoice) -> Self {
-        self.config.request_options.chat_request.tool_choice = Some(choice);
+        self.config.request_options.tool_choice = Some(choice);
         self
     }
 
     /// 设置停止序列。
     pub fn stop_sequences(mut self, seqs: Vec<String>) -> Self {
-        self.config.request_options.chat_request.stop_sequences = Some(seqs);
+        self.config.request_options.stop_sequences = Some(seqs);
         self
     }
 
     /// 设置预填充文本（引导模型输出方向）。
     pub fn prefill(mut self, text: String) -> Self {
-        self.config.request_options.chat_request.prefill = Some(text);
+        self.config.request_options.prefill = Some(text);
         self
     }
 
     /// 设置推理配置（控制模型是否进行深度推理）。
     pub fn reasoning(mut self, r: ReasoningConfig) -> Self {
-        self.config.request_options.chat_request.reasoning = Some(r);
+        self.config.request_options.reasoning = Some(r);
         self
     }
 
@@ -158,10 +158,17 @@ impl AgentBuilder {
     /// 与 `max_output_tokens` 分离：thinking 是模型内部推理，不计入输出预算。
     /// 透传给 Provider 层，由 Adapter 映射为协议特定字段。
     pub fn reasoning_budget(mut self, max: u32) -> Self {
-        self.config
-            .request_options
-            .chat_request
-            .max_reasoning_tokens = Some(max);
+        self.config.request_options.max_reasoning_tokens = Some(max);
+        self
+    }
+
+    /// 设置整个 Agent Run 的最大推理 Token 总数。
+    ///
+    /// 双层设计：
+    /// - `reasoning_budget(max)` — 单轮推理上限，透传给 Provider
+    /// - `max_total_reasoning_tokens(max)` — 整个 Agent Run 的累计推理上限
+    pub fn max_total_reasoning_tokens(mut self, max: u32) -> Self {
+        self.config.max_total_reasoning_tokens = Some(max);
         self
     }
 

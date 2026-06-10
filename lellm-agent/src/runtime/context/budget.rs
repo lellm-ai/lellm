@@ -1,5 +1,7 @@
 //! 上下文预算配置 — 控制 Agent Loop 中 messages 的 Token 总量。
 
+use lellm_core::ContentBlock;
+
 /// 上下文预算配置。
 ///
 /// 控制 Agent Loop 中消息历史的 Token 上限与压缩行为。
@@ -47,5 +49,23 @@ impl ContextBudget {
             truncated,
             text.chars().count()
         )
+    }
+
+    /// 截断 ContentBlock 列表中的文本内容（用于非流式路径）。
+    pub fn truncate_tool_result_blocks(&self, content: &[ContentBlock]) -> Vec<ContentBlock> {
+        content
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text(t) => {
+                    let truncated = self.truncate_tool_result(t.text.clone());
+                    if truncated != t.text {
+                        ContentBlock::Text(lellm_core::TextBlock { text: truncated })
+                    } else {
+                        b.clone()
+                    }
+                }
+                _ => b.clone(),
+            })
+            .collect()
     }
 }

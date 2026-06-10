@@ -316,6 +316,10 @@ impl ToolUseLoop {
                 return Ok(state.finish_output_budget(response));
             }
 
+            if state.exceeded_total_reasoning(self.config.max_total_reasoning_tokens) {
+                return Ok(state.finish_reasoning_budget(response));
+            }
+
             if !response.has_tool_calls() {
                 return Ok(state.finish_complete(response));
             }
@@ -326,7 +330,7 @@ impl ToolUseLoop {
 
             let batch = self.executor.execute_batch(&tool_calls).await;
 
-            let results = if let Some(e) = &batch.panicked {
+            let mut results = if let Some(e) = &batch.panicked {
                 tracing::error!(error = %e, "tool batch task panicked");
                 let mut results = batch.completed;
                 let completed_ids: std::collections::HashSet<String> = results
@@ -352,6 +356,33 @@ impl ToolUseLoop {
             } else {
                 batch.completed
             };
+
+            // 工具结果截断（非流式路径）
+            results = results
+                .into_iter()
+                .map(|m| {
+                    if let Message::ToolResult {
+                        ref is_error,
+                        ref content,
+                        ..
+                    } = m
+                    {
+                        if !*is_error {
+                            let truncated =
+                                self.config.context_budget.truncate_tool_result_blocks(content);
+                            if truncated != *content {
+                                return Message::ToolResult {
+                                    tool_call_id: m.tool_call_id(),
+                                    is_error: *is_error,
+                                    content: truncated,
+                                };
+                            }
+                        }
+                    }
+                    m
+                })
+                .collect();
+
             state.push_tool_results(results);
 
             tracing::debug!(

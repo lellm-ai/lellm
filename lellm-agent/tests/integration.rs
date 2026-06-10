@@ -597,9 +597,9 @@ fn test_local_compactor_compresses_old_turns() {
     // 移除了旧 turns（6 条 → summary + 2 条 = 3 条）
     assert!(result.removed_messages > 0);
     assert!(result.messages.len() < messages.len());
-    // 摘要消息应存在
+    // 摘要消息应存在（System 角色）
     assert!(result
         .messages
         .iter()
-        .any(|m| matches!(m, Message::User { content } if content.iter().any(|b| b.as_text().map(|t| t.contains("Compressed")).unwrap_or(false)))));
+        .any(|m| matches!(m, Message::System { content } if content.iter().any(|b| b.as_text().map(|t| t.contains("Compressed")).unwrap_or(false)))));
 }

@@ -16,7 +16,7 @@ use lellm_core::{ChatRequest, ChatResponse, LlmError};
 use std::borrow::Cow;
 
 use super::stream::sse_frame::SseFrame;
-pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
+pub use super::stream::tool_call_accumulator::ToolCallDelta;
 
 // ─── Codec 编解码中间表示 ───
 
@@ -25,7 +25,7 @@ pub(crate) use super::stream::tool_call_accumulator::ToolCallDelta;
 /// Codec 只关心协议适配（路径、Header、Body），
 /// 不关心 base_url、认证、HTTP Client。
 #[derive(Debug)]
-pub(crate) struct CodecRequest {
+pub struct CodecRequest {
     /// 相对路径。例如 `/v1/chat/completions` 或 `/v1beta/models/gemini-pro:generateContent`。
     pub path: Cow<'static, str>,
     /// 该厂商特有的自定义 Headers。例如 Anthropic 的 `anthropic-version: 2023-06-01`。
@@ -36,7 +36,7 @@ pub(crate) struct CodecRequest {
 
 /// 流式 chunk — Codec 解析 SseFrame 后返回。
 #[derive(Debug)]
-pub(crate) enum StreamChunk {
+pub enum StreamChunk {
     TextDelta(String),
     /// 思考块增量（Anthropic thinking_delta / OpenAI reasoning_content）
     ThinkingDelta {
@@ -55,7 +55,7 @@ pub(crate) enum StreamChunk {
 
 /// 流式解析结果 — 可能包含多个 chunk。
 #[derive(Debug)]
-pub(crate) struct StreamParseResult {
+pub struct StreamParseResult {
     pub chunks: Vec<StreamChunk>,
 }
 
@@ -81,6 +81,8 @@ pub struct Capabilities {
     pub supports_image_input: bool,
     /// 支持推理控制（ReasoningConfig 的 Low/Medium/High）
     pub supports_reasoning: bool,
+    /// 支持工具调用（Function Calling / Tool Use）
+    pub supports_tool_call: bool,
 }
 
 // ─── Provider 认证风格 ───
@@ -130,7 +132,7 @@ impl std::error::Error for ProviderEnvError {}
 ///
 /// Codec **不知道** `CodecProvider`、`reqwest`、HTTP。
 /// 只负责：`ChatRequest → CodecRequest`（编码），`body bytes → ChatResponse`（解码）。
-pub(crate) trait ChatCodec: Send + Sync {
+pub trait ChatCodec: Send + Sync {
     /// 编码 ChatRequest 为 CodecRequest（路径 + 协议 Header + JSON Body 字节）。
     fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError>;
 
@@ -147,37 +149,22 @@ pub(crate) trait ChatCodec: Send + Sync {
 /// 模型感知能力矩阵 — 逻辑校验层。
 ///
 /// 框架提供默认的基于命名的启发式匹配，Codec 可 override 精确控制。
-pub(crate) trait ModelCapabilities: Send + Sync {
+pub trait ModelCapabilities: Send + Sync {
     /// 结合模型名称，返回该模型的能力矩阵。
     ///
-    /// 默认实现提供基于命名的启发式猜测（如 contains("vision") → supports_image）。
+    /// 默认实现返回全 false（最保守假设）。
     /// Codec 应 override 此方法以提供精确的能力声明。
-    fn capabilities_for(&self, model: &str) -> Capabilities {
-        Capabilities::heuristic_guess(model)
+    fn capabilities_for(&self, _model: &str) -> Capabilities {
+        Capabilities::default()
     }
 }
 
-impl Capabilities {
-    /// 基于模型名称的启发式能力猜测（默认实现）。
-    fn heuristic_guess(model: &str) -> Self {
-        let mut caps = Capabilities::default();
-        let lower = model.to_lowercase();
-        if lower.contains("vision")
-            || lower.contains("-4o")
-            || lower.contains("gpt-4.5")
-            || lower.contains("claude-3")
-            || lower.contains("claude-4")
-        {
-            caps.supports_image_input = true;
-        }
-        caps
-    }
-}
+// NOTE: heuristic_guess 已移除。Codec 应实现 capabilities_for() 提供精确能力声明。
 
 // ─── 3. ProviderMeta — 连接元数据（框架环境约定、控制层）──
 
 /// 连接元数据 trait — 框架环境约定。
-pub(crate) trait ProviderMeta: Send + Sync {
+pub trait ProviderMeta: Send + Sync {
     /// Provider 标识（全小写，如 "openai", "anthropic"）。
     fn provider_id(&self) -> &str;
 
@@ -202,7 +189,7 @@ pub(crate) trait ProviderMeta: Send + Sync {
 ///
 /// 开发者实现一个新 Provider 时，只需同时满足这三个轴向的职责。
 /// 框架内部按需消费子 trait（如 `process_stream` 只需 `ChatCodec`）。
-pub(crate) trait ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta {}
+pub trait ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta {}
 
 // 毯式实现：任何同时实现了这三个 trait 的类型，自动成为合格的 ProviderExtension。
 impl<T> ProviderExtension for T where T: ChatCodec + ModelCapabilities + ProviderMeta {}

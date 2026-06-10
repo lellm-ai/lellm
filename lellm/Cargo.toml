@@ -8,7 +8,7 @@ documentation = "https://docs.rs/lellm"
 repository = "https://github.com/penghcn/lellm"
 
 [features]
-default = []
+default = ["provider"]
 core = ["dep:lellm-core"]
 provider = ["dep:lellm-core", "dep:lellm-provider"]
 agent = ["dep:lellm-core", "dep:lellm-agent"]

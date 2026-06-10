@@ -90,6 +90,14 @@ impl Message {
         }
     }
 
+    /// 返回 ToolResult 的 tool_call_id（仅 ToolResult 变体有效，其他返回 None）
+    pub fn tool_call_id(&self) -> String {
+        match self {
+            Message::ToolResult { tool_call_id, .. } => tool_call_id.clone(),
+            _ => String::new(),
+        }
+    }
+
     /// 返回 ToolResult 的 is_error 标记（仅 ToolResult 变体有效）
     pub fn is_tool_error(&self) -> bool {
         matches!(self, Message::ToolResult { is_error: true, .. })

@@ -59,7 +59,7 @@ impl ContextCompactor for LocalCompactor {
         let mut result = system_msgs.into_iter().cloned().collect::<Vec<_>>();
 
         if !summary.is_empty() {
-            result.push(Message::User {
+            result.push(Message::System {
                 content: text_block(format!("[Previous conversation summary]\n{summary}")),
             });
         }
@@ -156,20 +156,20 @@ fn summarize_turns(turns: &[&Vec<&Message>]) -> String {
                     if !texts.is_empty() {
                         let text = texts.join(" ");
                         let summary = truncate_chars(&text, 200);
-                        lines.push(format!("  🤖 Assistant: {}", summary));
+                        lines.push(format!("  Assistant: {}", summary));
                     }
 
                     if !tool_calls.is_empty() {
                         for tc in &tool_calls {
                             let args_summary = truncate_chars(&tc.arguments.to_string(), 100);
-                            lines.push(format!("  🔧 Called {}: {}", tc.name, args_summary));
+                            lines.push(format!("  Tool({}): {}", tc.name, args_summary));
                         }
                     }
                 }
                 Message::ToolResult {
                     is_error, content, ..
                 } => {
-                    let status = if *is_error { "❌" } else { "✅" };
+                    let status = if *is_error { "ERROR" } else { "OK" };
                     let text: String = content
                         .iter()
                         .filter_map(|b| b.as_text())
@@ -185,7 +185,7 @@ fn summarize_turns(turns: &[&Vec<&Message>]) -> String {
                         .collect::<Vec<_>>()
                         .join(" ");
                     let summary = truncate_chars(&text, 200);
-                    lines.push(format!("  👤 User: {}", summary));
+                    lines.push(format!("  User: {}", summary));
                 }
                 _ => {}
             }
