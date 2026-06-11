@@ -1,10 +1,11 @@
 use lellm_agent::schemars::JsonSchema;
+use lellm_agent::serde::Deserialize;
 use lellm_agent::{
-    AgentBuilder, CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, ToolArgs,
-    ToolCategory, ToolExecutor, ToolRegistration, ToolUseLoop, estimate_message, estimate_tokens,
+    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety, ToolArgs,
+    ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
-use lellm_macros::ToolDefinition as ToolDefinitionDerive;
+use lellm_macros::{Tool, tool};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -84,9 +85,9 @@ fn test_tool_category() {
     assert_eq!(ToolCategory::DATABASE.0, "database");
 }
 
-// ─── ToolArgs trait + derive(ToolDefinition) 测试 ───
+// ─── ToolArgs trait + derive(Tool) 测试 ───
 
-#[derive(JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(name = "weather_search", description = "搜索天气信息")]
 struct WeatherArgs {
     /// 城市名称
@@ -165,7 +166,7 @@ fn test_tool_args_schema_backward_compat() {
 #[test]
 fn test_tool_definition_default_name() {
     // 不指定 name，应自动转换为 snake_case
-    #[derive(JsonSchema, ToolDefinitionDerive)]
+    #[derive(Deserialize, JsonSchema, Tool)]
     #[tool(description = "测试默认命名")]
     struct MySearchTool {
         pub query: String,
@@ -178,7 +179,7 @@ fn test_tool_definition_default_name() {
 #[test]
 fn test_option_type_inference() {
     // 验证 Option<T> 正确推导内部类型
-    #[derive(JsonSchema, ToolDefinitionDerive)]
+    #[derive(Deserialize, JsonSchema, Tool)]
     #[tool(name = "typed_test", description = "测试类型推导")]
     struct TypedTestArgs {
         /// 可选字符串
@@ -217,6 +218,97 @@ fn test_option_type_inference() {
     // 全部是 Option，required 应为空
     let required = def.parameters.get("required");
     assert!(required.map_or(true, |r| r.as_array().map_or(true, |a| a.is_empty())));
+}
+
+// ─── Level 1: #[tool] 函数宏测试 ───
+
+/// 测试搜索工具
+#[tool(name = "test_search", description = "测试搜索功能")]
+fn test_search_fn(query: String, limit: Option<u32>) -> lellm_agent::ToolResult {
+    Ok(format!("搜索: {}, 限制: {:?}", query, limit))
+}
+
+#[test]
+fn test_tool_fn_macro_generates_args() {
+    // 验证 #[tool] 生成了 Args struct
+    assert_eq!(TestSearchFnArgs::NAME, "test_search");
+    assert_eq!(TestSearchFnArgs::DESCRIPTION, "测试搜索功能");
+
+    // 验证 schema 结构
+    let schema = TestSearchFnArgs::__schema();
+    assert_eq!(schema.get("type").unwrap(), "object");
+    let properties = schema.get("properties").unwrap().as_object().unwrap();
+    assert!(properties.contains_key("query"));
+    assert!(properties.contains_key("limit"));
+}
+
+#[test]
+fn test_tool_fn_macro_generates_reg_fn() {
+    // 验证 #[tool] 生成了注册函数
+    let reg = test_search_fn_tool();
+    assert_eq!(reg.definition.name, "test_search");
+    assert_eq!(reg.definition.description, "测试搜索功能");
+    assert_eq!(reg.safety, ParallelSafety::Safe);
+}
+
+#[tokio::test]
+async fn test_tool_fn_macro_execution() {
+    // 验证 #[tool] 生成的工具可以执行
+    let reg = test_search_fn_tool();
+    let name = reg.definition.name.clone();
+    let mut executor = ToolExecutor::new();
+    executor.register(&name, reg);
+
+    let call = ToolCall {
+        id: "1".to_string(),
+        name: "test_search".to_string(),
+        arguments: serde_json::json!({"query": "rust", "limit": 5}),
+    };
+
+    let result = executor.execute(&call).await;
+    assert!(result.is_ok());
+    let output = result.unwrap();
+    assert!(output.contains("rust"));
+}
+
+// ─── Level 2: safe() 便捷方法测试 ───
+
+#[derive(Deserialize, JsonSchema, Tool)]
+#[tool(name = "greet_tool", description = "打招呼")]
+struct GreetArgs {
+    /// 名字
+    name: String,
+}
+
+#[test]
+fn test_tool_safe_method() {
+    // 验证 safe() 方法正常工作
+    let reg = GreetArgs::safe(|args| async move {
+        Ok(format!("你好, {}!", args.name))
+    });
+
+    assert_eq!(reg.definition.name, "greet_tool");
+    assert_eq!(reg.definition.description, "打招呼");
+}
+
+#[tokio::test]
+async fn test_tool_safe_execution() {
+    let reg = GreetArgs::safe(|args| async move {
+        Ok(format!("你好, {}!", args.name))
+    });
+
+    let name = reg.definition.name.clone();
+    let mut executor = ToolExecutor::new();
+    executor.register(&name, reg);
+
+    let call = ToolCall {
+        id: "1".to_string(),
+        name: "greet_tool".to_string(),
+        arguments: serde_json::json!({"name": "世界"}),
+    };
+
+    let result = executor.execute(&call).await;
+    assert_eq!(result.unwrap(), "你好, 世界!");
 }
 
 // ─── AgentBuilder 测试 ───

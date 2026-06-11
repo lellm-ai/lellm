@@ -27,6 +27,7 @@
 //! ```
 
 use lellm_agent::schemars::JsonSchema;
+use lellm_agent::serde::Deserialize;
 use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
 use lellm_macros::ToolDefinition as ToolDefinitionDerive;
@@ -36,7 +37,7 @@ use std::sync::Arc;
 // ─── 定义工具 ───────────────────────────────────────────────────
 
 #[allow(dead_code)]
-#[derive(JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, ToolDefinitionDerive)]
 #[tool(
     name = "search_products",
     description = "搜索产品目录，返回匹配的产品列表"
@@ -47,7 +48,7 @@ struct SearchProductsArgs {
 }
 
 #[allow(dead_code)]
-#[derive(JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, ToolDefinitionDerive)]
 #[tool(name = "check_inventory", description = "检查指定产品的库存数量")]
 struct CheckInventoryArgs {
     /// 产品 ID
@@ -55,7 +56,7 @@ struct CheckInventoryArgs {
 }
 
 #[allow(dead_code)]
-#[derive(JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, ToolDefinitionDerive)]
 #[tool(name = "get_weather", description = "获取指定位置的天气信息")]
 struct GetWeatherArgs {
     /// 城市或地点名称

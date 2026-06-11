@@ -1,4 +1,4 @@
-//! 工具定义 — 使用 derive(ToolDefinition) 宏
+//! 三级 Tool API 展示
 //!
 //! 对应 LangChain 用法：
 //! ```python
@@ -8,11 +8,6 @@
 //! def search(query: str) -> str:
 //!     """搜索信息。"""
 //!     return f"结果：{query}"
-//!
-//! @tool
-//! def get_weather(location: str) -> str:
-//!     """获取位置的天气信息。"""
-//!     return f"{location} 的天气：晴朗，72°F"
 //! ```
 //!
 //! 运行：
@@ -21,68 +16,47 @@
 //! ```
 
 use lellm_agent::schemars::JsonSchema;
-use lellm_agent::{AgentBuilder, ToolArgs, ToolCategory, ToolRegistration, ToolUseLoop};
+use lellm_agent::serde::Deserialize;
+use lellm_agent::{
+    AgentBuilder, ToolArgs, ToolCategory, ToolRegistration, ToolResult, ToolUseLoop,
+};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition};
-use lellm_macros::ToolDefinition as ToolDefinitionDerive;
+use lellm_macros::{tool, Tool};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
-// ─── 方式一：derive(ToolDefinition) 宏（推荐）────────────────────
+// ─── Level 1: #[tool] 函数宏（推荐，95% 用户）──────────────────
 
-/// 搜索工具参数 — 宏自动生成 JSON Schema
-#[allow(dead_code)]
-#[derive(JsonSchema, ToolDefinitionDerive)]
+/// 搜索互联网信息
 #[tool(name = "search", description = "搜索互联网信息")]
-struct SearchArgs {
-    /// 搜索关键词
-    query: String,
+fn search(query: String, limit: Option<u32>) -> ToolResult {
+    Ok(format!("搜索结果: {} (限制: {:?})", query, limit))
 }
+
+/// 获取指定位置的天气信息
+#[tool(name = "get_weather", description = "获取指定位置的天气信息")]
+fn get_weather(location: String, unit: Option<String>) -> ToolResult {
+    let unit = unit.unwrap_or_else(|| "摄氏度".to_string());
+    Ok(format!("{} 的天气：晴朗，25{}", location, unit))
+}
+
+// ─── Level 2: #[derive(Tool)] + safe()（高级用户）─────────────
 
 /// 天气工具参数
-#[allow(dead_code)]
-#[derive(JsonSchema, ToolDefinitionDerive)]
-#[tool(name = "get_weather", description = "获取指定位置的天气信息")]
+#[derive(Deserialize, JsonSchema, Tool)]
+#[tool(name = "weather_search", description = "搜索天气信息")]
 struct WeatherArgs {
-    /// 城市或地点名称
-    location: String,
-    /// 温度单位（摄氏度/华氏度），默认为摄氏度
+    /// 城市名称
+    city: String,
+    /// 单位（摄氏度/华氏度）
     unit: Option<String>,
+    /// 是否包含预报
+    include_forecast: bool,
 }
 
-/// 使用 derive 宏注册工具
-#[allow(dead_code)]
-fn register_with_derive() -> Vec<ToolRegistration> {
-    vec![
-        // search 工具
-        ToolRegistration::safe(SearchArgs::tool_definition(), |args| {
-            let query = args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move { Ok(format!("搜索结果：{}", query)) }
-        }),
-        // get_weather 工具
-        ToolRegistration::safe(WeatherArgs::tool_definition(), |args| {
-            let location = args
-                .get("location")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let unit = args
-                .get("unit")
-                .and_then(|v| v.as_str())
-                .unwrap_or("摄氏度")
-                .to_string();
-            async move { Ok(format!("{} 的天气：晴朗，25{}", location, unit)) }
-        }),
-    ]
-}
+// ─── Level 3: ToolRegistration::safe()（框架开发者）────────────
 
-// ─── 方式二：手动构造 ToolDefinition ────────────────────────────
-
-/// 手动构造工具定义 — 不依赖 derive 宏
-#[allow(dead_code)]
+/// 手动构造工具定义 — 不依赖宏
 fn register_manually() -> Vec<ToolRegistration> {
     let search_def = ToolDefinition {
         name: "manual_search".to_string(),
@@ -106,61 +80,26 @@ fn register_manually() -> Vec<ToolRegistration> {
     })]
 }
 
-// ─── 方式三：带安全分级的工具注册 ────────────────────────────────
+/// 使用 Level 1 注册工具
+fn register_level1() -> Vec<ToolRegistration> {
+    vec![search_tool(), get_weather_tool()]
+}
 
-/// 展示不同安全分级的工具注册方式
-#[allow(dead_code)]
-fn register_with_safety_levels() -> Vec<ToolRegistration> {
-    let read_def = ToolDefinition {
-        name: "read_file".to_string(),
-        description: "读取文件内容".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" }
-            },
-            "required": ["path"]
-        }),
-    };
-
-    let write_def = ToolDefinition {
-        name: "write_file".to_string(),
-        description: "写入文件内容".to_string(),
-        parameters: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string" }
-            },
-            "required": ["path", "content"]
-        }),
-    };
-
-    vec![
-        // Safe — 可并发执行
-        ToolRegistration::safe(read_def, |args| {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move { Ok(format!("读取文件: {}", path)) }
-        }),
-        // CategoryExclusive — 同分类内互斥
-        ToolRegistration::category_exclusive(write_def, ToolCategory::FILE_IO, |args| {
-            let path = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move { Ok(format!("写入文件: {}", path)) }
-        }),
-    ]
+/// 使用 Level 2 注册工具
+fn register_level2() -> Vec<ToolRegistration> {
+    vec![WeatherArgs::safe(|args| async move {
+        let forecast = if args.include_forecast { "含预报" } else { "无预报" };
+        Ok(format!(
+            "{} 天气: 晴朗, 25{}, {}",
+            args.city,
+            args.unit.unwrap_or_else(|| "摄氏度".to_string()),
+            forecast
+        ))
+    })]
 }
 
 /// 构建带工具的 Agent
 fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
-    // MockProvider — 模拟 LLM 先调用工具，再返回最终答案
     let response = ChatResponse::new(
         vec![ContentBlock::text("已完成所有操作。".to_string())],
         TokenUsage::default(),
@@ -179,37 +118,77 @@ fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
 
 #[tokio::main]
 async fn main() {
-    // ─── 展示 derive 宏生成的 Schema ───
-    println!("=== SearchArgs Schema ===");
-    let search_def = SearchArgs::tool_definition();
-    println!("名称: {}", search_def.name);
-    println!("描述: {}", search_def.description);
+    // ─── Level 1: #[tool] 函数宏 ───
+    println!("=== Level 1: #[tool] 函数宏 ===");
+    println!("搜索工具: {} - {}", SearchArgs::NAME, SearchArgs::DESCRIPTION);
     println!(
         "Schema: {}",
-        serde_json::to_string_pretty(&search_def.parameters).unwrap()
+        serde_json::to_string_pretty(&SearchArgs::__schema()).unwrap()
+    );
+    println!();
+
+    println!("天气工具: {} - {}", GetWeatherArgs::NAME, GetWeatherArgs::DESCRIPTION);
+    println!();
+
+    // ─── Level 2: #[derive(Tool)] + safe() ───
+    println!("=== Level 2: #[derive(Tool)] + safe() ===");
+    println!(
+        "天气搜索: {} - {}",
+        WeatherArgs::NAME,
+        WeatherArgs::DESCRIPTION
+    );
+    println!(
+        "Schema: {}",
+        serde_json::to_string_pretty(&WeatherArgs::__schema()).unwrap()
+    );
+    println!();
+
+    // ─── Level 3: ToolRegistration ───
+    println!("=== Level 3: ToolRegistration::safe() ===");
+    let manual = register_manually();
+    for reg in &manual {
+        println!("  - {} ({})", reg.definition.name, reg.definition.description);
+    }
+    println!();
+
+    // ─── 验证安全分级 ───
+    println!("=== 安全分级 ===");
+    let l1 = register_level1();
+    println!("Level 1 工具数量: {}", l1.len());
+    for reg in &l1 {
+        println!("  - {} (safety: {:?})", reg.definition.name, reg.safety);
+    }
+
+    let l2 = register_level2();
+    println!("Level 2 工具数量: {}", l2.len());
+    for reg in &l2 {
+        println!("  - {} (safety: {:?})", reg.definition.name, reg.safety);
+    }
+
+    // 验证 category_exclusive
+    let cat_exclusive = WeatherArgs::category_exclusive(ToolCategory::NETWORK, |args| async move {
+        Ok(format!("网络请求: {}", args.city))
+    });
+    println!(
+        "CategoryExclusive 工具: {} (safety: {:?})",
+        cat_exclusive.definition.name, cat_exclusive.safety
     );
 
-    println!("\n=== WeatherArgs Schema ===");
-    let weather_def = WeatherArgs::tool_definition();
-    println!("名称: {}", weather_def.name);
-    println!("描述: {}", weather_def.description);
+    // 验证 exclusive
+    let exclusive = WeatherArgs::exclusive(|args| async move {
+        Ok(format!("独占执行: {}", args.city))
+    });
     println!(
-        "Schema: {}",
-        serde_json::to_string_pretty(&weather_def.parameters).unwrap()
+        "Exclusive 工具: {} (safety: {:?})",
+        exclusive.definition.name, exclusive.safety
     );
 
     // ─── 构建并执行 Agent ───
     println!("\n=== 构建 Agent ===");
-    let tools = register_with_derive();
-    println!("注册了 {} 个工具", tools.len());
-    for reg in &tools {
-        println!(
-            "  - {} ({})",
-            reg.definition.name, reg.definition.description
-        );
-    }
+    let all_tools = [register_level1(), register_level2(), register_manually()].concat();
+    println!("注册了 {} 个工具", all_tools.len());
 
-    let agent = create_agent(tools);
+    let agent = create_agent(all_tools);
 
     println!("\n=== 执行 Agent ===");
     let result = agent

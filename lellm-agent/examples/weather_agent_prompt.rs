@@ -10,7 +10,7 @@
 #[path = "_shared/shared.rs"]
 mod shared;
 
-use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema};
+use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
 use lellm_macros::ToolDefinition;
 use lellm_provider::ResolvedModel;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 // ─── 通用 HTTP GET 工具 ─────────────────────────────────────────
 
-#[derive(JsonSchema, ToolDefinition)]
+#[derive(Deserialize, JsonSchema, ToolDefinition)]
 #[tool(
     name = "http_get",
     description = "发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。"

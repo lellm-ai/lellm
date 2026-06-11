@@ -5,8 +5,9 @@
 
 pub mod runtime;
 
-// Re-export schemars so derive(ToolDefinition) macro can reference it.
+// Re-export schemars & serde so derive(Tool) / #[tool] macros can reference them.
 pub use schemars;
+pub use serde;
 
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, BatchExecutionResult, CompactionResult,

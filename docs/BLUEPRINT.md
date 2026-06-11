@@ -22,7 +22,7 @@
 | `lellm-core` | 协议对象 | Message, ContentBlock, ChatRequest/Response, ToolDefinition, TokenUsage, LlmError |
 | `lellm-provider` | Provider trait + Codec | LlmProvider, CodecProvider, ProviderExtension (三权分立), ModelRouter, ProviderRegistry, MockProvider |
 | `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, ParallelSafety, RetryPolicy, FallbackStrategy |
-| `lellm-macros` | 派生宏 | `#[derive(ToolDefinition)]` — Stub |
+| `lellm-macros` | 派生宏 + 属性宏 | `#[tool]` 函数宏, `#[derive(Tool)]` struct 宏, `ToolDefinition` 向后兼容别名 |
 
 ### 不包含（v0.2+）
 

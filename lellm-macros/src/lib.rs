@@ -1,101 +1,349 @@
-//! lellm-macros — 派生宏。
+//! lellm-macros — 派生宏与属性宏。
 //!
-//! 提供 `#[derive(ToolDefinition)]`，自动生成：
-//! 1. `lellm_agent::ToolArgs` impl — 工具注册 trait
-//! 2. 向后兼容的 `__schema()` / `__name()` / `__description()` 方法
+//! # 三级 API
 //!
-//! Schema 生成委托给 [schemars](https://crates.io/crates/schemars)，
-//! 用户 struct 需要同时 `#[derive(schemars::JsonSchema)]`。
+//! ## Level 1: `#[tool]` 函数宏（推荐，95% 用户）
 //!
-//! # 示例
 //! ```ignore
-//! use lellm_macros::ToolDefinition;
-//! use lellm_agent::schemars::JsonSchema;
+//! use lellm_agent::ToolResult;
+//! use lellm_macros::tool;
 //!
-//! #[derive(JsonSchema, ToolDefinition)]
 //! #[tool(name = "search", description = "搜索互联网信息")]
-//! pub struct SearchArgs {
-//!     /// 搜索关键词
-//!     pub query: String,
+//! async fn search(query: String, limit: Option<u32>) -> ToolResult {
+//!     Ok(format!("搜索结果: {}", query))
 //! }
+//!
+//! // 注册：
+//! builder.tool(search_tool());
+//! ```
+//!
+//! ## Level 2: `#[derive(Tool)]` struct 宏（高级用户）
+//!
+//! ```ignore
+//! use lellm_agent::{schemars::JsonSchema, ToolResult};
+//! use lellm_macros::Tool;
+//!
+//! #[derive(Tool, JsonSchema)]
+//! #[tool(name = "search", description = "搜索互联网信息")]
+//! struct SearchArgs {
+//!     /// 搜索关键词
+//!     query: String,
+//!     /// 返回数量
+//!     limit: Option<u32>,
+//! }
+//!
+//! // 注册：
+//! let reg = SearchArgs::safe(|args| async move {
+//!     Ok(format!("搜索结果: {}", args.query))
+//! });
+//! ```
+//!
+//! ## Level 3: `ToolRegistration::safe()`（框架开发者）
+//!
+//! ```ignore
+//! use lellm_agent::{ToolDefinition, ToolRegistration};
+//!
+//! let reg = ToolRegistration::safe(
+//!     ToolDefinition {
+//!         name: "search".to_string(),
+//!         description: "搜索".to_string(),
+//!         parameters: serde_json::json!({
+//!             "type": "object",
+//!             "properties": { "query": { "type": "string" } }
+//!         }),
+//!     },
+//!     |args| async { Ok(args["query"].as_str().unwrap().to_string()) }
+//! );
 //! ```
 
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{DataStruct, DeriveInput, parse_macro_input};
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::{quote, format_ident};
+use syn::{
+    Attribute, DeriveInput, Expr, FnArg, Item, ItemFn, Lit, Meta, Pat,
+    parse_macro_input, parse_quote, punctuated::Punctuated,
+};
 
-#[proc_macro_derive(ToolDefinition, attributes(tool))]
-pub fn derive_tool_definition(input: TokenStream) -> TokenStream {
+// ─────────────────────────────────────────────────────────────────
+// Entry: #[tool] attribute macro (handles both fn and struct)
+// ─────────────────────────────────────────────────────────────────
+
+#[proc_macro_attribute]
+pub fn tool(args: TokenStream, input: TokenStream) -> TokenStream {
+    let parsed: Item = parse_macro_input!(input as Item);
+
+    match parsed {
+        Item::Fn(func) => {
+            // Level 1: function → generate Args struct + registration function
+            match expand_tool_for_fn(args.into(), func) {
+                Ok(out) => out.into(),
+                Err(e) => e.to_compile_error().into(),
+            }
+        }
+        Item::Struct(s) => {
+            // Level 2: struct → generate ToolArgs impl (same as derive(Tool))
+            match expand_tool_for_struct(args.into(), s) {
+                Ok(out) => out.into(),
+                Err(e) => e.to_compile_error().into(),
+            }
+        }
+        other => {
+            syn::Error::new_spanned(
+                other,
+                "#[tool] can only be applied to functions or structs",
+            )
+            .to_compile_error()
+            .into()
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Entry: #[derive(Tool)] derive macro
+// ─────────────────────────────────────────────────────────────────
+
+#[proc_macro_derive(Tool, attributes(tool))]
+pub fn derive_tool(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     match &input.data {
-        syn::Data::Struct(data) => generate_for_struct(&input, data),
+        syn::Data::Struct(data) => generate_tool_for_struct(&input, data),
         _ => {
             let error = syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "ToolDefinition only supports struct types",
+                Span::call_site(),
+                "Tool only supports struct types",
             );
             error.to_compile_error().into()
         }
     }
 }
 
-fn generate_for_struct(input: &DeriveInput, _data: &DataStruct) -> TokenStream {
+// ─────────────────────────────────────────────────────────────────
+// Backward compatibility: ToolDefinition alias
+// ─────────────────────────────────────────────────────────────────
+
+#[proc_macro_derive(ToolDefinition, attributes(tool))]
+#[deprecated(since = "0.2.0", note = "Use `Tool` instead of `ToolDefinition`")]
+pub fn derive_tool_definition(input: TokenStream) -> TokenStream {
+    derive_tool(input)
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Level 1: #[tool] on function
+// ─────────────────────────────────────────────────────────────────
+
+fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, syn::Error> {
+    // Parse #[tool(name = "...", description = "...")] meta
+    let meta = parse_tool_meta_tokens(&args);
+
+    // Determine name
+    let name = if meta.name.is_empty() {
+        ident_to_snake_case(&func.sig.ident.to_string())
+    } else {
+        meta.name.clone()
+    };
+
+    // Determine description (from attribute or doc comment)
+    let description = if !meta.description.is_empty() {
+        meta.description.clone()
+    } else {
+        extract_doc_from_attrs(&func.attrs).unwrap_or_default()
+    };
+
+    // Extract parameters
+    let params = extract_fn_params(&func.sig.inputs)?;
+    // Convert fn name to PascalCase for struct name: test_search_fn → TestSearchFn
+    let pascal_name = snake_to_pascal(&func.sig.ident.to_string());
+    let struct_name = format_ident!("{}Args", pascal_name);
+    let reg_fn_name = format_ident!("{}_tool", func.sig.ident);
+    let fn_name = &func.sig.ident;
+
+    // Generate struct fields using parse_quote for each param
+    let fields: Vec<syn::Field> = params
+        .iter()
+        .map(|p| {
+            let ident = &p.ident;
+            let ty = &p.ty;
+            let doc_attrs = &p.doc_attrs;
+            parse_quote! {
+                #(#doc_attrs)*
+                pub #ident: #ty
+            }
+        })
+        .collect();
+
+    // Build arg references for function call: args.query, args.limit
+    let arg_refs: Vec<proc_macro2::TokenStream> = params
+        .iter()
+        .map(|p| {
+            let ident = &p.ident;
+            quote! { args.#ident }
+        })
+        .collect();
+
+    // Clean the original function (remove #[tool] attr)
+    let mut cleaned_func = func.clone();
+    cleaned_func.attrs.retain(|attr| !attr.path().is_ident("tool"));
+
+    let visibility = &func.vis;
+
+    // Generate ToolArgs impl + helper methods inline (don't use derive(Tool))
+    // to avoid issues with the #[tool] attribute macro chain.
+    let schema_fn = generate_schema_impl(&struct_name);
+    let compat_methods = generate_compat_methods(&struct_name);
+    let safe_methods = generate_safe_methods(&struct_name);
+
+    Ok(quote! {
+        #cleaned_func
+
+        /// Auto-generated tool arguments for `#fn_name`
+        #[derive(
+            ::lellm_agent::serde::Deserialize,
+            ::lellm_agent::schemars::JsonSchema
+        )]
+        #visibility struct #struct_name {
+            #(#fields),*
+        }
+
+        impl ::lellm_agent::ToolArgs for #struct_name {
+            const NAME: &'static str = #name;
+            const DESCRIPTION: &'static str = #description;
+
+            #schema_fn
+        }
+
+        #compat_methods
+        #safe_methods
+
+        /// Auto-generated tool registration for `#fn_name`
+        #visibility fn #reg_fn_name() -> ::lellm_agent::ToolRegistration {
+            #struct_name::safe(|args| async move {
+                #fn_name(#(#arg_refs),*)
+            })
+        }
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Level 2: #[tool] on struct (attribute macro path)
+// ─────────────────────────────────────────────────────────────────
+
+fn expand_tool_for_struct(
+    args: TokenStream2,
+    mut s: syn::ItemStruct,
+) -> Result<TokenStream2, syn::Error> {
+    // Parse #[tool(name = "...", description = "...")] meta
+    let meta = parse_tool_meta_tokens(&args);
+
+    let struct_name = &s.ident;
+
+    // If no explicit name/description in args, check existing #[tool(...)] helper attrs
+    let helper_meta = extract_helper_meta(&s.attrs);
+
+    let name = if !meta.name.is_empty() {
+        meta.name.clone()
+    } else if !helper_meta.name.is_empty() {
+        helper_meta.name.clone()
+    } else {
+        ident_to_snake_case(&s.ident.to_string())
+    };
+
+    let description = if !meta.description.is_empty() {
+        meta.description.clone()
+    } else if !helper_meta.description.is_empty() {
+        helper_meta.description.clone()
+    } else {
+        extract_doc_from_attrs(&s.attrs).unwrap_or_default()
+    };
+
+    // Remove old #[tool(...)] helper attrs to avoid leaking
+    s.attrs.retain(|attr| {
+        !(attr.path().is_ident("tool") && matches!(&attr.meta, Meta::List(_)))
+    });
+
+    // Generate the same output as derive(Tool) would
+    let schema_fn = generate_schema_impl(struct_name);
+    let compat_methods = generate_compat_methods(struct_name);
+    let safe_methods = generate_safe_methods(struct_name);
+
+    Ok(quote! {
+        #s
+
+        impl ::lellm_agent::ToolArgs for #struct_name {
+            const NAME: &'static str = #name;
+            const DESCRIPTION: &'static str = #description;
+
+            #schema_fn
+        }
+
+        #compat_methods
+        #safe_methods
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Derive(Tool) implementation (shared by derive & attribute paths)
+// ─────────────────────────────────────────────────────────────────
+
+fn generate_tool_for_struct(input: &DeriveInput, _data: &syn::DataStruct) -> TokenStream {
     let struct_name = &input.ident;
-    let (name, description) = parse_tool_attrs(&input.attrs, &input.ident);
+    let (name, description) = parse_struct_meta(&input.attrs, input);
+
+    let schema_fn = generate_schema_impl(struct_name);
+    let compat_methods = generate_compat_methods(struct_name);
+    let safe_methods = generate_safe_methods(struct_name);
 
     let generated = quote! {
         impl ::lellm_agent::ToolArgs for #struct_name {
             const NAME: &'static str = #name;
             const DESCRIPTION: &'static str = #description;
 
-            fn __schema() -> serde_json::Value {
-                // schemars 生成完整 schema（含 $schema, definitions 等元数据），
-                // 提取 inner schema 以匹配 OpenAI parameters 的预期格式。
-                let full = ::serde_json::to_value(
-                    ::lellm_agent::schemars::schema_for!(#struct_name)
-                ).expect("schemars schema_for always produces valid JSON");
-                Self::extract_inner_schema(&full)
-            }
+            #schema_fn
         }
 
+        #compat_methods
+        #safe_methods
+    };
+
+    TokenStream::from(generated)
+}
+
+fn generate_schema_impl(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
+    quote! {
+        fn __schema() -> serde_json::Value {
+            let full = ::serde_json::to_value(
+                ::lellm_agent::schemars::schema_for!(#struct_name)
+            ).expect("schemars schema_for always produces valid JSON");
+            Self::extract_inner_schema(&full)
+        }
+    }
+}
+
+fn generate_compat_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
+    quote! {
         impl #struct_name {
             /// 从 schemars 完整 schema 中提取 inner schema。
-            ///
-            /// schemars 输出：
-            /// ```json
-            /// { "$schema": "...", "definitions": { "SearchArgs": { "type": "object", ... } } }
-            /// ```
-            /// 提取后：
-            /// ```json
-            /// { "type": "object", "properties": { ... }, "required": [...] }
-            /// ```
             pub fn __schema() -> serde_json::Value {
                 <Self as ::lellm_agent::ToolArgs>::__schema()
             }
 
             /// 工具名称 — 向后兼容
             pub fn __name() -> &'static str {
-                Self::NAME
+                <Self as ::lellm_agent::ToolArgs>::NAME
             }
 
             /// 工具描述 — 向后兼容
             pub fn __description() -> &'static str {
-                Self::DESCRIPTION
+                <Self as ::lellm_agent::ToolArgs>::DESCRIPTION
             }
 
             fn extract_inner_schema(full: &serde_json::Value) -> serde_json::Value {
-                // schemars schema_for! 直接在内层生成 schema（含 type, properties, required...）
-                // 同时可能在 definitions 中放一份副本。
-                // 策略：从顶层提取，去掉元数据字段。
                 let source = if let Some(obj) = full.as_object() {
                     obj
                 } else {
                     return full.clone();
                 };
 
-                // 去掉 $schema, title, description, definitions, $id 等元数据
-                // 保留 type, properties, required, additionalProperties 等 OpenAI 需要的字段
                 let skip = ["$schema", "title", "description", "definitions", "$id", "$ref"];
                 let mut cleaned = serde_json::Map::new();
                 for (k, v) in source {
@@ -106,12 +354,148 @@ fn generate_for_struct(input: &DeriveInput, _data: &DataStruct) -> TokenStream {
                 serde_json::Value::Object(cleaned)
             }
         }
-    };
-
-    TokenStream::from(generated)
+    }
 }
 
-fn parse_tool_attrs(attrs: &[syn::Attribute], ident: &syn::Ident) -> (syn::LitStr, syn::LitStr) {
+fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
+    quote! {
+        impl #struct_name {
+            /// 便捷注册 — 并行安全（Safe）。
+            ///
+            /// 闭包接收反序列化后的 `Self`，直接操作强类型参数。
+            ///
+            /// # 示例
+            /// ```ignore
+            /// let reg = SearchArgs::safe(|args| async move {
+            ///     Ok(format!("搜索: {}", args.query))
+            /// });
+            /// ```
+            pub fn safe<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
+            where
+                F: Fn(Self) -> Fut + Send + Sync + 'static,
+                Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+            {
+                let f = ::std::sync::Arc::new(f);
+                ::lellm_agent::ToolRegistration::safe(
+                    <Self as ::lellm_agent::ToolArgs>::tool_definition(),
+                    {
+                        let f = ::std::sync::Arc::clone(&f);
+                        move |args: &serde_json::Value| {
+                            let args: Self = ::serde_json::from_value(args.clone())
+                                .expect("tool arguments should match schema");
+                            f(args)
+                        }
+                    }
+                )
+            }
+
+            /// 便捷注册 — 分类内互斥（CategoryExclusive）。
+            pub fn category_exclusive<F, Fut>(
+                category: ::lellm_agent::ToolCategory,
+                f: F,
+            ) -> ::lellm_agent::ToolRegistration
+            where
+                F: Fn(Self) -> Fut + Send + Sync + 'static,
+                Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+            {
+                let f = ::std::sync::Arc::new(f);
+                ::lellm_agent::ToolRegistration::category_exclusive(
+                    <Self as ::lellm_agent::ToolArgs>::tool_definition(),
+                    category,
+                    {
+                        let f = ::std::sync::Arc::clone(&f);
+                        move |args: &serde_json::Value| {
+                            let args: Self = ::serde_json::from_value(args.clone())
+                                .expect("tool arguments should match schema");
+                            f(args)
+                        }
+                    }
+                )
+            }
+
+            /// 便捷注册 — 全局互斥（Exclusive）。
+            pub fn exclusive<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
+            where
+                F: Fn(Self) -> Fut + Send + Sync + 'static,
+                Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+            {
+                let f = ::std::sync::Arc::new(f);
+                ::lellm_agent::ToolRegistration::exclusive(
+                    <Self as ::lellm_agent::ToolArgs>::tool_definition(),
+                    {
+                        let f = ::std::sync::Arc::clone(&f);
+                        move |args: &serde_json::Value| {
+                            let args: Self = ::serde_json::from_value(args.clone())
+                                .expect("tool arguments should match schema");
+                            f(args)
+                        }
+                    }
+                )
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+struct ToolMeta {
+    name: String,
+    description: String,
+}
+
+/// Parse #[tool(name = "...", description = "...")] from TokenStream2
+///
+/// The args from proc_macro_attribute are the content inside #[tool(...)],
+/// i.e.: `name = "test_search" , description = "..."`
+fn parse_tool_meta_tokens(args: &TokenStream2) -> ToolMeta {
+    let mut name = String::new();
+    let mut description = String::new();
+
+    if args.is_empty() {
+        return ToolMeta::default();
+    }
+
+    // Manually iterate over tokens to find name = "..." and description = "..."
+    let tokens: Vec<proc_macro2::TokenTree> = args.clone().into_iter().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        // Look for identifier
+        if let proc_macro2::TokenTree::Ident(ident) = &tokens[i] {
+            let ident_name = ident.to_string();
+            // Look for = sign
+            if i + 1 < tokens.len() {
+                if let proc_macro2::TokenTree::Punct(p) = &tokens[i + 1] {
+                    if p.as_char() == '=' {
+                        // Look for string literal
+                        if i + 2 < tokens.len() {
+                            if let proc_macro2::TokenTree::Literal(lit) = &tokens[i + 2] {
+                                let lit_str = lit.to_string();
+                                // Strip quotes
+                                let val = lit_str
+                                    .trim_matches(|c| c == '"' || c == '\'')
+                                    .to_string();
+                                if ident_name == "name" {
+                                    name = val;
+                                } else if ident_name == "description" {
+                                    description = val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    ToolMeta { name, description }
+}
+
+/// Extract #[tool(name = "...", description = "...")] from struct attrs (helper attrs)
+fn extract_helper_meta(attrs: &[Attribute]) -> ToolMeta {
     let mut name = String::new();
     let mut description = String::new();
 
@@ -119,36 +503,121 @@ fn parse_tool_attrs(attrs: &[syn::Attribute], ident: &syn::Ident) -> (syn::LitSt
         if !attr.path().is_ident("tool") {
             continue;
         }
-
-        if let syn::Meta::List(meta_list) = &attr.meta {
-            let _ = meta_list.parse_nested_meta(|meta| {
+        if let Meta::List(ml) = &attr.meta {
+            let _ = ml.parse_nested_meta(|meta| {
                 if meta.path.is_ident("name") {
-                    let lit: syn::Lit = meta.value()?.parse()?;
-                    if let syn::Lit::Str(lit_str) = lit {
-                        name = lit_str.value();
-                    }
+                    let content = meta.value()?;
+                    let lit: syn::LitStr = content.parse()?;
+                    name = lit.value();
                 } else if meta.path.is_ident("description") {
-                    let lit: syn::Lit = meta.value()?.parse()?;
-                    if let syn::Lit::Str(lit_str) = lit {
-                        description = lit_str.value();
-                    }
+                    let content = meta.value()?;
+                    let lit: syn::LitStr = content.parse()?;
+                    description = lit.value();
                 }
                 Ok(())
             });
         }
     }
 
-    if name.is_empty() {
-        name = ident_to_snake_case(ident.to_string());
-    }
-
-    (
-        syn::LitStr::new(&name, proc_macro2::Span::call_site()),
-        syn::LitStr::new(&description, proc_macro2::Span::call_site()),
-    )
+    ToolMeta { name, description }
 }
 
-fn ident_to_snake_case(s: String) -> String {
+/// Extract doc comment from attributes
+fn extract_doc_from_attrs(attrs: &[Attribute]) -> Option<String> {
+    let mut docs = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("doc") {
+            if let Meta::NameValue(nv) = &attr.meta {
+                if let Expr::Lit(el) = &nv.value {
+                    if let Lit::Str(s) = &el.lit {
+                        for line in s.value().lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                docs.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if docs.is_empty() {
+        None
+    } else {
+        Some(docs.join(" "))
+    }
+}
+
+struct FnParam {
+    ident: syn::Ident,
+    ty: syn::Type,
+    doc_attrs: Vec<Attribute>,
+}
+
+fn extract_fn_params(
+    inputs: &Punctuated<FnArg, syn::Token![,]>,
+) -> Result<Vec<FnParam>, syn::Error> {
+    let mut result = Vec::new();
+
+    for arg in inputs.iter() {
+        match arg {
+            FnArg::Typed(typed) => {
+                let ident = match &*typed.pat {
+                    Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &typed.pat,
+                            "only simple identifiers are supported as tool parameters",
+                        ))
+                    }
+                };
+
+                // Extract doc comments from the parameter
+                let doc_attrs: Vec<Attribute> = typed
+                    .attrs
+                    .iter()
+                    .filter(|a| a.path().is_ident("doc"))
+                    .cloned()
+                    .collect();
+
+                result.push(FnParam {
+                    ident,
+                    ty: (*typed.ty).clone(),
+                    doc_attrs,
+                });
+            }
+            FnArg::Receiver(_recv) => {
+                return Err(syn::Error::new_spanned(
+                    _recv,
+                    "self parameters are not supported in #[tool] functions",
+                ))
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn parse_struct_meta(attrs: &[Attribute], input: &DeriveInput) -> (String, String) {
+    let helper_meta = extract_helper_meta(attrs);
+    let doc = extract_doc_from_attrs(attrs);
+
+    let name = if !helper_meta.name.is_empty() {
+        helper_meta.name
+    } else {
+        ident_to_snake_case(&input.ident.to_string())
+    };
+
+    let description = if !helper_meta.description.is_empty() {
+        helper_meta.description
+    } else {
+        doc.unwrap_or_default()
+    };
+
+    (name, description)
+}
+
+fn ident_to_snake_case(s: &str) -> String {
     let mut result = String::new();
     let mut prev_upper = false;
 
@@ -158,6 +627,27 @@ fn ident_to_snake_case(s: String) -> String {
         }
         result.push(c.to_lowercase().next().unwrap());
         prev_upper = c.is_uppercase();
+    }
+
+    result
+}
+
+/// Convert snake_case or camelCase to PascalCase
+fn snake_to_pascal(s: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = true;
+
+    for c in s.chars() {
+        if c == '_' {
+            capitalize_next = true;
+        } else {
+            if capitalize_next {
+                result.push(c.to_uppercase().next().unwrap());
+                capitalize_next = false;
+            } else {
+                result.push(c);
+            }
+        }
     }
 
     result
