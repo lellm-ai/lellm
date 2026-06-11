@@ -24,7 +24,7 @@ mod shared;
 
 use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{ChatRequest, Message, ToolError, ToolErrorKind, text_block};
-use lellm_macros::ToolDefinition;
+use lellm_macros::Tool;
 use lellm_provider::LlmProvider;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
@@ -42,7 +42,7 @@ struct CityResult {
     address: String, // 原始请求地址
 }
 
-#[derive(Deserialize, JsonSchema, ToolDefinition)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(
     name = "resolve_city",
     description = "将地址解析为 wttr.in 城市英文名。四级降级：别名表 → Nominatim → LLM → unknown。始终调用此工具，不要猜测。"
@@ -545,7 +545,7 @@ fn to_kebab(s: &str) -> String {
 
 // ─── Tool 2: http_get ───────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema, ToolDefinition)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(
     name = "http_get",
     description = "发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。"
