@@ -10,9 +10,9 @@
 #[path = "_shared/shared.rs"]
 mod shared;
 
-use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
+use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
-use lellm_macros::ToolDefinition;
+use lellm_macros::Tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 // ─── 通用 HTTP GET 工具 ─────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema, ToolDefinition)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(
     name = "http_get",
     description = "发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。"
@@ -44,25 +44,15 @@ fn http_get(url: &str) -> Result<String, ToolError> {
         })
 }
 
-fn register_http_tools() -> Vec<ToolRegistration> {
-    vec![ToolRegistration::safe(
-        HttpGetArgs::tool_definition(),
-        |args| {
-            let url = args
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move {
-                tokio::task::spawn_blocking(move || http_get(&url))
-                    .await
-                    .map_err(|e| ToolError {
-                        kind: ToolErrorKind::Internal,
-                        message: format!("任务失败: {e}"),
-                    })?
-            }
-        },
-    )]
+fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
+    vec![HttpGetArgs::safe(|args| async move {
+        tokio::task::spawn_blocking(move || http_get(&args.url))
+            .await
+            .map_err(|e| ToolError {
+                kind: ToolErrorKind::Internal,
+                message: format!("任务失败: {e}"),
+            })?
+    })]
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────

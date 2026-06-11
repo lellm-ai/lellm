@@ -28,16 +28,16 @@
 
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
-use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop};
+use lellm_agent::{AgentBuilder, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
-use lellm_macros::ToolDefinition as ToolDefinitionDerive;
+use lellm_macros::Tool;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 
 // ─── 定义工具 ───────────────────────────────────────────────────
 
 #[allow(dead_code)]
-#[derive(Deserialize, JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(
     name = "search_products",
     description = "搜索产品目录，返回匹配的产品列表"
@@ -48,7 +48,7 @@ struct SearchProductsArgs {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(name = "check_inventory", description = "检查指定产品的库存数量")]
 struct CheckInventoryArgs {
     /// 产品 ID
@@ -56,7 +56,7 @@ struct CheckInventoryArgs {
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, JsonSchema, ToolDefinitionDerive)]
+#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(name = "get_weather", description = "获取指定位置的天气信息")]
 struct GetWeatherArgs {
     /// 城市或地点名称
@@ -171,34 +171,17 @@ fn create_react_agent() -> ToolUseLoop {
 
     // 注册工具
     let tools = vec![
-        ToolRegistration::safe(SearchProductsArgs::tool_definition(), |args| {
-            let query = args
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move {
-                Ok(format!(
-                    "找到 5 个匹配\"{}\"的产品。前 5 个结果：WH-1000XM5, AirPods Pro, QC45, WF-1000XM4, HD600",
-                    query
-                ))
-            }
+        SearchProductsArgs::safe(|args| async move {
+            Ok(format!(
+                "找到 5 个匹配\"{}\"的产品。前 5 个结果：WH-1000XM5, AirPods Pro, QC45, WF-1000XM4, HD600",
+                args.query
+            ))
         }),
-        ToolRegistration::safe(CheckInventoryArgs::tool_definition(), |args| {
-            let product_id = args
-                .get("product_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move { Ok(format!("产品 {}：库存 10 件", product_id)) }
+        CheckInventoryArgs::safe(|args| async move {
+            Ok(format!("产品 {}：库存 10 件", args.product_id))
         }),
-        ToolRegistration::safe(GetWeatherArgs::tool_definition(), |args| {
-            let location = args
-                .get("location")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move { Ok(format!("{} 的天气：晴朗，25°C", location)) }
+        GetWeatherArgs::safe(|args| async move {
+            Ok(format!("{} 的天气：晴朗，25°C", args.location))
         }),
     ];
 
