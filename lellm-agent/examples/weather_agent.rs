@@ -38,7 +38,7 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone, serde::Serialize)]
 struct CityResult {
     city_en: String, // wttr.in 城市名 (kebab-case)，未知 → "unknown"
-    source: String,  // alias / nominatim / llm / unknown
+    source: String,  // alias / tencent / llm / unknown
     address: String, // 原始请求地址
 }
 
@@ -61,7 +61,7 @@ fn resolve_city(address: &str) -> CityResult {
             address: address.to_string(),
         };
     }
-    if let Some(result) = resolve_via_nominatim(address) {
+    if let Some(result) = resolve_via_tencent_map(address) {
         return result;
     }
     CityResult {
@@ -119,12 +119,16 @@ fn resolve_city(address: &str) -> CityResult {
 //     })
 // }
 
-//fn resolve_via_tencent(address: &str) -> Option<CityResult> {
-fn resolve_via_nominatim(address: &str) -> Option<CityResult> {
+/// 第二级降级：腾讯地图逆地理编码 → 提取 city 字段 → to_kebab()
+fn resolve_via_tencent_map(address: &str) -> Option<CityResult> {
+    static KEY_MISSING_ONCE: std::sync::Once = std::sync::Once::new();
+
     let api_key = match std::env::var("TENCENT_MAP_KEY") {
         Ok(ak) => ak,
-        Err(e) => {
-            tracing::debug!(address, error = %e, "TENCENT_MAP_KEY not set, skipping nominatim");
+        Err(_) => {
+            KEY_MISSING_ONCE.call_once(|| {
+                tracing::info!("TENCENT_MAP_KEY not set — 第二级降级（腾讯地图）将不可用");
+            });
             return None;
         }
     };
@@ -680,7 +684,7 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
                 .to_string();
             let provider = llm_provider.clone();
             async move {
-                // 第一、二级：alias + nominatim（阻塞线程）
+                // 第一、二级：alias + 腾讯地图（阻塞线程）
                 let address_for_blocking = address.clone();
                 let mut result =
                     tokio::task::spawn_blocking(move || resolve_city(&address_for_blocking))
@@ -692,7 +696,7 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
 
                 // 第三级 miss → 第四级：LLM 轻量推理
                 if result.source == "unknown" {
-                    tracing::debug!(address = %address, "alias+nominatim miss, trying LLM fallback");
+                    tracing::debug!(address = %address, "alias+tencent miss, trying LLM fallback");
                     if let Some(ref p) = provider {
                         if let Some(city) = resolve_via_llm(p, &address).await {
                             tracing::debug!(city = %city.city_en, "LLM fallback success");
