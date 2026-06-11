@@ -76,6 +76,9 @@ let provider = CodecProvider::new(
 | deepseek | `DEEPSEEK_BASE_URL` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com/v1` |
 | nvidia | `NVIDIA_BASE_URL` | `NVIDIA_API_KEY` | `https://integrate.api.nvidia.com/v1` |
 | anthropic | `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` |
+| google | `GOOGLE_BASE_URL` | `GOOGLE_API_KEY` | `https://generativelanguage.googleapis.com` |
+
+**OpenRouter 环境变量：** `OPENROUTER_API_KEY`（必需）+ `OPENROUTER_BASE_URL`（可选，默认 `https://openrouter.ai/api/v1`）。
 
 ### 单条消息调用
 
@@ -240,10 +243,41 @@ max_iterations = 3 的执行流程：
 |----------|-------|------|
 | OpenAI | `OpenAICompatCodec::openai()` | GPT-4o, GPT-5.4 等 |
 | Anthropic | `AnthropicCodec` | Claude Sonnet, Opus 等 |
+| Google | `GoogleCodec` | Gemini 2.0 Flash/Pro 等 |
 | NVIDIA | `OpenAICompatCodec::nvidia()` | OpenAI 兼容接口 |
 | DeepSeek | `OpenAICompatCodec::deepseek()` | OpenAI 兼容接口 |
 | vLLM | `OpenAICompatCodec::vllm()` | OpenAI 兼容接口 |
 | LLaMA | `OpenAICompatCodec::llama()` | OpenAI 兼容接口 |
+
+### OpenRouter 聚合网关
+
+OpenRouter 不是 Codec，只是 Transport（base_url + headers）。通过 `openrouter()` 便捷函数或 `CodecProvider::builder()` 使用：
+
+```rust
+use lellm::provider::{openrouter, OpenAICompatCodec, AnthropicCodec, GoogleCodec};
+
+// 从 OPENROUTER_API_KEY 环境变量加载
+let provider = openrouter(OpenAICompatCodec::openai())?;
+
+// 换协议只需换 Codec
+let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+let gemini_via_openrouter = openrouter(GoogleCodec)?;
+```
+
+### ProviderBuilder — 自定义 Headers
+
+```rust
+use lellm::provider::{CodecProvider, OpenAICompatCodec};
+
+let provider = CodecProvider::builder(OpenAICompatCodec::openai())
+    .base_url("https://openrouter.ai/api/v1")
+    .api_key("sk-or-...")
+    .header("HTTP-Referer", "https://mysite.com")
+    .header("X-Title", "My App")
+    .build()?;
+```
+
+**Header 合并优先级：** codec defaults → builder extra_headers → request headers（后者覆盖前者）。
 
 ## 运行示例
 
@@ -333,15 +367,16 @@ process_stream(&mut mock_sink, &codec, "test".into(), stream).await;
 lellm/
 ├── lellm/               # Facade 统一入口
 ├── lellm-core/          # 协议（Message, ChatRequest, LlmError 等）
-├── lellm-provider/      # Provider 适配层（OpenAI, Anthropic, ...）
+├── lellm-provider/      # Provider 适配层（OpenAI, Anthropic, Google, ...）
 │   ├── providers/       # Codec + CodecProvider
-│   │   ├── base.rs      # CodecProvider, ProviderConfig, AuthConfig
+│   │   ├── base.rs      # CodecProvider, ProviderConfig, AuthConfig, ProviderBuilder, openrouter()
 │   │   ├── codec.rs     # ChatCodec, ModelCapabilities, ProviderMeta, ProviderExtension
 │   │   ├── stream/      # 传输层解耦的流式处理管道
 │   │   │   ├── sse_parser.rs
 │   │   │   ├── stream_processor.rs
 │   │   │   └── tool_call_accumulator.rs
 │   │   ├── anthropic.rs
+│   │   ├── google.rs
 │   │   └── openai_compat.rs
 │   └── router.rs        # ModelRouter + ProviderRegistry
 ├── lellm-agent/         # Agent Runtime（ToolUseLoop, Executor, ...）

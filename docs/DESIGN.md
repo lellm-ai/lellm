@@ -153,9 +153,14 @@ pub trait ProviderMeta: Send + Sync {
     fn provider_id(&self) -> &str;
     fn default_base_url(&self) -> &'static str;
     fn auth_style(&self) -> AuthStyle;
+    fn default_headers(&self) -> HeaderMap { HeaderMap::new() }
     fn api_key_env(&self) -> Cow<'static, str>;  // 默认 {PROVIDER_ID}_API_KEY
 }
 ```
+
+`default_headers()` 允许 Codec 声明协议必需的默认 Headers（如 Anthropic 的 `anthropic-version`）。
+与 Builder 传入的 extra_headers 以及 CodecRequest 的 headers 三层合并：
+**codec defaults → builder extra_headers → request headers**（后者覆盖前者）。
 
 ### ProviderExtension — 生态扩展统一入口
 
@@ -175,6 +180,7 @@ pub struct CodecProvider<C: ProviderExtension> {
     codec: Arc<C>,        // Arc 共享，无需 Clone bound
     config: ProviderConfig,
     client: reqwest::Client,
+    extra_headers: HeaderMap,  // Builder 传入的额外 Headers
 }
 ```
 
@@ -193,6 +199,34 @@ pub struct CodecProvider<C: ProviderExtension> {
 | HTTP Client | ❌ | ❌ | ✅ |
 | base_url / api_key / timeout | ❌ | ❌ | ✅ |
 | ChannelSink (桥接) | ❌ | ❌ | ✅ |
+
+### ProviderBuilder — 链式构建
+
+> **v2026-06-11 新增：** `CodecProvider` 通过 `ProviderBuilder` 构建，支持自定义 Headers。
+
+**背景：** OpenRouter 等聚合网关需要自定义 Headers（`HTTP-Referer`、`X-Title`），但不同网关的 Header 需求不同。写死在 Codec 中不够灵活，纯 `ProviderConfig` 又缺少 Header 支持。
+
+**决定：** 引入 `ProviderBuilder<C>`，链式 API 构建 `CodecProvider`：
+
+```rust
+let provider = CodecProvider::builder(OpenAICompatCodec::openai())
+    .base_url("https://openrouter.ai/api/v1")
+    .api_key("sk-or-...")
+    .header("HTTP-Referer", "https://mysite.com")
+    .header("X-Title", "My App")
+    .build()?;
+```
+
+**Header 合并优先级：** codec defaults → builder extra_headers → request headers（后者覆盖前者）。
+
+**OpenRouter 便捷函数：**
+```rust
+// 从 OPENROUTER_API_KEY 环境变量加载
+let provider = openrouter(OpenAICompatCodec::openai())?;
+
+// 换协议只需换 Codec
+let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+```
 
 ### ProviderConfig — 连接配置
 

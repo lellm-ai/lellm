@@ -150,6 +150,8 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | LlmProvider trait | ✅ |
 | ProviderCodec 三权分立 | ✅ |
 | CodecProvider | ✅ |
+| ProviderBuilder + openrouter() | ✅ |
+| ProviderMeta::default_headers() | ✅ |
 | stream/ 传输层解耦 | ✅ |
 | SseParser + ToolCallAccumulator | ✅ |
 | EventSink + StreamEvent | ✅ |

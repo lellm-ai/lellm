@@ -14,7 +14,7 @@ pub mod router;
 
 #[cfg(feature = "mock")]
 pub use providers::mock::*;
-pub use providers::{anthropic::*, base::*, codec::*, openai_compat::*};
+pub use providers::{anthropic::*, base::*, codec::*, google::*, openai_compat::*};
 pub use router::{ModelRouter, ProviderRegistry, ResolvedModel, RouteEntry, TaskLevel};
 
 /// 流式调用返回的 Stream 类型别名。

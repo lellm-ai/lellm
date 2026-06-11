@@ -222,6 +222,17 @@ pub trait ProviderMeta: Send + Sync {
     /// 认证方式（决定使用 `bearer()` 还是 `header()` 构造配置）。
     fn auth_style(&self) -> AuthStyle;
 
+    /// 该 Codec 声明的默认 Headers。
+    ///
+    /// 与 Builder 传入的 extra_headers 以及 CodecRequest 的 headers 三层合并：
+    /// codec defaults → builder headers → request headers（后者覆盖前者）。
+    ///
+    /// 默认返回空 HeaderMap。子类可 override 以声明协议必需的 Header，
+    /// 如 Anthropic 的 `anthropic-version` 或 OpenRouter 的 `HTTP-Referer`。
+    fn default_headers(&self) -> HeaderMap {
+        HeaderMap::new()
+    }
+
     /// API Key 环境变量名，默认 `{PROVIDER_ID}_API_KEY`。
     ///
     /// 子类可 override 以支持非标准命名（如 `DASHSCOPE_API_KEY` vs `QWEN_API_KEY`），
