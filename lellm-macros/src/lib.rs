@@ -58,10 +58,10 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{quote, format_ident};
+use quote::{format_ident, quote};
 use syn::{
-    Attribute, DeriveInput, Expr, FnArg, Item, ItemFn, Lit, Meta, Pat,
-    parse_macro_input, parse_quote, punctuated::Punctuated,
+    Attribute, DeriveInput, Expr, FnArg, Item, ItemFn, Lit, Meta, Pat, parse_macro_input,
+    parse_quote, punctuated::Punctuated,
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -88,12 +88,9 @@ pub fn tool(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
         other => {
-            syn::Error::new_spanned(
-                other,
-                "#[tool] can only be applied to functions or structs",
-            )
-            .to_compile_error()
-            .into()
+            syn::Error::new_spanned(other, "#[tool] can only be applied to functions or structs")
+                .to_compile_error()
+                .into()
         }
     }
 }
@@ -109,10 +106,7 @@ pub fn derive_tool(input: TokenStream) -> TokenStream {
     match &input.data {
         syn::Data::Struct(data) => generate_tool_for_struct(&input, data),
         _ => {
-            let error = syn::Error::new(
-                Span::call_site(),
-                "Tool only supports struct types",
-            );
+            let error = syn::Error::new(Span::call_site(), "Tool only supports struct types");
             error.to_compile_error().into()
         }
     }
@@ -183,7 +177,9 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
 
     // Clean the original function (remove #[tool] attr)
     let mut cleaned_func = func.clone();
-    cleaned_func.attrs.retain(|attr| !attr.path().is_ident("tool"));
+    cleaned_func
+        .attrs
+        .retain(|attr| !attr.path().is_ident("tool"));
 
     let visibility = &func.vis;
 
@@ -257,9 +253,8 @@ fn expand_tool_for_struct(
     };
 
     // Remove old #[tool(...)] helper attrs to avoid leaking
-    s.attrs.retain(|attr| {
-        !(attr.path().is_ident("tool") && matches!(&attr.meta, Meta::List(_)))
-    });
+    s.attrs
+        .retain(|attr| !(attr.path().is_ident("tool") && matches!(&attr.meta, Meta::List(_))));
 
     // Generate the same output as derive(Tool) would
     let schema_fn = generate_schema_impl(struct_name);
@@ -380,10 +375,22 @@ fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
                     <Self as ::lellm_agent::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| {
-                            let args: Self = ::serde_json::from_value(args.clone())
-                                .expect("tool arguments should match schema");
-                            f(args)
+                        move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
+                            match ::serde_json::from_value::<Self>(args.clone()) {
+                                Ok(parsed) => {
+                                    let f = ::std::sync::Arc::clone(&f);
+                                    Box::pin(async move { f(parsed).await })
+                                }
+                                Err(e) => Box::pin(async move {
+                                    ::lellm_agent::ToolResult::Err(::lellm_core::ToolError {
+                                        kind: ::lellm_core::ToolErrorKind::InvalidInput,
+                                        message: format!(
+                                            "Failed to parse tool arguments: {}",
+                                            e
+                                        ),
+                                    })
+                                }),
+                            }
                         }
                     }
                 )
@@ -404,10 +411,22 @@ fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
                     category,
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| {
-                            let args: Self = ::serde_json::from_value(args.clone())
-                                .expect("tool arguments should match schema");
-                            f(args)
+                        move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
+                            match ::serde_json::from_value::<Self>(args.clone()) {
+                                Ok(parsed) => {
+                                    let f = ::std::sync::Arc::clone(&f);
+                                    Box::pin(async move { f(parsed).await })
+                                }
+                                Err(e) => Box::pin(async move {
+                                    ::lellm_agent::ToolResult::Err(::lellm_core::ToolError {
+                                        kind: ::lellm_core::ToolErrorKind::InvalidInput,
+                                        message: format!(
+                                            "Failed to parse tool arguments: {}",
+                                            e
+                                        ),
+                                    })
+                                }),
+                            }
                         }
                     }
                 )
@@ -424,10 +443,22 @@ fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
                     <Self as ::lellm_agent::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| {
-                            let args: Self = ::serde_json::from_value(args.clone())
-                                .expect("tool arguments should match schema");
-                            f(args)
+                        move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
+                            match ::serde_json::from_value::<Self>(args.clone()) {
+                                Ok(parsed) => {
+                                    let f = ::std::sync::Arc::clone(&f);
+                                    Box::pin(async move { f(parsed).await })
+                                }
+                                Err(e) => Box::pin(async move {
+                                    ::lellm_agent::ToolResult::Err(::lellm_core::ToolError {
+                                        kind: ::lellm_core::ToolErrorKind::InvalidInput,
+                                        message: format!(
+                                            "Failed to parse tool arguments: {}",
+                                            e
+                                        ),
+                                    })
+                                }),
+                            }
                         }
                     }
                 )
@@ -474,9 +505,8 @@ fn parse_tool_meta_tokens(args: &TokenStream2) -> ToolMeta {
                             if let proc_macro2::TokenTree::Literal(lit) = &tokens[i + 2] {
                                 let lit_str = lit.to_string();
                                 // Strip quotes
-                                let val = lit_str
-                                    .trim_matches(|c| c == '"' || c == '\'')
-                                    .to_string();
+                                let val =
+                                    lit_str.trim_matches(|c| c == '"' || c == '\'').to_string();
                                 if ident_name == "name" {
                                     name = val;
                                 } else if ident_name == "description" {
@@ -568,7 +598,7 @@ fn extract_fn_params(
                         return Err(syn::Error::new_spanned(
                             &typed.pat,
                             "only simple identifiers are supported as tool parameters",
-                        ))
+                        ));
                     }
                 };
 
@@ -590,7 +620,7 @@ fn extract_fn_params(
                 return Err(syn::Error::new_spanned(
                     _recv,
                     "self parameters are not supported in #[tool] functions",
-                ))
+                ));
             }
         }
     }
