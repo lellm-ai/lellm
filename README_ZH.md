@@ -26,7 +26,7 @@ let agent = AgentBuilder::new(model)
 
 let result = agent
     .execute(vec![Message::User {
-        content: text_block("今天东京天气如何？".into()),
+        content: text_block("今天上海天气如何？".into()),
     }])
     .await?;
 ```
@@ -252,7 +252,7 @@ for block in &response.content {
 ### Agent 循环与工具调用
 
 ```rust
-use lellm::agent::{AgentBuilder, ToolRegistration, StopReason};
+use lellm::agent::{AgentBuilder, StopReason};
 use lellm::core::{Message, text_block};
 use lellm::provider::ResolvedModel;
 use std::sync::Arc;
@@ -267,7 +267,7 @@ let model = ResolvedModel {
 // 构建 Agent
 let agent = AgentBuilder::new(model)
     .system_prompt("你是一个有用的助手。".into())
-    .tool(ToolRegistration::new("search", "搜索互联网信息", search_fn))
+    .tool(search_tool)
     .max_iterations(10)
     .max_output_tokens(8000)
     .build();
@@ -275,7 +275,7 @@ let agent = AgentBuilder::new(model)
 // 执行
 let result = agent
     .execute(vec![Message::User {
-        content: text_block("今天东京天气如何？".into()),
+        content: text_block("今天上海天气如何？".into()),
     }])
     .await?;
 

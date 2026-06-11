@@ -26,7 +26,7 @@ let agent = AgentBuilder::new(model)
 
 let result = agent
     .execute(vec![Message::User {
-        content: text_block("What's the weather in Tokyo?".into()),
+        content: text_block("What's the weather in Shanghai?".into()),
     }])
     .await?;
 ```
@@ -252,7 +252,7 @@ for block in &response.content {
 ### Agent Loop with Tools
 
 ```rust
-use lellm::agent::{AgentBuilder, ToolRegistration, StopReason};
+use lellm::agent::{AgentBuilder, StopReason};
 use lellm::core::{Message, text_block};
 use lellm::provider::ResolvedModel;
 
@@ -266,7 +266,7 @@ let model = ResolvedModel {
 // Build the agent
 let agent = AgentBuilder::new(model)
     .system_prompt("You are a helpful assistant.".into())
-    .tool(ToolRegistration::new("search", "Search the internet", search_fn))
+    .tool(search_tool)
     .max_iterations(10)
     .max_output_tokens(8000)
     .build();
@@ -274,7 +274,7 @@ let agent = AgentBuilder::new(model)
 // Execute
 let result = agent
     .execute(vec![Message::User {
-        content: text_block("What's the weather in Tokyo?".into()),
+        content: text_block("What's the weather in Shanghai?".into()),
     }])
     .await?;
 
