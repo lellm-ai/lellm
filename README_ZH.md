@@ -15,9 +15,19 @@ cargo add lellm
 ```
 
 ```rust
-let response = agent
-    .prompt("总结这份报告")
-    .execute()
+use lellm::agent::AgentBuilder;
+use lellm::core::{Message, text_block};
+
+let agent = AgentBuilder::new(model)
+    .system_prompt("你是一个有用的助手。".into())
+    .tool(weather_tool)
+    .max_iterations(10)
+    .build();
+
+let result = agent
+    .execute(vec![Message::User {
+        content: text_block("今天东京天气如何？".into()),
+    }])
     .await?;
 ```
 
@@ -193,12 +203,34 @@ lellm = { version = "0.1", features = ["full"] }
 ### 初始化 Provider
 
 ```rust
-use lellm::provider::CodecProvider;
-use lellm::provider::OpenAICompatCodec;
+use lellm::provider::{CodecProvider, OpenAICompatCodec};
 
 // 自动读取 OPENAI_BASE_URL + OPENAI_API_KEY
 let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
 ```
+
+**通过 OpenRouter**（聚合网关）：
+
+```rust
+use lellm::provider::{openrouter, OpenAICompatCodec, AnthropicCodec};
+
+// 从 OPENROUTER_API_KEY 加载
+let provider = openrouter(OpenAICompatCodec::openai())?;
+
+// 换协议只需换 Codec
+let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+```
+
+**支持的 Provider：**
+
+| Provider | Codec |
+|---|---|
+| OpenAI | `OpenAICompatCodec::openai()` |
+| Anthropic | `AnthropicCodec` |
+| Google | `GoogleCodec` |
+| DeepSeek | `OpenAICompatCodec::deepseek()` |
+| NVIDIA | `OpenAICompatCodec::nvidia()` |
+| vLLM / LLaMA | `OpenAICompatCodec::vllm()` / `::llama()` |
 
 ### 单条消息调用
 
@@ -221,13 +253,31 @@ for block in &response.content {
 
 ```rust
 use lellm::agent::{AgentBuilder, ToolRegistration, StopReason};
+use lellm::core::{Message, text_block};
+use lellm::provider::ResolvedModel;
+use std::sync::Arc;
 
-let agent = AgentBuilder::new(resolved)
+// 解析模型
+let model = ResolvedModel {
+    provider: Arc::new(provider),
+    model: "gpt-4o".into(),
+    context_window: None,
+};
+
+// 构建 Agent
+let agent = AgentBuilder::new(model)
+    .system_prompt("你是一个有用的助手。".into())
     .tool(ToolRegistration::new("search", "搜索互联网信息", search_fn))
     .max_iterations(10)
+    .max_output_tokens(8000)
     .build();
 
-let result = agent.execute(messages).await?;
+// 执行
+let result = agent
+    .execute(vec![Message::User {
+        content: text_block("今天东京天气如何？".into()),
+    }])
+    .await?;
 
 match result.stop_reason {
     StopReason::Complete => println!("完成，共 {} 轮", result.iterations),
@@ -247,7 +297,7 @@ let mut stream = provider.stream(&request).await?;
 while let Some(event) = stream.next().await {
     match event? {
         ProviderEvent::Token { token } => print!("{}", token),
-        ProviderEvent::Done { usage, .. } => {
+        ProviderEvent::ResponseComplete { usage, .. } => {
             if let Some(u) = usage {
                 eprintln!("\nToken: {}", u.total_tokens);
             }
@@ -255,6 +305,35 @@ while let Some(event) = stream.next().await {
         _ => {}
     }
 }
+```
+
+### 工具定义与宏
+
+```rust
+use lellm::agent::{ToolArgs, ToolRegistration};
+use lellm::macros::Tool;
+use lellm::core::{ToolError, ToolErrorKind};
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema, Tool)]
+#[tool(
+    name = "get_weather",
+    description = "获取指定城市的天气"
+)]
+struct GetWeatherArgs {
+    city: String,
+}
+
+// 使用 .safe() 注册 —— 错误被捕获并返回为 ToolError
+let tool = ToolRegistration::safe(
+    GetWeatherArgs::tool_definition(),
+    |args| async move {
+        let city = args.get("city").unwrap().as_str().unwrap().to_string();
+        // ... 工具逻辑 ...
+        Ok(format!("{} 的天气", city))
+    },
+);
 ```
 
 ---

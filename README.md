@@ -15,9 +15,19 @@ cargo add lellm
 ```
 
 ```rust
-let response = agent
-    .prompt("Summarize this report")
-    .execute()
+use lellm::agent::AgentBuilder;
+use lellm::core::{Message, text_block};
+
+let agent = AgentBuilder::new(model)
+    .system_prompt("You are a helpful assistant.".into())
+    .tool(weather_tool)
+    .max_iterations(10)
+    .build();
+
+let result = agent
+    .execute(vec![Message::User {
+        content: text_block("What's the weather in Tokyo?".into()),
+    }])
     .await?;
 ```
 
@@ -193,12 +203,34 @@ lellm = { version = "0.1", features = ["full"] }
 ### Initialize a Provider
 
 ```rust
-use lellm::provider::CodecProvider;
-use lellm::provider::OpenAICompatCodec;
+use lellm::provider::{CodecProvider, OpenAICompatCodec};
 
 // Auto-load from OPENAI_BASE_URL + OPENAI_API_KEY
 let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
 ```
+
+**Via OpenRouter** (aggregation gateway):
+
+```rust
+use lellm::provider::{openrouter, OpenAICompatCodec, AnthropicCodec};
+
+// Load from OPENROUTER_API_KEY
+let provider = openrouter(OpenAICompatCodec::openai())?;
+
+// Switch protocol by swapping the codec
+let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+```
+
+**Supported providers:**
+
+| Provider | Codec |
+|---|---|
+| OpenAI | `OpenAICompatCodec::openai()` |
+| Anthropic | `AnthropicCodec` |
+| Google | `GoogleCodec` |
+| DeepSeek | `OpenAICompatCodec::deepseek()` |
+| NVIDIA | `OpenAICompatCodec::nvidia()` |
+| vLLM / LLaMA | `OpenAICompatCodec::vllm()` / `::llama()` |
 
 ### Single Message Call
 
@@ -221,13 +253,30 @@ for block in &response.content {
 
 ```rust
 use lellm::agent::{AgentBuilder, ToolRegistration, StopReason};
+use lellm::core::{Message, text_block};
+use lellm::provider::ResolvedModel;
 
-let agent = AgentBuilder::new(resolved)
+// Resolve a model from the provider
+let model = ResolvedModel {
+    provider: Arc::new(provider),
+    model: "gpt-4o".into(),
+    context_window: None,
+};
+
+// Build the agent
+let agent = AgentBuilder::new(model)
+    .system_prompt("You are a helpful assistant.".into())
     .tool(ToolRegistration::new("search", "Search the internet", search_fn))
     .max_iterations(10)
+    .max_output_tokens(8000)
     .build();
 
-let result = agent.execute(messages).await?;
+// Execute
+let result = agent
+    .execute(vec![Message::User {
+        content: text_block("What's the weather in Tokyo?".into()),
+    }])
+    .await?;
 
 match result.stop_reason {
     StopReason::Complete => println!("Done in {} iterations", result.iterations),
@@ -247,7 +296,7 @@ let mut stream = provider.stream(&request).await?;
 while let Some(event) = stream.next().await {
     match event? {
         ProviderEvent::Token { token } => print!("{}", token),
-        ProviderEvent::Done { usage, .. } => {
+        ProviderEvent::ResponseComplete { usage, .. } => {
             if let Some(u) = usage {
                 eprintln!("\nTokens: {}", u.total_tokens);
             }
@@ -255,6 +304,35 @@ while let Some(event) = stream.next().await {
         _ => {}
     }
 }
+```
+
+### Tool Definition with Macros
+
+```rust
+use lellm_agent::{ToolArgs, ToolRegistration};
+use lellm_macros::Tool;
+use lellm_core::{ToolError, ToolErrorKind};
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema, Tool)]
+#[tool(
+    name = "get_weather",
+    description = "Get the current weather for a city"
+)]
+struct GetWeatherArgs {
+    city: String,
+}
+
+// Register with .safe() — errors are caught and returned as ToolError
+let tool = ToolRegistration::safe(
+    GetWeatherArgs::tool_definition(),
+    |args| async move {
+        let city = args.get("city").unwrap().as_str().unwrap().to_string();
+        // ... tool logic ...
+        Ok(format!("Weather for {}", city))
+    },
+);
 ```
 
 ---
