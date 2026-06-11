@@ -73,6 +73,17 @@ impl ContextCompactor for LocalCompactor {
         let after_tokens = super::estimation::estimate_tokens(&result);
         let removed = before_count.saturating_sub(result.len());
 
+        if removed > 0 {
+            tracing::debug!(
+                before_tokens,
+                after_tokens,
+                removed_messages = removed,
+                before_count,
+                after_count = result.len(),
+                "LocalCompactor: context compressed"
+            );
+        }
+
         CompactionResult {
             messages: result,
             before_tokens,

@@ -178,9 +178,40 @@ fn fix_common_errors(text: &str) -> String {
         .replace(", ]", "]")
         .replace(",\t]", "]")
         .replace(",]", "]");
-    // Fix single quotes to double quotes (simple replacement)
-    s = s.replace('\'', "\"");
+    // Fix single quotes to double quotes using a lightweight state machine
+    // that respects double-quoted strings (don't touch apostrophes inside them).
+    s = normalize_single_quote_json(&s);
     s
+}
+
+/// Normalize single-quoted JSON to double-quoted JSON using a lightweight state machine.
+///
+/// Respects double-quoted strings so apostrophes inside them are preserved:
+/// `{'text': "It's"}` → `{"text": "It's"}`
+///
+/// Also handles escape sequences: `{"a": "test\"ed"}` — escaped quotes don't flip state.
+fn normalize_single_quote_json(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut escaped = false;
+
+    for ch in s.chars() {
+        match ch {
+            '"' if !escaped && !in_single => {
+                in_double = !in_double;
+                out.push(ch);
+            }
+            '\'' if !escaped && !in_double => {
+                in_single = !in_single;
+                out.push('"');
+            }
+            _ => out.push(ch),
+        }
+        escaped = ch == '\\' && !escaped;
+    }
+
+    out
 }
 
 /// Extract the outermost { ... } from the content.
@@ -324,6 +355,55 @@ mod tests {
     fn fix_common_errors_removes_trailing_commas() {
         assert_eq!(fix_common_errors(r#"{"a":1,}"#), r#"{"a":1}"#);
         assert_eq!(fix_common_errors(r#"{"a":[1,]}"#), r#"{"a":[1]}"#);
+    }
+
+    #[test]
+    fn normalize_single_quote_json_pure_single_quotes() {
+        assert_eq!(
+            normalize_single_quote_json(r#"{'action':'deploy'}"#),
+            r#"{"action":"deploy"}"#
+        );
+    }
+
+    #[test]
+    fn normalize_single_quote_json_preserves_apostrophe_in_double_string() {
+        assert_eq!(
+            normalize_single_quote_json(r#"{'text': "It's"}"#),
+            r#"{"text": "It's"}"#
+        );
+    }
+
+    #[test]
+    fn normalize_single_quote_json_no_change_if_double() {
+        assert_eq!(
+            normalize_single_quote_json(r#"{"a": "b"}"#),
+            r#"{"a": "b"}"#
+        );
+    }
+
+    #[test]
+    fn normalize_single_quote_json_respects_escape() {
+        assert_eq!(
+            normalize_single_quote_json(r#"{"a": "test\"ed"}"#),
+            r#"{"a": "test\"ed"}"#
+        );
+    }
+
+    #[test]
+    fn normalize_single_quote_json_double_backslash() {
+        // \\ should reset escaped state, so next " flips in_double
+        assert_eq!(
+            normalize_single_quote_json(r#"{"a": "C:\\\"test"}"#),
+            r#"{"a": "C:\\\"test"}"#
+        );
+    }
+
+    #[test]
+    fn robust_parse_mixed_quotes_with_trailing_comma() {
+        // Single quotes for keys, double-quoted value with apostrophe, trailing comma
+        let result = robust_parse(r#"{'text': "It's a test", 'count': 5,}"#);
+        assert_eq!(result["text"], "It's a test");
+        assert_eq!(result["count"], 5);
     }
 
     #[test]
