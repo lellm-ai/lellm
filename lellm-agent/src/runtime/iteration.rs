@@ -2,16 +2,18 @@
 //!
 //! 包含带 Fallback 的重试执行器、流式迭代、工具串行执行等。
 
-use lellm_core::{ChatRequest, ChatResponse, LlmError, Message};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolCall, ToolError, ToolErrorKind};
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use super::LoopState;
+use super::ResolvedRound;
 use super::context::{ContextBudget, estimate_text};
 use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
-use super::tools::ToolExecutor;
+use super::retry::RetryPolicy;
+use super::tools::{ToolExecutor, ToolSnapshot};
 
 // ─── 带 Fallback 的执行器 ────────────────────────────────────────
 
@@ -67,17 +69,18 @@ pub async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
     tx.send(event).await.is_ok()
 }
 
-/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具。
+/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具（使用快照）。
 ///
-/// **设计决策（见 docs/DESIGN.md §8）：** 流式模式工具执行强制串行，
+/// **设计决策：** 流式模式工具执行强制串行，
 /// 即使工具标记为 Safe。原因：ToolStart/ToolEnd 与 Token 交错会让消费者解析更复杂。
 /// v0.2 再优化流式分组并发。
 ///
 /// **工具结果截断**统一在 `LoopState.push_tool_results()` 中执行，此处不截断。
-pub async fn emit_and_execute_tools(
+pub(super) async fn emit_and_execute_tools_with(
     tx: &Sender<AgentEvent>,
-    executor: &ToolExecutor,
-    tool_calls: &[lellm_core::ToolCall],
+    snapshot: &ToolSnapshot,
+    retry_policy: &RetryPolicy,
+    tool_calls: &[ToolCall],
 ) -> Option<Vec<Message>> {
     let mut results = Vec::new();
 
@@ -94,7 +97,12 @@ pub async fn emit_and_execute_tools(
             return None;
         }
 
-        let raw_result = executor.execute_with_emission(tc, tx).await;
+        let raw_result = match snapshot.get(&tc.name) {
+            Some(entry) => retry_policy
+                .execute_with_retry_and_emission(&entry.func, &tc.arguments, tx, &tc.id)
+                .await,
+            None => Err(ToolError::not_found(format!("unknown tool: {}", tc.name))),
+        };
 
         if !emit(
             tx,
@@ -176,9 +184,7 @@ pub(super) enum StreamIterResult {
 ///
 /// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
 ///
-/// `max_output_tokens` — 单轮输出的 Token 上限（保险丝），在流式消费时实时检查。
-/// `max_reasoning_tokens` — 单轮推理的 Token 上限（保险丝），可选。
-/// `stream_thinking` — 是否向消费者发射 ThinkingDelta 事件（不影响预算检查）。
+/// `round` — 预解析的 ResolvedRound（快照 + 定义），充当单轮真理之源。
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
@@ -191,6 +197,7 @@ async fn process_stream_iteration(
     max_output_tokens: u32,
     max_reasoning_tokens: Option<u32>,
     stream_thinking: bool,
+    round: ResolvedRound,
 ) -> Result<StreamIterResult, LlmError> {
     use futures_util::StreamExt;
 
@@ -299,8 +306,13 @@ async fn process_stream_iteration(
                 state.add_output_from_content(&response.content);
                 state.add_tool_calls(pending_tool_calls.len());
 
-                let results =
-                    emit_and_execute_tools(tx, executor, &pending_tool_calls).await;
+                let results = emit_and_execute_tools_with(
+                    tx,
+                    &round.snapshot,
+                    &executor.retry_policy(),
+                    &pending_tool_calls,
+                )
+                .await;
                 if results.is_none() {
                     return Ok(StreamIterResult::Cancelled {
                         response: Some(response),
@@ -361,6 +373,7 @@ pub(super) async fn do_stream_iteration(
     budget: ContextBudget,
     max_output_tokens: u32,
     stream_thinking: bool,
+    round: ResolvedRound,
 ) -> StreamIterationResult {
     let max_reasoning_tokens = req.max_reasoning_tokens;
 
@@ -393,6 +406,7 @@ pub(super) async fn do_stream_iteration(
         max_output_tokens,
         max_reasoning_tokens,
         stream_thinking,
+        round,
     )
     .await;
 

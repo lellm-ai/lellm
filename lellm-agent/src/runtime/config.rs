@@ -4,13 +4,13 @@
 //! - `ToolUseDeps` — 策略服务，Arc 包裹
 //! - `build_request_*` — 请求构建辅助函数
 
-use lellm_core::{ChatRequest, LlmError, Message};
+use lellm_core::{ChatRequest, LlmError, Message, ToolDefinition};
 use lellm_provider::ResolvedModel;
 
 use super::context::ContextBudget;
 use super::fallback::FallbackStrategy;
 use super::request_opts::RequestOptions;
-use super::tools::ToolExecutor;
+use super::retry::RetryPolicy;
 use std::sync::Arc;
 
 // ─── 配置（纯参数）──────────────────────────────────────────────
@@ -73,6 +73,8 @@ pub struct ToolUseConfig {
     /// **重要：** 此字段控制框架行为（Event 管道），不属于协议参数。
     /// 不应出现在 `ChatRequest` 中（Codec 不应看到此字段）。
     pub stream_thinking: bool,
+    /// 工具重试策略
+    pub retry_policy: RetryPolicy,
 }
 
 impl Default for ToolUseConfig {
@@ -86,6 +88,7 @@ impl Default for ToolUseConfig {
             context_budget: ContextBudget::default(),
             request_options: RequestOptions::default(),
             stream_thinking: false,
+            retry_policy: RetryPolicy::default(),
         }
     }
 }
@@ -139,17 +142,25 @@ pub(super) fn build_request_messages_inner(
 ///
 /// 先构建基础请求（Agent 层注入 model/messages/tools/max_tokens），
 /// 再应用 RequestOptions 非默认值覆盖。
+///
+/// `definitions` — 预解析的工具定义列表（从 ResolvedRound 获取）。
 pub(super) fn build_request_inner(
     model: &ResolvedModel,
-    executor: &ToolExecutor,
     messages: &[Message],
     max_output_tokens: u32,
     request_options: &RequestOptions,
+    definitions: &[ToolDefinition],
 ) -> ChatRequest {
+    let tools = if definitions.is_empty() {
+        None
+    } else {
+        Some(definitions.to_vec())
+    };
+
     let mut req = ChatRequest {
         model: model.model.clone(),
         messages: messages.to_vec(),
-        tools: executor.has_tools().then(|| executor.definitions()),
+        tools,
         max_tokens: Some(max_output_tokens),
         temperature: None,
         top_p: None,
@@ -172,20 +183,22 @@ pub(super) fn build_request_inner(
 ///
 /// 当 `RequestOptions` 设置了 `tool_choice` 时，仅在第一轮注入；
 /// 后续轮次由 LLM 自主决定是否调用工具。
+///
+/// `definitions` — 预解析的工具定义列表（从 ResolvedRound 获取）。
 pub(super) fn build_request_inner_with_round(
     model: &ResolvedModel,
-    executor: &ToolExecutor,
     messages: &[Message],
     max_output_tokens: u32,
     request_options: &RequestOptions,
     iteration: usize,
+    definitions: &[ToolDefinition],
 ) -> ChatRequest {
     let mut req = build_request_inner(
         model,
-        executor,
         messages,
         max_output_tokens,
         request_options,
+        definitions,
     );
 
     // 如果 RequestOptions 设置了 tool_choice 且不是第一轮，清除它

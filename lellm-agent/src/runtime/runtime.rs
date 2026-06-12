@@ -8,13 +8,14 @@
 //! ```text
 //! ToolUseLoop
 //! ├── model:       ResolvedModel     (Provider + model name)
-//! ├── executor:    ToolExecutor      (工具注册表 + 执行引擎)
+//! ├── executor:    ToolExecutor      (ToolCatalog + 执行引擎)
 //! ├── config:      ToolUseConfig     (纯参数, Clone + Send + Sync)
 //! └── deps:        ToolUseDeps       (策略服务, Arc 包裹)
 //! ```
 
 use lellm_core::{ChatResponse, LlmError, Message};
 use lellm_provider::ResolvedModel;
+use std::sync::Arc;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_messages_inner, empty_response};
 use super::context::{
@@ -24,7 +25,28 @@ use super::context::{
 use super::event::{AgentEvent, AgentStream, StopReason};
 use super::fallback::{FallbackAction, FallbackContext};
 use super::iteration::{StreamIterResult, do_stream_iteration, emit, execute_with_fallback};
-use super::tools::ToolExecutor;
+use super::tools::{execute_batch_with, ToolExecutor, ToolSnapshot};
+
+// ─── 本轮解析数据 ────────────────────────────────────────────────
+
+/// 本轮对话锁定的快照 + 定义。
+///
+/// 一旦创建，内容不再变化。充当单轮的"真理之源"。
+pub struct ResolvedRound {
+    /// 本轮对话锁定的快照
+    pub snapshot: Arc<ToolSnapshot>,
+    /// 为当前 LLM 供给的工具定义（已在前置阶段从快照中提取并平铺）
+    pub definitions: Vec<lellm_core::ToolDefinition>,
+}
+
+impl ResolvedRound {
+    pub fn new(snapshot: Arc<ToolSnapshot>) -> Self {
+        Self {
+            definitions: snapshot.definitions().to_vec(),
+            snapshot,
+        }
+    }
+}
 
 // ─── 循环状态机 ───────────────────────────────────────────────
 
@@ -113,9 +135,6 @@ impl LoopState {
     }
 
     /// 追加工具执行结果到历史。
-    ///
-    /// 在注入前对成功结果执行截断（`max_tool_result_chars`），
-    /// 失败结果不截断（错误信息应完整保留）。
     pub fn push_tool_results(
         &mut self,
         results: Vec<Message>,
@@ -163,7 +182,6 @@ impl LoopState {
     }
 
     /// 对消息历史执行压缩。
-    /// 返回压缩结果（用于发射事件），`None` 表示无需压缩。
     pub fn compact(
         &mut self,
         budget: &ContextBudget,
@@ -189,27 +207,22 @@ impl LoopState {
         }
     }
 
-    /// 构建正常完成结果
     pub fn finish_complete(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::Complete, response)
     }
 
-    /// 构建达到最大轮次结果
     pub fn finish_max_iterations(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::MaxIterationsReached, response)
     }
 
-    /// 构建外部取消结果
     pub fn finish_cancelled(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::Cancelled, response)
     }
 
-    /// 构建输出预算超限结果
     pub fn finish_output_budget(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::OutputBudgetExceeded, response)
     }
 
-    /// 构建推理预算超限结果
     pub fn finish_reasoning_budget(&self, response: ChatResponse) -> ToolUseResult {
         self.finish(StopReason::ReasoningBudgetExceeded, response)
     }
@@ -224,12 +237,10 @@ pub struct ToolUseResult {
     pub response: ChatResponse,
     pub messages: Vec<Message>,
     pub iterations: usize,
-    /// 执行过程中调用的工具总次数
     pub tool_calls_executed: usize,
 }
 
 impl ToolUseResult {
-    /// 仅 `StopReason::Complete` 返回 `true`。
     pub fn is_success(&self) -> bool {
         matches!(self.stop_reason, StopReason::Complete)
     }
@@ -240,22 +251,6 @@ impl ToolUseResult {
 /// 管理 LLM 与工具调用闭环。
 ///
 /// 内部全为 Arc/Clone，clone 为 O(1)，支持并发 execute。
-///
-/// # 构造
-///
-/// **推荐（Builder API）：**
-/// ```rust,ignore
-/// let agent = AgentBuilder::new(model)
-///     .system_prompt("你是助手".into())
-///     .tool(search_tool)
-///     .max_iterations(20)
-///     .build();
-/// ```
-///
-/// **高级（直接构造）：**
-/// ```rust,ignore
-/// let agent = ToolUseLoop::new(model, executor, config, deps);
-/// ```
 #[derive(Clone)]
 pub struct ToolUseLoop {
     model: ResolvedModel,
@@ -265,16 +260,12 @@ pub struct ToolUseLoop {
 }
 
 impl ToolUseLoop {
-    /// 构造 ToolUseLoop。
-    ///
-    /// `config` 为纯参数，`deps` 为策略服务。
     pub fn new(
         model: ResolvedModel,
         executor: ToolExecutor,
         config: ToolUseConfig,
         deps: ToolUseDeps,
     ) -> Self {
-        // 启动时检查：stream_thinking 开启但 Provider 不支持
         if config.stream_thinking {
             let caps = model.provider.capabilities_for(&model.model);
             if !caps.supports_stream_thinking {
@@ -306,12 +297,6 @@ impl ToolUseLoop {
     }
 
     /// 非流式执行
-    ///
-    /// 语义：
-    /// - `Ok(ToolUseResult)` — Agent 层完成（含 MaxIterationsReached）
-    /// - `Err(LlmError)` — Provider 调用失败
-    ///
-    /// `&self` 借用，不消费 self — 支持复用同一个 agent 做多次对话。
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
         let mut state = LoopState::new(initial_messages);
@@ -319,7 +304,6 @@ impl ToolUseLoop {
         let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
         loop {
-            // 1. 检查终止 + 推进迭代（借用 state）
             if state.reached_max(self.config.max_iterations) {
                 return Ok(
                     state.finish_max_iterations(last_response.unwrap_or_else(empty_response))
@@ -328,17 +312,20 @@ impl ToolUseLoop {
             state.next_iteration();
             state.compact(&self.config.context_budget, &*compactor);
 
-            // 2. 构建请求（借用 state）
+            // 1.5 解析本轮工具快照（每轮一次，固定工具集）
+            let round = ResolvedRound::new(self.executor.snapshot().await);
+
+            // 2. 构建请求
             let req = super::config::build_request_inner_with_round(
                 &self.model,
-                &self.executor,
                 &state.messages,
                 self.config.max_output_tokens,
                 &self.config.request_options,
                 state.iterations,
+                &round.definitions,
             );
 
-            // 3. 执行 Provider（需要 state 快照）
+            // 3. 执行 Provider
             let iteration = state.iterations;
             let msg_snapshot = state.messages.clone();
             let response = execute_with_fallback(
@@ -351,14 +338,6 @@ impl ToolUseLoop {
             last_response = Some(response.clone());
 
             // 4. 单轮推理预算检查（非流式路径）
-            //
-            // `max_reasoning_tokens` 的两种语义：
-            // - 流式: Hard limit — 达到限额当场切断 stream，省钱
-            // - 非流式: Soft limit — response 已完整返回，只能事后检测并标记
-            //
-            // 这里做的是"检测"：发现超额就终止 agent loop，
-            // 把完整 response 包成 `ReasoningBudgetExceeded` 返回，
-            // 让调用方知道这一轮推理超标了。
             if let Some(limit) = self.config.request_options.max_reasoning_tokens {
                 let round_reasoning: usize = response
                     .content
@@ -378,7 +357,7 @@ impl ToolUseLoop {
                 }
             }
 
-            // 5. 后处理响应（借用 state）
+            // 5. 后处理响应
             state.add_output_from_content(&response.content);
 
             if state.exceeded_total_output(self.config.max_total_output_tokens) {
@@ -397,13 +376,17 @@ impl ToolUseLoop {
             state.push_assistant(response.content.clone());
             state.add_tool_calls(tool_calls.len());
 
-            let batch = self.executor.execute_batch(&tool_calls).await;
+            let batch = execute_batch_with(
+                &tool_calls,
+                &round.snapshot,
+                &self.executor.retry_policy(),
+            )
+            .await;
 
             if batch.panicked {
                 tracing::warn!("tool batch task panicked — error results filled in by executor");
             }
 
-            // 工具结果截断统一在 push_tool_results() 中执行
             state.push_tool_results(batch.results, &self.config.context_budget);
 
             tracing::debug!(
@@ -415,13 +398,6 @@ impl ToolUseLoop {
     }
 
     /// 流式执行，返回事件接收器
-    ///
-    /// **Agent Stream Contract：**
-    /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
-    /// - 业务失败：`LoopError` 恰好一次，然后 channel 关闭
-    /// - 运行时异常：channel 直接关闭（未收到终态事件）
-    ///
-    /// `&self` 借用，不消费 self — 支持复用同一个 agent。
     pub fn execute_stream(&self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let model = self.model.clone();
@@ -475,16 +451,19 @@ impl ToolUseLoop {
                     .await;
                 }
 
+                // 解析本轮工具快照（每轮一次，固定工具集）
+                let round = ResolvedRound::new(executor.snapshot().await);
+
                 let req = super::config::build_request_inner_with_round(
                     &model,
-                    &executor,
                     &state.messages,
                     config.max_output_tokens,
                     &config.request_options,
                     state.iterations,
+                    &round.definitions,
                 );
 
-                // 内联 fallback 重试循环 — 不用闭包捕获，消除 _for_fallback 变量爆炸。
+                // 内联 fallback 重试循环
                 let iteration = state.iterations;
                 let attempt_state = state.clone();
                 let mut attempt: usize = 1;
@@ -499,6 +478,7 @@ impl ToolUseLoop {
                         config.context_budget.clone(),
                         config.max_output_tokens,
                         config.stream_thinking,
+                        round.clone(),
                     )
                     .await;
 
@@ -512,7 +492,6 @@ impl ToolUseLoop {
                                 "stream iteration failed, fallback handling"
                             );
 
-                            // stream 已打开 → 事件可能已发出 → 禁止 Retry，直接 Abort
                             if iter_result.stream_started {
                                 let e: LlmError = err.clone();
                                 break Err(e);
@@ -547,7 +526,7 @@ impl ToolUseLoop {
                     Err(e) => Err(e),
                 };
 
-                // 总预算检查（与非流式路径对齐）
+                // 总预算检查
                 if state.exceeded_total_output(config.max_total_output_tokens) {
                     let _ = emit(
                         &tx,
@@ -571,7 +550,7 @@ impl ToolUseLoop {
                 }
 
                 match result {
-                    Ok(StreamIterResult::Continue { response, .. }) => {
+                    Ok(StreamIterResult::Continue { response }) => {
                         last_response = Some(response);
                     }
                     Ok(StreamIterResult::Complete { response }) => {

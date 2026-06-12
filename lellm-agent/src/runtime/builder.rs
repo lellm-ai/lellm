@@ -25,16 +25,19 @@ use super::fallback::FallbackStrategy;
 use super::request_opts::RequestOptions;
 use super::retry::RetryPolicy;
 use super::runtime::ToolUseLoop;
-use super::tools::{ToolExecutor, ToolRegistration};
+use super::tools::{CompositeCatalog, StaticCatalog, ToolCatalog, ToolExecutor, ToolRegistration};
 
 /// Agent 链式构建器 — 推荐的 Agent 创建方式。
 ///
-/// 内部持有构建参数，`build()` 时组装为 `ToolUseConfig` + `ToolUseDeps`，
+/// 内部收集静态工具和动态目录，`build()` 时组装为 `ToolCatalog`，
 /// 再传给 `ToolUseLoop::new()`。所有 setter 返回 `self`（不借用），
 /// 支持流畅的链式调用。
 pub struct AgentBuilder {
     model: ResolvedModel,
-    executor: ToolExecutor,
+    /// 收集通过 `.tool()` 注册的本地静态工具（最高优先级）
+    static_tools: Vec<ToolRegistration>,
+    /// 收集通过 `.catalog()` 注册的动态目录（按注册顺序，先绑定的优先级高于后绑定的）
+    catalogs: Vec<Arc<dyn ToolCatalog>>,
     config: ToolUseConfig,
     deps: ToolUseDeps,
 }
@@ -44,7 +47,8 @@ impl AgentBuilder {
     pub fn new(model: ResolvedModel) -> Self {
         Self {
             model,
-            executor: ToolExecutor::default(),
+            static_tools: Vec::new(),
+            catalogs: Vec::new(),
             config: ToolUseConfig::default(),
             deps: ToolUseDeps::default(),
         }
@@ -52,17 +56,35 @@ impl AgentBuilder {
 
     /// 注册工具。
     pub fn tool(mut self, reg: ToolRegistration) -> Self {
-        let name = reg.definition.name.clone();
-        self.executor.register(&name, reg);
+        self.static_tools.push(reg);
         self
     }
 
     /// 批量注册工具。
     pub fn tools(mut self, registrations: impl IntoIterator<Item = ToolRegistration>) -> Self {
-        for reg in registrations {
-            let name = reg.definition.name.clone();
-            self.executor.register(&name, reg);
-        }
+        self.static_tools.extend(registrations);
+        self
+    }
+
+    /// 绑定动态工具目录（MCP、插件系统等）。
+    ///
+    /// 可调用多次。按注册顺序，先绑定的优先级高于后绑定的。
+    /// 静态工具（`.tool()`）永远拥有最高优先级。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use lellm_agent::{AgentBuilder, ToolCatalog};
+    /// use lellm_mcp::{McpCatalog, McpClient};
+    ///
+    /// let client = Arc::new(McpClient::with_transport(transport));
+    /// let catalog = McpCatalog::discover(client).await?;
+    /// let agent = AgentBuilder::new(model)
+    ///     .catalog(Arc::new(catalog))
+    ///     .build();
+    /// ```
+    pub fn catalog(mut self, catalog: Arc<dyn ToolCatalog>) -> Self {
+        self.catalogs.push(catalog);
         self
     }
 
@@ -79,9 +101,6 @@ impl AgentBuilder {
     }
 
     /// 设置整个 Agent Run 的最大输出 token 总数。
-    ///
-    /// 防止多轮工具调用导致总输出失控。达到阈值时立即停止，
-    /// 返回 `StopReason::OutputBudgetExceeded`。
     pub fn max_total_output_tokens(mut self, max: u32) -> Self {
         self.config.max_total_output_tokens = Some(max);
         self
@@ -96,8 +115,6 @@ impl AgentBuilder {
     // ─── RequestOptions 快捷 setter ──────────────────────────
 
     /// 设置完整的 RequestOptions（覆盖所有生成参数）。
-    ///
-    /// 内部包裹 `ChatRequest`，与 core 层零重复定义。
     pub fn request_options(mut self, opts: RequestOptions) -> Self {
         self.config.request_options = opts;
         self
@@ -122,8 +139,6 @@ impl AgentBuilder {
     }
 
     /// 设置工具选择策略（仅首轮生效）。
-    ///
-    /// 第一轮强制指定工具选择，后续轮次由 LLM 自主决定。
     pub fn tool_choice(mut self, choice: ToolChoice) -> Self {
         self.config.request_options.tool_choice = Some(choice);
         self
@@ -154,19 +169,12 @@ impl AgentBuilder {
     }
 
     /// 设置单轮推理 Token 上限。
-    ///
-    /// 与 `max_output_tokens` 分离：thinking 是模型内部推理，不计入输出预算。
-    /// 透传给 Provider 层，由 Adapter 映射为协议特定字段。
     pub fn reasoning_budget(mut self, max: u32) -> Self {
         self.config.request_options.max_reasoning_tokens = Some(max);
         self
     }
 
     /// 设置整个 Agent Run 的最大推理 Token 总数。
-    ///
-    /// 双层设计：
-    /// - `reasoning_budget(max)` — 单轮推理上限，透传给 Provider
-    /// - `max_total_reasoning_tokens(max)` — 整个 Agent Run 的累计推理上限
     pub fn max_total_reasoning_tokens(mut self, max: u32) -> Self {
         self.config.max_total_reasoning_tokens = Some(max);
         self
@@ -178,9 +186,9 @@ impl AgentBuilder {
         self
     }
 
-    /// 设置工具重试策略（不影响已注册的工具）。
+    /// 设置工具重试策略。
     pub fn retry_policy(mut self, policy: RetryPolicy) -> Self {
-        self.executor.set_retry_policy(policy);
+        self.config.retry_policy = policy;
         self
     }
 
@@ -193,9 +201,26 @@ impl AgentBuilder {
 
     /// 构建 ToolUseLoop。
     ///
-    /// 将内部参数组装为 `ToolUseConfig` + `ToolUseDeps`，
-    /// 传给 `ToolUseLoop::new()`。无字段复制逻辑。
+    /// 将静态工具和动态目录坍缩为最终的 `ToolCatalog`，
+    /// 传给 `ToolUseLoop::new()`。
     pub fn build(self) -> ToolUseLoop {
-        ToolUseLoop::new(self.model, self.executor, self.config, self.deps)
+        // 构造优先级队列：本地静态工具永远拥有最高优先级
+        let mut sources: Vec<Arc<dyn ToolCatalog>> = Vec::new();
+
+        if !self.static_tools.is_empty() {
+            sources.push(Arc::new(StaticCatalog::from_tools(self.static_tools)));
+        }
+
+        sources.extend(self.catalogs);
+
+        // 坍缩成最终的单根 Catalog
+        let final_catalog: Arc<dyn ToolCatalog> = match sources.len() {
+            0 => Arc::new(StaticCatalog::empty()),
+            1 => sources.remove(0),
+            _ => Arc::new(CompositeCatalog::new(sources)),
+        };
+
+        let executor = ToolExecutor::with_retry_policy(final_catalog, self.config.retry_policy.clone());
+        ToolUseLoop::new(self.model, executor, self.config, self.deps)
     }
 }

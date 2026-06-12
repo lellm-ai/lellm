@@ -20,7 +20,10 @@ pub mod tools;
 
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
-pub use tools::{ToolArgs, ToolCategory, ToolExecutor, ToolRegistration};
+pub use tools::{
+    execute_batch_with, BatchExecutionResult, ParallelSafety, StaticCatalog, ToolArgs,
+    ToolCategory, ToolCatalog, ToolExecutor, ToolRegistration,
+};
 
 // ─── 运行时 re-export ────────────────────────────────────────────
 
@@ -43,6 +46,3 @@ pub use signal_voter::{NegativeSignal, SignalVoter};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{ToolError, ToolErrorKind, ToolResult};
-
-// 从 tools re-export
-pub use tools::{BatchExecutionResult, ParallelSafety};

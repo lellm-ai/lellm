@@ -20,6 +20,7 @@ tracing.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 schemars.workspace = true
+indexmap.workspace = true
 
 [features]
 default = []

@@ -5,6 +5,7 @@ members = [
     "lellm-provider",
     "lellm-agent",
     "lellm-macros",
+    "lellm-mcp",
 ]
 resolver = "2"
 
@@ -19,6 +20,7 @@ lellm-core = { path = "lellm-core", version = "0.1" }
 lellm-provider = { path = "lellm-provider", version = "0.1" }
 lellm-agent = { path = "lellm-agent", version = "0.1" }
 lellm-macros = { path = "lellm-macros", version = "0.1" }
+lellm-mcp = { path = "lellm-mcp", version = "0.1" }
 
 # Common
 async-trait = "0.1"
@@ -34,4 +36,5 @@ futures-util = "0.3"
 secrecy = "0.8"
 url = "2"
 schemars = "1"
+indexmap = "2"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }

@@ -11,7 +11,7 @@ use thiserror::Error;
 /// **铁律：Core 公共 API 禁止返回 `LellmError`。**
 /// 各层必须返回各自的领域错误：
 /// - Provider API → `Result<T, LlmError>`
-/// - Tool 执行 → `Result<String, ToolError>`
+/// - Tool 执行 → `Result<T, ToolError>`
 /// - 记忆操作 → `Result<T, MemoryError>`
 /// - 解析操作 → `Result<T, ParseError>`
 ///
@@ -75,10 +75,14 @@ pub enum LlmError {
 }
 
 /// 工具执行错误的分类。
+///
+/// `Copy` 约束保留——所有变体均为 `Copy` 类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolErrorKind {
-    /// 工具未找到
+    /// 工具未找到（静态目录中从未存在）
     NotFound,
+    /// 工具不可用（动态目录中曾存在但当前刷新后消失）
+    ToolUnavailable,
     /// 工具执行超时
     Timeout,
     /// 网络相关错误
@@ -93,12 +97,31 @@ pub enum ToolErrorKind {
     LoopDetected,
     /// 内部错误（兜底）
     Internal,
+    /// 外部业务错误（由用户代码抛出，自动桥接）
+    ///
+    /// `source` 为原始错误类型的 `type_name`，用于可观测性。
+    External { source: &'static str },
 }
 
 impl ToolErrorKind {
-    /// 该错误类型是否值得重试
-    pub fn is_retriable(self) -> bool {
-        matches!(self, Self::Timeout | Self::Network | Self::RateLimited)
+    /// 判断该错误是否属于基础设施层面的瞬态故障（Transient Failure）。
+    ///
+    /// **可重试（原地静默重试）：**
+    /// - `Timeout` / `Network` / `RateLimited` — 网络抖动、服务端过载
+    /// - `ToolUnavailable` — 动态目录瞬态不可用（MCP 重启等）
+    ///
+    /// **不可重试（立即弹回 LLM 修复层）：**
+    /// - `InvalidInput` — 参数错了就是错了
+    /// - `NotFound` — 工具不存在，重试也没用
+    /// - `PermissionDenied` — 权限不会自动恢复
+    /// - `External` — 用户业务错误，框架不应猜测
+    /// - `LoopDetected` — 循环检测，重试无意义
+    /// - `Internal` — 内部错误，重试无意义
+    pub fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::Timeout | Self::Network | Self::RateLimited | Self::ToolUnavailable
+        )
     }
 }
 
@@ -106,6 +129,7 @@ impl fmt::Display for ToolErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => write!(f, "NotFound"),
+            Self::ToolUnavailable => write!(f, "ToolUnavailable"),
             Self::Timeout => write!(f, "Timeout"),
             Self::Network => write!(f, "Network"),
             Self::PermissionDenied => write!(f, "PermissionDenied"),
@@ -113,6 +137,7 @@ impl fmt::Display for ToolErrorKind {
             Self::RateLimited => write!(f, "RateLimited"),
             Self::LoopDetected => write!(f, "LoopDetected"),
             Self::Internal => write!(f, "Internal"),
+            Self::External { source } => write!(f, "External({})", source),
         }
     }
 }
@@ -122,6 +147,34 @@ impl fmt::Display for ToolErrorKind {
 pub struct ToolError {
     pub kind: ToolErrorKind,
     pub message: String,
+}
+
+impl ToolError {
+    /// 构造 `InvalidInput` 错误。
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        Self {
+            kind: ToolErrorKind::InvalidInput,
+            message: msg.into(),
+        }
+    }
+
+    /// 构造 `NotFound` 错误。
+    pub fn not_found(msg: impl Into<String>) -> Self {
+        Self {
+            kind: ToolErrorKind::NotFound,
+            message: msg.into(),
+        }
+    }
+
+    /// 构造 `External` 错误，自动记录原始错误类型名。
+    pub fn external<E: std::fmt::Display>(source: E) -> Self {
+        Self {
+            kind: ToolErrorKind::External {
+                source: std::any::type_name::<E>(),
+            },
+            message: source.to_string(),
+        }
+    }
 }
 
 impl fmt::Display for ToolError {
@@ -138,8 +191,102 @@ impl fmt::Debug for ToolError {
 
 impl std::error::Error for ToolError {}
 
-/// 工具执行结果 — Rust 原生 Result，不包装枚举。
-pub type ToolResult = Result<String, ToolError>;
+/// 工具执行结果 — `serde_json::Value` 支持结构化数据。
+///
+/// 通过 `IntoToolResult` trait，用户可返回 `String`、`Value`、
+/// `Option<T>`、`Result<T, E>` 等类型，框架自动转换。
+pub type ToolResult = Result<serde_json::Value, ToolError>;
+
+// ─── IntoToolError ───────────────────────────────────────────────
+
+/// 将任意错误转换为 `ToolError`。
+///
+/// **默认实现：** 任何 `E: Display` 自动转为 `External { source: type_name::<E>() }`。
+///
+/// **用户覆盖：** 为自己的错误类型实现 `IntoToolError`，精确控制 `ToolErrorKind`。
+pub trait IntoToolError {
+    fn into_tool_error(self) -> ToolError;
+}
+
+/// 默认兜底：任何 `Display` 错误 → `External`
+///
+/// 注意：`ToolError` 已经实现了 `Display`，所以会被此 blanket impl 覆盖。
+/// 但 `ToolError::into_tool_error()` 会返回 `External` 而非原样透传。
+/// 如果需要精确透传，用户应使用 `Result<T, ToolError>` 的专用实现。
+impl<E> IntoToolError for E
+where
+    E: std::fmt::Display,
+{
+    fn into_tool_error(self) -> ToolError {
+        ToolError::external(self)
+    }
+}
+
+// ─── IntoToolResult ──────────────────────────────────────────────
+
+/// 将工具函数返回值统一转换为 `ToolResult`。
+///
+/// 由 `#[tool]` 宏在闭包中调用，用户无需手动实现。
+///
+/// **支持的返回类型：**
+/// - `String` → `Ok(Value::String(s))`
+/// - `serde_json::Value` → `Ok(v)`
+/// - `T: Serialize` → `Ok(serde_json::to_value(t)?)`
+/// - `Option<T>` → `Some` 转 Value，`None` → `Ok(Value::Null)`
+/// - `Result<T, ToolError>` → 直接透传
+/// - `Result<T, E: Display>` → `Ok` 转 Value，`Err` → `External`
+pub trait IntoToolResult: Sized {
+    fn into_tool(self) -> ToolResult;
+}
+
+/// `String` → `Ok(Value::String(s))`
+impl IntoToolResult for String {
+    fn into_tool(self) -> ToolResult {
+        Ok(serde_json::Value::String(self))
+    }
+}
+
+/// `serde_json::Value` → 直接透传
+impl IntoToolResult for serde_json::Value {
+    fn into_tool(self) -> ToolResult {
+        Ok(self)
+    }
+}
+
+/// `Option<T>` → `Some` 序列化，`None` → `Value::Null`
+impl<T> IntoToolResult for Option<T>
+where
+    T: serde::Serialize,
+{
+    fn into_tool(self) -> ToolResult {
+        match self {
+            Some(v) => serde_json::to_value(v).map_err(|e| ToolError {
+                kind: ToolErrorKind::Internal,
+                message: format!("failed to serialize tool result: {}", e),
+            }),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+}
+
+/// `Result<T, E>` (T: Serialize, E: Display) → 自动桥接
+impl<T, E> IntoToolResult for Result<T, E>
+where
+    T: serde::Serialize,
+    E: std::fmt::Display,
+{
+    fn into_tool(self) -> ToolResult {
+        match self {
+            Ok(v) => serde_json::to_value(v).map_err(|e| ToolError {
+                kind: ToolErrorKind::Internal,
+                message: format!("failed to serialize tool result: {}", e),
+            }),
+            Err(e) => Err(e.into_tool_error()),
+        }
+    }
+}
+
+// ─── 其他错误类型 ────────────────────────────────────────────────
 
 /// 记忆操作错误。
 #[derive(Debug, Error)]
@@ -212,11 +359,61 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_error_is_retriable() {
-        assert!(ToolErrorKind::Timeout.is_retriable());
-        assert!(ToolErrorKind::Network.is_retriable());
-        assert!(ToolErrorKind::RateLimited.is_retriable());
-        assert!(!ToolErrorKind::NotFound.is_retriable());
-        assert!(!ToolErrorKind::InvalidInput.is_retriable());
+    fn test_tool_error_is_retryable() {
+        // 可重试
+        assert!(ToolErrorKind::Timeout.is_retryable());
+        assert!(ToolErrorKind::Network.is_retryable());
+        assert!(ToolErrorKind::RateLimited.is_retryable());
+        assert!(ToolErrorKind::ToolUnavailable.is_retryable());
+
+        // 不可重试
+        assert!(!ToolErrorKind::NotFound.is_retryable());
+        assert!(!ToolErrorKind::InvalidInput.is_retryable());
+        assert!(!ToolErrorKind::PermissionDenied.is_retryable());
+        assert!(!ToolErrorKind::Internal.is_retryable());
+        assert!(!ToolErrorKind::LoopDetected.is_retryable());
+        assert!(!ToolErrorKind::External { source: "test" }.is_retryable());
+    }
+
+    #[test]
+    fn test_into_tool_result_string() {
+        let result: ToolResult = "hello".to_string().into_tool();
+        assert_eq!(result.unwrap(), serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_into_tool_result_option() {
+        let some: Option<String> = Some("hello".to_string());
+        assert_eq!(some.into_tool().unwrap(), serde_json::json!("hello"));
+
+        let none: Option<String> = None;
+        assert_eq!(none.into_tool().unwrap(), serde_json::json!(null));
+    }
+
+    #[test]
+    fn test_into_tool_result_external_error() {
+        #[derive(Debug)]
+        struct MyError;
+        impl fmt::Display for MyError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "my error")
+            }
+        }
+
+        let result: ToolResult = Err::<(), MyError>(()).into_tool();
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, ToolErrorKind::External { source: std::any::type_name::<MyError>() });
+        assert_eq!(err.message, "my error");
+    }
+
+    #[test]
+    fn test_tool_error_factories() {
+        let err = ToolError::invalid_input("bad input");
+        assert_eq!(err.kind, ToolErrorKind::InvalidInput);
+        assert_eq!(err.message, "bad input");
+
+        let err = ToolError::not_found("search");
+        assert_eq!(err.kind, ToolErrorKind::NotFound);
+        assert_eq!(err.message, "search");
     }
 }

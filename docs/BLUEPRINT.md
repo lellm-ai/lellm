@@ -27,7 +27,7 @@
 ### 不包含（v0.2+）
 
 - Graph/Node/Edge 编排层
-- MCP Client/Server（v0.2+）
+- MCP Client/Server（v0.3+，详见 [ADR-001](./adr/001-mcp-as-tool-runtime-extension.md)）
 - Sandbox / Harness Orchestrator
 - LongTermMemory / MemoryStore
 
@@ -43,7 +43,32 @@ lellm/
 └── lellm-macros/               # 派生宏
 ```
 
-## 四、核心 API
+> **v0.3+** 将新增 `lellm-mcp/` crate。
+> 完整文档：[MCP 集成概览](./mcp-overview.md) → [ADR 系列](./adr/)
+
+## 四、架构总览
+
+```
+用户
+ ↓
+Graph (v0.2)
+ ↓
+Agent (ToolUseLoop)
+ ↓
+ToolExecutor
+ ↓
+ToolRegistration
+ ├─ LocalTool (现有)
+ └─ McpToolBridge (v0.3)
+      ↓
+   McpClient
+      ↓
+   McpTransport (stdio)
+      ↓
+   外部 MCP Server
+```
+
+## 五、核心 API
 
 ### 4.1 LlmProvider
 
@@ -133,6 +158,16 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 | 推理控制 | [DESIGN.md §13](./DESIGN.md#13-%E6%8E%A8%E7%90%86%E6%8E%A7%E5%88%B6--reasoningconfig-stream_thinking-%E4%B8%A4%E5%B1%82%E6%A8%A1%E5%9E%8B) |
 | RequestOptions | [DESIGN.md §14](./DESIGN.md#14-requestoptions--agent-%E5%B1%8F%E7%94%9F%E6%88%90%E5%8F%82%E6%95%B0%E8%A6%BD%E7%9B%96) |
 | Context Compaction | [DESIGN.md §15](./DESIGN.md#15-context-compaction---%E4%B8%8A%E4%B8%8B%E6%96%87%E5%8E%8B%E7%BC%A9) |
+
+### MCP 设计决策（v0.3+）
+
+| 主题 | 详见 |
+|------|------|
+| ARG 评审报告 | [ARG-000](./adr/000-architecture-review-gate.md) |
+| MCP 职责边界 | [ADR-001](./adr/001-mcp-as-tool-runtime-extension.md) |
+| Crate 拆分策略 | [ADR-002](./adr/002-mcp-crate-structure.md) |
+| Transport 抽象 | [ADR-003](./adr/003-mcp-transport-abstraction.md) |
+| Tool 桥接设计 | [ADR-004](./adr/004-mcp-tool-bridge.md) |
 
 ## 六、实现状态
 
@@ -226,4 +261,6 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 |------|------|
 | **v0.1** | core + provider + agent + macros |
 | **v0.2** | Graph/Node/Edge + LoopDetector/SignalVoter 集成 |
-| **v0.3** | MCP Client/Server + Multi-Agent |
+| **v0.3** | MCP Client (Tools only, stdio, ToolBridge) |
+| **v0.4** | MCP Server + Resources + HTTP/SSE Transport |
+| **v0.5** | Sampling + Agent↔Agent via MCP |
