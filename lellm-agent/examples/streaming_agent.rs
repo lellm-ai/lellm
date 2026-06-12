@@ -91,7 +91,10 @@ async fn main() {
                 println!(
                     "[工具结束] id={}, result={:?}",
                     tool_call_id,
-                    result.as_ref().map(|s| s.as_str()).unwrap_or("error")
+                    match &result {
+                        Ok(v) => v.as_str().unwrap_or_else(|| v.to_string().leak()),
+                        Err(e) => &e.message,
+                    }
                 );
             }
             AgentEvent::Retry {

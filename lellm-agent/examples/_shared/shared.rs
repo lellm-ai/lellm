@@ -77,13 +77,17 @@ pub async fn observe_react_loop(
                 );
                 match result {
                     Ok(ref output) => {
-                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
-                            println!(
-                                "{}",
-                                serde_json::to_string(&value).unwrap_or(output.clone())
-                            );
+                        if let Some(s) = output.as_str() {
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| s.to_string())
+                                );
+                            } else {
+                                println!("{}", s);
+                            }
                         } else {
-                            println!("{output}");
+                            println!("{}", output);
                         }
                     }
                     Err(err) => println!("❌ 工具错误 [{}] {}", err.kind, err.message),

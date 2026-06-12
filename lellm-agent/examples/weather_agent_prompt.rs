@@ -46,12 +46,13 @@ fn http_get(url: &str) -> Result<String, ToolError> {
 
 fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
     vec![HttpGetArgs::safe(|args| async move {
-        tokio::task::spawn_blocking(move || http_get(&args.url))
+        let body = tokio::task::spawn_blocking(move || http_get(&args.url))
             .await
             .map_err(|e| ToolError {
                 kind: ToolErrorKind::Internal,
                 message: format!("任务失败: {e}"),
-            })?
+            })??;
+        Ok(serde_json::json!(body))
     })]
 }
 

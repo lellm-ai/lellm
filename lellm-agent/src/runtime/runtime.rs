@@ -32,6 +32,7 @@ use super::tools::{execute_batch_with, ToolExecutor, ToolSnapshot};
 /// 本轮对话锁定的快照 + 定义。
 ///
 /// 一旦创建，内容不再变化。充当单轮的"真理之源"。
+#[derive(Clone)]
 pub struct ResolvedRound {
     /// 本轮对话锁定的快照
     pub snapshot: Arc<ToolSnapshot>,

@@ -82,7 +82,7 @@ impl RetryPolicy {
 
         for attempt in 1..self.max_attempts {
             match &last_result {
-                Err(e) if e.kind.is_retriable() => {}
+                Err(e) if e.kind.is_retryable() => {}
                 _ => return last_result,
             }
 
@@ -121,7 +121,7 @@ impl RetryPolicy {
 
         for attempt in 1..self.max_attempts {
             let reason = match &last_result {
-                Err(e) if e.kind.is_retriable() => format!("[{}] {}", e.kind, e.message),
+                Err(e) if e.kind.is_retryable() => format!("[{}] {}", e.kind, e.message),
                 _ => return last_result,
             };
             let _ = tx

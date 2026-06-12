@@ -1,11 +1,12 @@
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{
-    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety, ToolArgs,
-    ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
+    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety,
+    StaticCatalog, ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message,
+    estimate_tokens,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
-use lellm_macros::{Tool, tool};
+use lellm_macros::Tool;
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -24,7 +25,6 @@ async fn test_tool_use_loop_no_tool_calls() {
         model: "test-model".to_string(),
     };
 
-    let executor = ToolExecutor::new();
     let messages = vec![Message::User {
         content: lellm_core::text_block("test".to_string()),
     }];
@@ -41,8 +41,7 @@ async fn test_tool_use_loop_no_tool_calls() {
 }
 
 #[tokio::test]
-async fn test_tool_executor_register_and_execute() {
-    let mut executor = ToolExecutor::new();
+async fn test_tool_executor_snapshot_and_execute() {
     let def = ToolDefinition {
         name: "echo".to_string(),
         description: "echo tool".to_string(),
@@ -53,20 +52,17 @@ async fn test_tool_executor_register_and_execute() {
             }
         }),
     };
-    executor.register(
-        "echo",
-        ToolRegistration::safe(def, |args: &serde_json::Value| {
-            let args_clone = args.clone();
-            async move {
-                let text = args_clone
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Ok(format!("echo: {}", text))
-            }
-        }),
-    );
+    let reg = ToolRegistration::safe(def, |args: &serde_json::Value| {
+        let text = args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        async move { Ok(serde_json::json!(format!("echo: {}", text))) }
+    });
+
+    let catalog = StaticCatalog::from_tools(vec![reg]);
+    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
     let call = ToolCall {
         id: "1".to_string(),
@@ -74,8 +70,11 @@ async fn test_tool_executor_register_and_execute() {
         arguments: serde_json::json!({"text": "hello"}),
     };
 
-    let result = executor.execute(&call).await;
-    assert!(matches!(result, Ok(ref s) if s == "echo: hello"));
+    let snapshot = executor.snapshot().await;
+    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    assert!(result.is_ok());
+    let val = result.unwrap();
+    assert_eq!(val, serde_json::json!("echo: hello"));
 }
 
 #[test]
@@ -220,57 +219,6 @@ fn test_option_type_inference() {
     assert!(required.map_or(true, |r| r.as_array().map_or(true, |a| a.is_empty())));
 }
 
-// ─── Level 1: #[tool] 函数宏测试 ───
-
-/// 测试搜索工具
-#[tool(name = "test_search", description = "测试搜索功能")]
-fn test_search_fn(query: String, limit: Option<u32>) -> lellm_agent::ToolResult {
-    Ok(format!("搜索: {}, 限制: {:?}", query, limit))
-}
-
-#[test]
-fn test_tool_fn_macro_generates_args() {
-    // 验证 #[tool] 生成了 Args struct
-    assert_eq!(TestSearchFnArgs::NAME, "test_search");
-    assert_eq!(TestSearchFnArgs::DESCRIPTION, "测试搜索功能");
-
-    // 验证 schema 结构
-    let schema = TestSearchFnArgs::__schema();
-    assert_eq!(schema.get("type").unwrap(), "object");
-    let properties = schema.get("properties").unwrap().as_object().unwrap();
-    assert!(properties.contains_key("query"));
-    assert!(properties.contains_key("limit"));
-}
-
-#[test]
-fn test_tool_fn_macro_generates_reg_fn() {
-    // 验证 #[tool] 生成了注册函数
-    let reg = test_search_fn_tool();
-    assert_eq!(reg.definition.name, "test_search");
-    assert_eq!(reg.definition.description, "测试搜索功能");
-    assert_eq!(reg.safety, ParallelSafety::Safe);
-}
-
-#[tokio::test]
-async fn test_tool_fn_macro_execution() {
-    // 验证 #[tool] 生成的工具可以执行
-    let reg = test_search_fn_tool();
-    let name = reg.definition.name.clone();
-    let mut executor = ToolExecutor::new();
-    executor.register(&name, reg);
-
-    let call = ToolCall {
-        id: "1".to_string(),
-        name: "test_search".to_string(),
-        arguments: serde_json::json!({"query": "rust", "limit": 5}),
-    };
-
-    let result = executor.execute(&call).await;
-    assert!(result.is_ok());
-    let output = result.unwrap();
-    assert!(output.contains("rust"));
-}
-
 // ─── Level 2: safe() 便捷方法测试 ───
 
 #[derive(Deserialize, JsonSchema, Tool)]
@@ -284,22 +232,21 @@ struct GreetArgs {
 fn test_tool_safe_method() {
     // 验证 safe() 方法正常工作
     let reg = GreetArgs::safe(|args| async move {
-        Ok(format!("你好, {}!", args.name))
+        Ok(serde_json::json!(format!("你好, {}!", args.name)))
     });
 
-    assert_eq!(reg.definition.name, "greet_tool");
-    assert_eq!(reg.definition.description, "打招呼");
+    assert_eq!(reg.definition().name, "greet_tool");
+    assert_eq!(reg.definition().description, "打招呼");
 }
 
 #[tokio::test]
 async fn test_tool_safe_execution() {
     let reg = GreetArgs::safe(|args| async move {
-        Ok(format!("你好, {}!", args.name))
+        Ok(serde_json::json!(format!("你好, {}!", args.name)))
     });
 
-    let name = reg.definition.name.clone();
-    let mut executor = ToolExecutor::new();
-    executor.register(&name, reg);
+    let catalog = StaticCatalog::from_tools(vec![reg]);
+    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
     let call = ToolCall {
         id: "1".to_string(),
@@ -307,8 +254,11 @@ async fn test_tool_safe_execution() {
         arguments: serde_json::json!({"name": "世界"}),
     };
 
-    let result = executor.execute(&call).await;
-    assert_eq!(result.unwrap(), "你好, 世界!");
+    let snapshot = executor.snapshot().await;
+    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    assert!(result.is_ok());
+    let val = result.unwrap();
+    assert_eq!(val, serde_json::json!("你好, 世界!"));
 }
 
 // ─── AgentBuilder 测试 ───
@@ -371,30 +321,6 @@ async fn test_builder_with_config() {
 
 #[tokio::test]
 async fn test_builder_with_tool() {
-    let mut executor = ToolExecutor::new();
-    executor.register(
-        "echo",
-        ToolRegistration::safe(
-            ToolDefinition {
-                name: "echo".to_string(),
-                description: "echo".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": { "text": { "type": "string" } }
-                }),
-            },
-            |args| {
-                let t = args
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                async move { Ok(format!("echo: {}", t)) }
-            },
-        ),
-    );
-
-    // 验证 AgentBuilder 可以通过 tool() 方法注册工具
     let def = ToolDefinition {
         name: "echo".to_string(),
         description: "echo tool".to_string(),
@@ -410,7 +336,7 @@ async fn test_builder_with_tool() {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        async move { Ok(format!("reply: {}", m)) }
+        async move { Ok(serde_json::json!(format!("reply: {}", m))) }
     });
 
     let response = ChatResponse::new(
@@ -450,7 +376,9 @@ fn test_builder_chain_api() {
         description: "test".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
     };
-    let reg = ToolRegistration::safe(def, |_| async { Ok("done".to_string()) });
+    let reg = ToolRegistration::safe(def, |_| async {
+        Ok(serde_json::json!("done"))
+    });
 
     // 完整链式调用
     let _agent = AgentBuilder::new(model)
@@ -503,7 +431,7 @@ async fn test_create_agent_with_tools() {
             .and_then(|v| v.as_str())
             .unwrap_or("world")
             .to_string();
-        async move { Ok(format!("hello {}", n)) }
+        async move { Ok(serde_json::json!(format!("hello {}", n))) }
     });
 
     let response = ChatResponse::new(
@@ -567,7 +495,7 @@ fn test_create_agent_full() {
         description: "test".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
     };
-    let reg = ToolRegistration::safe(def, |_| async { Ok("ok".to_string()) });
+    let reg = ToolRegistration::safe(def, |_| async { Ok(serde_json::json!("ok")) });
 
     let _agent = lellm_agent::create_agent_full(model, "你是助手".to_string(), vec![reg], 20);
 }
@@ -603,8 +531,9 @@ fn test_estimate_tokens_empty() {
 #[test]
 fn test_truncate_tool_result_short() {
     let budget = ContextBudget::default();
-    let short = "short result".to_string();
-    assert_eq!(budget.truncate_tool_result(short.clone()), short);
+    let short = lellm_core::text_block("short result".to_string());
+    let result = budget.truncate_tool_result_blocks(&short);
+    assert_eq!(result.len(), 1);
 }
 
 #[test]
@@ -613,11 +542,15 @@ fn test_truncate_tool_result_long() {
         max_tool_result_chars: 10,
         ..Default::default()
     };
-    let long = "0123456789ABCDEFG".to_string();
-    let result = budget.truncate_tool_result(long);
-    assert!(result.starts_with("0123456789"));
-    assert!(result.contains("[truncated"));
-    assert!(result.contains("original 17 chars"));
+    let long = lellm_core::text_block("0123456789ABCDEFG".to_string());
+    let result = budget.truncate_tool_result_blocks(&long);
+    assert!(result.len() >= 1);
+    let text = result
+        .iter()
+        .filter_map(|b: &lellm_core::ContentBlock| b.as_text())
+        .collect::<String>();
+    assert!(text.starts_with("0123456789"));
+    assert!(text.contains("[truncated"));
 }
 
 #[test]

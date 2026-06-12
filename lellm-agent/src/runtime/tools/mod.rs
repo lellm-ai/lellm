@@ -6,7 +6,10 @@ mod args;
 mod executor;
 
 pub use args::ToolArgs;
-pub use executor::{BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration};
+pub use executor::{
+    execute_batch_with, BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor,
+    ToolRegistration,
+};
 
 /// 异步工具函数类型（executor 内部使用）
 pub(crate) type ToolFn = std::sync::Arc<

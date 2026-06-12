@@ -30,14 +30,14 @@ use std::sync::Arc;
 /// 搜索互联网信息
 #[tool(name = "search", description = "搜索互联网信息")]
 fn search(query: String, limit: Option<u32>) -> ToolResult {
-    Ok(format!("搜索结果: {} (限制: {:?})", query, limit))
+    Ok(serde_json::json!(format!("搜索结果: {} (限制: {:?})", query, limit)))
 }
 
 /// 获取指定位置的天气信息
 #[tool(name = "get_weather", description = "获取指定位置的天气信息")]
 fn get_weather(location: String, unit: Option<String>) -> ToolResult {
     let unit = unit.unwrap_or_else(|| "摄氏度".to_string());
-    Ok(format!("{} 的天气：晴朗，25{}", location, unit))
+    Ok(serde_json::json!(format!("{} 的天气：晴朗，25{}", location, unit)))
 }
 
 // ─── Level 2: #[derive(Tool)] + safe()（高级用户）─────────────
@@ -76,7 +76,7 @@ fn register_manually() -> Vec<ToolRegistration> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        async move { Ok(format!("手动搜索结果：{}", query)) }
+        async move { Ok(serde_json::json!(format!("手动搜索结果：{}", query))) }
     })]
 }
 
@@ -89,12 +89,12 @@ fn register_level1() -> Vec<ToolRegistration> {
 fn register_level2() -> Vec<ToolRegistration> {
     vec![WeatherArgs::safe(|args| async move {
         let forecast = if args.include_forecast { "含预报" } else { "无预报" };
-        Ok(format!(
+        Ok(serde_json::json!(format!(
             "{} 天气: 晴朗, 25{}, {}",
             args.city,
             args.unit.unwrap_or_else(|| "摄氏度".to_string()),
             forecast
-        ))
+        )))
     })]
 }
 
@@ -147,7 +147,7 @@ async fn main() {
     println!("=== Level 3: ToolRegistration::safe() ===");
     let manual = register_manually();
     for reg in &manual {
-        println!("  - {} ({})", reg.definition.name, reg.definition.description);
+        println!("  - {} ({})", reg.definition().name, reg.definition().description);
     }
     println!();
 
@@ -156,31 +156,33 @@ async fn main() {
     let l1 = register_level1();
     println!("Level 1 工具数量: {}", l1.len());
     for reg in &l1 {
-        println!("  - {} (safety: {:?})", reg.definition.name, reg.safety);
+        println!("  - {} (safety: {:?})", reg.definition().name, reg.safety());
     }
 
     let l2 = register_level2();
     println!("Level 2 工具数量: {}", l2.len());
     for reg in &l2 {
-        println!("  - {} (safety: {:?})", reg.definition.name, reg.safety);
+        println!("  - {} (safety: {:?})", reg.definition().name, reg.safety());
     }
 
     // 验证 category_exclusive
     let cat_exclusive = WeatherArgs::category_exclusive(ToolCategory::NETWORK, |args| async move {
-        Ok(format!("网络请求: {}", args.city))
+        Ok(serde_json::json!(format!("网络请求: {}", args.city)))
     });
     println!(
         "CategoryExclusive 工具: {} (safety: {:?})",
-        cat_exclusive.definition.name, cat_exclusive.safety
+        cat_exclusive.definition().name,
+        cat_exclusive.safety()
     );
 
     // 验证 exclusive
     let exclusive = WeatherArgs::exclusive(|args| async move {
-        Ok(format!("独占执行: {}", args.city))
+        Ok(serde_json::json!(format!("独占执行: {}", args.city)))
     });
     println!(
         "Exclusive 工具: {} (safety: {:?})",
-        exclusive.definition.name, exclusive.safety
+        exclusive.definition().name,
+        exclusive.safety()
     );
 
     // ─── 构建并执行 Agent ───

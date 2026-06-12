@@ -47,6 +47,21 @@ pub struct ToolRegistration {
 }
 
 impl ToolRegistration {
+    /// 获取工具定义的引用。
+    pub fn definition(&self) -> &lellm_core::ToolDefinition {
+        &self.definition
+    }
+
+    /// 获取并行安全级别。
+    pub fn safety(&self) -> &ParallelSafety {
+        &self.safety
+    }
+
+    /// 获取工具类别（如果有）。
+    pub fn category(&self) -> Option<&ToolCategory> {
+        self.category.as_ref()
+    }
+
     pub fn safe<F, Fut>(def: lellm_core::ToolDefinition, f: F) -> Self
     where
         F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,

@@ -172,16 +172,16 @@ fn create_react_agent() -> ToolUseLoop {
     // 注册工具
     let tools = vec![
         SearchProductsArgs::safe(|args| async move {
-            Ok(format!(
+            Ok(serde_json::json!(format!(
                 "找到 5 个匹配\"{}\"的产品。前 5 个结果：WH-1000XM5, AirPods Pro, QC45, WF-1000XM4, HD600",
                 args.query
-            ))
+            )))
         }),
         CheckInventoryArgs::safe(|args| async move {
-            Ok(format!("产品 {}：库存 10 件", args.product_id))
+            Ok(serde_json::json!(format!("产品 {}：库存 10 件", args.product_id)))
         }),
         GetWeatherArgs::safe(|args| async move {
-            Ok(format!("{} 的天气：晴朗，25°C", args.location))
+            Ok(serde_json::json!(format!("{} 的天气：晴朗，25°C", args.location)))
         }),
     ];
 

@@ -21,8 +21,8 @@ pub mod tools;
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
 pub use tools::{
-    execute_batch_with, BatchExecutionResult, ParallelSafety, StaticCatalog, ToolArgs,
-    ToolCategory, ToolCatalog, ToolExecutor, ToolRegistration,
+    execute_batch_with, BatchExecutionResult, CompositeCatalog, ParallelSafety, StaticCatalog,
+    ToolArgs, ToolCategory, ToolCatalog, ToolExecutor, ToolRegistration, ToolSnapshot,
 };
 
 // ─── 运行时 re-export ────────────────────────────────────────────
@@ -40,9 +40,11 @@ pub use lellm_provider::ResolvedModel;
 pub use loop_detector::{LoopDetector, LoopIntervention};
 pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
-pub use runtime::{LoopState, ToolUseLoop, ToolUseResult};
+pub use runtime::{LoopState, ResolvedRound, ToolUseLoop, ToolUseResult};
 #[cfg(feature = "v02-preview")]
 pub use signal_voter::{NegativeSignal, SignalVoter};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
-pub use lellm_core::{ToolError, ToolErrorKind, ToolResult};
+pub use lellm_core::{
+    IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult,
+};

@@ -95,10 +95,10 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
                     }
                 }
 
-                serde_json::to_string(&result).map_err(|e| ToolError {
+                Ok(serde_json::json!(serde_json::to_string(&result).map_err(|e| ToolError {
                     kind: ToolErrorKind::Internal,
                     message: format!("序列化失败: {e}"),
-                })
+                })?))
             }
         }),
         ToolRegistration::safe(HttpGetArgs::tool_definition(), |args| {
@@ -108,12 +108,13 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
                 .unwrap_or("")
                 .to_string();
             async move {
-                tokio::task::spawn_blocking(move || http_get(&url))
+                let body = tokio::task::spawn_blocking(move || http_get(&url))
                     .await
                     .map_err(|e| ToolError {
                         kind: ToolErrorKind::Internal,
                         message: format!("任务失败: {e}"),
-                    })?
+                    })??;
+                Ok(serde_json::json!(body))
             }
         }),
     ]

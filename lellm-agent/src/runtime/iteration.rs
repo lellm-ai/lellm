@@ -2,13 +2,13 @@
 //!
 //! 包含带 Fallback 的重试执行器、流式迭代、工具串行执行等。
 
-use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolCall, ToolError, ToolErrorKind};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolCall, ToolError};
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use super::LoopState;
-use super::ResolvedRound;
+use super::runtime::ResolvedRound;
 use super::context::{ContextBudget, estimate_text};
 use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
