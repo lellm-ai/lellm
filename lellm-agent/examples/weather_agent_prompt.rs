@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let provider =
-        CodecProvider::from_env(OpenAICompatCodec::llama()).expect("OpenAI provider env error");
+        CodecProvider::load(OpenAICompatCodec::llama()).expect("OpenAI provider env error");
     let agent = create_agent(provider);
 
     println!("=== LeLLM Agent — 天气查询链（纯 http_get）===\n");

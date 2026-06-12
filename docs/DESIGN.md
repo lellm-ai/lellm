@@ -178,7 +178,7 @@ pub trait ProviderExtension: ChatCodec + ModelCapabilities + ProviderMeta {}
 ```rust
 pub struct CodecProvider<C: ProviderExtension> {
     codec: Arc<C>,        // Arc 共享，无需 Clone bound
-    config: ProviderConfig,
+    config: ProviderConfig,  // pub(crate)，外部不可见
     client: reqwest::Client,
     extra_headers: HeaderMap,  // Builder 传入的额外 Headers
 }
@@ -204,7 +204,7 @@ pub struct CodecProvider<C: ProviderExtension> {
 
 > **v2026-06-11 新增：** `CodecProvider` 通过 `ProviderBuilder` 构建，支持自定义 Headers。
 
-**背景：** OpenRouter 等聚合网关需要自定义 Headers（`HTTP-Referer`、`X-Title`），但不同网关的 Header 需求不同。写死在 Codec 中不够灵活，纯 `ProviderConfig` 又缺少 Header 支持。
+**背景：** OpenRouter 等聚合网关需要自定义 Headers（`HTTP-Referer`、`X-Title`），但不同网关的 Header 需求不同。写死在 Codec 中不够灵活，纯 `ProviderConfig`（内部结构）又缺少 Header 支持。
 
 **决定：** 引入 `ProviderBuilder<C>`，链式 API 构建 `CodecProvider`：
 
@@ -219,39 +219,49 @@ let provider = CodecProvider::builder(OpenAICompatCodec::openai())
 
 **Header 合并优先级：** codec defaults → builder extra_headers → request headers（后者覆盖前者）。
 
-**OpenRouter 便捷函数：**
+**OpenRouter 便捷方法：**
 ```rust
 // 从 OPENROUTER_API_KEY 环境变量加载
-let provider = openrouter(OpenAICompatCodec::openai())?;
+let provider = CodecProvider::openrouter(OpenAICompatCodec::openai())?;
 
 // 换协议只需换 Codec
-let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+let anthropic_via_openrouter = CodecProvider::openrouter(AnthropicCodec)?;
 ```
 
-### ProviderConfig — 连接配置
+**ProviderProfile — builder 预设轮廓：**
+```rust
+// 应用预设 + 后续覆盖
+let provider = CodecProvider::builder(OpenAICompatCodec::openai())
+    .profile(ProviderProfile::OpenRouter)
+    .header("HTTP-Referer", "https://mysite.com")
+    .build()?;
+```
+
+### ProviderConfig — 连接配置（内部）
 
 ```rust
-pub struct ProviderConfig {
-    pub base_url: url::Url,
-    pub auth: AuthConfig,
-    pub connect_timeout: std::time::Duration,
-    pub timeout: std::time::Duration,
-    pub idle_timeout: std::time::Duration,
+pub(crate) struct ProviderConfig {
+    base_url: url::Url,
+    auth: AuthConfig,
+    connect_timeout: std::time::Duration,
+    timeout: std::time::Duration,
+    idle_timeout: std::time::Duration,
 }
 ```
+
+**API 边界收紧：** `ProviderConfig` 和 `AuthConfig` 均为 `pub(crate)`，外部无法直接构造。
+公开入口仅保留 `CodecProvider::load()` 和 `CodecProvider::builder()`。
 
 **环境变量自动加载：**
 ```rust
 // 便捷方法 — 一行搞定
-let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
+let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
 
 // 自定义超时
 let codec = OpenAICompatCodec::openai();
-let provider = CodecProvider::new(
-    codec.clone(),
-    ProviderConfig::from_codec(&codec)?
-        .with_timeout(Duration::from_secs(60)),
-);
+let provider = CodecProvider::builder(codec)
+    .timeout(Duration::from_secs(60))
+    .build()?;
 ```
 
 环境变量前缀 = `provider_id().to_ascii_uppercase()`。
@@ -264,7 +274,7 @@ let provider = CodecProvider::new(
 
 ```rust
 impl AuthConfig {
-    pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder;
+    pub(crate) fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder;
 }
 ```
 
@@ -279,6 +289,7 @@ impl AuthConfig {
 
 `ChatCodec`、`ModelCapabilities`、`ProviderMeta`、`ProviderExtension`、`CodecProvider` 均为 `pub`。
 `CodecRequest`、`StreamChunk`、`StreamParseResult` 随之公开。
+`ProviderConfig`、`AuthConfig` 为 `pub(crate)`（内部配置细节不对外暴露）。
 `stream/` 模块保持 `pub(crate)`（传输层细节不对外暴露）。
 
 ### SSE 解析 — SseFrame 中间表示

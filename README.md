@@ -206,19 +206,19 @@ lellm = { version = "0.1", features = ["full"] }
 use lellm::provider::{CodecProvider, OpenAICompatCodec};
 
 // Auto-load from OPENAI_BASE_URL + OPENAI_API_KEY
-let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
+let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
 ```
 
 **Via OpenRouter** (aggregation gateway):
 
 ```rust
-use lellm::provider::{openrouter, OpenAICompatCodec, AnthropicCodec};
+use lellm::provider::{CodecProvider, OpenAICompatCodec, AnthropicCodec};
 
 // Load from OPENROUTER_API_KEY
-let provider = openrouter(OpenAICompatCodec::openai())?;
+let provider = CodecProvider::openrouter(OpenAICompatCodec::openai())?;
 
 // Switch protocol by swapping the codec
-let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+let anthropic_via_openrouter = CodecProvider::openrouter(AnthropicCodec)?;
 ```
 
 **Supported providers:**

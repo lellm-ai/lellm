@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let provider =
-        CodecProvider::from_env(OpenAICompatCodec::llama()).expect("LLaMA provider env error");
+        CodecProvider::load(OpenAICompatCodec::llama()).expect("LLaMA provider env error");
     let agent = create_agent(provider);
 
     println!("=== Weather Agent — resolve_city(四级降级) + http_get ===\n");

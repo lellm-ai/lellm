@@ -146,33 +146,84 @@ pub enum AuthStyle {
     None,
 }
 
-/// 环境变量加载错误
+/// 环境变量加载错误 — 稳定语义，不公开内部结构细节。
+///
+/// 通过 `ProviderBuildError::Env` 间接暴露。
+/// `#[non_exhaustive]` 保证未来可扩展而不破坏调用方。
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProviderEnvError {
-    /// 缺少必需的 API Key
-    MissingApiKey { provider: String, env_var: String },
-    /// URL 解析失败
-    InvalidUrl { url: String, reason: String },
+    /// 缺少必需的环境变量
+    MissingEnv { name: String },
+    /// 环境变量存在但为空
+    EmptyEnv { name: String },
 }
 
 impl std::fmt::Display for ProviderEnvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProviderEnvError::MissingApiKey { provider, env_var } => {
-                write!(
-                    f,
-                    "Missing API key for provider '{}' (env: {})",
-                    provider, env_var
-                )
-            }
-            ProviderEnvError::InvalidUrl { url, reason } => {
-                write!(f, "Invalid URL '{}': {}", url, reason)
-            }
+            Self::MissingEnv { name } => write!(f, "missing environment variable: {}", name),
+            Self::EmptyEnv { name } => write!(f, "environment variable is empty: {}", name),
         }
     }
 }
 
 impl std::error::Error for ProviderEnvError {}
+
+/// Provider 构建错误 — 统一所有创建路径的错误面。
+///
+/// `load()` / `openrouter()` / `builder().build()` 统一返回此类型。
+/// `#[non_exhaustive]` 保证未来可扩展而不破坏调用方。
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProviderBuildError {
+    /// 环境变量加载错误
+    Env(ProviderEnvError),
+    /// URL 解析失败
+    Url(url::ParseError),
+    /// Header 解析失败
+    InvalidHeader { field: String, value: String },
+    /// 校验失败（超时、profile 等）
+    Validation { message: String },
+}
+
+impl std::fmt::Display for ProviderBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Env(e) => write!(f, "{}", e),
+            Self::Url(e) => write!(f, "{}", e),
+            Self::InvalidHeader { field, value } => {
+                write!(f, "invalid header {}: {}", field, value)
+            }
+            Self::Validation { message } => write!(f, "validation error: {}", message),
+        }
+    }
+}
+
+impl std::error::Error for ProviderBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Env(e) => Some(e),
+            Self::Url(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<ProviderEnvError> for ProviderBuildError {
+    fn from(err: ProviderEnvError) -> Self {
+        Self::Env(err)
+    }
+}
+
+impl From<url::ParseError> for ProviderBuildError {
+    fn from(err: url::ParseError) -> Self {
+        Self::Url(err)
+    }
+}
+
+/// 构建结果类型别名
+pub type BuildResult<T> = Result<T, ProviderBuildError>;
 
 // ─── 1. ChatCodec — 协议编解码（无状态、纯粹的物理层互转）──
 

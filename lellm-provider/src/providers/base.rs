@@ -16,8 +16,8 @@ use tokio_stream::StreamExt;
 use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
 use super::codec::{
-    Capabilities, validate_capabilities, CodecRequest, ProviderEnvError, ProviderExtension,
-    ProviderMeta,
+    Capabilities, CodecRequest, ProviderBuildError, ProviderEnvError, ProviderExtension,
+    ProviderMeta, validate_capabilities,
 };
 use super::stream::{EventSink, StreamEvent};
 
@@ -123,9 +123,9 @@ impl<C: ProviderExtension> CodecProvider<C> {
     /// let provider = CodecProvider::builder(OpenAICompatCodec::openai())
     ///     .api_key(std::env::var("OPENAI_API_KEY").unwrap())
     ///     .build()?;
-    /// # Ok::<_, url::ParseError>(())
+    /// # Ok::<_, lellm_provider::providers::codec::ProviderBuildError>(())
     /// ```
-    pub fn new(codec: C, config: ProviderConfig) -> Self {
+    pub(crate) fn new(codec: C, config: ProviderConfig) -> Self {
         Self::builder(codec)
             .base_url(config.base_url.as_str())
             .auth(config.auth)
@@ -138,18 +138,18 @@ impl<C: ProviderExtension> CodecProvider<C> {
 
     /// 从环境变量自动加载配置创建 Provider（便捷方法）。
     ///
-    /// 内部委托给 `ProviderConfig::from_codec(&codec)`。
+    /// 内部委托给 `ProviderConfig::load(&codec)`。
     ///
     /// # 示例
     ///
     /// ```rust,no_run
     /// use lellm_provider::{CodecProvider, OpenAICompatCodec};
     ///
-    /// let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
-    /// # Ok::<_, lellm_provider::providers::codec::ProviderEnvError>(())
+    /// let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
+    /// # Ok::<_, lellm_provider::providers::codec::ProviderBuildError>(())
     /// ```
-    pub fn from_env(codec: C) -> Result<Self, ProviderEnvError> {
-        let config = ProviderConfig::from_codec(&codec)?;
+    pub fn load(codec: C) -> Result<Self, ProviderBuildError> {
+        let config = ProviderConfig::load(&codec)?;
         Ok(Self::new(codec, config))
     }
 
@@ -166,7 +166,7 @@ impl<C: ProviderExtension> CodecProvider<C> {
     ///     .header("HTTP-Referer", "https://example.com")
     ///     .header("X-Title", "My App")
     ///     .build()?;
-    /// # Ok::<_, url::ParseError>(())
+    /// # Ok::<_, lellm_provider::providers::codec::ProviderBuildError>(())
     /// ```
     pub fn builder(codec: C) -> ProviderBuilder<C> {
         ProviderBuilder::new(codec)
@@ -400,22 +400,22 @@ impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
 
 /// Provider 配置 — 只管连接，不含 model。
 #[derive(Clone, Debug)]
-pub struct ProviderConfig {
+pub(crate) struct ProviderConfig {
     /// API 基础地址
-    pub base_url: url::Url,
+    base_url: url::Url,
     /// 认证配置
-    pub auth: AuthConfig,
+    auth: AuthConfig,
     /// TCP/TLS 握手超时
-    pub connect_timeout: std::time::Duration,
+    connect_timeout: std::time::Duration,
     /// 请求超时 — 控制 `.send()` + 首 token 等待
-    pub timeout: std::time::Duration,
+    timeout: std::time::Duration,
     /// SSE 流空闲超时 — 连续无数据的最大时间（per-chunk）。
-    pub idle_timeout: std::time::Duration,
+    idle_timeout: std::time::Duration,
 }
 
 impl ProviderConfig {
     /// 便捷构造 — Bearer 认证
-    pub fn bearer(
+    pub(crate) fn bearer(
         base_url: impl AsRef<str>,
         api_key: impl Into<String>,
     ) -> Result<Self, url::ParseError> {
@@ -431,7 +431,7 @@ impl ProviderConfig {
     }
 
     /// 便捷构造 — 自定义 Header 认证
-    pub fn header(
+    pub(crate) fn header(
         base_url: impl AsRef<str>,
         header: impl Into<String>,
         value: impl Into<String>,
@@ -449,7 +449,7 @@ impl ProviderConfig {
     }
 
     /// 便捷构造 — 无认证（本地调试）
-    pub fn none(base_url: impl AsRef<str>) -> Result<Self, url::ParseError> {
+    pub(crate) fn none(base_url: impl AsRef<str>) -> Result<Self, url::ParseError> {
         Ok(Self {
             base_url: url::Url::parse(base_url.as_ref())?,
             auth: AuthConfig::None,
@@ -460,7 +460,7 @@ impl ProviderConfig {
     }
 
     /// 从 codec 元数据 + 环境变量自动加载配置。
-    pub fn from_codec(meta: &dyn ProviderMeta) -> Result<Self, ProviderEnvError> {
+    pub(crate) fn load(meta: &dyn ProviderMeta) -> Result<Self, ProviderBuildError> {
         let provider_id = meta.provider_id();
         let env_prefix = provider_id.to_ascii_uppercase();
         let default_url = meta.default_base_url();
@@ -477,70 +477,30 @@ impl ProviderConfig {
             default_url.to_string()
         });
 
-        let api_key =
-            std::env::var(&*api_key_env).map_err(|_| ProviderEnvError::MissingApiKey {
-                provider: provider_id.to_string(),
-                env_var: api_key_env.into_owned(),
-            })?;
+        let api_key_name = api_key_env.into_owned();
+        let api_key = std::env::var(&api_key_name).map_err(|_| {
+            ProviderBuildError::Env(ProviderEnvError::MissingEnv { name: api_key_name.clone() })
+        })?;
+        if api_key.is_empty() {
+            return Err(ProviderBuildError::Env(ProviderEnvError::EmptyEnv {
+                name: api_key_name,
+            }));
+        }
 
         match auth_style {
-            super::codec::AuthStyle::Bearer => {
-                Self::bearer(&base_url, api_key).map_err(|e| ProviderEnvError::InvalidUrl {
-                    url: base_url.clone(),
-                    reason: e.to_string(),
-                })
-            }
+            super::codec::AuthStyle::Bearer => Self::bearer(&base_url, api_key).map_err(Into::into),
             super::codec::AuthStyle::CustomHeader(header) => {
-                Self::header(&base_url, header, api_key).map_err(|e| ProviderEnvError::InvalidUrl {
-                    url: base_url.clone(),
-                    reason: e.to_string(),
-                })
+                Self::header(&base_url, header, api_key).map_err(Into::into)
             }
-            super::codec::AuthStyle::None => {
-                Self::none(&base_url).map_err(|e| ProviderEnvError::InvalidUrl {
-                    url: base_url.clone(),
-                    reason: e.to_string(),
-                })
-            }
+            super::codec::AuthStyle::None => Self::none(&base_url).map_err(Into::into),
         }
     }
 
-    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
-        self.auth = auth;
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
-    pub fn with_connect_timeout(mut self, connect_timeout: std::time::Duration) -> Self {
-        self.connect_timeout = connect_timeout;
-        self
-    }
-
-    pub fn with_idle_timeout(mut self, idle_timeout: std::time::Duration) -> Self {
-        self.idle_timeout = idle_timeout;
-        self
-    }
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            base_url: url::Url::parse("http://localhost").unwrap(),
-            auth: AuthConfig::None,
-            connect_timeout: std::time::Duration::from_secs(10),
-            timeout: std::time::Duration::from_secs(120),
-            idle_timeout: std::time::Duration::from_secs(30),
-        }
-    }
 }
 
 /// 认证配置。
 #[derive(Clone, Debug)]
-pub enum AuthConfig {
+pub(crate) enum AuthConfig {
     Bearer {
         api_key: secrecy::SecretString,
     },
@@ -552,7 +512,7 @@ pub enum AuthConfig {
 }
 
 impl AuthConfig {
-    pub fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub(crate) fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self {
             AuthConfig::Bearer { api_key } => builder.bearer_auth(api_key.expose_secret()),
             AuthConfig::Header { header, value } => builder.header(header, value.expose_secret()),
@@ -562,6 +522,40 @@ impl AuthConfig {
 }
 
 // ─── ProviderBuilder — 链式构建 CodecProvider ───
+
+/// Provider 预设配置轮廓。
+///
+/// 为常见 Provider 提供一键式 base_url + 环境变量前缀，
+/// 后续 `.base_url()` / `.api_key()` 可覆盖。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderProfile {
+    OpenRouter,
+    Anthropic,
+    Groq,
+    DeepSeek,
+}
+
+impl ProviderProfile {
+    /// 预设的 base_url
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "https://openrouter.ai/api/v1",
+            Self::Anthropic => "https://api.anthropic.com/v1",
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::DeepSeek => "https://api.deepseek.com/v1",
+        }
+    }
+
+    /// 环境变量前缀（用于 `BASE_URL` 和 `API_KEY`）
+    fn env_prefix(self) -> &'static str {
+        match self {
+            Self::OpenRouter => "OPENROUTER",
+            Self::Anthropic => "ANTHROPIC",
+            Self::Groq => "GROQ",
+            Self::DeepSeek => "DEEPSEEK",
+        }
+    }
+}
 
 /// CodecProvider 的链式构建器。
 ///
@@ -580,7 +574,7 @@ impl AuthConfig {
 ///     .header("HTTP-Referer", "https://mysite.com")
 ///     .header("X-Title", "My App")
 ///     .build()?;
-/// # Ok::<_, url::ParseError>(())
+/// # Ok::<_, super::codec::ProviderBuildError>(())
 /// ```
 pub struct ProviderBuilder<C> {
     codec: C,
@@ -590,11 +584,13 @@ pub struct ProviderBuilder<C> {
     timeout: std::time::Duration,
     idle_timeout: std::time::Duration,
     extra_headers: HeaderMap,
+    /// 累计的构建错误（fallible builder）。
+    error: Option<ProviderBuildError>,
 }
 
 impl<C> ProviderBuilder<C> {
     /// 创建新的 Builder，仅持有 Codec。
-    fn new(codec: C) -> Self {
+    pub(crate) fn new(codec: C) -> Self {
         Self {
             codec,
             base_url: String::new(),
@@ -603,7 +599,18 @@ impl<C> ProviderBuilder<C> {
             timeout: std::time::Duration::from_secs(120),
             idle_timeout: std::time::Duration::from_secs(30),
             extra_headers: HeaderMap::new(),
+            error: None,
         }
+    }
+
+    /// 应用 Provider 预设轮廓（base_url 默认值）。
+    ///
+    /// 后续 `.base_url()` / `.api_key()` 可覆盖预设。
+    pub fn profile(mut self, profile: ProviderProfile) -> Self {
+        if self.base_url.is_empty() {
+            self.base_url = profile.base_url().to_string();
+        }
+        self
     }
 
     /// 设置 API 基础地址。
@@ -633,8 +640,8 @@ impl<C> ProviderBuilder<C> {
         self
     }
 
-    /// 设置完整的认证配置。
-    pub fn auth(mut self, auth: AuthConfig) -> Self {
+    /// 设置完整的认证配置（内部使用）。
+    pub(crate) fn auth(mut self, auth: AuthConfig) -> Self {
         self.auth = Some(auth);
         self
     }
@@ -642,21 +649,66 @@ impl<C> ProviderBuilder<C> {
     /// 添加一个自定义 Header。可链式调用多次。
     ///
     /// 用于注入 Provider 要求的额外 Headers，如 OpenRouter 的 `HTTP-Referer`。
+    /// 解析错误会累计到 builder 中，在 `build()` 时统一返回。
     pub fn header(mut self, key: impl AsRef<str>, value: impl AsRef<str>) -> Self {
-        let name: http::HeaderName = key.as_ref().parse().expect("invalid header name");
-        let val: http::HeaderValue = value.as_ref().parse().expect("invalid header value");
+        if self.error.is_some() {
+            return self;
+        }
+        let name: http::HeaderName = match key.as_ref().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.error = Some(ProviderBuildError::InvalidHeader {
+                    field: "name".to_string(),
+                    value: key.as_ref().to_string(),
+                });
+                return self;
+            }
+        };
+        let val: http::HeaderValue = match value.as_ref().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                self.error = Some(ProviderBuildError::InvalidHeader {
+                    field: "value".to_string(),
+                    value: value.as_ref().to_string(),
+                });
+                return self;
+            }
+        };
         self.extra_headers.insert(name, val);
         self
     }
 
     /// 批量添加自定义 Headers。
+    ///
+    /// 解析错误会累计到 builder 中，在 `build()` 时统一返回。
     pub fn extra_headers(
         mut self,
         headers: impl IntoIterator<Item = (String, String)>,
     ) -> Self {
+        if self.error.is_some() {
+            return self;
+        }
         for (key, value) in headers {
-            let name: http::HeaderName = key.parse().expect("invalid header name");
-            let val: http::HeaderValue = value.parse().expect("invalid header value");
+            let name: http::HeaderName = match key.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    self.error = Some(ProviderBuildError::InvalidHeader {
+                        field: "name".to_string(),
+                        value: key,
+                    });
+                    return self;
+                }
+            };
+            let val: http::HeaderValue = match value.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    self.error = Some(ProviderBuildError::InvalidHeader {
+                        field: "value".to_string(),
+                        value,
+                    });
+                    return self;
+                }
+            };
             self.extra_headers.insert(name, val);
         }
         self
@@ -681,10 +733,15 @@ impl<C> ProviderBuilder<C> {
     }
 
     /// 构建 CodecProvider。
-    pub fn build(self) -> Result<CodecProvider<C>, url::ParseError>
+    ///
+    /// 若 builder 链中累计了错误（如非法 header），优先返回该错误。
+    pub fn build(self) -> Result<CodecProvider<C>, ProviderBuildError>
     where
         C: ProviderExtension,
     {
+        if let Some(e) = self.error {
+            return Err(e);
+        }
         let base_url = url::Url::parse(&self.base_url)?;
         let auth = self.auth.unwrap_or(AuthConfig::None);
 
@@ -715,54 +772,66 @@ impl<C> ProviderBuilder<C> {
     }
 }
 
-/// 便捷构造 OpenRouter Provider。
-///
-/// OpenRouter 是一个聚合网关，支持多种协议（OpenAI / Anthropic / Responses）。
-/// 此函数设置正确的 base_url 和 Bearer 认证，返回 CodecProvider。
-///
-/// **环境变量回退**：优先读取 `OPENROUTER_API_KEY`，未设置则返回错误。
-/// `OPENROUTER_BASE_URL` 可选，默认 `https://openrouter.ai/api/v1`。
-///
-/// # 示例
-///
-/// ```rust,no_run
-/// use lellm_provider::{openrouter, OpenAICompatCodec};
-///
-/// // 从 OPENROUTER_API_KEY 环境变量加载
-/// let provider = openrouter(OpenAICompatCodec::openai())?;
-/// # Ok::<_, lellm_provider::providers::codec::ProviderEnvError>(())
-/// ```
-///
-/// 如需添加 `HTTP-Referer` 或 `X-Title` 等推荐 Header，使用 [`ProviderBuilder`]：
-///
-/// ```rust,no_run
-/// use lellm_provider::{CodecProvider, OpenAICompatCodec};
-///
-/// let provider = CodecProvider::builder(OpenAICompatCodec::openai())
-///     .base_url("https://openrouter.ai/api/v1")
-///     .api_key("sk-or-...")
-///     .header("HTTP-Referer", "https://mysite.com")
-///     .header("X-Title", "My App")
-///     .build()?;
-/// # Ok::<_, url::ParseError>(())
-/// ```
-pub fn openrouter<C: ProviderExtension>(codec: C) -> Result<CodecProvider<C>, ProviderEnvError> {
-    let base_url = std::env::var("OPENROUTER_BASE_URL").unwrap_or_else(|_| {
-        tracing::debug!("OPENROUTER_BASE_URL not set, using default");
-        "https://openrouter.ai/api/v1".to_string()
-    });
+/// Provider 预设加载辅助函数
+impl<C> CodecProvider<C>
+where
+    C: ProviderExtension,
+{
+    /// 便捷构造 OpenRouter Provider。
+    ///
+    /// OpenRouter 是一个聚合网关，支持多种协议（OpenAI / Anthropic / Responses）。
+    /// 内部读取 `OPENROUTER_API_KEY`（必须）和 `OPENROUTER_BASE_URL`（可选）。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,no_run
+    /// use lellm_provider::{CodecProvider, OpenAICompatCodec};
+    ///
+    /// // 从 OPENROUTER_API_KEY 环境变量加载
+    /// let provider = CodecProvider::openrouter(OpenAICompatCodec::openai())?;
+    /// # Ok::<_, lellm_provider::providers::codec::ProviderBuildError>(())
+    /// ```
+    ///
+    /// 如需添加 `HTTP-Referer` 或 `X-Title` 等推荐 Header，使用 [`ProviderBuilder`]：
+    ///
+    /// ```rust,no_run
+    /// use lellm_provider::{CodecProvider, OpenAICompatCodec};
+    ///
+    /// let provider = CodecProvider::builder(OpenAICompatCodec::openai())
+    ///     .base_url("https://openrouter.ai/api/v1")
+    ///     .api_key("sk-or-...")
+    ///     .header("HTTP-Referer", "https://mysite.com")
+    ///     .header("X-Title", "My App")
+    ///     .build()?;
+    /// # Ok::<_, lellm_provider::providers::codec::ProviderBuildError>(())
+    /// ```
+    pub fn openrouter(codec: C) -> Result<Self, ProviderBuildError> {
+        let profile = ProviderProfile::OpenRouter;
+        let base_url = std::env::var(format!("{}_BASE_URL", profile.env_prefix())).unwrap_or_else(
+            |_| {
+                tracing::debug!(
+                    "{}_BASE_URL not set, using default",
+                    profile.env_prefix()
+                );
+                profile.base_url().to_string()
+            },
+        );
 
-    let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| ProviderEnvError::MissingApiKey {
-        provider: "openrouter".to_string(),
-        env_var: "OPENROUTER_API_KEY".to_string(),
-    })?;
+        let api_key_env = format!("{}_API_KEY", profile.env_prefix());
+        let api_key = std::env::var(&api_key_env).map_err(|_| {
+            ProviderBuildError::Env(ProviderEnvError::MissingEnv {
+                name: api_key_env.clone(),
+            })
+        })?;
+        if api_key.is_empty() {
+            return Err(ProviderBuildError::Env(ProviderEnvError::EmptyEnv {
+                name: api_key_env,
+            }));
+        }
 
-    Ok(CodecProvider::builder(codec)
-        .base_url(&base_url)
-        .api_key(api_key)
-        .build()
-        .map_err(|e| ProviderEnvError::InvalidUrl {
-            url: base_url.clone(),
-            reason: e.to_string(),
-        })?)
+        Ok(Self::builder(codec)
+            .base_url(&base_url)
+            .api_key(api_key)
+            .build()?)
+    }
 }

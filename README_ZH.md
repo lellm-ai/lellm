@@ -206,19 +206,19 @@ lellm = { version = "0.1", features = ["full"] }
 use lellm::provider::{CodecProvider, OpenAICompatCodec};
 
 // 自动读取 OPENAI_BASE_URL + OPENAI_API_KEY
-let provider = CodecProvider::from_env(OpenAICompatCodec::openai())?;
+let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
 ```
 
 **通过 OpenRouter**（聚合网关）：
 
 ```rust
-use lellm::provider::{openrouter, OpenAICompatCodec, AnthropicCodec};
+use lellm::provider::{CodecProvider, OpenAICompatCodec, AnthropicCodec};
 
 // 从 OPENROUTER_API_KEY 加载
-let provider = openrouter(OpenAICompatCodec::openai())?;
+let provider = CodecProvider::openrouter(OpenAICompatCodec::openai())?;
 
 // 换协议只需换 Codec
-let anthropic_via_openrouter = openrouter(AnthropicCodec)?;
+let anthropic_via_openrouter = CodecProvider::openrouter(AnthropicCodec)?;
 ```
 
 **支持的 Provider：**
