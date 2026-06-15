@@ -1,6 +1,6 @@
 # lellm v0.1 产品蓝图
 
-> 版本：v0.1 | 日期：2026-06-03 | 状态：代码已对齐
+> 版本：v0.1 | 日期：2026-06-15 | 状态：代码已对齐
 > 设计决策详见 [DESIGN.md](./DESIGN.md)
 
 ## 一、项目愿景
@@ -8,7 +8,7 @@
 做 Rust 版本的 LangChain / LangGraph / AutoGen。
 
 - LLM 抽象层，标准化消息内容格式；提供基础的 LLM provider 适配
-- 低层编排层，让开发者能精准控制 Agent 的执行流程；提供基础的 function call, agent loop, tool use
+- 低层编排层，让开发者能精准控制 Agent 的执行流程；提供基础的 function call, agent loop, tool use, MCP client
 - 支持节点 node, 边 edge, 图 graph, Multi-Agent Orchestration（v0.2+）
 - 支持流式输出、持久化执行、短期记忆、人类介入（human-in-the-loop）
 
@@ -19,15 +19,15 @@
 | Crate | 职责 | 核心内容 |
 |-------|------|----------|
 | `lellm` | 门面 crate | Feature-gated re-export 所有子 crate；用户统一入口 |
-| `lellm-core` | 协议对象 | Message, ContentBlock, ChatRequest/Response, ToolDefinition, TokenUsage, LlmError |
+| `lellm-core` | 协议对象 | Message, ContentBlock, ChatRequest/Response, ToolDefinition, CacheControl, TokenUsage, LlmError |
 | `lellm-provider` | Provider trait + Codec | LlmProvider, CodecProvider, ProviderExtension (三权分立), ModelRouter, ProviderRegistry, MockProvider |
 | `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, ParallelSafety, RetryPolicy, FallbackStrategy |
 | `lellm-macros` | 派生宏 + 属性宏 | `#[tool]` 函数宏, `#[derive(Tool)]` struct 宏, `ToolDefinition` 向后兼容别名 |
+| `lellm-mcp` | MCP Client | McpClient, McpTransport (stdio), McpCatalog (ToolCatalog), ToolBridge |
 
 ### 不包含（v0.2+）
 
 - Graph/Node/Edge 编排层
-- MCP Client/Server（v0.3+，详见 [ADR-001](./adr/001-mcp-as-tool-runtime-extension.md)）
 - Sandbox / Harness Orchestrator
 - LongTermMemory / MemoryStore
 
@@ -40,10 +40,10 @@ lellm/
 ├── lellm-core/                 # 协议对象，零运行时依赖
 ├── lellm-provider/             # Provider trait + 适配器
 ├── lellm-agent/                # Agent 运行时
-└── lellm-macros/               # 派生宏
+├── lellm-macros/               # 派生宏
+└── lellm-mcp/                  # MCP Client（v0.1 提前纳入）
 ```
 
-> **v0.3+** 将新增 `lellm-mcp/` crate。
 > 完整文档：[MCP 集成概览](./mcp-overview.md) → [ADR 系列](./adr/)
 
 ## 四、架构总览
@@ -59,7 +59,7 @@ ToolExecutor
  ↓
 ToolRegistration
  ├─ LocalTool (现有)
- └─ McpToolBridge (v0.3)
+ └─ McpToolBridge (v0.1)
       ↓
    McpClient
       ↓

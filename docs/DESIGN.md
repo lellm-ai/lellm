@@ -424,7 +424,7 @@ process_stream(&mut mock_sink, &codec, "test".into(), false, stream).await;
 **决定：** 删除 `ToolCallResult` 枚举，改用 Rust 原生 `Result`：
 
 ```rust
-pub type ToolResult = Result<String, ToolError>;
+pub type ToolResult = Result<serde_json::Value, ToolError>;
 
 pub struct ToolError {
     pub kind: ToolErrorKind,

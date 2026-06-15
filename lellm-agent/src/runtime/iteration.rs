@@ -13,7 +13,10 @@ use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::retry::RetryPolicy;
 use super::runtime::ResolvedRound;
-use super::tools::{ToolExecutor, ToolSnapshot};
+use super::tools::{ToolExecutor, ToolRegistration, ToolSnapshot};
+
+/// 工具映射类型别名
+type ToolMap = indexmap::IndexMap<String, ToolRegistration>;
 
 // ─── 带 Fallback 的执行器 ────────────────────────────────────────
 
@@ -22,8 +25,10 @@ use super::tools::{ToolExecutor, ToolSnapshot};
 /// **职责划分：**
 /// - `FallbackContext` = 观察窗口（借用 `&LlmError`）
 /// - Retry Loop = 错误所有者（Abort 时直接返回 owned `err`）
+/// - `can_retry` = 重试门控（流式模式下 stream_started 后不可重试）
 pub async fn execute_with_fallback<T, F, Fut>(
     fallback: &Arc<dyn FallbackStrategy>,
+    can_retry: impl Fn(&LlmError) -> bool,
     mut op: F,
     iteration: usize,
     messages: &[Message],
@@ -38,6 +43,9 @@ where
         match op().await {
             Ok(v) => return Ok(v),
             Err(err) => {
+                if !can_retry(&err) {
+                    return Err(err);
+                }
                 tracing::warn!(
                     attempt = attempt,
                     error = %err,
@@ -69,11 +77,15 @@ pub async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
     tx.send(event).await.is_ok()
 }
 
-/// 流式模式下 emit ToolStart/ToolEnd 并串行执行工具（使用快照）。
+/// 流式模式下 emit ToolStart/ToolEnd 并分组并发执行工具（使用快照）。
 ///
-/// **设计决策：** 流式模式工具执行强制串行，
-/// 即使工具标记为 Safe。原因：ToolStart/ToolEnd 与 Token 交错会让消费者解析更复杂。
-/// v0.2 再优化流式分组并发。
+/// **并发策略：** 复用 `execute_batch_with()` 的 `ParallelSafety` 分组逻辑：
+/// - `Safe`: 全并发
+/// - `CategoryExclusive`: 组内串行，组间并发
+/// - `Exclusive`: 全串行
+///
+/// **事件顺序：** ToolStart 按原始顺序发出，ToolEnd 允许乱序。
+/// 消费者用 `tool_call_id` 配对 Start/End。
 ///
 /// **工具结果截断**统一在 `LoopState.push_tool_results()` 中执行，此处不截断。
 pub(super) async fn emit_and_execute_tools_with(
@@ -82,8 +94,11 @@ pub(super) async fn emit_and_execute_tools_with(
     retry_policy: &RetryPolicy,
     tool_calls: &[ToolCall],
 ) -> Option<Vec<Message>> {
-    let mut results = Vec::new();
+    if tool_calls.is_empty() {
+        return Some(Vec::new());
+    }
 
+    // 1. 按原始顺序发出所有 ToolStart
     for tc in tool_calls {
         if !emit(
             tx,
@@ -96,32 +111,158 @@ pub(super) async fn emit_and_execute_tools_with(
         {
             return None;
         }
-
-        let raw_result = match snapshot.get(&tc.name) {
-            Some(entry) => {
-                retry_policy
-                    .execute_with_retry_and_emission(&entry.func, &tc.arguments, tx, &tc.id)
-                    .await
-            }
-            None => Err(ToolError::not_found(format!("unknown tool: {}", tc.name))),
-        };
-
-        if !emit(
-            tx,
-            AgentEvent::ToolEnd {
-                tool_call_id: tc.id.clone(),
-                result: raw_result.clone(),
-            },
-        )
-        .await
-        {
-            return None;
-        }
-
-        results.push(Message::tool_result(tc, &raw_result));
     }
 
-    Some(results)
+    // 2. 按 ParallelSafety 分组（与 execute_batch_with 相同逻辑）
+    let mut safe_calls: Vec<(usize, ToolCall)> = Vec::new();
+    let mut category_calls: std::collections::HashMap<
+        super::tools::ToolCategory,
+        Vec<(usize, ToolCall)>,
+    > = std::collections::HashMap::new();
+    let mut exclusive_calls: Vec<(usize, ToolCall)> = Vec::new();
+
+    for (idx, call) in tool_calls.iter().enumerate() {
+        let safety = snapshot
+            .get(&call.name)
+            .map(|t| t.safety.clone())
+            .unwrap_or(super::tools::ParallelSafety::Exclusive);
+
+        match safety {
+            super::tools::ParallelSafety::Safe => safe_calls.push((idx, call.clone())),
+            super::tools::ParallelSafety::CategoryExclusive => {
+                if let Some(cat) = snapshot.get(&call.name).and_then(|t| t.category.clone()) {
+                    category_calls
+                        .entry(cat)
+                        .or_default()
+                        .push((idx, call.clone()));
+                } else {
+                    exclusive_calls.push((idx, call.clone()));
+                }
+            }
+            super::tools::ParallelSafety::Exclusive => exclusive_calls.push((idx, call.clone())),
+        }
+    }
+
+    // 3. 分组并发执行，每个完成后立即 emit ToolEnd
+    let snapshot_arc: Arc<ToolMap> = snapshot.clone_for_spawn();
+    let retry_policy = retry_policy.clone();
+    let tx = tx.clone();
+
+    let mut group_handles: Vec<tokio::task::JoinHandle<Vec<(usize, Message)>>> = Vec::new();
+
+    // Safe: 每个 tool 独立 spawn（全并发）
+    if !safe_calls.is_empty() {
+        let s = Arc::clone(&snapshot_arc);
+        let rp = retry_policy.clone();
+        let txClone = tx.clone();
+        group_handles.push(tokio::spawn(async move {
+            let handles: Vec<_> = safe_calls
+                .iter()
+                .map(|(idx, call)| {
+                    let tools = Arc::clone(&s);
+                    let rp = rp.clone();
+                    let call = call.clone();
+                    let idx = *idx;
+                    let tx = txClone.clone();
+                    tokio::spawn(async move {
+                        let result = match tools.get(&call.name) {
+                            Some(entry) => {
+                                rp.execute_with_retry(&entry.func, &call.arguments).await
+                            }
+                            None => {
+                                Err(ToolError::not_found(format!("unknown tool: {}", call.name)))
+                            }
+                        };
+                        let _ = emit(
+                            &tx,
+                            AgentEvent::ToolEnd {
+                                tool_call_id: call.id.clone(),
+                                result: result.clone(),
+                            },
+                        )
+                        .await;
+                        (idx, Message::tool_result(&call, &result))
+                    })
+                })
+                .collect();
+
+            let raw = futures_util::future::join_all(handles).await;
+            raw.into_iter()
+                .map(|h| match h {
+                    Ok((idx, msg)) => (idx, msg),
+                    Err(join_err) => {
+                        panic!("tool task panicked: {join_err}");
+                    }
+                })
+                .collect()
+        }));
+    }
+
+    // CategoryExclusive: 按 category 分组，组内串行、组间并发
+    for group_calls in category_calls.into_values() {
+        let s = Arc::clone(&snapshot_arc);
+        let rp = retry_policy.clone();
+        let txClone = tx.clone();
+        group_handles.push(tokio::spawn(async move {
+            let mut results = Vec::with_capacity(group_calls.len());
+            for (idx, call) in group_calls {
+                let result = match s.get(&call.name) {
+                    Some(entry) => rp.execute_with_retry(&entry.func, &call.arguments).await,
+                    None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
+                };
+                let _ = emit(
+                    &txClone,
+                    AgentEvent::ToolEnd {
+                        tool_call_id: call.id.clone(),
+                        result: result.clone(),
+                    },
+                )
+                .await;
+                results.push((idx, Message::tool_result(&call, &result)));
+            }
+            results
+        }));
+    }
+
+    // Exclusive: 全部串行，一个 task
+    if !exclusive_calls.is_empty() {
+        let s = Arc::clone(&snapshot_arc);
+        let rp = retry_policy.clone();
+        let txClone = tx.clone();
+        group_handles.push(tokio::spawn(async move {
+            let mut results = Vec::with_capacity(exclusive_calls.len());
+            for (idx, call) in exclusive_calls {
+                let result = match s.get(&call.name) {
+                    Some(entry) => rp.execute_with_retry(&entry.func, &call.arguments).await,
+                    None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
+                };
+                let _ = emit(
+                    &txClone,
+                    AgentEvent::ToolEnd {
+                        tool_call_id: call.id.clone(),
+                        result: result.clone(),
+                    },
+                )
+                .await;
+                results.push((idx, Message::tool_result(&call, &result)));
+            }
+            results
+        }));
+    }
+
+    // 4. 等待所有组完成，按原始索引回填结果
+    let mut results: Vec<Option<Message>> = vec![None; tool_calls.len()];
+    let all_handles = futures_util::future::join_all(group_handles).await;
+
+    for handle_result in all_handles {
+        if let Ok(indexed_messages) = handle_result {
+            for (idx, msg) in indexed_messages {
+                results[idx] = Some(msg);
+            }
+        }
+    }
+
+    Some(results.into_iter().flatten().collect())
 }
 
 /// 从累积的 buffer 构建部分 ChatResponse（输出预算超限时使用）

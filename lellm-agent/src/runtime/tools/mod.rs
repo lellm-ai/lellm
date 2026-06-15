@@ -129,24 +129,104 @@ impl ToolCatalog for StaticCatalog {
     }
 }
 
+/// 冲突解决策略
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConflictPolicy {
+    /// 默认：前面优先级高，同名工具被遮蔽
+    #[default]
+    Shadow,
+    /// 严格模式：冲突即报错
+    Error,
+}
+
+/// 工具冲突详情
+#[derive(Debug, Clone)]
+pub struct CatalogConflict {
+    /// 冲突的工具名称
+    pub tool_name: String,
+    /// 获胜的 catalog 名称（优先级高）
+    pub winner: String,
+    /// 被覆盖的 catalog 名称（优先级低）
+    pub loser: String,
+    /// 使用的冲突策略
+    pub policy: ConflictPolicy,
+}
+
+/// 组合目录构建器
+pub struct CompositeCatalogBuilder {
+    sources: Vec<(String, std::sync::Arc<dyn ToolCatalog>)>,
+    conflict_policy: ConflictPolicy,
+}
+
+impl CompositeCatalogBuilder {
+    /// 创建新的构建器
+    pub fn new() -> Self {
+        Self {
+            sources: Vec::new(),
+            conflict_policy: ConflictPolicy::default(),
+        }
+    }
+
+    /// 设置冲突策略
+    pub fn conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
+    }
+
+    /// 添加工具源（按优先级从高到低）
+    pub fn add(
+        mut self,
+        name: impl Into<String>,
+        catalog: std::sync::Arc<dyn ToolCatalog>,
+    ) -> Self {
+        self.sources.push((name.into(), catalog));
+        self
+    }
+
+    /// 构建组合目录
+    pub fn build(self) -> CompositeCatalog {
+        let sources: Vec<_> = self.sources.into_iter().map(|(_, c)| c).collect();
+        CompositeCatalog {
+            sources,
+            conflict_policy: self.conflict_policy,
+            version_counter: std::sync::atomic::AtomicU64::new(0),
+            conflicts: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
 /// 组合目录 — 按优先级合并多个工具源。
 ///
 /// **遮蔽策略（Shadowing）：** 靠前的源优先级高，同名工具被遮蔽。
 /// 遮蔽发生时通过 `tracing::warn!` 记录结构化日志。
 pub struct CompositeCatalog {
     sources: Vec<std::sync::Arc<dyn ToolCatalog>>,
+    conflict_policy: ConflictPolicy,
     version_counter: std::sync::atomic::AtomicU64,
+    conflicts: std::sync::Mutex<Vec<CatalogConflict>>,
 }
 
 impl CompositeCatalog {
-    /// 创建组合目录。
+    /// 创建组合目录（Builder 模式）。
+    pub fn builder() -> CompositeCatalogBuilder {
+        CompositeCatalogBuilder::new()
+    }
+
+    /// 创建组合目录（简单模式，默认 Shadow 策略）。
     ///
     /// `sources` 按优先级从高到低排列。
     pub fn new(sources: Vec<std::sync::Arc<dyn ToolCatalog>>) -> Self {
         Self {
             sources,
+            conflict_policy: ConflictPolicy::default(),
             version_counter: std::sync::atomic::AtomicU64::new(0),
+            conflicts: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// 获取所有冲突详情
+    pub fn conflicts(&self) -> Vec<CatalogConflict> {
+        self.conflicts.lock().unwrap().clone()
     }
 }
 
@@ -154,20 +234,33 @@ impl CompositeCatalog {
 impl ToolCatalog for CompositeCatalog {
     async fn snapshot(&self) -> std::sync::Arc<ToolSnapshot> {
         let mut merged = indexmap::IndexMap::new();
+        let mut conflicts = Vec::new();
 
         // 反向遍历（从低优先级到高优先级），高优先级自然覆盖低优先级
-        for source in self.sources.iter().rev() {
+        for (idx, source) in self.sources.iter().rev().enumerate() {
             let snap = source.snapshot().await;
             let snap_tools = &snap.tools;
+            let source_name = format!("source_{}", idx);
             for (name, tool) in snap_tools.iter() {
                 if merged.contains_key(name) {
                     tracing::warn!(
                         tool_name = %name,
                         "Tool conflict detected in CompositeCatalog. Higher priority tool shadows the lower one."
                     );
+                    conflicts.push(CatalogConflict {
+                        tool_name: name.clone(),
+                        winner: source_name.clone(),
+                        loser: format!("source_{}", idx + 1),
+                        policy: self.conflict_policy,
+                    });
                 }
                 merged.insert(name.clone(), tool.clone());
             }
+        }
+
+        // 存储冲突信息
+        if !conflicts.is_empty() {
+            *self.conflicts.lock().unwrap() = conflicts;
         }
 
         let version = self

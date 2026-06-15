@@ -75,6 +75,31 @@ impl ToolRegistration {
         }
     }
 
+    /// 强类型便捷构造 — 自动反序列化参数。
+    ///
+    /// 与 `safe()` 的区别：闭包接收反序列化后的 `T`，而非原始 `serde_json::Value`。
+    /// 反序列化失败时返回 `ToolErrorKind::InvalidInput`。
+    pub fn safe_fn<T, F, Fut>(def: lellm_core::ToolDefinition, f: F) -> Self
+    where
+        T: for<'de> serde::Deserialize<'de> + Send + 'static,
+        F: Fn(T) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
+    {
+        let f = Arc::new(f);
+        Self::safe(def, move |value| {
+            let f = Arc::clone(&f);
+            let result = serde_json::from_value::<T>(value.clone());
+            Box::pin(async move {
+                match result {
+                    Ok(parsed) => f(parsed).await,
+                    Err(e) => Err(ToolError::invalid_input(format!(
+                        "invalid tool arguments: {e}"
+                    ))),
+                }
+            })
+        })
+    }
+
     pub fn category_exclusive<F, Fut>(
         def: lellm_core::ToolDefinition,
         category: ToolCategory,
@@ -344,7 +369,7 @@ pub async fn execute_batch_with(
 
 impl ToolSnapshot {
     /// 克隆内部工具映射，供 spawn 使用。
-    fn clone_for_spawn(&self) -> Arc<indexmap::IndexMap<String, ToolRegistration>> {
+    pub fn clone_for_spawn(&self) -> Arc<indexmap::IndexMap<String, ToolRegistration>> {
         self.tools.clone()
     }
 }

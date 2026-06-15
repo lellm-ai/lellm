@@ -327,6 +327,7 @@ impl ToolUseLoop {
             let msg_snapshot = state.messages.clone();
             let response = execute_with_fallback(
                 &self.deps.fallback,
+                |_| true, // 非流式模式允许重试
                 || self.model.provider.call(&req),
                 iteration,
                 &msg_snapshot,
