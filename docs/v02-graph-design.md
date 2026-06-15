@@ -454,25 +454,65 @@ for edge in edges {
 
 ### 流式执行
 
-`execute_stream()` 返回 `(GraphStream, GraphHandle)`，消费者实时接收事件并通过句柄交互：
+`execute_stream()` 返回 `(GraphStream, GraphHandle)`，消费者实时接收事件并通过句柄交互。
+
+#### 事件分层
+
+```
+GraphEvent（图级）
+  ├── NodeStart / NodeEnd        — 节点执行边界
+  ├── Node                       — 节点内部事件（NodeEvent）
+  │     ├── Agent(AgentEvent)    — Agent 内部事件
+  │     ├── Barrier(BarrierEvent)
+  │     └── Subgraph(SubgraphEvent)
+  ├── BarrierPaused              — 等待外部审批（需响应）
+  ├── GraphComplete              — 执行完成
+  └── GraphError                 — 执行出错
+```
+
+**Graph 编排 Agent，不暴露 Agent 内部实现。** `NodeEvent` 是中间层，隔离 `GraphEvent` 与节点内部事件。
 
 ```rust
+pub struct TraceId(Uuid);
+
+pub enum NodeEvent {
+    Agent(AgentEvent),
+    Barrier(BarrierEvent),
+    Subgraph(SubgraphEvent),
+}
+
 pub enum GraphEvent {
-    NodeStart { node_name: String },
-    NodeEnd { node_name: String, success: bool, duration: Duration },
-    Agent { node_name: String, event: AgentEvent },
+    NodeStart { node_name: String, trace_id: TraceId },
+    NodeEnd { node_name: String, trace_id: TraceId, success: bool, duration: Duration },
+    Node { trace_id: TraceId, node_name: String, event: NodeEvent },
     BarrierPaused { barrier_id: BarrierId, node_name: String },
     GraphComplete { result: GraphResult },
     GraphError { error: GraphError },
 }
 ```
 
-**生命周期契约：**
-- 正常结束：`GraphComplete` 恰好一次，然后 channel 关闭
-- 异常结束：`GraphError` 恰好一次，然后 channel 关闭
-- 终态事件后不再发送任何事件
+#### 为什么需要 `trace_id`
 
-### Barrier 决策 API
+`trace_id` 的价值不在并发，而在**生命周期追踪**。
+
+同一个节点可能被多次执行：
+
+```
+Graph: planner → coder → reviewer → planner (回跳)
+
+事件流：
+planner/7f12...  Token
+planner/7f12...  ToolCall
+coder/a82c...    Token
+coder/a82c...    ToolCall
+reviewer/b93d... Token
+planner/c3e1...  Token    ← 第二次执行 planner，不同的 trace_id
+planner/c3e1...  Complete
+```
+
+`node_name` 只能区分"哪个节点"，`trace_id` 区分"哪次运行"。日志天然可聚合。
+
+#### Barrier 决策 API
 
 `BarrierPaused` 不暴露内部同步原语（`oneshot::Sender`），而是通过 `GraphHandle` 提交决策：
 
@@ -512,8 +552,14 @@ while let Some(event) = stream.recv().await {
 3. **隐藏内部同步** — 内部仍用 `HashMap<BarrierId, oneshot::Sender>` 管理，调用方不受影响
 4. **一次性语义保留** — 内部 `oneshot` 保证决策只能提交一次
 
-> **v0.2 现状：** 当前代码将 `oneshot::Sender` 直接嵌入 `BarrierPaused` 事件。
-> `BarrierId` + `GraphHandle::decide()` 为 v0.2.1 目标设计，待实现。
+**生命周期契约：**
+- 正常结束：`GraphComplete` 恰好一次，然后 channel 关闭
+- 异常结束：`GraphError` 恰好一次，然后 channel 关闭
+- 终态事件后不再发送任何事件
+
+> **v0.2 现状：** 当前代码 `GraphEvent::Agent { node_name, event }` 直接包裹 `AgentEvent`，
+> 无 `trace_id`，无 `NodeEvent` 中间层。
+> `NodeEvent` + `TraceId` + `BarrierId` + `GraphHandle` 为 v0.2.1 目标设计，待实现。
 
 ### 错误处理
 
@@ -669,6 +715,7 @@ lellm-graph/
 | P0 | `Edge::max_visits` | 边级循环预算，`find_next_node` 中检查 |
 | P0 | `analyze_cycles()` | 诊断用，找出图中所有环，生成诊断信息 |
 | P0 | `StateExt` 强类型 getter/setter | `get_str/get_u64/get_json/set/remove/contains` |
+| P0 | `NodeEvent` + `TraceId` | 事件分层，隔离 Graph 与节点内部事件 |
 | P0 | `BarrierId` + `GraphHandle::decide()` | 剥离 oneshot Sender，支持事件序列化与 Remote UI |
 | P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 |
 | P1 | ParallelNode | 并行子图，`join_all` + Reducer 聚合 |
