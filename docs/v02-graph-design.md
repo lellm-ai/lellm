@@ -15,30 +15,39 @@
 | 约束 | 决策 |
 |------|------|
 | 图类型 | **允许有环**，A→B→C→A 完全合法 |
-| 循环保护 | `GraphExecutor::max_steps` 全局熔断（默认 50 步）+ `LoopNode::max_iterations` 局部熔断 |
+| 循环保护 | **三层体系**（详见下文）|
 | 控制流 | Sequence, Condition (edge_if), Parallel (未实现), Loop |
 | Node 种类 | 7 种：Task, Agent, LLM, Tool, Condition, Loop, Barrier |
 | 数据传递 | 共享 State（`HashMap<String, Value>`）+ Reducer 合并机制 |
 | 执行模式 | 宏观串行，节点依次执行 |
 | 流式支持 | `execute_stream()` 返回 `GraphStream`，实时发射 `GraphEvent` |
 
-### 路线 B 决策
+### 循环保护：三层体系
 
-原始设计承诺"严格 DAG + LoopNode 表达循环"，实现时选择了**路线 B**：
+原始设计承诺"严格 DAG + LoopNode 表达循环"，最终冻结为**有环图 + 三层循环保护**：
 
-- **有环图** — `edge_if` 天然支持回跳，无需 ConditionNode 中转
-- **熔断器** — `max_steps` 全局步数限制，防止无限循环
-- **LoopNode 保留** — 作为需要独立迭代计数和独立熔断的语法糖
+| 层级 | 机制 | 作用域 | 说明 |
+|------|------|--------|------|
+| **全局** | `GraphExecutor::max_steps` | 整个图执行 | 绝对安全网，默认 50 步 |
+| **局部** | `Edge::max_visits` | 单条边（尤其回跳边）| 精细化循环预算 |
+| **语法糖** | `LoopNode::max_iterations` | 封装循环体 | DSL 表达，非必需 |
 
 ```rust
-// 推荐：直接用有环图 + edge_if（更直观）
+// 推荐：有环图 + edge_if + max_visits（最直观）
 GraphBuilder::new("retry")
-    .edge_if("check", "agent", |s| !s.satisfied)  // 回跳
-    .edge("check", "output")                       // 通过
+    .edge_if("check", "agent", |s| !s.satisfied)
+        .max_visits(10)          // 这条回跳边最多走 10 次
+    .edge("check", "output")     // 通过
+    .end("output")
 
-// LoopNode：需要独立 max_iterations 时使用
+// LoopNode：DSL 语法糖，适合需要独立迭代计数的场景
 LoopNode::new("loop", SubGraph { ... }, |s| !s.satisfied, max_iterations: 5)
 ```
+
+**设计意图：**
+- 全局熔断是**底线**——任何图都不会无限执行
+- 边级预算是**常规手段**——对回跳边设置合理的访问上限
+- LoopNode 是**语法糖**——封装了循环体 + 条件 + 计数，但功能上可用 `edge_if` + `max_visits` 替代
 
 ---
 
@@ -137,7 +146,7 @@ ConditionNode::builder("route")
     .build()
 ```
 
-### LoopNode — 循环容器
+### LoopNode — 循环容器（DSL 语法糖）
 
 ```rust
 pub struct LoopNode {
@@ -147,6 +156,8 @@ pub struct LoopNode {
     pub max_iterations: usize,
 }
 ```
+
+**定位：** DSL 语法糖，非必需。功能上可用 `edge_if` + `Edge::max_visits` 替代。
 
 - 每次执行完 body 后求值 `continue_condition`
 - 条件为 false 时退出，返回 `GoToNext`
@@ -241,10 +252,11 @@ pub struct Edge {
     pub from: String,
     pub to: String,
     pub condition: Option<Box<dyn Fn(&State) -> bool + Send + Sync>>,
+    pub max_visits: Option<usize>,  // 局部循环预算（待实现）
 }
 ```
 
-**图允许有环。** 循环保护由 `GraphExecutor::max_steps` 运行时熔断提供。
+**图允许有环。** 循环保护由三层体系提供。
 
 ### 验证规则
 
@@ -253,8 +265,11 @@ pub struct Edge {
 2. 结束节点存在
 3. 所有边引用的节点存在
 
+`analyze_cycles()` 诊断（非验证）：
+- 找出图中所有环，生成诊断信息
+- 不阻止构建，仅用于调试和审查
+
 **不检查：**
-- 循环检测（有环图不需要）
 - 节点可达性（未实现）
 - 条件边覆盖完整性（未实现）
 
@@ -335,6 +350,8 @@ loop {
     End            → break
     Err(e)         → 立即返回错误（fail-fast）
   }
+  // 检查选中边的 max_visits（待实现）
+  if edge.max_visits.is_some() && visits >= edge.max_visits → EdgeLimitExceeded
 }
 ```
 
@@ -428,6 +445,7 @@ pub enum GraphError {
     NodeExecutionFailed { node: String, source: Box<dyn Error + Send + Sync> },
     LoopLimitExceeded { limit: usize },                      // LoopNode 局部超限
     StepsExceeded { limit: usize },                          // 全局步数超限（熔断）
+    EdgeLimitExceeded { edge: String, limit: usize },        // 边级循环预算超限（待实现）
     BarrierTimeout { node: String, timeout: Duration },      // Barrier 超时
     BarrierCancelled { node: String },                       // Barrier 被取消
     StateError(String),                                      // State 操作错误
@@ -489,6 +507,8 @@ lellm-graph/
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
+| P0 | `Edge::max_visits` | 边级循环预算，`find_next_node` 中检查 |
+| P0 | `analyze_cycles()` | 诊断用，找出图中所有环，生成诊断信息 |
 | P1 | ParallelNode | 并行子图，`join_all` + Reducer 聚合 |
 | P2 | 可达性验证 | validate() 检查所有节点是否可达 |
 | P3 | 条件覆盖验证 | validate() 检查条件边是否覆盖完整 |
