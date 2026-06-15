@@ -12,7 +12,7 @@ use crate::barrier_node::BarrierDefaultAction;
 use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId, GraphEvent, GraphHandle, GraphStream, TraceId};
 use crate::graph::Graph;
-use crate::node::{GraphNode, NextStep, NodeKind, PendingDecisions, StreamNodeResult};
+use crate::node::{GraphNode, NextStep, NodeKind, StreamNodeResult};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
 /// 边访问计数器 — 跟踪 (from, to) 对的 traversed 次数。
@@ -137,8 +137,6 @@ impl GraphExecutor {
             let mut state = initial_state;
             let mut execution_log = Vec::new();
             let mut edge_visits = EdgeVisits::default();
-            let pending_decisions: PendingDecisions =
-                std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
             let mut current = graph.start_node().to_string();
             let mut step: usize = 0;
@@ -184,9 +182,7 @@ impl GraphExecutor {
                 .await;
 
                 let node_start = Instant::now();
-                let result = node
-                    .execute_stream(&mut state, &event_tx, trace_id, pending_decisions.clone())
-                    .await;
+                let result = node.execute_stream(&mut state, &event_tx, trace_id).await;
                 let node_end = Instant::now();
                 let duration = node_end.duration_since(node_start);
 
@@ -249,7 +245,6 @@ impl GraphExecutor {
                         let decision = executor
                             .wait_barrier_decision(
                                 &mut decision_rx,
-                                &pending_decisions,
                                 barrier_id,
                                 timeout,
                                 &default_action,
@@ -339,33 +334,19 @@ impl GraphExecutor {
         (event_rx, handle)
     }
 
-    /// 等待 Barrier 决策通过 handle 到达，并转发到 pending_decisions。
+    /// 等待 Barrier 决策通过 handle 到达。
     async fn wait_barrier_decision(
         &self,
         decision_rx: &mut mpsc::Receiver<(BarrierId, BarrierDecision)>,
-        pending_decisions: &PendingDecisions,
         target_id: BarrierId,
         timeout: Option<std::time::Duration>,
         default_action: &BarrierDefaultAction,
     ) -> BarrierDecision {
-        // 先检查是否已有决策
-        {
-            let map = pending_decisions.lock().await;
-            if let Some(decision) = map.get(&target_id) {
-                return decision.clone();
-            }
-        }
-
         if let Some(timeout) = timeout {
             let start = std::time::Instant::now();
             loop {
-                // 使用 try_recv 避免阻塞，定期检查超时
                 match decision_rx.try_recv() {
                     Ok((barrier_id, decision)) => {
-                        pending_decisions
-                            .lock()
-                            .await
-                            .insert(barrier_id, decision.clone());
                         if barrier_id == target_id {
                             return decision;
                         }
@@ -389,10 +370,6 @@ impl GraphExecutor {
             // 无限等待
             loop {
                 if let Some((barrier_id, decision)) = decision_rx.recv().await {
-                    pending_decisions
-                        .lock()
-                        .await
-                        .insert(barrier_id, decision.clone());
                     if barrier_id == target_id {
                         return decision;
                     }

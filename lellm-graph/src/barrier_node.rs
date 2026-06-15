@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId, GraphEvent, TraceId};
-use crate::node::{GraphNode, NextStep, PendingDecisions, StreamNodeResult};
+use crate::node::{GraphNode, NextStep, StreamNodeResult};
 use crate::state::State;
 
 /// Barrier 超时后的默认行为。
@@ -27,7 +27,7 @@ pub enum BarrierDefaultAction {
 /// 执行流程：
 /// 1. 返回 `StreamNodeResult::BarrierPaused`，executor 发射 `BarrierPaused` 事件
 /// 2. 消费者通过 `GraphHandle::decide(barrier_id, decision)` 提交决策
-/// 3. BarrierNode 从 `pending_decisions` 获取决策，应用并返回
+/// 3. executor 的 `wait_barrier_decision()` 接收决策，调用 `apply_decision()` 应用
 ///
 /// **阻塞模式不支持。** 调用 `execute()` 直接报错，引导使用 `execute_stream()`。
 pub struct BarrierNode {
@@ -128,7 +128,6 @@ impl GraphNode for BarrierNode {
         _state: &mut State,
         _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
         trace_id: TraceId,
-        _pending_decisions: PendingDecisions,
     ) -> Result<StreamNodeResult, GraphError> {
         let barrier_id = BarrierId::new();
         let node_name = self.name.clone();

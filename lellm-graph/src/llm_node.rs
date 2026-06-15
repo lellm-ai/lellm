@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::error::GraphError;
 use crate::event::{GraphEvent, NodeEvent, TraceId};
-use crate::node::{GraphNode, NextStep, PendingDecisions, StreamNodeResult};
+use crate::node::{GraphNode, NextStep, StreamNodeResult};
 use crate::state::State;
 
 // ─── AgentNode ───────────────────────────────────────────────
@@ -161,7 +161,6 @@ impl GraphNode for AgentNode {
         state: &mut State,
         sink: &mpsc::Sender<GraphEvent>,
         trace_id: TraceId,
-        _pending_decisions: PendingDecisions,
     ) -> Result<StreamNodeResult, GraphError> {
         let messages = read_messages(state, &self.prefix);
         let node_name = self.name.clone();
