@@ -154,7 +154,7 @@ pub(super) async fn emit_and_execute_tools_with(
     if !safe_calls.is_empty() {
         let s = Arc::clone(&snapshot_arc);
         let rp = retry_policy.clone();
-        let txClone = tx.clone();
+        let tx_clone = tx.clone();
         group_handles.push(tokio::spawn(async move {
             let handles: Vec<_> = safe_calls
                 .iter()
@@ -163,7 +163,7 @@ pub(super) async fn emit_and_execute_tools_with(
                     let rp = rp.clone();
                     let call = call.clone();
                     let idx = *idx;
-                    let tx = txClone.clone();
+                    let tx = tx_clone.clone();
                     tokio::spawn(async move {
                         let result = match tools.get(&call.name) {
                             Some(entry) => {
@@ -202,7 +202,7 @@ pub(super) async fn emit_and_execute_tools_with(
     for group_calls in category_calls.into_values() {
         let s = Arc::clone(&snapshot_arc);
         let rp = retry_policy.clone();
-        let txClone = tx.clone();
+        let tx_clone = tx.clone();
         group_handles.push(tokio::spawn(async move {
             let mut results = Vec::with_capacity(group_calls.len());
             for (idx, call) in group_calls {
@@ -211,7 +211,7 @@ pub(super) async fn emit_and_execute_tools_with(
                     None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
                 };
                 let _ = emit(
-                    &txClone,
+                    &tx_clone,
                     AgentEvent::ToolEnd {
                         tool_call_id: call.id.clone(),
                         result: result.clone(),
@@ -228,7 +228,7 @@ pub(super) async fn emit_and_execute_tools_with(
     if !exclusive_calls.is_empty() {
         let s = Arc::clone(&snapshot_arc);
         let rp = retry_policy.clone();
-        let txClone = tx.clone();
+        let tx_clone = tx.clone();
         group_handles.push(tokio::spawn(async move {
             let mut results = Vec::with_capacity(exclusive_calls.len());
             for (idx, call) in exclusive_calls {
@@ -237,7 +237,7 @@ pub(super) async fn emit_and_execute_tools_with(
                     None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
                 };
                 let _ = emit(
-                    &txClone,
+                    &tx_clone,
                     AgentEvent::ToolEnd {
                         tool_call_id: call.id.clone(),
                         result: result.clone(),
