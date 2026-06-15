@@ -1,6 +1,6 @@
 //! OpenAI 兼容协议适配器。
 //!
-//! 覆盖 OpenAI、NVIDIA、DeepSeek、VLLM、LLaMA 等使用 OpenAI 兼容接口的 provider。
+//! 覆盖 OpenAI、NVIDIA、DeepSeek、VLLM、LLaMA、SGLang、Ollama、MiMo、智谱 等使用 OpenAI 兼容接口的 provider。
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -53,6 +53,30 @@ impl OpenAICompatCodec {
             provider_id: "llama".into(),
         }
     }
+
+    pub fn sglang() -> Self {
+        Self {
+            provider_id: "sglang".into(),
+        }
+    }
+
+    pub fn ollama() -> Self {
+        Self {
+            provider_id: "ollama".into(),
+        }
+    }
+
+    pub fn mimo() -> Self {
+        Self {
+            provider_id: "mimo".into(),
+        }
+    }
+
+    pub fn zhipu() -> Self {
+        Self {
+            provider_id: "zhipu".into(),
+        }
+    }
 }
 
 // ── ProviderMeta ──
@@ -69,6 +93,10 @@ impl ProviderMeta for OpenAICompatCodec {
             "nvidia" => "https://integrate.api.nvidia.com/v1",
             "vllm" => "http://localhost:8000/v1",
             "llama" => "http://localhost:8080/v1",
+            "sglang" => "http://localhost:30000/v1",
+            "ollama" => "http://localhost:11434/v1",
+            "mimo" => "https://api.xiaomimimo.com/v1",
+            "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
             _ => "http://localhost",
         }
     }
@@ -379,6 +407,16 @@ impl ModelCapabilities for OpenAICompatCodec {
             caps.supports_reasoning = true;
             caps.supports_stream_thinking = true;
         }
+        // MiMo models support reasoning (thinking mode)
+        if self.provider_id == "mimo" && (lower.contains("mimo-v2") || lower.contains("mimo-v3")) {
+            caps.supports_reasoning = true;
+            caps.supports_stream_thinking = true;
+        }
+        // Zhipu GLM-5.x supports reasoning
+        if self.provider_id == "zhipu" && (lower.contains("glm-5") || lower.contains("glm-4.6")) {
+            caps.supports_reasoning = true;
+            caps.supports_stream_thinking = true;
+        }
         // OpenAI 兼容协议本身定义了 tool_calls 标准字段，
         // 所有通过 /v1/chat/completions 接入的模型都默认支持。
         caps.supports_tool_call = true;
@@ -568,6 +606,12 @@ fn serialize_reasoning_fields(
                     "reasoning_effort".into(),
                     serde_json::Value::String(openai_reasoning_effort(level)),
                 )]
+            }
+        },
+        "mimo" => match config {
+            ReasoningConfig::Disabled => vec![],
+            _level => {
+                vec![("thinking".into(), serde_json::json!({"type": "enabled"}))]
             }
         },
         "llama" => match config {

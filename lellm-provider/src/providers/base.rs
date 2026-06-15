@@ -531,6 +531,10 @@ pub enum ProviderProfile {
     Anthropic,
     Groq,
     DeepSeek,
+    SGLang,
+    Ollama,
+    MiMo,
+    Zhipu,
 }
 
 impl ProviderProfile {
@@ -541,6 +545,10 @@ impl ProviderProfile {
             Self::Anthropic => "https://api.anthropic.com/v1",
             Self::Groq => "https://api.groq.com/openai/v1",
             Self::DeepSeek => "https://api.deepseek.com/v1",
+            Self::SGLang => "http://localhost:30000/v1",
+            Self::Ollama => "http://localhost:11434/v1",
+            Self::MiMo => "https://api.xiaomimimo.com/v1",
+            Self::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
         }
     }
 
@@ -551,6 +559,10 @@ impl ProviderProfile {
             Self::Anthropic => "ANTHROPIC",
             Self::Groq => "GROQ",
             Self::DeepSeek => "DEEPSEEK",
+            Self::SGLang => "SGLANG",
+            Self::Ollama => "OLLAMA",
+            Self::MiMo => "MIMO",
+            Self::Zhipu => "ZAI",
         }
     }
 }
