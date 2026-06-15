@@ -212,7 +212,7 @@ async fn main() {
             "init",
             NodeKind::Task(TaskNode::new("init", |state| {
                 state.insert(
-                    "messages".into(),
+                    "calc.messages".into(),
                     serde_json::json!(vec![Message::User {
                         content: lellm_core::text_block("3加4等于多少，然后再乘以2。".to_string(),),
                     }]),
@@ -221,20 +221,54 @@ async fn main() {
             })),
         )
         // Agent 节点：执行完整的 ReAct 循环
+        // P0: AgentNode 自动写回 messages、output、iterations、tool_calls、stop_reason
         .node(
             "agent",
-            NodeKind::Agent(Box::new(lellm_graph::AgentNode::new("agent", agent))),
+            NodeKind::Agent(Box::new(
+                lellm_graph::AgentNode::new("agent", agent).with_prefix("calc"), // key 前缀改为 "calc"
+            )),
         )
-        // 后处理：打印结果
+        // 后处理：读取 AgentNode 写回的完整状态
         .node(
             "summary",
             NodeKind::Task(TaskNode::new("summary", |state| {
+                println!("\n=== Graph 执行结果 ===");
+
+                // P0: 读取最终输出
                 let output = state
-                    .get("output")
+                    .get("calc.output")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(no output)");
-                println!("\n=== Graph 执行结果 ===");
                 println!("最终输出: {}", output);
+
+                // P0: 读取执行统计
+                let iterations = state
+                    .get("calc.iterations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!("LLM 调用轮次: {}", iterations);
+
+                let tool_calls = state
+                    .get("calc.tool_calls")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!("工具调用次数: {}", tool_calls);
+
+                let stop_reason = state
+                    .get("calc.stop_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                println!("停止原因: {}", stop_reason);
+
+                // P0: 读取完整对话历史
+                if let Some(msgs) = state.get("calc.messages") {
+                    let count = if let Some(arr) = msgs.as_array() {
+                        arr.len()
+                    } else {
+                        0
+                    };
+                    println!("对话消息数: {}", count);
+                }
                 Ok(())
             })),
         )
