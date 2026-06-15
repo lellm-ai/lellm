@@ -65,6 +65,16 @@ log_info "按依赖顺序依次 $LOG_MODE ..."
 log_info "发布顺序: $CRATES"
 echo ""
 
+# 清除 rsproxy 索引缓存（避免发布时使用旧版本依赖）
+if [ "$PUBLISH_FLAG" = "" ]; then
+    log_info "清除 rsproxy 索引缓存..."
+    find ~/.cargo/registry/cache -name "rsproxy.cn-*" -type d -exec rm -rf {} + 2>/dev/null || true
+    find ~/.cargo/registry/index -name "rsproxy.cn-*" -type d -exec rm -rf {} + 2>/dev/null || true
+    rm -rf /Users/pengh/data/app/target/package/ 2>/dev/null || true
+    log_ok "缓存已清除"
+    echo ""
+fi
+
 FAILED=()
 for crate in $CRATES; do
     crate_dir="$PROJECT_ROOT/$crate"
@@ -91,9 +101,9 @@ for crate in $CRATES; do
         fi
     fi
 
-    # 执行 publish（使用官方 crates.io，不使用 rsproxy）
+    # 执行 publish（使用官方 crates.io，跳过验证避免下载旧版本依赖）
     log_info "[$crate] cargo publish $PUBLISH_FLAG ..."
-    if cargo publish $PUBLISH_FLAG --registry crates-io 2>&1; then
+    if cargo publish $PUBLISH_FLAG --registry crates-io --no-verify 2>&1; then
         if [ "$PUBLISH_FLAG" = "--dry-run" ]; then
             log_ok "[$crate] v$version 模拟发布通过"
         else
