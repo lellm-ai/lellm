@@ -2,8 +2,8 @@
 //!
 //! - `GraphNode` trait, `NextStep` 枚举
 //! - `NodeKind` 节点类型枚举
-//! - `TaskNode`, `ConditionNode`, `LoopNode`, `SubGraph`
-//! - 重新导出 `llm_node` 和 `tool_node` 模块
+//! - `TaskNode`, `ConditionNode`, `LoopNode`, `SubGraph`, `BarrierNode`
+//! - 重新导出 `llm_node`, `tool_node`, `barrier_node` 模块
 
 use async_trait::async_trait;
 
@@ -14,6 +14,7 @@ use crate::state::State;
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
+pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
 pub use crate::llm_node::{AgentNode, LLMNode};
 pub use crate::tool_node::ToolNode;
 
@@ -61,6 +62,8 @@ pub enum NodeKind {
     Condition(ConditionNode),
     /// 循环容器
     Loop(Box<LoopNode>),
+    /// Human-in-the-loop 审批屏障（仅流式模式）
+    Barrier(BarrierNode),
 }
 
 // ─── TaskNode ────────────────────────────────────────────────
@@ -156,6 +159,9 @@ impl GraphNode for ConditionNode {
 // ─── SubGraph ────────────────────────────────────────────────
 
 /// 子图（LoopNode 的执行单元）。
+///
+/// **注意：** SubGraph 内的节点不支持按名跳转（`NextStep::Goto`），
+/// 因为节点没有名字。需要条件回跳请使用外层 Graph 的 `edge_if`。
 #[derive(Default)]
 pub struct SubGraph {
     pub nodes: Vec<Box<dyn GraphNode>>,
@@ -167,9 +173,28 @@ impl SubGraph {
         Self::default()
     }
 
+    /// 线性执行子图内所有节点，尊重 `NextStep` 语义。
+    ///
+    /// - `GoToNext` — 继续遍历下一个节点
+    /// - `End` — 提前退出子图（后续节点不再执行）
+    /// - `Goto(target)` — 报错（SubGraph 不支持按名跳转）
     pub async fn execute(&self, state: &mut State) -> Result<(), GraphError> {
         for node in &self.nodes {
-            node.execute(state).await?;
+            match node.execute(state).await? {
+                NextStep::GoToNext => {
+                    // 继续线性遍历
+                }
+                NextStep::End => {
+                    // 提前退出子图
+                    break;
+                }
+                NextStep::Goto(target) => {
+                    return Err(GraphError::InvalidGraph(format!(
+                        "SubGraph does not support Goto(\"{}\"). Use Graph::edge_if for conditional jumps.",
+                        target
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -177,7 +202,20 @@ impl SubGraph {
 
 // ─── LoopNode ────────────────────────────────────────────────
 
-/// 循环容器。
+/// 循环容器 — 可选的高级语法糖。
+///
+/// **推荐使用 `edge_if` 实现简单回跳。** LoopNode 适用于需要独立迭代计数
+/// 和独立熔断保护的封装场景（例如并行子任务中的局部循环）。
+///
+/// ```rust,ignore
+/// // 推荐：直接用有环图 + edge_if（更直观）
+/// GraphBuilder::new("retry")
+///     .edge_if("check", "agent", |s| !s.satisfied)  // 回跳
+///     .edge("check", "output")                       // 通过
+///
+/// // LoopNode：需要独立 max_iterations 时使用
+/// LoopNode::new("loop", SubGraph { ... }, |s| !s.satisfied, max_iterations: 5)
+/// ```
 pub struct LoopNode {
     pub name: String,
     pub body: SubGraph,
@@ -241,6 +279,22 @@ impl GraphNode for NodeKind {
             Self::Tool(n) => n.execute(state).await,
             Self::Condition(n) => n.execute(state).await,
             Self::Loop(n) => n.execute(state).await,
+            Self::Barrier(n) => n.execute(state).await,
+        }
+    }
+
+    async fn execute_stream(
+        &self,
+        state: &mut State,
+        sink: &tokio::sync::mpsc::Sender<GraphEvent>,
+    ) -> Result<NextStep, GraphError> {
+        match self {
+            Self::Task(n) => n.execute_stream(state, sink).await,
+            Self::Agent(n) => n.execute_stream(state, sink).await,
+            Self::Tool(n) => n.execute_stream(state, sink).await,
+            Self::Condition(n) => n.execute_stream(state, sink).await,
+            Self::Loop(n) => n.execute_stream(state, sink).await,
+            Self::Barrier(n) => n.execute_stream(state, sink).await,
         }
     }
 }

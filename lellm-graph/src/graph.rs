@@ -16,7 +16,7 @@ pub struct Edge {
     pub condition: Option<EdgeCondition>,
 }
 
-/// 图（Graph）。
+/// 图（Graph）— 允许有环，循环保护由 GraphExecutor::max_steps 运行时熔断提供。
 pub struct Graph {
     pub(crate) nodes: IndexMap<String, NodeKind>,
     pub(crate) edges: Vec<Edge>,
@@ -45,7 +45,9 @@ impl Graph {
         self.edges.iter().filter(|e| e.from == from).collect()
     }
 
-    /// 验证图结构。
+    /// 验证图结构（节点、边引用有效性）。
+    ///
+    /// 注意：不检测环 — 有环图是合法的，循环保护由 GraphExecutor::max_steps 提供。
     pub fn validate(&self) -> Result<(), GraphError> {
         if !self.nodes.contains_key(&self.start) {
             return Err(GraphError::InvalidGraph(format!(
@@ -73,48 +75,6 @@ impl Graph {
                     "edge references non-existent target node '{}'",
                     edge.to
                 )));
-            }
-        }
-
-        self.detect_cycle()?;
-
-        Ok(())
-    }
-
-    /// 检测环。
-    fn detect_cycle(&self) -> Result<(), GraphError> {
-        use std::collections::HashSet;
-
-        fn dfs(
-            node: &str,
-            graph: &Graph,
-            visited: &mut HashSet<String>,
-            rec_stack: &mut HashSet<String>,
-        ) -> Result<(), GraphError> {
-            visited.insert(node.to_string());
-            rec_stack.insert(node.to_string());
-
-            for edge in graph.edges_from(node) {
-                if !visited.contains(&edge.to) {
-                    dfs(&edge.to, graph, visited, rec_stack)?;
-                } else if rec_stack.contains(&edge.to) {
-                    return Err(GraphError::InvalidGraph(format!(
-                        "cycle detected: {} -> {}",
-                        node, edge.to
-                    )));
-                }
-            }
-
-            rec_stack.remove(node);
-            Ok(())
-        }
-
-        let mut visited = HashSet::new();
-        let mut rec_stack = HashSet::new();
-
-        for node_name in self.nodes.keys() {
-            if !visited.contains(node_name) {
-                dfs(node_name, self, &mut visited, &mut rec_stack)?;
             }
         }
 

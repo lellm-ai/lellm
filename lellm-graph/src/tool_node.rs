@@ -11,6 +11,12 @@ use crate::state::State;
 ///
 /// 读取 State 中最后一条 Assistant 消息的 `tool_calls`，
 /// 执行所有工具调用，将 `ToolResult` 消息追加到消息列表。
+///
+/// ⚠️ **警告：** 此节点是 `LLMNode` 的配套组件，用于手动构建 ReAct 循环。
+/// 与 [`AgentNode`](crate::AgentNode) 不同，**不提供** `ParallelSafety` 并发执行、
+/// `RetryPolicy` 自动重试、`FallbackStrategy` 容错等保护。
+///
+/// 除非你有明确理由需要手动控制每轮 LLM 调用，否则请使用 [`AgentNode`](crate::AgentNode)。
 pub struct ToolNode {
     pub name: String,
     executor: lellm_agent::ToolExecutor,

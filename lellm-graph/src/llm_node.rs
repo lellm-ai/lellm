@@ -226,6 +226,20 @@ impl GraphNode for AgentNode {
 /// 与 `AgentNode`（完整 ReAct 循环）不同，`LLMNode` 仅执行一次 LLM 调用，
 /// 将响应写入 State。配合 `ToolNode` + `ConditionNode`，可手动构建 ReAct 循环。
 ///
+/// ⚠️ **警告：** 使用 `LLMNode` + `ToolNode` 手动构建循环时，你将**失去**以下保护：
+/// - `ParallelSafety` 并发工具执行
+/// - `RetryPolicy` 自动重试
+/// - `FallbackStrategy` 容错路由
+/// - 输出/推理预算保险丝
+/// - `Context Compaction` 上下文压缩
+///
+/// **适用场景（窄但真实）：**
+/// 1. 自定义 Agent Loop — 实现非 ReAct 的交互模式（如 multi-agent debate）
+/// 2. 调试/教学 — 逐步观察每轮 LLM 输入输出
+/// 3. 混合编排 — 多个 AgentNode 之间插入自定义处理逻辑
+///
+/// 除非你有明确理由，否则请使用 [`AgentNode`]。
+///
 /// ```rust,ignore
 /// // 手动 ReAct 循环：
 /// GraphBuilder::new("react")

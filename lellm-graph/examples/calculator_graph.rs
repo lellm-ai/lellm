@@ -285,7 +285,8 @@ async fn main() {
     println!("起始节点: {}", graph.start_node());
     println!();
 
-    let result = GraphExecutor::execute(&graph, HashMap::new())
+    let result = GraphExecutor::default()
+        .execute(&graph, HashMap::new())
         .await
         .expect("Graph 执行失败");
 

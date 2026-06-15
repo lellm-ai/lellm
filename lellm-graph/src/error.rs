@@ -16,6 +16,15 @@ pub enum GraphError {
     },
     /// 循环超限
     LoopLimitExceeded { limit: usize },
+    /// 全局步数超限（运行时熔断）
+    StepsExceeded { limit: usize },
+    /// Barrier 超时
+    BarrierTimeout {
+        node: String,
+        timeout: std::time::Duration,
+    },
+    /// Barrier 被取消（消费者丢弃了 channel）
+    BarrierCancelled { node: String },
     /// State 操作错误
     StateError(String),
 }
@@ -31,7 +40,22 @@ impl fmt::Display for GraphError {
             Self::LoopLimitExceeded { limit } => {
                 write!(f, "loop limit exceeded: {limit}")
             }
+            Self::StepsExceeded { limit } => {
+                write!(
+                    f,
+                    "graph execution halted: step limit {limit} exceeded (potential infinite loop)"
+                )
+            }
             Self::StateError(msg) => write!(f, "state error: {msg}"),
+            Self::BarrierTimeout { node, timeout } => {
+                write!(f, "barrier '{node}' timed out after {timeout:?}")
+            }
+            Self::BarrierCancelled { node } => {
+                write!(
+                    f,
+                    "barrier '{node}' cancelled: consumer dropped the signal channel"
+                )
+            }
         }
     }
 }
@@ -40,6 +64,8 @@ impl std::error::Error for GraphError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NodeExecutionFailed { source, .. } => Some(source.as_ref()),
+            Self::BarrierCancelled { .. } => None,
+            Self::BarrierTimeout { .. } => None,
             _ => None,
         }
     }
