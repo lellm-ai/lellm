@@ -6,8 +6,11 @@
 
 set -euo pipefail
 
-CRATES="lellm-core lellm-macros lellm-provider lellm-agent lellm"
+CRATES="lellm-core lellm-macros lellm-provider lellm-agent lellm-mcp lellm"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 读取 workspace version
+WORKSPACE_VERSION=$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*= *"\([^"]*\)".*/\1/')
 
 # 颜色
 RED='\033[0;31m'
@@ -71,7 +74,7 @@ for crate in $CRATES; do
         continue
     fi
 
-    version=$(grep '^version' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"\([^"]*\)".*/\1/')
+    version="$WORKSPACE_VERSION"
     log_info "[$crate] v$version ..."
 
     cd "$crate_dir"
@@ -88,9 +91,9 @@ for crate in $CRATES; do
         fi
     fi
 
-    # 执行 publish
+    # 执行 publish（使用官方 crates.io，不使用 rsproxy）
     log_info "[$crate] cargo publish $PUBLISH_FLAG ..."
-    if cargo publish $PUBLISH_FLAG --index "sparse+https://index.crates.io/" 2>&1; then
+    if cargo publish $PUBLISH_FLAG --registry crates-io 2>&1; then
         if [ "$PUBLISH_FLAG" = "--dry-run" ]; then
             log_ok "[$crate] v$version 模拟发布通过"
         else
