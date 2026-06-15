@@ -15,10 +15,15 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot, watch};
 
 use super::{ConnectionState, McpTransport, NotificationStream};
-use crate::protocol::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError};
+use crate::protocol::{
+    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
+};
 
 /// 通知 channel 容量。
 const NOTIFICATION_BUFFER: usize = 64;
+
+/// 默认请求超时（秒）。
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// Stdio Transport 配置。
 #[derive(Debug, Clone)]
@@ -29,6 +34,8 @@ pub struct StdioConfig {
     pub args: Vec<String>,
     /// 环境变量（可选）。
     pub env: Option<Vec<(String, String)>>,
+    /// 单次请求超时（默认 30 秒）。
+    pub request_timeout: std::time::Duration,
 }
 
 impl StdioConfig {
@@ -37,7 +44,14 @@ impl StdioConfig {
             command: command.into(),
             args: args.into(),
             env: None,
+            request_timeout: std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
         }
+    }
+
+    /// 设置请求超时。
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 }
 
@@ -106,7 +120,6 @@ impl McpTransport for StdioTransport {
             let pending = Arc::clone(&pending);
             let mut shutdown = shutdown_tx.subscribe();
             async move {
-
                 loop {
                     tokio::select! {
                         _ = shutdown.changed() => break,
@@ -167,16 +180,14 @@ impl McpTransport for StdioTransport {
         Ok(())
     }
 
-    async fn request(
-        &self,
-        req: JsonRpcRequest,
-    ) -> Result<JsonRpcResponse, McpError> {
+    async fn request(&self, req: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         let inner = self.inner.as_ref().ok_or(McpError::Disconnected)?;
 
         // 分配 request id
         let id = inner
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let method = req.method_name.clone();
         let req = JsonRpcRequest::new(id, req.method_name.clone(), req.params.clone());
 
         // 注册 pending
@@ -184,23 +195,29 @@ impl McpTransport for StdioTransport {
         inner.pending.lock().await.insert(id, tx);
 
         // 通过 stdin 发送
-        let json = serde_json::to_string(&req)
-            .map_err(|e| McpError::Protocol(e.to_string()))?;
+        let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
         let mut stdin = inner.stdin.lock().await;
         stdin
             .write_all(json.as_bytes())
             .await
             .map_err(McpError::Io)?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(McpError::Io)?;
+        stdin.write_all(b"\n").await.map_err(McpError::Io)?;
         stdin.flush().await.map_err(McpError::Io)?;
 
-        // 等待响应
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => Err(McpError::Disconnected),
+        // 等待响应（带超时）
+        match tokio::time::timeout(self.config.request_timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(McpError::Disconnected),
+            Err(_elapsed) => {
+                // 超时 — 清理 pending entry，避免泄漏
+                inner.pending.lock().await.remove(&id);
+                tracing::warn!(
+                    method = %method,
+                    timeout_ms = self.config.request_timeout.as_millis() as u64,
+                    "MCP request timed out"
+                );
+                Err(McpError::Timeout)
+            }
         }
     }
 

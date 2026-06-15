@@ -121,7 +121,6 @@ impl ToolCatalog for McpCatalog {
         for entry in self.tools.values() {
             let client = self.client.clone();
             let name = entry.name.clone();
-            let args_schema = entry.input_schema.clone();
 
             let def = ToolDefinition {
                 name: entry.name.clone(),
@@ -132,26 +131,14 @@ impl ToolCatalog for McpCatalog {
             let reg = lellm_agent::ToolRegistration::safe(def, move |input: &serde_json::Value| {
                 let client = client.clone();
                 let name = name.clone();
-                let schema = args_schema.clone();
                 let input = input.clone();
 
                 async move {
-                    // 合并 input 和 schema defaults
-                    let mut merged_args = serde_json::Map::new();
-                    if let serde_json::Value::Object(defaults) = &schema {
-                        merged_args.extend(defaults.clone());
-                    }
-                    if let serde_json::Value::Object(input_obj) = &input {
-                        merged_args.extend(input_obj.clone());
-                    }
-                    let final_args = serde_json::Value::Object(merged_args);
-
-                    let call_params = CallToolParams::new(&name, Some(final_args));
-                    let params = serde_json::to_value(&call_params)
-                        .map_err(|e| ToolError {
-                            kind: ToolErrorKind::Internal,
-                            message: format!("serialize call params: {e}"),
-                        })?;
+                    let call_params = CallToolParams::new(&name, Some(input));
+                    let params = serde_json::to_value(&call_params).map_err(|e| ToolError {
+                        kind: ToolErrorKind::Internal,
+                        message: format!("serialize call params: {e}"),
+                    })?;
 
                     let req = JsonRpcRequest::new(0, methods::TOOLS_CALL, Some(params));
                     let resp = client.request(req).await.map_err(|e| match e {
