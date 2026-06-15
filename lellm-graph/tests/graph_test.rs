@@ -674,6 +674,79 @@ async fn test_barrier_reroute() {
     }
 }
 
+/// 双重 Barrier 顺序执行 — 验证 DecisionRegistry 不破坏正常流程。
+///
+/// 场景：A → B 两个 Barrier 串行，按顺序提交决策。
+/// 这是 DecisionRegistry 的 baseline 测试：确保缓存层不引入回归。
+#[tokio::test]
+async fn test_double_barrier_sequential() {
+    let graph = build_graph("double_barrier", |g| {
+        let _ = g.start("before_a");
+        let _ = g.node(
+            "before_a",
+            NodeKind::Task(TaskNode::new("before_a", |state| {
+                state.insert("steps".into(), serde_json::json!(Vec::<String>::new()));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "barrier_a",
+            NodeKind::Barrier(BarrierNode::new("barrier_a")),
+        );
+        let _ = g.node(
+            "between",
+            NodeKind::Task(TaskNode::new("between", |state| {
+                let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
+                steps.push("passed_a".into());
+                state.set("steps", steps);
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "barrier_b",
+            NodeKind::Barrier(BarrierNode::new("barrier_b")),
+        );
+        let _ = g.node(
+            "after_b",
+            NodeKind::Task(TaskNode::new("after_b", |state| {
+                let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
+                steps.push("passed_b".into());
+                state.set("steps", steps);
+                Ok(())
+            })),
+        );
+        let _ = g.edge("before_a", "barrier_a");
+        let _ = g.edge("barrier_a", "between");
+        let _ = g.edge("between", "barrier_b");
+        let _ = g.edge("barrier_b", "after_b");
+        let _ = g.end("after_b");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let graph = std::sync::Arc::new(graph);
+    let (mut stream, handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
+
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::BarrierPaused { barrier_id, .. } => {
+                // 按顺序提交 Approve
+                let _ = handle.decide(barrier_id, BarrierDecision::Approve).await;
+            }
+            GraphEvent::GraphComplete { result } => {
+                let steps: Vec<String> = result.state.get_json("steps").unwrap();
+                assert_eq!(steps, vec!["passed_a", "passed_b"]);
+                break;
+            }
+            GraphEvent::GraphError { error } => {
+                panic!("unexpected graph error: {error:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
 // ─── StateExt 测试 ──────────────────────────────────────────────
 
 #[test]

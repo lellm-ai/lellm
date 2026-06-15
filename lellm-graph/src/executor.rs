@@ -15,6 +15,37 @@ use crate::graph::Graph;
 use crate::node::{GraphNode, NextStep, NodeKind, StreamNodeResult};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
+/// Barrier 决策注册表 — Executor 私有状态。
+///
+/// **设计原则：level-triggered，非 edge-triggered。**
+/// 在 Barrier 进入等待状态之前提交的决策 MUST 被保留，
+/// 待 Barrier 到达时再取出应用。
+///
+/// 为什么不需要 Arc<Mutex<...>>：
+/// - 唯一消费者是 GraphExecutor 的 spawned task
+/// - 无并发访问，plain HashMap 足够
+struct DecisionRegistry {
+    pending: HashMap<BarrierId, BarrierDecision>,
+}
+
+impl DecisionRegistry {
+    fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+        }
+    }
+
+    /// 缓存一条决策（来自 handle.decide()）。
+    fn insert(&mut self, barrier_id: BarrierId, decision: BarrierDecision) {
+        self.pending.insert(barrier_id, decision);
+    }
+
+    /// 尝试取出目标 Barrier 的决策（命中则移除）。
+    fn take(&mut self, target_id: &BarrierId) -> Option<BarrierDecision> {
+        self.pending.remove(target_id)
+    }
+}
+
 /// 边访问计数器 — 跟踪 (from, to) 对的 traversed 次数。
 #[derive(Default)]
 struct EdgeVisits(HashMap<(String, String), usize>);
@@ -137,6 +168,7 @@ impl GraphExecutor {
             let mut state = initial_state;
             let mut execution_log = Vec::new();
             let mut edge_visits = EdgeVisits::default();
+            let mut decision_registry = DecisionRegistry::new();
 
             let mut current = graph.start_node().to_string();
             let mut step: usize = 0;
@@ -245,6 +277,7 @@ impl GraphExecutor {
                         let decision = executor
                             .wait_barrier_decision(
                                 &mut decision_rx,
+                                &mut decision_registry,
                                 barrier_id,
                                 timeout,
                                 &default_action,
@@ -335,25 +368,56 @@ impl GraphExecutor {
     }
 
     /// 等待 Barrier 决策通过 handle 到达。
+    ///
+    /// **Level-triggered 语义：**
+    /// - 先查 decision_registry（缓存了提前到达的决策）
+    /// - 从 channel drain 决策，匹配的立即返回，不匹配的缓存
+    /// - 确保决策顺序 ≠ Barrier 到达顺序时不会丢失
     async fn wait_barrier_decision(
         &self,
         decision_rx: &mut mpsc::Receiver<(BarrierId, BarrierDecision)>,
+        registry: &mut DecisionRegistry,
         target_id: BarrierId,
         timeout: Option<std::time::Duration>,
         default_action: &BarrierDefaultAction,
     ) -> BarrierDecision {
+        // 1. 先查缓存（提前到达的决策）
+        if let Some(decision) = registry.take(&target_id) {
+            tracing::debug!(
+                barrier = ?target_id,
+                "hit cached decision (early submission)"
+            );
+            return decision;
+        }
+
+        // 2. 先 drain channel 中已有的决策（非阻塞）
+        while let Ok((barrier_id, decision)) = decision_rx.try_recv() {
+            if barrier_id == target_id {
+                return decision;
+            }
+            registry.insert(barrier_id, decision);
+        }
+
+        // 3. 超时分支 — poll + 定期检查
         if let Some(timeout) = timeout {
             let start = std::time::Instant::now();
             loop {
-                match decision_rx.try_recv() {
-                    Ok((barrier_id, decision)) => {
+                // 阻塞等待新决策（带短期超时，避免空转）
+                match tokio::time::timeout(std::time::Duration::from_millis(50), decision_rx.recv())
+                    .await
+                {
+                    Ok(Some((barrier_id, decision))) => {
                         if barrier_id == target_id {
                             return decision;
                         }
+                        registry.insert(barrier_id, decision);
                     }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    Ok(None) => {
+                        // channel 断开
                         return Self::default_decision(default_action);
+                    }
+                    Err(_) => {
+                        // tokio::timeout 超时 — 继续检查总超时
                     }
                 }
                 if start.elapsed() >= timeout {
@@ -364,16 +428,18 @@ impl GraphExecutor {
                     );
                     return Self::default_decision(default_action);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         } else {
-            // 无限等待
+            // 无限等待 — 阻塞 recv，不匹配的缓存
             loop {
                 if let Some((barrier_id, decision)) = decision_rx.recv().await {
                     if barrier_id == target_id {
                         return decision;
                     }
+                    registry.insert(barrier_id, decision);
                 }
+                // channel 断开 — 不应发生，但防御性处理
+                return Self::default_decision(default_action);
             }
         }
     }
