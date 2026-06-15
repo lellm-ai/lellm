@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::error::GraphError;
-use crate::event::{GraphEvent, NodeEvent, TraceId};
+use crate::error::{GraphError, TerminalError};
+use crate::event::{GraphEvent, NodeEvent, SpanId};
 use crate::node::{GraphNode, NextStep, StreamNodeResult};
 use crate::state::State;
 
@@ -146,10 +146,10 @@ impl GraphNode for AgentNode {
             self.agent
                 .execute(messages)
                 .await
-                .map_err(|e| GraphError::NodeExecutionFailed {
+                .map_err(|e| GraphError::Terminal(TerminalError::NodeExecutionFailed {
                     node: self.name.clone(),
                     source: Box::new(e),
-                })?;
+                }))?;
 
         write_agent_result(self, &result, state);
         Ok(NextStep::GoToNext)
@@ -160,7 +160,7 @@ impl GraphNode for AgentNode {
         &self,
         state: &mut State,
         sink: &mpsc::Sender<GraphEvent>,
-        trace_id: TraceId,
+        span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
         let messages = read_messages(state, &self.prefix);
         let node_name = self.name.clone();
@@ -194,7 +194,7 @@ impl GraphNode for AgentNode {
             // 转发到 Graph 层（通过 NodeEvent 中间层）
             let _ = sink
                 .send(GraphEvent::Node {
-                    trace_id,
+                    span_id,
                     node_name: node_name.clone(),
                     event: NodeEvent::Agent(event),
                 })
@@ -205,21 +205,21 @@ impl GraphNode for AgentNode {
                 write_agent_result(self, &result, state);
                 return Ok(StreamNodeResult::Done {
                     next: NextStep::GoToNext,
-                    trace_id,
+                    span_id,
                 });
             }
             if let Some(err_msg) = extracted.error_msg {
-                return Err(GraphError::NodeExecutionFailed {
+                return Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
                     node: self.name.clone(),
                     source: err_msg.into(),
-                });
+                }));
             }
         }
 
-        Err(GraphError::NodeExecutionFailed {
+        Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
             node: self.name.clone(),
             source: "agent stream closed without terminal event".into(),
-        })
+        }))
     }
 }
 
@@ -321,10 +321,10 @@ impl GraphNode for LLMNode {
 
         // 调用 LLM
         let response = self.model.provider.call(&request).await.map_err(|e| {
-            GraphError::NodeExecutionFailed {
+            GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: self.name.clone(),
                 source: Box::new(e),
-            }
+            })
         })?;
 
         // 将响应追加到消息列表
@@ -335,7 +335,7 @@ impl GraphNode for LLMNode {
         state.insert(
             self.messages_key.clone(),
             serde_json::to_value(&messages).map_err(|e| {
-                GraphError::StateError(format!("failed to serialize messages: {e}"))
+                GraphError::Terminal(TerminalError::StateError(format!("failed to serialize messages: {e}")))
             })?,
         );
 

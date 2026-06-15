@@ -12,17 +12,30 @@ pub mod node;
 pub mod state;
 pub mod tool_node;
 
-pub use error::GraphError;
+// ─── Error Types ────────────────────────────────────────────────
+pub use error::{BuildError, GraphError, ObservedError, RecoverableError, TerminalError};
+
+// ─── Events ─────────────────────────────────────────────────────
 pub use event::{
-    BarrierDecision, BarrierId, BarrierInnerEvent, GraphEvent, GraphHandle, GraphStream, NodeEvent,
-    TraceId,
+    BarrierDecision, BarrierId, BarrierInnerEvent, EventLevel, GraphEvent, GraphHandle,
+    GraphStream, NodeEvent, SpanId, TraceId,
 };
-pub use executor::GraphExecutor;
-pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
+
+// ─── Graph ──────────────────────────────────────────────────────
+pub use graph::{
+    CycleAnalysis, Edge, EdgeAnalysis, EdgeExceededStrategy, EdgePolicy, Graph, GraphBuilder,
+};
+
+// ─── Nodes ──────────────────────────────────────────────────────
 pub use node::{
     AgentNode, BarrierDefaultAction, BarrierNode, ConditionNode, ConditionNodeBuilder, GraphNode,
     LLMNode, LoopNode, NextStep, NodeKind, SubGraph, TaskNode, ToolNode,
 };
+
+// ─── State ──────────────────────────────────────────────────────
 pub use state::{
     ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer, array_reducer,
 };
+
+// ─── Executor ───────────────────────────────────────────────────
+pub use executor::GraphExecutor;

@@ -285,7 +285,7 @@ async fn main() {
     println!();
 
     let result = GraphExecutor::default()
-        .execute(&graph, HashMap::new())
+        .execute(std::sync::Arc::new(graph), HashMap::new())
         .await
         .expect("Graph 执行失败");
 

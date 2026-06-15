@@ -62,6 +62,11 @@ pub trait StateExt {
     where
         T: serde::de::DeserializeOwned;
 
+    /// 获取并反序列化为强类型。key 不存在时返回错误。
+    fn require<T>(&self, key: &str) -> Result<T, StateError>
+    where
+        T: serde::de::DeserializeOwned;
+
     /// 设置值（自动序列化）。
     fn set<T>(&mut self, key: impl Into<String>, value: T)
     where
@@ -117,6 +122,13 @@ impl StateExt for State {
             .ok_or_else(|| StateError::MissingKey(key.to_string()))?;
         serde_json::from_value(value.clone())
             .map_err(|e| StateError::Deserialize(key.to_string(), e.to_string()))
+    }
+
+    fn require<T>(&self, key: &str) -> Result<T, StateError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        self.get_json(key)
     }
 
     fn set<T>(&mut self, key: impl Into<String>, value: T)

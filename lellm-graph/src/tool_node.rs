@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::GraphError;
+use crate::error::{GraphError, TerminalError};
 use crate::node::GraphNode;
 use crate::node::NextStep;
 use crate::state::State;
@@ -62,9 +62,9 @@ impl GraphNode for ToolNode {
         }
 
         // 获取最后一条消息的 tool_calls
-        let last_msg = messages.last().ok_or(GraphError::StateError(
+        let last_msg = messages.last().ok_or(GraphError::Terminal(TerminalError::StateError(
             "no messages to extract tool_calls from".into(),
-        ))?;
+        )))?;
 
         let tool_calls = match last_msg {
             lellm_core::Message::Assistant { content } => content
@@ -103,7 +103,7 @@ impl GraphNode for ToolNode {
         state.insert(
             self.messages_key.clone(),
             serde_json::to_value(&result_messages).map_err(|e| {
-                GraphError::StateError(format!("failed to serialize messages: {e}"))
+                GraphError::Terminal(TerminalError::StateError(format!("failed to serialize messages: {e}")))
             })?,
         );
 

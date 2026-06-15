@@ -5,10 +5,12 @@
 //! - `TaskNode`, `ConditionNode`, `LoopNode`, `SubGraph`, `BarrierNode`
 //! - 重新导出 `llm_node`, `tool_node`, `barrier_node` 模块
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
-use crate::error::GraphError;
-use crate::event::{BarrierId, GraphEvent, TraceId};
+use crate::error::{GraphError, TerminalError};
+use crate::event::{BarrierId, GraphEvent, SpanId};
 use crate::graph::Edge;
 use crate::state::State;
 
@@ -39,16 +41,16 @@ pub enum StreamNodeResult {
         /// 下一步
         next: NextStep,
         /// 执行实例 ID（由调用方传入）
-        trace_id: TraceId,
+        span_id: SpanId,
     },
     /// Barrier 暂停，等待外部决策
     BarrierPaused {
-        /// Barrier 审批请求 ID
+        /// Barrier 审批请求 ID（由 executor 生成）
         barrier_id: BarrierId,
         /// 节点名称
         node_name: String,
         /// 执行实例 ID
-        trace_id: TraceId,
+        span_id: SpanId,
         /// 超时时间（None = 无限等待）
         timeout: Option<std::time::Duration>,
         /// 超时默认行为
@@ -65,7 +67,7 @@ pub trait GraphNode: Send + Sync {
     /// 执行节点逻辑（流式模式），将内部事件转发到 channel。
     ///
     /// - `sink` — 事件输出 channel
-    /// - `trace_id` — 执行实例 ID（由 executor 生成，用于关联所有节点内部事件）
+    /// - `span_id` — 执行实例 ID（由 executor 生成）
     ///
     /// 默认实现直接调用 `execute`，返回 `StreamNodeResult::Done`。
     /// AgentNode 覆写此方法以转发 AgentEvent。
@@ -74,10 +76,10 @@ pub trait GraphNode: Send + Sync {
         &self,
         state: &mut State,
         _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        trace_id: TraceId,
+        span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
         let next = self.execute(state).await?;
-        Ok(StreamNodeResult::Done { next, trace_id })
+        Ok(StreamNodeResult::Done { next, span_id })
     }
 }
 
@@ -100,10 +102,12 @@ pub enum NodeKind {
 // ─── TaskNode ────────────────────────────────────────────────
 
 /// Task 节点回调类型别名。
-pub type TaskFn = Box<dyn Fn(&mut State) -> Result<(), GraphError> + Send + Sync>;
+/// Arc 包装以支持 Clone。
+pub type TaskFn = Arc<dyn Fn(&mut State) -> Result<(), GraphError> + Send + Sync>;
 
 /// 条件分支回调类型别名。
-pub type BranchCondition = Box<dyn Fn(&State) -> bool + Send + Sync>;
+/// Arc 包装以支持 Clone。
+pub type BranchCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
 
 /// 自定义逻辑节点。
 pub struct TaskNode {
@@ -118,7 +122,7 @@ impl TaskNode {
     ) -> Self {
         Self {
             name: name.into(),
-            func: Box::new(func),
+            func: Arc::new(func),
         }
     }
 }
@@ -160,7 +164,7 @@ impl ConditionNodeBuilder {
         target: impl Into<String>,
         condition: impl Fn(&State) -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.branches.push((target.into(), Box::new(condition)));
+        self.branches.push((target.into(), Arc::new(condition)));
         self
     }
 
@@ -180,10 +184,10 @@ impl GraphNode for ConditionNode {
                 return Ok(NextStep::Goto(target.clone()));
             }
         }
-        Err(GraphError::NodeExecutionFailed {
+        Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
             node: self.name.clone(),
             source: "no matching branch".into(),
-        })
+        }))
     }
 }
 
@@ -195,7 +199,7 @@ impl GraphNode for ConditionNode {
 /// 因为节点没有名字。需要条件回跳请使用外层 Graph 的 `edge_if`。
 #[derive(Default)]
 pub struct SubGraph {
-    pub nodes: Vec<Box<dyn GraphNode>>,
+    pub nodes: Vec<Arc<dyn GraphNode>>,
     pub edges: Vec<Edge>,
 }
 
@@ -220,10 +224,10 @@ impl SubGraph {
                     break;
                 }
                 NextStep::Goto(target) => {
-                    return Err(GraphError::InvalidGraph(format!(
+                    return Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
                         "SubGraph does not support Goto(\"{}\"). Use Graph::edge_if for conditional jumps.",
                         target
-                    )));
+                    ))));
                 }
             }
         }
@@ -250,7 +254,7 @@ impl SubGraph {
 pub struct LoopNode {
     pub name: String,
     pub body: SubGraph,
-    pub continue_condition: Box<dyn Fn(&State) -> bool + Send + Sync>,
+    pub continue_condition: Arc<dyn Fn(&State) -> bool + Send + Sync>,
     pub max_iterations: usize,
 }
 
@@ -264,7 +268,7 @@ impl LoopNode {
         Self {
             name: name.into(),
             body,
-            continue_condition: Box::new(continue_condition),
+            continue_condition: Arc::new(continue_condition),
             max_iterations,
         }
     }
@@ -293,9 +297,9 @@ impl GraphNode for LoopNode {
             }
         }
 
-        Err(GraphError::LoopLimitExceeded {
+        Err(GraphError::Terminal(TerminalError::LoopLimitExceeded {
             limit: self.max_iterations,
-        })
+        }))
     }
 }
 
@@ -318,15 +322,15 @@ impl GraphNode for NodeKind {
         &self,
         state: &mut State,
         sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        trace_id: TraceId,
+        span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
         match self {
-            Self::Task(n) => n.execute_stream(state, sink, trace_id).await,
-            Self::Agent(n) => n.execute_stream(state, sink, trace_id).await,
-            Self::Tool(n) => n.execute_stream(state, sink, trace_id).await,
-            Self::Condition(n) => n.execute_stream(state, sink, trace_id).await,
-            Self::Loop(n) => n.execute_stream(state, sink, trace_id).await,
-            Self::Barrier(n) => n.execute_stream(state, sink, trace_id).await,
+            Self::Task(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Agent(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Tool(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Condition(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Loop(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Barrier(n) => n.execute_stream(state, sink, span_id).await,
         }
     }
 }

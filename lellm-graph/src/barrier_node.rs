@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 
-use crate::error::GraphError;
-use crate::event::{BarrierDecision, BarrierId, GraphEvent, TraceId};
+use crate::error::{GraphError, TerminalError};
+use crate::event::{BarrierDecision, BarrierId, GraphEvent, SpanId};
 use crate::node::{GraphNode, NextStep, StreamNodeResult};
 use crate::state::State;
 
@@ -116,10 +116,10 @@ impl BarrierNode {
 impl GraphNode for BarrierNode {
     /// 阻塞模式不支持 BarrierNode — 直接报错。
     async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
-        Err(GraphError::InvalidGraph(format!(
+        Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
             "BarrierNode '{}' requires stream mode. Use GraphExecutor::execute_stream() for human-in-the-loop.",
             self.name
-        )))
+        ))))
     }
 
     /// 流式执行 — 返回 BarrierPaused，由 executor 发射事件并等待决策。
@@ -127,16 +127,19 @@ impl GraphNode for BarrierNode {
         &self,
         _state: &mut State,
         _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        trace_id: TraceId,
+        span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
-        let barrier_id = BarrierId::new();
         let node_name = self.name.clone();
 
-        // 返回 BarrierPaused，由 executor 发射 BarrierPaused 事件
+        // barrier_id 由 executor 的 DecisionRegistry 生成
+        // 这里传一个 placeholder，executor 会用 DecisionRegistry::next_id() 覆盖
+        let barrier_id = BarrierId::new(&node_name, 0);
+
+        // 返回 BarrierPaused，由 executor 发射 BarrierWaiting 事件
         Ok(StreamNodeResult::BarrierPaused {
             barrier_id,
             node_name,
-            trace_id,
+            span_id,
             timeout: self.timeout,
             default_action: self.default_action.clone(),
         })
