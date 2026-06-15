@@ -454,16 +454,16 @@ for edge in edges {
 
 ### 流式执行
 
-`execute_stream()` 返回 `GraphStream`（`mpsc::Receiver<GraphEvent>`），消费者实时接收：
+`execute_stream()` 返回 `(GraphStream, GraphHandle)`，消费者实时接收事件并通过句柄交互：
 
 ```rust
 pub enum GraphEvent {
-    NodeStart { node_name },
-    NodeEnd { node_name, success, duration },
-    Agent { node_name, event: AgentEvent },    // Agent 内部事件穿透
-    BarrierPaused { node_name, signal },        // 等待外部审批
-    GraphComplete { result: GraphResult },      // 恰好一次
-    GraphError { error: GraphError },           // 恰好一次
+    NodeStart { node_name: String },
+    NodeEnd { node_name: String, success: bool, duration: Duration },
+    Agent { node_name: String, event: AgentEvent },
+    BarrierPaused { barrier_id: BarrierId, node_name: String },
+    GraphComplete { result: GraphResult },
+    GraphError { error: GraphError },
 }
 ```
 
@@ -471,6 +471,49 @@ pub enum GraphEvent {
 - 正常结束：`GraphComplete` 恰好一次，然后 channel 关闭
 - 异常结束：`GraphError` 恰好一次，然后 channel 关闭
 - 终态事件后不再发送任何事件
+
+### Barrier 决策 API
+
+`BarrierPaused` 不暴露内部同步原语（`oneshot::Sender`），而是通过 `GraphHandle` 提交决策：
+
+```rust
+pub struct BarrierId(Uuid);
+
+pub struct GraphHandle;
+
+impl GraphHandle {
+    /// 提交 Barrier 决策（一次性，重复提交报错）
+    pub async fn decide(
+        &self,
+        barrier_id: BarrierId,
+        decision: BarrierDecision,
+    ) -> Result<(), GraphError>;
+}
+```
+
+**使用方式：**
+```rust
+let (mut stream, handle) = executor.execute_stream(graph, state);
+while let Some(event) = stream.recv().await {
+    match event {
+        GraphEvent::BarrierPaused { barrier_id, node_name } => {
+            let decision = ask_user(&node_name).await;
+            handle.decide(barrier_id, decision).await?;
+        }
+        GraphEvent::GraphComplete { result } => { /* ... */ }
+        _ => {}
+    }
+}
+```
+
+**设计优势：**
+1. **事件可序列化** — `GraphEvent` 不含 `Sender`，可直接转 JSON 推送给 Web UI
+2. **支持 Remote UI** — 浏览器收到 `barrier_paused` 事件，通过 HTTP/WebSocket 调用 `decide()`
+3. **隐藏内部同步** — 内部仍用 `HashMap<BarrierId, oneshot::Sender>` 管理，调用方不受影响
+4. **一次性语义保留** — 内部 `oneshot` 保证决策只能提交一次
+
+> **v0.2 现状：** 当前代码将 `oneshot::Sender` 直接嵌入 `BarrierPaused` 事件。
+> `BarrierId` + `GraphHandle::decide()` 为 v0.2.1 目标设计，待实现。
 
 ### 错误处理
 
@@ -626,6 +669,7 @@ lellm-graph/
 | P0 | `Edge::max_visits` | 边级循环预算，`find_next_node` 中检查 |
 | P0 | `analyze_cycles()` | 诊断用，找出图中所有环，生成诊断信息 |
 | P0 | `StateExt` 强类型 getter/setter | `get_str/get_u64/get_json/set/remove/contains` |
+| P0 | `BarrierId` + `GraphHandle::decide()` | 剥离 oneshot Sender，支持事件序列化与 Remote UI |
 | P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 |
 | P1 | ParallelNode | 并行子图，`join_all` + Reducer 聚合 |
 | P2 | 可达性验证 | validate() 检查所有节点是否可达 |
