@@ -33,6 +33,24 @@ struct McpToolEntry {
 impl McpCatalog {
     /// 从 MCP Client 发现工具。
     pub async fn discover(client: Arc<McpClient>) -> Result<Self, crate::McpError> {
+        let tools = Self::fetch_tools(&client).await?;
+        Ok(Self {
+            client,
+            tools,
+            version_counter: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// 刷新工具列表（重新从 MCP Server 拉取）。
+    pub async fn refresh(&mut self) -> Result<(), crate::McpError> {
+        self.tools = Self::fetch_tools(&self.client).await?;
+        Ok(())
+    }
+
+    /// 从 MCP Server 拉取工具列表。
+    async fn fetch_tools(
+        client: &McpClient,
+    ) -> Result<IndexMap<String, McpToolEntry>, crate::McpError> {
         let resp = client
             .request(JsonRpcRequest::new(0, methods::TOOLS_LIST, None))
             .await?;
@@ -46,7 +64,7 @@ impl McpCatalog {
             })
             .map_err(|e| crate::McpError::Protocol(e.to_string()))?;
 
-        let tools = list_result
+        Ok(list_result
             .tools
             .into_iter()
             .map(|tool| {
@@ -59,47 +77,7 @@ impl McpCatalog {
                     },
                 )
             })
-            .collect();
-
-        Ok(Self {
-            client,
-            tools,
-            version_counter: std::sync::atomic::AtomicU64::new(0),
-        })
-    }
-
-    /// 刷新工具列表（重新从 MCP Server 拉取）。
-    pub async fn refresh(&mut self) -> Result<(), crate::McpError> {
-        let resp = self
-            .client
-            .request(JsonRpcRequest::new(0, methods::TOOLS_LIST, None))
-            .await?;
-
-        let list_result: crate::protocol::ListToolsResult =
-            serde_json::from_value(match &resp.result {
-                crate::protocol::JsonRpcResult::Success(v) => v.clone(),
-                crate::protocol::JsonRpcResult::Error(e) => {
-                    return Err(crate::McpError::ServerError(e.message.clone()));
-                }
-            })
-            .map_err(|e| crate::McpError::Protocol(e.to_string()))?;
-
-        self.tools = list_result
-            .tools
-            .into_iter()
-            .map(|tool| {
-                (
-                    tool.name.clone(),
-                    McpToolEntry {
-                        name: tool.name,
-                        description: tool.description,
-                        input_schema: tool.input_schema,
-                    },
-                )
-            })
-            .collect();
-
-        Ok(())
+            .collect())
     }
 
     /// 工具数量。

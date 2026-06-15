@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use http::HeaderMap;
 use lellm_core::{ChatRequest, ChatResponse, LlmError};
 use secrecy::ExposeSecret;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_stream::StreamExt;
 
 use crate::{LlmProvider, ProviderEvent, ProviderStream};
@@ -286,10 +286,7 @@ impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
         }
     }
 
-    async fn stream(
-        &self,
-        request: &ChatRequest,
-    ) -> Result<ProviderStream, LlmError> {
+    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         self.validate_request(request)?;
         let http_req = self.codec.encode(request, true)?;
 
@@ -479,7 +476,9 @@ impl ProviderConfig {
 
         let api_key_name = api_key_env.into_owned();
         let api_key = std::env::var(&api_key_name).map_err(|_| {
-            ProviderBuildError::Env(ProviderEnvError::MissingEnv { name: api_key_name.clone() })
+            ProviderBuildError::Env(ProviderEnvError::MissingEnv {
+                name: api_key_name.clone(),
+            })
         })?;
         if api_key.is_empty() {
             return Err(ProviderBuildError::Env(ProviderEnvError::EmptyEnv {
@@ -495,7 +494,6 @@ impl ProviderConfig {
             super::codec::AuthStyle::None => Self::none(&base_url).map_err(Into::into),
         }
     }
-
 }
 
 /// 认证配置。
@@ -574,7 +572,7 @@ impl ProviderProfile {
 ///     .header("HTTP-Referer", "https://mysite.com")
 ///     .header("X-Title", "My App")
 ///     .build()?;
-/// # Ok::<_, super::codec::ProviderBuildError>(())
+/// # Ok::<_, lellm_provider::ProviderBuildError>(())
 /// ```
 pub struct ProviderBuilder<C> {
     codec: C,
@@ -628,11 +626,7 @@ impl<C> ProviderBuilder<C> {
     }
 
     /// 设置自定义 Header 认证。
-    pub fn auth_header(
-        mut self,
-        header: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn auth_header(mut self, header: impl Into<String>, value: impl Into<String>) -> Self {
         self.auth = Some(AuthConfig::Header {
             header: header.into(),
             value: secrecy::SecretString::new(value.into()),
@@ -681,10 +675,7 @@ impl<C> ProviderBuilder<C> {
     /// 批量添加自定义 Headers。
     ///
     /// 解析错误会累计到 builder 中，在 `build()` 时统一返回。
-    pub fn extra_headers(
-        mut self,
-        headers: impl IntoIterator<Item = (String, String)>,
-    ) -> Self {
+    pub fn extra_headers(mut self, headers: impl IntoIterator<Item = (String, String)>) -> Self {
         if self.error.is_some() {
             return self;
         }
@@ -807,15 +798,11 @@ where
     /// ```
     pub fn openrouter(codec: C) -> Result<Self, ProviderBuildError> {
         let profile = ProviderProfile::OpenRouter;
-        let base_url = std::env::var(format!("{}_BASE_URL", profile.env_prefix())).unwrap_or_else(
-            |_| {
-                tracing::debug!(
-                    "{}_BASE_URL not set, using default",
-                    profile.env_prefix()
-                );
+        let base_url =
+            std::env::var(format!("{}_BASE_URL", profile.env_prefix())).unwrap_or_else(|_| {
+                tracing::debug!("{}_BASE_URL not set, using default", profile.env_prefix());
                 profile.base_url().to_string()
-            },
-        );
+            });
 
         let api_key_env = format!("{}_API_KEY", profile.env_prefix());
         let api_key = std::env::var(&api_key_env).map_err(|_| {

@@ -6,9 +6,7 @@
 //! - Name conversion utilities
 
 use proc_macro2::TokenStream as TokenStream2;
-use syn::{
-    Attribute, DeriveInput, Expr, FnArg, Lit, Meta, Pat, punctuated::Punctuated,
-};
+use syn::{Attribute, DeriveInput, Expr, FnArg, Lit, Meta, Pat, punctuated::Punctuated};
 
 // ─────────────────────────────────────────────────────────────────
 // ToolMeta — parsed metadata from #[tool(...)]
@@ -203,37 +201,12 @@ pub(crate) fn parse_struct_meta(attrs: &[Attribute], input: &DeriveInput) -> (St
 // ─────────────────────────────────────────────────────────────────
 
 pub(crate) fn ident_to_snake_case(s: &str) -> String {
-    let mut result = String::new();
-    let mut prev_upper = false;
-
-    for c in s.chars() {
-        if c.is_uppercase() && !prev_upper && !result.is_empty() {
-            result.push('_');
-        }
-        result.push(c.to_lowercase().next().unwrap());
-        prev_upper = c.is_uppercase();
-    }
-
-    result
+    use heck::ToSnakeCase;
+    s.to_snake_case()
 }
 
 /// Convert snake_case or camelCase to PascalCase
 pub(crate) fn snake_to_pascal(s: &str) -> String {
-    let mut result = String::new();
-    let mut capitalize_next = true;
-
-    for c in s.chars() {
-        if c == '_' {
-            capitalize_next = true;
-        } else {
-            if capitalize_next {
-                result.push(c.to_uppercase().next().unwrap());
-                capitalize_next = false;
-            } else {
-                result.push(c);
-            }
-        }
-    }
-
-    result
+    use heck::ToPascalCase;
+    s.to_pascal_case()
 }

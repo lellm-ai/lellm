@@ -11,6 +11,7 @@ repository = "https://github.com/lellm-ai/lellm"
 proc-macro = true
 
 [dependencies]
+heck = "0.5"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits", "parsing", "printing"] }
