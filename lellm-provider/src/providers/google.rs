@@ -193,16 +193,17 @@ impl ChatCodec for GoogleCodec {
         })?;
 
         // 检查 prompts/usageMetadata (safety filtering 等错误)
-        if let Some(prompt_feedback) = raw.get("promptFeedback") {
-            if let Some(block_reason) = prompt_feedback.get("blockReason").and_then(|b| b.as_str())
-            {
-                return Err(LlmError::Provider {
-                    provider: "google".into(),
-                    status: Some(400),
-                    code: None,
-                    message: format!("Prompt blocked: {}", block_reason),
-                });
-            }
+        if let Some(block_reason) = raw
+            .get("promptFeedback")
+            .and_then(|p| p.get("blockReason"))
+            .and_then(|b| b.as_str())
+        {
+            return Err(LlmError::Provider {
+                provider: "google".into(),
+                status: Some(400),
+                code: None,
+                message: format!("Prompt blocked: {}", block_reason),
+            });
         }
 
         let candidates =
@@ -233,13 +234,15 @@ impl ChatCodec for GoogleCodec {
 
         let mut content: Vec<ContentBlock> = Vec::new();
         for part in parts {
-            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                if !text.is_empty() {
-                    content.push(ContentBlock::Text(TextBlock {
-                        text: text.into(),
-                        cache_control: None,
-                    }));
-                }
+            if let Some(text) = part
+                .get("text")
+                .and_then(|t| t.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                content.push(ContentBlock::Text(TextBlock {
+                    text: text.into(),
+                    cache_control: None,
+                }));
             }
             if let Some(func_call) = part.get("functionCall") {
                 let name = func_call
@@ -292,48 +295,46 @@ impl ChatCodec for GoogleCodec {
 
         // Gemini 流式返回 candidates 数组
         let candidates = val.get("candidates").and_then(|c| c.as_array());
-        if let Some(candidates) = candidates {
-            if !candidates.is_empty() {
-                let candidate = &candidates[0];
-                let content = candidate.get("content");
-                if let Some(content) = content {
-                    let parts = content.get("parts").and_then(|p| p.as_array());
-                    if let Some(parts) = parts {
-                        let mut results: Vec<StreamChunk> = Vec::new();
+        if let Some(candidates) = candidates.filter(|c| !c.is_empty()) {
+            let candidate = &candidates[0];
+            let content = candidate.get("content");
+            if let Some(content) = content {
+                let parts = content.get("parts").and_then(|p| p.as_array());
+                if let Some(parts) = parts {
+                    let mut results: Vec<StreamChunk> = Vec::new();
 
-                        for part in parts {
-                            // 文本增量
-                            if let Some(text) = part.get("text").and_then(|t| t.as_str())
-                                && !text.is_empty()
-                            {
-                                results.push(StreamChunk::TextDelta(text.into()));
-                            }
-
-                            // 工具调用增量
-                            if let Some(func_call) = part.get("functionCall") {
-                                let name = func_call
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                let args = func_call.get("args").map(|v| v.to_string());
-
-                                results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
-                                    index: 0,
-                                    id: None,
-                                    name,
-                                    arguments_delta: args,
-                                }));
-                            }
+                    for part in parts {
+                        // 文本增量
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
+                        {
+                            results.push(StreamChunk::TextDelta(text.into()));
                         }
 
-                        // finishReason 存在即表示本轮结束
-                        if candidate.get("finishReason").is_some() {
-                            results.push(StreamChunk::Done);
-                        }
+                        // 工具调用增量
+                        if let Some(func_call) = part.get("functionCall") {
+                            let name = func_call
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            let args = func_call.get("args").map(|v| v.to_string());
 
-                        if !results.is_empty() {
-                            return Ok(StreamParseResult { chunks: results });
+                            results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
+                                index: 0,
+                                id: None,
+                                name,
+                                arguments_delta: args,
+                            }));
                         }
+                    }
+
+                    // finishReason 存在即表示本轮结束
+                    if candidate.get("finishReason").is_some() {
+                        results.push(StreamChunk::Done);
+                    }
+
+                    if !results.is_empty() {
+                        return Ok(StreamParseResult { chunks: results });
                     }
                 }
             }

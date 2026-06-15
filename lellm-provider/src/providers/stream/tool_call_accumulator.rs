@@ -108,12 +108,12 @@ fn robust_parse(text: &str) -> serde_json::Value {
     }
 
     // Layer 1: Direct parse
-    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&trimmed) {
+    if let Ok(result) = serde_json::from_str::<serde_json::Value>(trimmed) {
         return result;
     }
 
     // Layer 2: Strip markdown code blocks
-    let stripped = strip_codeblocks(&trimmed);
+    let stripped = strip_codeblocks(trimmed);
     if let Ok(result) = serde_json::from_str::<serde_json::Value>(&stripped) {
         tracing::debug!(
             original_preview = %trimmed.chars().take(80).collect::<String>(),
@@ -123,26 +123,26 @@ fn robust_parse(text: &str) -> serde_json::Value {
     }
 
     // Layer 3: Extract outermost { ... }
-    if let Some(json_str) = extract_braces(&stripped) {
-        if let Ok(result) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            tracing::debug!(
-                original_preview = %trimmed.chars().take(80).collect::<String>(),
-                "structured output: extracted braces"
-            );
-            return result;
-        }
+    if let Some(ref result) =
+        extract_braces(&stripped).and_then(|js| serde_json::from_str::<serde_json::Value>(&js).ok())
+    {
+        tracing::debug!(
+            original_preview = %trimmed.chars().take(80).collect::<String>(),
+            "structured output: extracted braces"
+        );
+        return result.clone();
     }
 
     // Layer 4: Fix common errors — trailing commas, single quotes
     let fixed = fix_common_errors(&stripped);
-    if let Some(json_str) = extract_braces(&fixed) {
-        if let Ok(result) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            tracing::debug!(
-                original_preview = %trimmed.chars().take(80).collect::<String>(),
-                "structured output: fixed common json errors"
-            );
-            return result;
-        }
+    if let Some(ref result) =
+        extract_braces(&fixed).and_then(|js| serde_json::from_str::<serde_json::Value>(&js).ok())
+    {
+        tracing::debug!(
+            original_preview = %trimmed.chars().take(80).collect::<String>(),
+            "structured output: fixed common json errors"
+        );
+        return result.clone();
     }
 
     // Layer 5: Try as Value via round-trip (normalize whitespace, etc.)

@@ -831,9 +831,9 @@ where
             }));
         }
 
-        Ok(Self::builder(codec)
+        Self::builder(codec)
             .base_url(&base_url)
             .api_key(api_key)
-            .build()?)
+            .build()
     }
 }

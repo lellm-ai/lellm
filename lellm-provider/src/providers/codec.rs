@@ -113,12 +113,10 @@ pub fn validate_capabilities(req: &ChatRequest, caps: &Capabilities) -> Result<(
     }
 
     // 校验推理控制 — Disabled 静默成功
-    if let Some(ref reasoning) = req.reasoning {
-        if !reasoning.is_disabled() && !caps.supports_reasoning {
-            return Err(LlmError::UnsupportedFeature {
-                feature: "reasoning".into(),
-            });
-        }
+    if !caps.supports_reasoning && req.reasoning.as_ref().is_some_and(|r| !r.is_disabled()) {
+        return Err(LlmError::UnsupportedFeature {
+            feature: "reasoning".into(),
+        });
     }
 
     // 校验工具调用

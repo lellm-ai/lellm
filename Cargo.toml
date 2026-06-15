@@ -6,6 +6,7 @@ members = [
     "lellm-agent",
     "lellm-macros",
     "lellm-mcp",
+    "lellm-graph",
 ]
 resolver = "2"
 

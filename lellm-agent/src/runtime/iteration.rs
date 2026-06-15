@@ -254,11 +254,9 @@ pub(super) async fn emit_and_execute_tools_with(
     let mut results: Vec<Option<Message>> = vec![None; tool_calls.len()];
     let all_handles = futures_util::future::join_all(group_handles).await;
 
-    for handle_result in all_handles {
-        if let Ok(indexed_messages) = handle_result {
-            for (idx, msg) in indexed_messages {
-                results[idx] = Some(msg);
-            }
+    for indexed_messages in all_handles.into_iter().filter_map(Result::ok) {
+        for (idx, msg) in indexed_messages {
+            results[idx] = Some(msg);
         }
     }
 
@@ -330,6 +328,7 @@ pub(super) enum StreamIterResult {
 /// 返回 `Ok(StreamIterResult)` 表示迭代完成，`Err(LlmError)` 表示 Provider 错误。
 ///
 /// `round` — 预解析的 ResolvedRound（快照 + 定义），充当单轮真理之源。
+#[allow(clippy::too_many_arguments)]
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
@@ -377,20 +376,20 @@ async fn process_stream_iteration(
             lellm_provider::ProviderEvent::ThinkingDelta { thinking, redacted } => {
                 round_reasoning_tokens += estimate_text(thinking)
                     + redacted.as_ref().map(|r| estimate_text(r)).unwrap_or(0);
-                if let Some(limit) = max_reasoning_tokens {
-                    if (round_reasoning_tokens as u32) > limit {
-                        tracing::warn!(
-                            round_reasoning_tokens,
-                            max_reasoning_tokens = limit,
-                            "single-round reasoning budget exceeded, cutting stream"
-                        );
-                        let response = build_partial_response(
-                            text_buffer.clone(),
-                            thinking_buffer.clone(),
-                            redacted_buffer.clone(),
-                        );
-                        return Ok(StreamIterResult::ReasoningBudgetExceeded { response });
-                    }
+                if let Some(limit) =
+                    max_reasoning_tokens.filter(|&limit| (round_reasoning_tokens as u32) > limit)
+                {
+                    tracing::warn!(
+                        round_reasoning_tokens,
+                        max_reasoning_tokens = limit,
+                        "single-round reasoning budget exceeded, cutting stream"
+                    );
+                    let response = build_partial_response(
+                        text_buffer.clone(),
+                        thinking_buffer.clone(),
+                        redacted_buffer.clone(),
+                    );
+                    return Ok(StreamIterResult::ReasoningBudgetExceeded { response });
                 }
                 thinking_buffer.push_str(thinking);
                 if let Some(r) = redacted {
@@ -508,6 +507,7 @@ pub(super) struct StreamIterationResult {
 ///
 /// 接收 owned 参数（Arc-clone 为 O(1)），避免闭包捕获带来的变量爆炸。
 /// 返回迭代结果和更新后的 LoopState。
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn do_stream_iteration(
     model: ResolvedModel,
     tx: Sender<AgentEvent>,

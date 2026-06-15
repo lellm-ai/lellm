@@ -13,6 +13,7 @@ pub(crate) mod iteration;
 pub mod loop_detector;
 pub mod request_opts;
 pub mod retry;
+#[allow(clippy::module_inception)]
 pub mod runtime;
 #[cfg(feature = "v02-preview")]
 pub mod signal_voter;
