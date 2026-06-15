@@ -14,7 +14,8 @@ provider = ["dep:lellm-core", "dep:lellm-provider"]
 agent = ["dep:lellm-core", "dep:lellm-agent"]
 macros = ["dep:lellm-macros"]
 mcp = ["dep:lellm-core", "dep:lellm-mcp"]
-full = ["provider", "agent", "macros"]
+graph = ["dep:lellm-core", "dep:lellm-agent", "dep:lellm-graph"]
+full = ["provider", "agent", "macros", "graph"]
 
 [dependencies]
 lellm-core = { workspace = true, optional = true }
@@ -22,3 +23,4 @@ lellm-provider = { workspace = true, optional = true }
 lellm-agent = { workspace = true, optional = true }
 lellm-macros = { workspace = true, optional = true }
 lellm-mcp = { workspace = true, optional = true }
+lellm-graph = { workspace = true, optional = true }

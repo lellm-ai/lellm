@@ -9,8 +9,8 @@
 //! # 需要 Agent 运行时
 //! lellm = { version = "0.1", features = ["agent"] }
 //!
-//! # 需要 MCP 客户端
-//! lellm = { version = "0.1", features = ["mcp"] }
+//! # 需要 Graph 编排层
+//! lellm = { version = "0.1", features = ["graph"] }
 //!
 //! # 全部启用
 //! lellm = { version = "0.1", features = ["full"] }
@@ -30,3 +30,6 @@ pub use lellm_macros as macros;
 
 #[cfg(feature = "mcp")]
 pub use lellm_mcp as mcp;
+
+#[cfg(feature = "graph")]
+pub use lellm_graph as graph;

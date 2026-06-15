@@ -22,6 +22,7 @@ lellm-provider = { path = "lellm-provider", version = "0.1" }
 lellm-agent = { path = "lellm-agent", version = "0.1" }
 lellm-macros = { path = "lellm-macros", version = "0.1" }
 lellm-mcp = { path = "lellm-mcp", version = "0.1" }
+lellm-graph = { path = "lellm-graph", version = "0.1" }
 
 # Common
 async-trait = "0.1"
@@ -39,3 +40,4 @@ url = "2"
 schemars = "1"
 indexmap = "2"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+futures = "0.3"
