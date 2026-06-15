@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 
 use crate::error::GraphError;
-use crate::event::GraphEvent;
+use crate::event::{BarrierId, GraphEvent, TraceId};
 use crate::graph::Edge;
 use crate::state::State;
 
@@ -31,6 +31,35 @@ pub enum NextStep {
     End,
 }
 
+/// 节点流式执行结果。
+#[derive(Debug)]
+pub enum StreamNodeResult {
+    /// 节点正常完成
+    Done {
+        /// 下一步
+        next: NextStep,
+        /// 执行实例 ID（由调用方传入）
+        trace_id: TraceId,
+    },
+    /// Barrier 暂停，等待外部决策
+    BarrierPaused {
+        /// Barrier 审批请求 ID
+        barrier_id: BarrierId,
+        /// 节点名称
+        node_name: String,
+        /// 执行实例 ID
+        trace_id: TraceId,
+        /// 超时时间（None = 无限等待）
+        timeout: Option<std::time::Duration>,
+        /// 超时默认行为
+        default_action: crate::barrier_node::BarrierDefaultAction,
+    },
+}
+
+/// Barrier 决策共享映射类型 — executor 与 BarrierNode 之间传递决策。
+pub type PendingDecisions =
+    std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<BarrierId, crate::event::BarrierDecision>>>;
+
 /// 节点执行 trait。
 #[async_trait]
 pub trait GraphNode: Send + Sync {
@@ -39,14 +68,22 @@ pub trait GraphNode: Send + Sync {
 
     /// 执行节点逻辑（流式模式），将内部事件转发到 channel。
     ///
-    /// 默认实现直接调用 `execute`，不产生流式事件。
+    /// - `sink` — 事件输出 channel
+    /// - `trace_id` — 执行实例 ID（由 executor 生成，用于关联所有节点内部事件）
+    /// - `pending_decisions` — Barrier 决策共享映射（BarrierNode 用于获取外部决策）
+    ///
+    /// 默认实现直接调用 `execute`，返回 `StreamNodeResult::Done`。
     /// AgentNode 覆写此方法以转发 AgentEvent。
+    /// BarrierNode 覆写此方法以返回 `StreamNodeResult::BarrierPaused`。
     async fn execute_stream(
         &self,
         state: &mut State,
         _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-    ) -> Result<NextStep, GraphError> {
-        self.execute(state).await
+        trace_id: TraceId,
+        _pending_decisions: PendingDecisions,
+    ) -> Result<StreamNodeResult, GraphError> {
+        let next = self.execute(state).await?;
+        Ok(StreamNodeResult::Done { next, trace_id })
     }
 }
 
@@ -287,14 +324,16 @@ impl GraphNode for NodeKind {
         &self,
         state: &mut State,
         sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-    ) -> Result<NextStep, GraphError> {
+        trace_id: TraceId,
+        pending_decisions: PendingDecisions,
+    ) -> Result<StreamNodeResult, GraphError> {
         match self {
-            Self::Task(n) => n.execute_stream(state, sink).await,
-            Self::Agent(n) => n.execute_stream(state, sink).await,
-            Self::Tool(n) => n.execute_stream(state, sink).await,
-            Self::Condition(n) => n.execute_stream(state, sink).await,
-            Self::Loop(n) => n.execute_stream(state, sink).await,
-            Self::Barrier(n) => n.execute_stream(state, sink).await,
+            Self::Task(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
+            Self::Agent(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
+            Self::Tool(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
+            Self::Condition(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
+            Self::Loop(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
+            Self::Barrier(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
         }
     }
 }

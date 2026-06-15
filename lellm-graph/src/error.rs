@@ -18,6 +18,8 @@ pub enum GraphError {
     LoopLimitExceeded { limit: usize },
     /// 全局步数超限（运行时熔断）
     StepsExceeded { limit: usize },
+    /// 边级循环预算超限
+    EdgeLimitExceeded { edge: String, limit: usize },
     /// Barrier 超时
     BarrierTimeout {
         node: String,
@@ -44,6 +46,12 @@ impl fmt::Display for GraphError {
                 write!(
                     f,
                     "graph execution halted: step limit {limit} exceeded (potential infinite loop)"
+                )
+            }
+            Self::EdgeLimitExceeded { edge, limit } => {
+                write!(
+                    f,
+                    "edge '{edge}' visit limit {limit} exceeded (cycle protection)"
                 )
             }
             Self::StateError(msg) => write!(f, "state error: {msg}"),

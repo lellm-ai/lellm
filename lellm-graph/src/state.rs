@@ -8,6 +8,18 @@ use std::time::{Duration, Instant};
 /// Graph 共享状态。
 pub type State = HashMap<String, serde_json::Value>;
 
+/// State 操作错误。
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    /// Key 不存在
+    #[error("state key '{0}' is missing")]
+    MissingKey(String),
+
+    /// 反序列化失败
+    #[error("failed to deserialize state key '{0}': {1}")]
+    Deserialize(String, String),
+}
+
 /// State Reducer 类型别名 — 将已有值与新值合并。
 ///
 /// 类似于 LangGraph 的 `operator.add`，但保持显式：
@@ -26,12 +38,44 @@ pub type StateReducer = Box<
         + Sync,
 >;
 
-/// State 扩展方法 — 通过 Trait 为 HashMap 添加 Reducer 能力。
+/// State 扩展方法 — 通过 Trait 为 HashMap 添加强类型访问与 Reducer 能力。
 pub trait StateExt {
+    // ─── 强类型 Getter ────────────────────────────────────────
+
+    /// 获取 String 值。
+    fn get_str(&self, key: &str) -> Option<&str>;
+
+    /// 获取 bool 值。
+    fn get_bool(&self, key: &str) -> Option<bool>;
+
+    /// 获取 u64 值。
+    fn get_u64(&self, key: &str) -> Option<u64>;
+
+    /// 获取 i64 值。
+    fn get_i64(&self, key: &str) -> Option<i64>;
+
+    /// 获取 f64 值。
+    fn get_f64(&self, key: &str) -> Option<f64>;
+
+    /// 反序列化为强类型。
+    fn get_json<T>(&self, key: &str) -> Result<T, StateError>
+    where
+        T: serde::de::DeserializeOwned;
+
+    /// 设置值（自动序列化）。
+    fn set<T>(&mut self, key: impl Into<String>, value: T)
+    where
+        T: serde::Serialize;
+
+    /// 移除并返回值。
+    fn remove(&mut self, key: &str) -> Option<serde_json::Value>;
+
+    /// 检查 key 是否存在。
+    fn contains(&self, key: &str) -> bool;
+
+    // ─── Reducer ──────────────────────────────────────────────
+
     /// 使用 Reducer 合并值到指定 key。
-    ///
-    /// - 若 key 不存在，直接插入 `value`
-    /// - 若 key 已存在，调用 `reducer(existing, &value)` 得到合并后的值
     fn reduce(
         &mut self,
         key: &str,
@@ -40,13 +84,56 @@ pub trait StateExt {
     ) -> Result<(), String>;
 
     /// 追加模式 — 内置的数组追加 Reducer。
-    ///
-    /// 将 `items`（数组）追加到 key 对应的现有数组末尾。
-    /// 若 key 不存在，则直接插入 `items`。
     fn append_array(&mut self, key: &str, items: serde_json::Value) -> Result<(), String>;
 }
 
 impl StateExt for State {
+    fn get_str(&self, key: &str) -> Option<&str> {
+        self.get(key).and_then(|v| v.as_str())
+    }
+
+    fn get_bool(&self, key: &str) -> Option<bool> {
+        self.get(key).and_then(|v| v.as_bool())
+    }
+
+    fn get_u64(&self, key: &str) -> Option<u64> {
+        self.get(key).and_then(|v| v.as_u64())
+    }
+
+    fn get_i64(&self, key: &str) -> Option<i64> {
+        self.get(key).and_then(|v| v.as_i64())
+    }
+
+    fn get_f64(&self, key: &str) -> Option<f64> {
+        self.get(key).and_then(|v| v.as_f64())
+    }
+
+    fn get_json<T>(&self, key: &str) -> Result<T, StateError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let value = self
+            .get(key)
+            .ok_or_else(|| StateError::MissingKey(key.to_string()))?;
+        serde_json::from_value(value.clone()).map_err(|e| StateError::Deserialize(key.to_string(), e.to_string()))
+    }
+
+    fn set<T>(&mut self, key: impl Into<String>, value: T)
+    where
+        T: serde::Serialize,
+    {
+        let json = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        HashMap::insert(self, key.into(), json);
+    }
+
+    fn remove(&mut self, key: &str) -> Option<serde_json::Value> {
+        HashMap::remove(self, key)
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.contains_key(key)
+    }
+
     fn reduce(
         &mut self,
         key: &str,

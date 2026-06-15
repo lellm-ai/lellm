@@ -1,16 +1,13 @@
 //! Human-in-the-loop 审批节点。
 //!
-//! BarrierNode 在执行时暂停 Graph，通过 oneshot channel 等待外部决策。
-//! 消费者收到 `GraphEvent::BarrierPaused` 后，发送 [`BarrierDecision`] 继续执行。
+//! BarrierNode 在执行时暂停 Graph，通过 `GraphHandle::decide()` 等待外部决策。
+//! 消费者收到 `GraphEvent::BarrierPaused` 后，通过 `GraphHandle` 发送 [`BarrierDecision`]。
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 
 use crate::error::GraphError;
-use crate::event::{BarrierDecision, GraphEvent};
-use crate::node::GraphNode;
-use crate::node::NextStep;
+use crate::event::{BarrierDecision, BarrierId, GraphEvent, TraceId};
+use crate::node::{GraphNode, NextStep, PendingDecisions, StreamNodeResult};
 use crate::state::State;
 
 /// Barrier 超时后的默认行为。
@@ -28,45 +25,11 @@ pub enum BarrierDefaultAction {
 /// Human-in-the-loop 审批节点。
 ///
 /// 执行流程：
-/// 1. 发射 `GraphEvent::BarrierPaused { signal }` 到 sink
-/// 2. `tokio::select!` 等待决策信号或超时
-/// 3. 根据决策写入 State，决定下一步
+/// 1. 返回 `StreamNodeResult::BarrierPaused`，executor 发射 `BarrierPaused` 事件
+/// 2. 消费者通过 `GraphHandle::decide(barrier_id, decision)` 提交决策
+/// 3. BarrierNode 从 `pending_decisions` 获取决策，应用并返回
 ///
 /// **阻塞模式不支持。** 调用 `execute()` 直接报错，引导使用 `execute_stream()`。
-///
-/// ```rust,ignore
-/// // 构建包含 Barrier 的 Graph
-/// let graph = GraphBuilder::new("review_flow")
-///     .start("agent")
-///     .node("agent", NodeKind::Agent(Box::new(agent_node)))
-///     .node("review", NodeKind::Barrier(BarrierNode::new("review")
-///         .timeout(Duration::from_secs(300))
-///         .default_action(BarrierDefaultAction::Reject)))
-///     .node("output", NodeKind::Task(output_node))
-///     .edge("agent", "review")
-///     .edge("review", "output")
-///     .end("output")
-///     .build();
-///
-/// // 消费事件并审批
-/// let mut stream = GraphExecutor::default().execute_stream(graph, state);
-/// while let Some(event) = stream.recv().await {
-///     match event {
-///         GraphEvent::BarrierPaused { node_name, signal } => {
-///             let approved = ask_user(&node_name).await;
-///             let _ = signal.send(if approved {
-///                 BarrierDecision::Approve
-///             } else {
-///                 BarrierDecision::Reject { reason: "质量不达标".into() }
-///             });
-///         }
-///         GraphEvent::GraphComplete { result } => {
-///             println!("done: {:?}", result);
-///         }
-///         _ => {}
-///     }
-/// }
-/// ```
 pub struct BarrierNode {
     pub name: String,
     /// 超时时间（None = 无限等待）
@@ -117,8 +80,8 @@ impl BarrierNode {
 
     /// 处理决策结果 — 写入 State 并返回 NextStep。
     ///
-    /// **幂等性保证：** Approve 时清除 reject_reason，防止 edge_if 误判回跳。
-    fn apply_decision(
+    /// 由 executor 在收到外部决策后调用。
+    pub fn apply_decision(
         &self,
         decision: BarrierDecision,
         state: &mut State,
@@ -127,14 +90,12 @@ impl BarrierNode {
             BarrierDecision::Approve => {
                 tracing::info!(barrier = %self.name, "approved");
                 state.insert(self.approve_key.clone(), serde_json::json!(true));
-                // 清除拒绝原因，防止 edge_if 误判回跳
                 state.remove(&self.reject_key);
                 Ok(NextStep::GoToNext)
             }
             BarrierDecision::Reject { reason } => {
                 tracing::warn!(barrier = %self.name, reason = %reason, "rejected");
                 state.insert(self.reject_key.clone(), serde_json::json!(reason));
-                // 清除审批标记
                 state.remove(&self.approve_key);
                 Ok(NextStep::GoToNext)
             }
@@ -150,17 +111,7 @@ impl BarrierNode {
         }
     }
 
-    /// 根据默认行为生成决策。
-    fn default_decision(&self) -> BarrierDecision {
-        match &self.default_action {
-            BarrierDefaultAction::Approve => BarrierDecision::Approve,
-            BarrierDefaultAction::Reject => BarrierDecision::Reject {
-                reason: "timeout — no decision received".into(),
-            },
-            BarrierDefaultAction::Skip => BarrierDecision::Approve,
-        }
-    }
-}
+ }
 
 #[async_trait]
 impl GraphNode for BarrierNode {
@@ -172,53 +123,24 @@ impl GraphNode for BarrierNode {
         )))
     }
 
-    /// 流式执行 — 发射 BarrierPaused 事件，等待外部决策。
+    /// 流式执行 — 返回 BarrierPaused，由 executor 发射事件并等待决策。
     async fn execute_stream(
         &self,
-        state: &mut State,
-        sink: &mpsc::Sender<GraphEvent>,
-    ) -> Result<NextStep, GraphError> {
-        let (signal_tx, signal_rx) = oneshot::channel::<BarrierDecision>();
+        _state: &mut State,
+        _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
+        trace_id: TraceId,
+        _pending_decisions: PendingDecisions,
+    ) -> Result<StreamNodeResult, GraphError> {
+        let barrier_id = BarrierId::new();
+        let node_name = self.name.clone();
 
-        // 发射暂停事件，携带 oneshot sender
-        if sink
-            .send(GraphEvent::BarrierPaused {
-                node_name: self.name.clone(),
-                signal: signal_tx,
-            })
-            .await
-            .is_err()
-        {
-            return Err(GraphError::BarrierCancelled {
-                node: self.name.clone(),
-            });
-        }
-
-        let decision = if let Some(timeout) = self.timeout {
-            // 带超时的 select
-            tokio::select! {
-                result = signal_rx => {
-                    result.map_err(|_| GraphError::BarrierCancelled {
-                        node: self.name.clone(),
-                    })?
-                }
-                _ = tokio::time::sleep(timeout) => {
-                    tracing::warn!(
-                        barrier = %self.name,
-                        timeout = ?timeout,
-                        action = ?self.default_action,
-                        "barrier timeout, applying default action"
-                    );
-                    self.default_decision()
-                }
-            }
-        } else {
-            // 无限等待
-            signal_rx.await.map_err(|_| GraphError::BarrierCancelled {
-                node: self.name.clone(),
-            })?
-        };
-
-        self.apply_decision(decision, state)
+        // 返回 BarrierPaused，由 executor 发射 BarrierPaused 事件
+        Ok(StreamNodeResult::BarrierPaused {
+            barrier_id,
+            node_name,
+            trace_id,
+            timeout: self.timeout,
+            default_action: self.default_action.clone(),
+        })
     }
 }
