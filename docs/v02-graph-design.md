@@ -411,7 +411,7 @@ pub struct GraphExecutor {
 | 模式 | 方法 | 返回 | 适用场景 |
 |------|------|------|---------|
 | 阻塞 | `execute(&graph, state)` | `Result<GraphResult, GraphError>` | 简单流水线、测试 |
-| 流式 | `execute_stream(graph, state)` | `GraphStream` | 需要实时事件、BarrierNode |
+| 流式 | `execute_stream(graph, state)` | `(GraphStream, GraphHandle)` | 需要实时事件、BarrierNode |
 
 ### 执行流程（阻塞模式）
 
@@ -454,7 +454,7 @@ for edge in edges {
 
 ### 流式执行
 
-`execute_stream()` 返回 `(GraphStream, GraphHandle)`，消费者实时接收事件并通过句柄交互。
+`execute_stream()` 返回 `(GraphStream, GraphHandle)` 元组，消费者实时接收事件并通过句柄交互。
 
 #### 事件分层
 
