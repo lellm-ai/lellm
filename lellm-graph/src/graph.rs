@@ -48,6 +48,11 @@ impl Graph {
         self.edges.iter().filter(|e| e.from == from).collect()
     }
 
+    /// 查找从 `from` 到 `to` 的边。
+    pub fn find_edge(&self, from: &str, to: &str) -> Option<&Edge> {
+        self.edges.iter().find(|e| e.from == from && e.to == to)
+    }
+
     /// 验证图结构（节点、边引用有效性）。
     ///
     /// 注意：不检测环 — 有环图是合法的，循环保护由 GraphExecutor::max_steps 提供。
@@ -96,7 +101,9 @@ impl Graph {
         let mut adj: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for edge in &self.edges {
-            adj.entry(edge.from.clone()).or_default().push(edge.to.clone());
+            adj.entry(edge.from.clone())
+                .or_default()
+                .push(edge.to.clone());
         }
 
         // DFS from each node to find cycles
@@ -106,15 +113,19 @@ impl Graph {
             self.dfs_cycles(node, node, &adj, &mut in_path, &mut path, &mut cycles);
         }
 
-        // Check which cycles have protection
+        // Check which cycles have protection — 检查环中所有边（含闭合边）
         let mut unprotected = cycles
             .iter()
             .filter(|cycle| {
-                !cycle.windows(2).all(|w| {
+                let has_protection = (0..cycle.len()).any(|i| {
+                    let next = (i + 1) % cycle.len();
+                    let from = cycle[i].as_str();
+                    let to = cycle[next].as_str();
                     self.edges
                         .iter()
-                        .any(|e| e.from == w[0] && e.to == w[1] && e.max_visits.is_some())
-                })
+                        .any(|e| e.from == from && e.to == to && e.max_visits.is_some())
+                });
+                !has_protection
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -213,7 +224,10 @@ impl CycleAnalysis {
 
         if !self.all_protected() {
             lines.push("".into());
-            lines.push("⚠️ Recommendation: Set max_visits on back-edges to prevent infinite loops.".to_string());
+            lines.push(
+                "⚠️ Recommendation: Set max_visits on back-edges to prevent infinite loops."
+                    .to_string(),
+            );
         }
 
         lines.join("\n")
@@ -255,14 +269,22 @@ impl GraphBuilder {
     }
 
     /// 添加节点。
-    pub fn node(&mut self, name: impl Into<String>, kind: NodeKind) -> Result<&mut Self, GraphError> {
+    pub fn node(
+        &mut self,
+        name: impl Into<String>,
+        kind: NodeKind,
+    ) -> Result<&mut Self, GraphError> {
         let name = name.into();
         self.nodes.insert(name, kind);
         Ok(self)
     }
 
     /// 添加边（无条件）。
-    pub fn edge(&mut self, from: impl Into<String>, to: impl Into<String>) -> Result<&mut Self, GraphError> {
+    pub fn edge(
+        &mut self,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Result<&mut Self, GraphError> {
         self.edges.push(Edge {
             from: from.into(),
             to: to.into(),
@@ -323,8 +345,12 @@ impl GraphBuilder {
 
     /// 构建 Graph。
     pub fn build(self) -> Result<Graph, GraphError> {
-        let start = self.start.ok_or_else(|| GraphError::InvalidGraph("start node not set".into()))?;
-        let end = self.end.ok_or_else(|| GraphError::InvalidGraph("end node not set".into()))?;
+        let start = self
+            .start
+            .ok_or_else(|| GraphError::InvalidGraph("start node not set".into()))?;
+        let end = self
+            .end
+            .ok_or_else(|| GraphError::InvalidGraph("end node not set".into()))?;
 
         let graph = Graph {
             nodes: self.nodes,

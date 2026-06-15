@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::error::GraphError;
 use crate::barrier_node::BarrierDefaultAction;
+use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId, GraphEvent, GraphHandle, GraphStream, TraceId};
 use crate::graph::Graph;
 use crate::node::{GraphNode, NextStep, NodeKind, PendingDecisions, StreamNodeResult};
@@ -20,7 +20,12 @@ use crate::state::{ExecutionEntry, GraphResult, State};
 struct EdgeVisits(HashMap<(String, String), usize>);
 
 impl EdgeVisits {
-    fn record(&mut self, from: &str, to: &str, max_visits: Option<usize>) -> Result<(), GraphError> {
+    fn record(
+        &mut self,
+        from: &str,
+        to: &str,
+        max_visits: Option<usize>,
+    ) -> Result<(), GraphError> {
         let key = (from.to_string(), to.to_string());
         let count = self.0.entry(key).or_insert(0);
         *count += 1;
@@ -97,11 +102,13 @@ impl GraphExecutor {
             });
 
             let next = result?;
-            current = self.resolve_next(graph, &current, &mut state, &mut edge_visits, next)?;
 
+            // 如果刚执行的是 end 节点，直接结束（不解析出边）
             if current == graph.end_node() {
                 break;
             }
+
+            current = self.resolve_next(graph, &current, &mut state, &mut edge_visits, next)?;
         }
 
         Ok(GraphResult {
@@ -184,7 +191,10 @@ impl GraphExecutor {
                 let duration = node_end.duration_since(node_start);
 
                 match result {
-                    Ok(StreamNodeResult::Done { next, trace_id: _tid }) => {
+                    Ok(StreamNodeResult::Done {
+                        next,
+                        trace_id: _tid,
+                    }) => {
                         execution_log.push(ExecutionEntry {
                             node_name: node_name.clone(),
                             start_time: node_start,
@@ -200,6 +210,11 @@ impl GraphExecutor {
                         })
                         .await;
 
+                        // 如果刚执行的是 end 节点，直接结束（不解析出边）
+                        if current == graph.end_node() {
+                            break;
+                        }
+
                         match executor.resolve_next(
                             &graph,
                             &current,
@@ -208,9 +223,6 @@ impl GraphExecutor {
                             next,
                         ) {
                             Ok(target) => {
-                                if target == graph.end_node() {
-                                    break;
-                                }
                                 current = target;
                             }
                             Err(e) => {
@@ -271,6 +283,11 @@ impl GraphExecutor {
                         })
                         .await;
 
+                        // 如果刚执行的是 end 节点，直接结束
+                        if current == graph.end_node() {
+                            break;
+                        }
+
                         match executor.resolve_next(
                             &graph,
                             &current,
@@ -279,9 +296,6 @@ impl GraphExecutor {
                             next,
                         ) {
                             Ok(target) => {
-                                if target == graph.end_node() {
-                                    break;
-                                }
                                 current = target;
                             }
                             Err(e) => {
@@ -345,10 +359,20 @@ impl GraphExecutor {
         if let Some(timeout) = timeout {
             let start = std::time::Instant::now();
             loop {
-                if let Some((barrier_id, decision)) = decision_rx.recv().await {
-                    pending_decisions.lock().await.insert(barrier_id, decision.clone());
-                    if barrier_id == target_id {
-                        return decision;
+                // 使用 try_recv 避免阻塞，定期检查超时
+                match decision_rx.try_recv() {
+                    Ok((barrier_id, decision)) => {
+                        pending_decisions
+                            .lock()
+                            .await
+                            .insert(barrier_id, decision.clone());
+                        if barrier_id == target_id {
+                            return decision;
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        return Self::default_decision(default_action);
                     }
                 }
                 if start.elapsed() >= timeout {
@@ -359,13 +383,16 @@ impl GraphExecutor {
                     );
                     return Self::default_decision(default_action);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         } else {
             // 无限等待
             loop {
                 if let Some((barrier_id, decision)) = decision_rx.recv().await {
-                    pending_decisions.lock().await.insert(barrier_id, decision.clone());
+                    pending_decisions
+                        .lock()
+                        .await
+                        .insert(barrier_id, decision.clone());
                     if barrier_id == target_id {
                         return decision;
                     }
@@ -396,16 +423,37 @@ impl GraphExecutor {
         next: NextStep,
     ) -> Result<String, GraphError> {
         match next {
-            NextStep::Goto(target) => Ok(target),
+            NextStep::Goto(target) => {
+                Self::transition(graph, current, &target, edge_visits)?;
+                Ok(target)
+            }
             NextStep::GoToNext => {
                 let (target, max_visits) = Self::find_next_node(graph, current, state)?;
                 edge_visits.record(current, &target, max_visits)?;
                 Ok(target)
             }
-            NextStep::End => Err(GraphError::InvalidGraph(
-                "unexpected End next step".into(),
-            )),
+            NextStep::End => Err(GraphError::InvalidGraph("unexpected End next step".into())),
         }
+    }
+
+    /// 统一跳转校验 — 验证边存在并记录访问计数。
+    ///
+    /// 所有 Goto(target) 跳转都必须对应图中的一条 Edge，否则返回 MissingEdge 错误。
+    fn transition(
+        graph: &Graph,
+        current: &str,
+        target: &str,
+        edge_visits: &mut EdgeVisits,
+    ) -> Result<(), GraphError> {
+        let edge = graph
+            .find_edge(current, target)
+            .ok_or_else(|| GraphError::MissingEdge {
+                from: current.to_string(),
+                to: target.to_string(),
+            })?;
+
+        edge_visits.record(current, target, edge.max_visits)?;
+        Ok(())
     }
 
     fn find_next_node(

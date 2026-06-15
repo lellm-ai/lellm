@@ -23,4 +23,6 @@ pub use node::{
     AgentNode, BarrierDefaultAction, BarrierNode, ConditionNode, ConditionNodeBuilder, GraphNode,
     LLMNode, LoopNode, NextStep, NodeKind, SubGraph, TaskNode, ToolNode,
 };
-pub use state::{ExecutionEntry, GraphResult, State, StateExt, StateError, StateReducer, array_reducer};
+pub use state::{
+    ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer, array_reducer,
+};

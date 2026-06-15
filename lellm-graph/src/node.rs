@@ -57,8 +57,9 @@ pub enum StreamNodeResult {
 }
 
 /// Barrier 决策共享映射类型 — executor 与 BarrierNode 之间传递决策。
-pub type PendingDecisions =
-    std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<BarrierId, crate::event::BarrierDecision>>>;
+pub type PendingDecisions = std::sync::Arc<
+    tokio::sync::Mutex<std::collections::HashMap<BarrierId, crate::event::BarrierDecision>>,
+>;
 
 /// 节点执行 trait。
 #[async_trait]
@@ -328,12 +329,30 @@ impl GraphNode for NodeKind {
         pending_decisions: PendingDecisions,
     ) -> Result<StreamNodeResult, GraphError> {
         match self {
-            Self::Task(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
-            Self::Agent(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
-            Self::Tool(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
-            Self::Condition(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
-            Self::Loop(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
-            Self::Barrier(n) => n.execute_stream(state, sink, trace_id, pending_decisions).await,
+            Self::Task(n) => {
+                n.execute_stream(state, sink, trace_id, pending_decisions)
+                    .await
+            }
+            Self::Agent(n) => {
+                n.execute_stream(state, sink, trace_id, pending_decisions)
+                    .await
+            }
+            Self::Tool(n) => {
+                n.execute_stream(state, sink, trace_id, pending_decisions)
+                    .await
+            }
+            Self::Condition(n) => {
+                n.execute_stream(state, sink, trace_id, pending_decisions)
+                    .await
+            }
+            Self::Loop(n) => {
+                n.execute_stream(state, sink, trace_id, pending_decisions)
+                    .await
+            }
+            Self::Barrier(n) => {
+                n.execute_stream(state, sink, trace_id, pending_decisions)
+                    .await
+            }
         }
     }
 }

@@ -184,12 +184,8 @@ pub struct GraphHandle {
 
 impl GraphHandle {
     /// 创建 GraphHandle（内部使用）。
-    pub fn new(
-        decision_tx: tokio::sync::mpsc::Sender<(BarrierId, BarrierDecision)>,
-    ) -> Self {
-        Self {
-            decision_tx,
-        }
+    pub fn new(decision_tx: tokio::sync::mpsc::Sender<(BarrierId, BarrierDecision)>) -> Self {
+        Self { decision_tx }
     }
 
     /// 提交 Barrier 决策。

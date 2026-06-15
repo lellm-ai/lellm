@@ -9,6 +9,8 @@ pub enum GraphError {
     InvalidGraph(String),
     /// 节点不存在
     NodeNotFound(String),
+    /// Goto 目标缺少对应的边
+    MissingEdge { from: String, to: String },
     /// 节点执行失败
     NodeExecutionFailed {
         node: String,
@@ -36,6 +38,13 @@ impl fmt::Display for GraphError {
         match self {
             Self::InvalidGraph(msg) => write!(f, "invalid graph: {msg}"),
             Self::NodeNotFound(name) => write!(f, "node not found: {name}"),
+            Self::MissingEdge { from, to } => {
+                write!(
+                    f,
+                    "goto '{}' from '{}' failed: no edge {}→{} exists in graph",
+                    to, from, from, to
+                )
+            }
             Self::NodeExecutionFailed { node, source } => {
                 write!(f, "node '{node}' execution failed: {source}")
             }

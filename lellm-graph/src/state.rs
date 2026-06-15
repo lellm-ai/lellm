@@ -115,7 +115,8 @@ impl StateExt for State {
         let value = self
             .get(key)
             .ok_or_else(|| StateError::MissingKey(key.to_string()))?;
-        serde_json::from_value(value.clone()).map_err(|e| StateError::Deserialize(key.to_string(), e.to_string()))
+        serde_json::from_value(value.clone())
+            .map_err(|e| StateError::Deserialize(key.to_string(), e.to_string()))
     }
 
     fn set<T>(&mut self, key: impl Into<String>, value: T)

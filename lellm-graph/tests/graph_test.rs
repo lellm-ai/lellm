@@ -1,6 +1,6 @@
 use lellm_graph::{
-    array_reducer, BarrierDecision, BarrierDefaultAction, BarrierNode, GraphBuilder, GraphError,
-    GraphEvent, GraphExecutor, LoopNode, NodeKind, State, StateExt, SubGraph, TaskNode, TraceId,
+    BarrierDecision, BarrierDefaultAction, BarrierNode, GraphBuilder, GraphError, GraphEvent,
+    GraphExecutor, LoopNode, NodeKind, State, StateExt, SubGraph, TaskNode, TraceId, array_reducer,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -59,44 +59,49 @@ async fn test_linear_pipeline() {
 
 #[tokio::test]
 async fn test_condition_branching() {
-    let graph = GraphBuilder::new("condition")
-        .start("check")
-        .node(
+    let graph = build_graph("condition", |g| {
+        let _ = g.start("check");
+        let _ = g.node(
             "check",
             NodeKind::Condition(
                 lellm_graph::ConditionNode::builder("check")
-                    .branch("yes", |s| s.get("flag").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .branch("yes", |s| {
+                        s.get("flag").and_then(|v| v.as_bool()).unwrap_or(false)
+                    })
                     .branch("no", |_| true)
                     .build(),
             ),
-        )
-        .node(
+        );
+        let _ = g.node(
             "yes",
             NodeKind::Task(TaskNode::new("yes", |state| {
                 state.insert("result".into(), serde_json::json!("yes"));
                 Ok(())
             })),
-        )
-        .node(
+        );
+        let _ = g.node(
             "no",
             NodeKind::Task(TaskNode::new("no", |state| {
                 state.insert("result".into(), serde_json::json!("no"));
                 Ok(())
             })),
-        )
-        .edge("yes", "yes_end")
-        .edge("no", "no_end")
-        .node(
+        );
+        let _ = g.edge("check", "yes");
+        let _ = g.edge("check", "no");
+        let _ = g.edge("yes", "yes_end");
+        let _ = g.edge("no", "no_end");
+        let _ = g.node(
             "yes_end",
             NodeKind::Task(TaskNode::new("yes_end", |_| Ok(()))),
-        )
-        .node(
+        );
+        let _ = g.node(
             "no_end",
             NodeKind::Task(TaskNode::new("no_end", |_| Ok(()))),
-        )
-        .end("yes_end")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.end("yes_end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let mut initial_state = HashMap::new();
     initial_state.insert("flag".into(), serde_json::json!(true));
@@ -113,17 +118,18 @@ async fn test_condition_branching() {
 
 #[tokio::test]
 async fn test_task_node_error() {
-    let graph = GraphBuilder::new("error")
-        .start("fail")
-        .node(
+    let graph = build_graph("error", |g| {
+        let _ = g.start("fail");
+        let _ = g.node(
             "fail",
             NodeKind::Task(TaskNode::new("fail", |_| {
                 Err(lellm_graph::GraphError::StateError("boom".into()))
             })),
-        )
-        .end("fail")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.end("fail");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -140,14 +146,15 @@ async fn test_task_node_error() {
 /// 有环图现在可以正常构建 — 不再被 detect_cycle 拦截。
 #[test]
 fn test_cyclic_graph_allowed() {
-    let result = GraphBuilder::new("cycle")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .edge("a", "b")
-        .edge("b", "a")
-        .end("b")
-        .build();
+    let result = build_graph("cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "a");
+        let _ = g.end("b");
+        Ok(())
+    });
 
     assert!(result.is_ok(), "cyclic graph should be allowed to build");
 }
@@ -155,23 +162,24 @@ fn test_cyclic_graph_allowed() {
 /// 有环图执行时，max_steps 熔断器防止无限循环。
 #[tokio::test]
 async fn test_cyclic_graph_steps_exceeded() {
-    let graph = GraphBuilder::new("infinite_cycle")
-        .start("a")
-        .node(
+    let graph = build_graph("infinite_cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                 state.insert("count".into(), serde_json::json!(count + 1));
                 Ok(())
             })),
-        )
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .node("done", NodeKind::Task(TaskNode::new("done", |_| Ok(()))))
-        .edge("a", "b")
-        .edge("b", "a")
-        .end("done")
-        .build()
-        .expect("cyclic graph should build");
+        );
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("done", NodeKind::Task(TaskNode::new("done", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "a");
+        let _ = g.end("done");
+        Ok(())
+    })
+    .expect("cyclic graph should build");
 
     let executor = GraphExecutor::new(5);
     let result = executor.execute(&graph, HashMap::new()).await;
@@ -186,29 +194,30 @@ async fn test_cyclic_graph_steps_exceeded() {
 /// 有环图 + edge_if 条件回跳 — 最核心的 Agent 编排模式。
 #[tokio::test]
 async fn test_cyclic_graph_with_edge_if_exit() {
-    let graph = GraphBuilder::new("cyclic_with_exit")
-        .start("a")
-        .node(
+    let graph = build_graph("cyclic_with_exit", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                 state.insert("count".into(), serde_json::json!(count + 1));
                 Ok(())
             })),
-        )
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))))
-        .edge("a", "b")
-        .edge_if("b", "a", |s| {
+        );
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge_if("b", "a", |s: &State| {
             s.get("count")
                 .and_then(|v| v.as_u64())
                 .map(|c| c < 3)
                 .unwrap_or(true)
-        })
-        .edge("b", "end")
-        .end("end")
-        .build()
-        .expect("build should succeed");
+        });
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -222,21 +231,21 @@ async fn test_cyclic_graph_with_edge_if_exit() {
 /// ConditionNode 回跳 — 复杂多路分支场景的语法糖。
 #[tokio::test]
 async fn test_condition_node_back_jump() {
-    let graph = GraphBuilder::new("cond_back_jump")
-        .start("a")
-        .node(
+    let graph = build_graph("cond_back_jump", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                 state.insert("count".into(), serde_json::json!(count + 1));
                 Ok(())
             })),
-        )
-        .node(
+        );
+        let _ = g.node(
             "route",
             NodeKind::Condition(
                 lellm_graph::ConditionNode::builder("route")
-                    .branch("a", |s| {
+                    .branch("a", |s: &State| {
                         s.get("count")
                             .and_then(|v| v.as_u64())
                             .map(|c| c < 2)
@@ -245,12 +254,15 @@ async fn test_condition_node_back_jump() {
                     .branch("end", |_| true)
                     .build(),
             ),
-        )
-        .node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))))
-        .edge("a", "route")
-        .end("end")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("a", "route");
+        let _ = g.edge("route", "a");
+        let _ = g.edge("route", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -262,45 +274,49 @@ async fn test_condition_node_back_jump() {
 
 #[test]
 fn test_missing_node() {
-    let result = GraphBuilder::new("missing")
-        .start("a")
-        .edge("a", "nonexistent")
-        .end("nonexistent")
-        .build();
+    let result = build_graph("missing", |g| {
+        let _ = g.start("a");
+        let _ = g.edge("a", "nonexistent");
+        let _ = g.end("nonexistent");
+        Ok(())
+    });
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_missing_start() {
-    let result = GraphBuilder::new("no_start")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .end("a")
-        .build();
+    let result = build_graph("no_start", |g| {
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.end("a");
+        Ok(())
+    });
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_missing_end() {
-    let result = GraphBuilder::new("no_end")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .build();
+    let result = build_graph("no_end", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        Ok(())
+    });
 
     assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_execution_log() {
-    let graph = GraphBuilder::new("log")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .edge("a", "b")
-        .end("b")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("log", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.end("b");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -327,7 +343,7 @@ async fn test_loop_node_basic() {
     let loop_node = LoopNode::new(
         "counter",
         body,
-        |s| {
+        |s: &State| {
             s.get("count")
                 .and_then(|v| v.as_u64())
                 .map(|c| c < 3)
@@ -336,12 +352,13 @@ async fn test_loop_node_basic() {
         10,
     );
 
-    let graph = GraphBuilder::new("loop_test")
-        .start("loop")
-        .node("loop", NodeKind::Loop(Box::new(loop_node)))
-        .end("loop")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("loop_test", |g| {
+        let _ = g.start("loop");
+        let _ = g.node("loop", NodeKind::Loop(Box::new(loop_node)));
+        let _ = g.end("loop");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -361,12 +378,13 @@ async fn test_loop_node_limit_exceeded() {
 
     let loop_node = LoopNode::new("infinite", body, |_| true, 2);
 
-    let graph = GraphBuilder::new("loop_limit")
-        .start("loop")
-        .node("loop", NodeKind::Loop(Box::new(loop_node)))
-        .end("loop")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("loop_limit", |g| {
+        let _ = g.start("loop");
+        let _ = g.node("loop", NodeKind::Loop(Box::new(loop_node)));
+        let _ = g.end("loop");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -384,12 +402,13 @@ async fn test_loop_node_limit_exceeded() {
 /// BarrierNode 在阻塞模式下必须报错。
 #[tokio::test]
 async fn test_barrier_blocked_mode_error() {
-    let graph = GraphBuilder::new("barrier_blocked")
-        .start("barrier")
-        .node("barrier", NodeKind::Barrier(BarrierNode::new("review")))
-        .end("barrier")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("barrier_blocked", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("review")));
+        let _ = g.end("barrier");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -410,14 +429,15 @@ async fn test_barrier_blocked_mode_error() {
 /// BarrierNode 流式模式 — Approve 决策（使用 GraphHandle::decide）。
 #[tokio::test]
 async fn test_barrier_approve() {
-    let graph = GraphBuilder::new("approve_flow")
-        .start("barrier")
-        .node("barrier", NodeKind::Barrier(BarrierNode::new("review")))
-        .node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))))
-        .edge("barrier", "after")
-        .end("after")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("approve_flow", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("review")));
+        let _ = g.node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))));
+        let _ = g.edge("barrier", "after");
+        let _ = g.end("after");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let graph = std::sync::Arc::new(graph);
     let (mut stream, handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
@@ -425,7 +445,10 @@ async fn test_barrier_approve() {
     loop {
         let event = stream.recv().await.expect("stream should not close");
         match event {
-            GraphEvent::BarrierPaused { node_name, barrier_id } => {
+            GraphEvent::BarrierPaused {
+                node_name,
+                barrier_id,
+            } => {
                 assert_eq!(node_name, "review");
                 let _ = handle.decide(barrier_id, BarrierDecision::Approve).await;
             }
@@ -445,24 +468,27 @@ async fn test_barrier_approve() {
 /// BarrierNode — Reject 决策 + edge_if 回跳。
 #[tokio::test]
 async fn test_barrier_reject_with_back_jump() {
-    let graph = GraphBuilder::new("reject_flow")
-        .start("task")
-        .node(
+    let graph = build_graph("reject_flow", |g| {
+        let _ = g.start("task");
+        let _ = g.node(
             "task",
             NodeKind::Task(TaskNode::new("task", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                 state.insert("count".into(), serde_json::json!(count + 1));
                 Ok(())
             })),
-        )
-        .node("review", NodeKind::Barrier(BarrierNode::new("review")))
-        .edge("task", "review")
-        .edge_if("review", "task", |s| s.get("review.reject_reason").is_some())
-        .node("done", NodeKind::Task(TaskNode::new("done", |_| Ok(()))))
-        .edge("review", "done")
-        .end("done")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.node("review", NodeKind::Barrier(BarrierNode::new("review")));
+        let _ = g.edge("task", "review");
+        let _ = g.edge_if("review", "task", |s: &State| {
+            s.get("review.reject_reason").is_some()
+        });
+        let _ = g.node("done", NodeKind::Task(TaskNode::new("done", |_| Ok(()))));
+        let _ = g.edge("review", "done");
+        let _ = g.end("done");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let graph = std::sync::Arc::new(graph);
     let (mut stream, handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
@@ -471,7 +497,10 @@ async fn test_barrier_reject_with_back_jump() {
     loop {
         let event = stream.recv().await.expect("stream should not close");
         match event {
-            GraphEvent::BarrierPaused { node_name, barrier_id } => {
+            GraphEvent::BarrierPaused {
+                node_name,
+                barrier_id,
+            } => {
                 assert_eq!(node_name, "review");
                 reject_count += 1;
                 if reject_count == 1 {
@@ -503,14 +532,15 @@ async fn test_barrier_reject_with_back_jump() {
 /// BarrierNode — Modify 决策，修改 State 后继续。
 #[tokio::test]
 async fn test_barrier_modify() {
-    let graph = GraphBuilder::new("modify_flow")
-        .start("barrier")
-        .node("barrier", NodeKind::Barrier(BarrierNode::new("input")))
-        .node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))))
-        .edge("barrier", "after")
-        .end("after")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("modify_flow", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("input")));
+        let _ = g.node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))));
+        let _ = g.edge("barrier", "after");
+        let _ = g.end("after");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let graph = std::sync::Arc::new(graph);
     let (mut stream, handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
@@ -544,21 +574,22 @@ async fn test_barrier_modify() {
 /// BarrierNode — 超时自动 Reject。
 #[tokio::test]
 async fn test_barrier_timeout() {
-    let graph = GraphBuilder::new("timeout_flow")
-        .start("barrier")
-        .node(
+    let graph = build_graph("timeout_flow", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node(
             "barrier",
             NodeKind::Barrier(
                 BarrierNode::new("review")
                     .timeout(Duration::from_millis(100))
                     .default_action(BarrierDefaultAction::Reject),
             ),
-        )
-        .node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))))
-        .edge("barrier", "after")
-        .end("after")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))));
+        let _ = g.edge("barrier", "after");
+        let _ = g.end("after");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let graph = std::sync::Arc::new(graph);
     let (mut stream, _handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
@@ -587,30 +618,32 @@ async fn test_barrier_timeout() {
 /// BarrierNode — Reroute 决策，跳转到指定节点。
 #[tokio::test]
 async fn test_barrier_reroute() {
-    let graph = GraphBuilder::new("reroute_flow")
-        .start("barrier")
-        .node("barrier", NodeKind::Barrier(BarrierNode::new("route")))
-        .node(
+    let graph = build_graph("reroute_flow", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("route")));
+        let _ = g.node(
             "path_a",
             NodeKind::Task(TaskNode::new("path_a", |state| {
                 state.insert("path".into(), serde_json::json!("A"));
                 Ok(())
             })),
-        )
-        .node(
+        );
+        let _ = g.node(
             "path_b",
             NodeKind::Task(TaskNode::new("path_b", |state| {
                 state.insert("path".into(), serde_json::json!("B"));
                 Ok(())
             })),
-        )
-        .edge("barrier", "path_a")
-        .edge("path_a", "end")
-        .edge("path_b", "end")
-        .node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))))
-        .end("end")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.edge("barrier", "path_a");
+        let _ = g.edge("barrier", "path_b");
+        let _ = g.edge("path_a", "end");
+        let _ = g.edge("path_b", "end");
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let graph = std::sync::Arc::new(graph);
     let (mut stream, handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
@@ -684,10 +717,7 @@ fn test_state_ext_remove() {
 #[test]
 fn test_state_ext_get_json() {
     let mut state = State::new();
-    state.set(
-        "config",
-        serde_json::json!({"nested": {"key": "value"}}),
-    );
+    state.set("config", serde_json::json!({"nested": {"key": "value"}}));
 
     let config: serde_json::Value = state.get_json("config").unwrap();
     assert_eq!(config["nested"]["key"], "value");
@@ -699,8 +729,12 @@ fn test_state_ext_get_json() {
 #[test]
 fn test_state_ext_append_array() {
     let mut state = State::new();
-    state.append_array("items", serde_json::json!([1, 2])).unwrap();
-    state.append_array("items", serde_json::json!([3, 4])).unwrap();
+    state
+        .append_array("items", serde_json::json!([1, 2]))
+        .unwrap();
+    state
+        .append_array("items", serde_json::json!([3, 4]))
+        .unwrap();
 
     let items = state.get("items").unwrap();
     assert_eq!(items, &serde_json::json!([1, 2, 3, 4]));
@@ -710,7 +744,8 @@ fn test_state_ext_append_array() {
 fn test_state_ext_reduce() {
     let mut state = State::new();
     state.insert("items".into(), serde_json::json!([1, 2]));
-    state.reduce("items", serde_json::json!([3, 4]), &array_reducer())
+    state
+        .reduce("items", serde_json::json!([3, 4]), &array_reducer())
         .unwrap();
 
     let items = state.get("items").unwrap();
@@ -722,30 +757,36 @@ fn test_state_ext_reduce() {
 /// 边级循环预算 — 超过 max_visits 返回 EdgeLimitExceeded。
 #[tokio::test]
 async fn test_edge_max_visits_exceeded() {
-    let graph = GraphBuilder::new("edge_limit")
-        .start("a")
-        .node(
+    let graph = build_graph("edge_limit", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                 state.insert("count".into(), serde_json::json!(count + 1));
                 Ok(())
             })),
-        )
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))))
-        .edge("a", "b")
+        );
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("a", "b");
         // 条件边 + max_visits=2：最多回跳 2 次
-        .edge_if_max_visits("b", "a", |s| {
-            s.get("count")
-                .and_then(|v| v.as_u64())
-                .map(|c| c < 10)
-                .unwrap_or(true)
-        }, 2)
-        .edge("b", "end")
-        .end("end")
-        .build()
-        .expect("build should succeed");
+        let _ = g.edge_if_max_visits(
+            "b",
+            "a",
+            |s: &State| {
+                s.get("count")
+                    .and_then(|v| v.as_u64())
+                    .map(|c| c < 10)
+                    .unwrap_or(true)
+            },
+            2,
+        );
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -765,29 +806,35 @@ async fn test_edge_max_visits_exceeded() {
 /// 边级预算未超限 — 正常退出。
 #[tokio::test]
 async fn test_edge_max_visits_ok() {
-    let graph = GraphBuilder::new("edge_limit_ok")
-        .start("a")
-        .node(
+    let graph = build_graph("edge_limit_ok", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
                 state.insert("count".into(), serde_json::json!(count + 1));
                 Ok(())
             })),
-        )
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))))
-        .edge("a", "b")
-        .edge_if_max_visits("b", "a", |s| {
-            s.get("count")
-                .and_then(|v| v.as_u64())
-                .map(|c| c < 2)
-                .unwrap_or(true)
-        }, 5)
-        .edge("b", "end")
-        .end("end")
-        .build()
-        .expect("build should succeed");
+        );
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge_if_max_visits(
+            "b",
+            "a",
+            |s: &State| {
+                s.get("count")
+                    .and_then(|v| v.as_u64())
+                    .map(|c| c < 2)
+                    .unwrap_or(true)
+            },
+            5,
+        );
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let result = GraphExecutor::default()
         .execute(&graph, HashMap::new())
@@ -802,14 +849,15 @@ async fn test_edge_max_visits_ok() {
 /// DAG 无环。
 #[test]
 fn test_analyze_cycles_dag() {
-    let graph = GraphBuilder::new("dag")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .edge("a", "b")
-        .end("b")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("dag", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.end("b");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let analysis = graph.analyze_cycles();
     assert!(!analysis.has_cycles);
@@ -820,17 +868,18 @@ fn test_analyze_cycles_dag() {
 /// 有环图检测到环。
 #[test]
 fn test_analyze_cycles_detected() {
-    let graph = GraphBuilder::new("cycle")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(()))))
-        .edge("a", "b")
-        .edge("b", "c")
-        .edge("c", "a")
-        .end("a")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "c");
+        let _ = g.edge("c", "a");
+        let _ = g.end("a");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let analysis = graph.analyze_cycles();
     assert!(analysis.has_cycles);
@@ -840,17 +889,18 @@ fn test_analyze_cycles_detected() {
 /// 有环图 + max_visits 保护。
 #[test]
 fn test_analyze_cycles_protected() {
-    let graph = GraphBuilder::new("protected_cycle")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .edge("a", "b")
-        .edge_if_max_visits("b", "a", |_| true, 5)
-        .edge("b", "end")
-        .node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))))
-        .end("end")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("protected_cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge_if_max_visits("b", "a", |_| true, 5);
+        let _ = g.edge("b", "end");
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let analysis = graph.analyze_cycles();
     assert!(analysis.has_cycles);
@@ -860,15 +910,16 @@ fn test_analyze_cycles_protected() {
 /// analyze_cycles 生成诊断报告。
 #[test]
 fn test_analyze_cycles_report() {
-    let graph = GraphBuilder::new("report_test")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .edge("a", "b")
-        .edge("b", "a")
-        .end("a")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("report_test", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "a");
+        let _ = g.end("a");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let analysis = graph.analyze_cycles();
     let report = analysis.report();
@@ -889,14 +940,15 @@ fn test_trace_id_uniqueness() {
 /// 流式执行事件包含 trace_id。
 #[tokio::test]
 async fn test_stream_has_trace_id() {
-    let graph = GraphBuilder::new("trace_test")
-        .start("a")
-        .node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))))
-        .node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))))
-        .edge("a", "b")
-        .end("b")
-        .build()
-        .expect("build should succeed");
+    let graph = build_graph("trace_test", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.end("b");
+        Ok(())
+    })
+    .expect("build should succeed");
 
     let graph = std::sync::Arc::new(graph);
     let (mut stream, _handle) = GraphExecutor::default().execute_stream(graph, HashMap::new());
@@ -920,4 +972,92 @@ async fn test_stream_has_trace_id() {
 
     // 至少有两个节点，每个有 start + end，共 4 个 trace_id
     assert!(trace_ids.len() >= 4);
+}
+
+// ─── Goto 边校验 + max_visits 测试 ─────────────────────────────
+
+/// ConditionNode 返回 Goto(target) 的回跳边，max_visits 应生效。
+#[tokio::test]
+async fn test_goto_edge_max_visits_applies() {
+    let graph = build_graph("goto_limit", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |state| {
+                let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                state.insert("count".into(), serde_json::json!(count + 1));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "route",
+            NodeKind::Condition(
+                lellm_graph::ConditionNode::builder("route")
+                    .branch("a", |s: &State| {
+                        s.get("count")
+                            .and_then(|v| v.as_u64())
+                            .map(|c| c < 10)
+                            .unwrap_or(true)
+                    })
+                    .branch("end", |_| true)
+                    .build(),
+            ),
+        );
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("a", "route");
+        // route → a 是 ConditionNode 的 Goto 目标，max_visits=2 应生效
+        let _ = g.edge_if_max_visits("route", "a", |_| true, 2);
+        let _ = g.edge("route", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(&graph, HashMap::new())
+        .await;
+
+    // route→a 被 ConditionNode 的 Goto 走了 2 次后应触发 EdgeLimitExceeded
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        GraphError::EdgeLimitExceeded { edge, limit } => {
+            assert_eq!(edge, "route→a");
+            assert_eq!(limit, 2);
+        }
+        other => panic!("expected EdgeLimitExceeded, got: {other}"),
+    }
+}
+
+/// Goto(target) 但图中没有对应的边 → MissingEdge 错误。
+#[tokio::test]
+async fn test_goto_missing_edge_error() {
+    let graph = build_graph("missing_edge", |g| {
+        let _ = g.start("route");
+        let _ = g.node(
+            "route",
+            NodeKind::Condition(
+                lellm_graph::ConditionNode::builder("route")
+                    .branch("nonexistent", |_| true)
+                    .build(),
+            ),
+        );
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("route", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(&graph, HashMap::new())
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        GraphError::MissingEdge { from, to } => {
+            assert_eq!(from, "route");
+            assert_eq!(to, "nonexistent");
+        }
+        other => panic!("expected MissingEdge, got: {other}"),
+    }
 }

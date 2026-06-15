@@ -110,8 +110,7 @@ impl BarrierNode {
             }
         }
     }
-
- }
+}
 
 #[async_trait]
 impl GraphNode for BarrierNode {
