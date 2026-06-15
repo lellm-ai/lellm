@@ -18,3 +18,8 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 futures-util.workspace = true
+
+[dev-dependencies]
+lellm-provider.workspace = true
+lellm-macros.workspace = true
+schemars.workspace = true
