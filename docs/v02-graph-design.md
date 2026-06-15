@@ -277,24 +277,101 @@ pub struct Edge {
 
 ## [S4] State 设计
 
-### 基础类型
+### 两层 API 架构
+
+底层保持动态 KV，上层提供强类型访问与编译期 Key 常量。
+
+```
+用户代码
+  ↓
+StateKey<T>（编译期 key 常量）
+  ↓
+StateExt（强类型 getter/setter）
+  ↓
+State = HashMap<String, Value>（底层动态存储）
+```
+
+### 底层：动态 State
 
 ```rust
 pub type State = HashMap<String, serde_json::Value>;
 ```
 
-### Reducer 机制
+**为什么不做强类型 State？**
+
+Graph 的状态天然是开放集合（open world）——Agent、Tool、Barrier、Subgraph 各自读写不同的字段。强类型 State（如 `GraphBuilder::<MyState>::new()`）最终会退化为 `known_fields + dynamic_fields`，收益不高。
+
+### 上层：StateExt（P0）
 
 ```rust
-/// 将已有值与新值合并
-pub type StateReducer = Box<
-    dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync,
->;
-
 pub trait StateExt {
+    fn get_str(&self, key: &str) -> Option<&str>;
+    fn get_bool(&self, key: &str) -> Option<bool>;
+    fn get_u64(&self, key: &str) -> Option<u64>;
+    fn get_i64(&self, key: &str) -> Option<i64>;
+    fn get_f64(&self, key: &str) -> Option<f64>;
+    fn get_json<T>(&self, key: &str) -> Result<T, StateError>
+    where
+        T: DeserializeOwned;
+    fn set<T>(&mut self, key: impl Into<String>, value: T)
+    where
+        T: Serialize;
+    fn remove(&mut self, key: &str) -> Option<Value>;
+    fn contains(&self, key: &str) -> bool;
+
+    // Reducer 合并
     fn reduce(&mut self, key: &str, value: Value, reducer: &StateReducer) -> Result<(), String>;
     fn append_array(&mut self, key: &str, items: Value) -> Result<(), String>;
 }
+```
+
+消除 `as_str().unwrap()` / `serde_json::from_value()` 样板代码。
+
+### 上层：StateKey<T>（P1）
+
+解决字符串魔法值拼写问题：
+
+```rust
+pub struct StateKey<T> {
+    name: &'static str,
+    _marker: PhantomData<T>,
+}
+
+impl<T> StateKey<T> {
+    pub const fn new(name: &'static str) -> Self { ... }
+}
+
+pub trait StateExt {
+    fn get_typed<T>(&self, key: &StateKey<T>) -> Result<T, StateError>
+    where T: DeserializeOwned;
+    fn set_typed<T>(&mut self, key: &StateKey<T>, value: T)
+    where T: Serialize;
+}
+```
+
+使用方式：
+
+```rust
+// 定义常量 key
+pub const MESSAGES: StateKey<Vec<Message>> = StateKey::new("messages");
+pub const RETRY_COUNT: StateKey<u64> = StateKey::new("retry_count");
+
+// 编译期校验 key 与类型匹配
+let msgs = state.get_typed(&MESSAGES)?;
+let retry = state.get_typed(&RETRY_COUNT).unwrap_or(0);
+state.set_typed(&MESSAGES, msgs);
+```
+
+**收益：**
+- 编译期 key 常量，避免 `"messages"` / `"msgs"` / `"message"` 拼写混乱
+- 保持底层动态 State，不影响 BarrierNode、MCP、Subgraph 的动态输出
+
+### Reducer 机制
+
+```rust
+pub type StateReducer = Box<
+    dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync,
+>;
 
 /// 内置：数组追加（类似 LangGraph 的 operator.add for lists）
 pub fn array_reducer() -> StateReducer;
@@ -509,6 +586,8 @@ lellm-graph/
 |--------|------|------|
 | P0 | `Edge::max_visits` | 边级循环预算，`find_next_node` 中检查 |
 | P0 | `analyze_cycles()` | 诊断用，找出图中所有环，生成诊断信息 |
+| P0 | `StateExt` 强类型 getter/setter | `get_str/get_u64/get_json/set/remove/contains` |
+| P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 |
 | P1 | ParallelNode | 并行子图，`join_all` + Reducer 聚合 |
 | P2 | 可达性验证 | validate() 检查所有节点是否可达 |
 | P3 | 条件覆盖验证 | validate() 检查条件边是否覆盖完整 |
