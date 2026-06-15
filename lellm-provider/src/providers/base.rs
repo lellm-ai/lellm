@@ -535,6 +535,7 @@ pub enum ProviderProfile {
     Ollama,
     MiMo,
     Zhipu,
+    DashScope,
 }
 
 impl ProviderProfile {
@@ -549,6 +550,7 @@ impl ProviderProfile {
             Self::Ollama => "http://localhost:11434/v1",
             Self::MiMo => "https://api.xiaomimimo.com/v1",
             Self::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
+            Self::DashScope => "https://dashscope.aliyuncs.com/compatible-mode/v1",
         }
     }
 
@@ -563,6 +565,7 @@ impl ProviderProfile {
             Self::Ollama => "OLLAMA",
             Self::MiMo => "MIMO",
             Self::Zhipu => "ZAI",
+            Self::DashScope => "DASHSCOPE",
         }
     }
 }

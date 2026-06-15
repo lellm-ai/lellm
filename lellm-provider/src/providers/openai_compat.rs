@@ -1,6 +1,6 @@
 //! OpenAI 兼容协议适配器。
 //!
-//! 覆盖 OpenAI、NVIDIA、DeepSeek、VLLM、LLaMA、SGLang、Ollama、MiMo、智谱 等使用 OpenAI 兼容接口的 provider。
+//! 覆盖 OpenAI、NVIDIA、DeepSeek、VLLM、LLaMA、SGLang、Ollama、MiMo、智谱、DashScope 等使用 OpenAI 兼容接口的 provider。
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -77,6 +77,12 @@ impl OpenAICompatCodec {
             provider_id: "zhipu".into(),
         }
     }
+
+    pub fn dashscope() -> Self {
+        Self {
+            provider_id: "dashscope".into(),
+        }
+    }
 }
 
 // ── ProviderMeta ──
@@ -97,6 +103,7 @@ impl ProviderMeta for OpenAICompatCodec {
             "ollama" => "http://localhost:11434/v1",
             "mimo" => "https://api.xiaomimimo.com/v1",
             "zhipu" => "https://open.bigmodel.cn/api/paas/v4",
+            "dashscope" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
             _ => "http://localhost",
         }
     }
@@ -414,6 +421,13 @@ impl ModelCapabilities for OpenAICompatCodec {
         }
         // Zhipu GLM-5.x supports reasoning
         if self.provider_id == "zhipu" && (lower.contains("glm-5") || lower.contains("glm-4.6")) {
+            caps.supports_reasoning = true;
+            caps.supports_stream_thinking = true;
+        }
+        // DashScope Qwen models support reasoning
+        if self.provider_id == "dashscope"
+            && (lower.contains("qwen-max") || lower.contains("qwen-plus") || lower.contains("qwq"))
+        {
             caps.supports_reasoning = true;
             caps.supports_stream_thinking = true;
         }
