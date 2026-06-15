@@ -39,7 +39,7 @@ pub struct InitializeParams {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
     pub capabilities: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "clientInfo", skip_serializing_if = "Option::is_none")]
     pub client_info: Option<ImplementationInfo>,
 }
 

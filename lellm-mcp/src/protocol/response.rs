@@ -56,6 +56,7 @@ pub struct InitializeResult {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
     pub capabilities: serde_json::Value,
+    #[serde(rename = "serverInfo")]
     pub server_info: ImplementationInfo,
 }
 
@@ -92,7 +93,7 @@ pub struct CallToolResult {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text: String },
-    Image { data: String, mime_type: String },
+    Image { data: String, #[serde(rename = "mimeType")] mime_type: String },
     #[serde(other)]
     Unknown,
 }
