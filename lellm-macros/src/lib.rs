@@ -156,6 +156,8 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
 
     // Extract parameters
     let params = extract_fn_params(&func.sig.inputs)?;
+    // Check if function is async
+    let is_async = func.sig.asyncness.is_some();
     // Convert fn name to PascalCase for struct name: test_search_fn → TestSearchFn
     let pascal_name = snake_to_pascal(&func.sig.ident.to_string());
     let struct_name = format_ident!("{}Args", pascal_name);
@@ -185,6 +187,13 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
             quote! { args.#ident }
         })
         .collect();
+
+    // await suffix for async functions
+    let await_suffix = if is_async {
+        quote! { .await }
+    } else {
+        quote! {}
+    };
 
     // Clean the original function (remove #[tool] attr)
     let mut cleaned_func = func.clone();
@@ -231,7 +240,7 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
         /// Auto-generated tool registration for `#fn_name` (no dependency injection).
         #visibility fn #reg_fn_name() -> ::lellm_agent::ToolRegistration {
             #reg_fn_name_with(|args| async move {
-                #fn_name(#(#arg_refs),*)
+                #fn_name(#(#arg_refs),*) #await_suffix
             })
         }
 

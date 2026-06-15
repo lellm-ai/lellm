@@ -375,33 +375,30 @@ fn test_visibility_preserved() {
 }
 
 // ============================================================================
-// 11. 异步工具通过 _tool_with 注册（模拟异步执行）
+// 11. 异步函数支持 — #[tool] on async fn
 // ============================================================================
-//
-// NOTE: #[tool] on `async fn` currently has a bug — the generated `_tool()`
-// factory does not `.await` the async function call. Until fixed, use
-// `_tool_with()` with an explicit async closure.
-// This test verifies the _tool_with path works correctly for async logic.
 
-#[tool(name = "async_data_fetch", description = "异步获取数据")]
-fn async_data_fetch(query: String, limit: u32) -> ToolResult {
-    Ok(serde_json::json!(format!("sync fallback for '{}'", query)))
+/// 异步搜索
+#[tool]
+async fn async_search(query: String, limit: u32) -> ToolResult {
+    Ok(serde_json::json!(format!("async results for '{}' (limit={})", query, limit)))
+}
+
+#[test]
+fn test_async_tool_args() {
+    assert_eq!(AsyncSearchArgs::NAME, "async_search");
+    assert_eq!(AsyncSearchArgs::DESCRIPTION, "异步搜索");
 }
 
 #[tokio::test]
-async fn test_async_tool_via_with_factory() {
-    let reg = async_data_fetch_tool_with(|args| async move {
-        // 模拟异步操作
-        let result = format!("async results for '{}' (limit={})", args.query, args.limit);
-        Ok(serde_json::json!(result))
-    });
-
+async fn test_async_tool_execution() {
+    let reg = async_search_tool();
     let catalog = StaticCatalog::from_tools(vec![reg]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
     let call = ToolCall {
         id: "call_async".to_string(),
-        name: "async_data_fetch".to_string(),
+        name: "async_search".to_string(),
         arguments: serde_json::json!({"query": "Rust", "limit": 10}),
     };
 
