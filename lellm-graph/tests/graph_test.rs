@@ -1,6 +1,6 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, GraphBuilder, GraphError,
-    GraphEvent, GraphExecutor, LoopNode, NodeKind, State, StateExt, SubGraph, TaskNode, TerminalError, TraceId,
+    GraphEvent, GraphExecutor, GraphExecution, LoopNode, NodeKind, State, StateExt, SubGraph, TaskNode, TerminalError, TraceId,
     array_reducer, EdgePolicy, EdgeExceededStrategy,
 };
 use std::collections::HashMap;
@@ -441,7 +441,7 @@ async fn test_barrier_approve() {
     })
     .expect("build should succeed");
 
-    let (mut stream, handle) = GraphExecutor::default()
+    let GraphExecution { mut stream, handle } = GraphExecutor::default()
         .execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
@@ -491,7 +491,7 @@ async fn test_barrier_reject_with_back_jump() {
     })
     .expect("build should succeed");
 
-    let (mut stream, handle) = GraphExecutor::default()
+    let GraphExecution { mut stream, handle } = GraphExecutor::default()
         .execute_stream(Arc::new(graph), HashMap::new());
 
     let mut reject_count = 0;
@@ -542,7 +542,7 @@ async fn test_barrier_modify() {
     })
     .expect("build should succeed");
 
-    let (mut stream, handle) = GraphExecutor::default()
+    let GraphExecution { mut stream, handle } = GraphExecutor::default()
         .execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
@@ -590,7 +590,7 @@ async fn test_barrier_timeout() {
     })
     .expect("build should succeed");
 
-    let (mut stream, _handle) = GraphExecutor::default()
+    let GraphExecution { mut stream, handle: _handle } = GraphExecutor::default()
         .execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
@@ -640,7 +640,7 @@ async fn test_barrier_reroute() {
     })
     .expect("build should succeed");
 
-    let (mut stream, handle) = GraphExecutor::default()
+    let GraphExecution { mut stream, handle } = GraphExecutor::default()
         .execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
@@ -714,7 +714,7 @@ async fn test_double_barrier_sequential() {
     })
     .expect("build should succeed");
 
-    let (mut stream, handle) = GraphExecutor::default()
+    let GraphExecution { mut stream, handle } = GraphExecutor::default()
         .execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
@@ -1002,7 +1002,7 @@ async fn test_stream_has_span_id() {
     })
     .expect("build should succeed");
 
-    let (mut stream, _handle) =
+    let GraphExecution { mut stream, handle: _handle } =
         GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     let mut span_ids = Vec::new();

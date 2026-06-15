@@ -108,7 +108,7 @@ pub enum RecoverableError {
 }
 
 /// 观测错误 — 仅作为事件发出，不影响执行流。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ObservedError {
     /// 警告
     Warning { node: String, message: String },

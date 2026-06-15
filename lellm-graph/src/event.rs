@@ -164,11 +164,15 @@ pub enum GraphEvent {
         node_name: String,
     },
     /// Graph 执行完成（恰好一次）
+    ///
+    /// `GraphResult` 即为终态的终极真理之源——内含 `state`、`execution_log`、`duration`。
+    /// 不再在外层冗余携带 `state`。
     GraphComplete {
-        state: State,
         result: GraphResult,
     },
     /// Graph 执行出错（恰好一次）
+    ///
+    /// 携带出错瞬间的 `state` 快照，便于诊断。
     GraphError {
         error: GraphError,
         state: State,
@@ -178,13 +182,25 @@ pub enum GraphEvent {
 /// Graph 事件通道类型别名
 pub type GraphStream = tokio::sync::mpsc::Receiver<GraphEvent>;
 
+/// Graph 流式执行的完整返回包装。
+///
+/// 将 stream（观察权）、handle（控制权）封装为高内聚的结构体。
+/// **Stream is primary, Blocking is derived.**
+pub struct GraphExecution {
+    /// 事件接收器（read-only view）
+    pub stream: GraphStream,
+    /// 执行句柄（write + cancel）
+    pub handle: GraphHandle,
+}
+
 // ─── GraphHandle ──────────────────────────────────────────────
 
 /// Graph 执行句柄 — 用于与运行中的 Graph 交互。
 ///
-/// 通过 `execute_stream()` 返回，消费者使用此句柄提交 Barrier 决策。
+/// 通过 `execute_stream()` 返回，消费者使用此句柄提交 Barrier 决策或取消执行。
 pub struct GraphHandle {
     decision_tx: tokio::sync::mpsc::Sender<BarrierDecisionMessage>,
+    cancel_tx: tokio::sync::mpsc::Sender<()>,
 }
 
 /// 决策消息 — 支持精确匹配和通配匹配。
@@ -199,8 +215,12 @@ pub(crate) enum BarrierDecisionMessage {
 impl GraphHandle {
     pub(crate) fn new(
         decision_tx: tokio::sync::mpsc::Sender<BarrierDecisionMessage>,
+        cancel_tx: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
-        Self { decision_tx }
+        Self {
+            decision_tx,
+            cancel_tx,
+        }
     }
 
     /// 提交 Barrier 决策（精确匹配）。
@@ -247,5 +267,17 @@ impl GraphHandle {
             .map_err(|_| GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
                 node: "decision channel closed".into(),
             }))
+    }
+
+    /// 强制取消正在执行的 Graph。
+    ///
+    /// 发送取消信号后，executor 在主循环检测点响应：
+    /// - 立即终止执行，发送 `GraphError` 事件
+    /// - 如果正在等待 Barrier 决策，中断等待
+    ///
+    /// 多次调用安全（idempotent）。
+    pub fn cancel(&self) {
+        // send 失败说明 executor 已结束，忽略即可
+        let _ = self.cancel_tx.try_send(());
     }
 }

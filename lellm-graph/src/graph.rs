@@ -97,6 +97,17 @@ impl Graph {
         self.edges.iter().find(|e| e.from == from && e.to == to)
     }
 
+    /// 查找指定节点的 fallback 边目标。
+    ///
+    /// 用于 RecoverableError 恢复：当边级 policy 触发 SoftFallback 时，
+    /// 寻找 fallback 边作为降级路径。
+    pub fn find_fallback_edge(&self, from: &str) -> Option<String> {
+        self.edges
+            .iter()
+            .find(|e| e.from == from && e.fallback)
+            .map(|e| e.to.clone())
+    }
+
     /// 验证图结构（节点、边引用有效性）。
     ///
     /// 注意：不检测环 — 有环图是合法的，循环保护由 GraphExecutor::max_steps 提供。

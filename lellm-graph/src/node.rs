@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::{GraphError, TerminalError};
+use crate::error::{GraphError, ObservedError, TerminalError};
 use crate::event::{BarrierId, GraphEvent, SpanId};
 use crate::graph::Edge;
 use crate::state::State;
@@ -55,6 +55,19 @@ pub enum StreamNodeResult {
         timeout: Option<std::time::Duration>,
         /// 超时默认行为
         default_action: crate::barrier_node::BarrierDefaultAction,
+    },
+    /// 观测错误 — 仅事件，不影响 control flow。
+    ///
+    /// 节点通过此变体声明式地报告非致命异常，executor 负责：
+    /// 1. 发送 `GraphEvent::ObservedError` 事件
+    /// 2. 按 `next` 继续推进控制流
+    Observed {
+        /// 观测错误
+        error: ObservedError,
+        /// 下一步
+        next: NextStep,
+        /// 执行实例 ID
+        span_id: SpanId,
     },
 }
 
@@ -141,6 +154,9 @@ impl GraphNode for TaskNode {
 pub struct ConditionNode {
     pub name: String,
     pub branches: Vec<(String, BranchCondition)>,
+    /// 兜底目标 — 当所有 branch 条件均不匹配时，跳转到此节点。
+    /// 未设置时，无匹配则返回 TerminalError。
+    pub otherwise_target: Option<String>,
 }
 
 impl ConditionNode {
@@ -148,6 +164,7 @@ impl ConditionNode {
         ConditionNodeBuilder {
             name: name.into(),
             branches: Vec::new(),
+            otherwise_target: None,
         }
     }
 }
@@ -156,6 +173,7 @@ impl ConditionNode {
 pub struct ConditionNodeBuilder {
     name: String,
     branches: Vec<(String, BranchCondition)>,
+    otherwise_target: Option<String>,
 }
 
 impl ConditionNodeBuilder {
@@ -168,10 +186,27 @@ impl ConditionNodeBuilder {
         self
     }
 
+    /// 设置兜底目标 — 当所有 branch 条件均不匹配时，跳转到此节点。
+    ///
+    /// 解决"边有 fallback，节点没有"的概念不一致问题。
+    ///
+    /// ```rust,ignore
+    /// ConditionNode::builder("route")
+    ///     .branch("fast_path", |s| s.get("score").map(|v| v.as_u64().unwrap_or(0) >= 80))
+    ///     .branch("slow_path", |s| s.get("score").map(|v| v.as_u64().unwrap_or(0) >= 50))
+    ///     .otherwise("default")  // 兜底
+    ///     .build()
+    /// ```
+    pub fn otherwise(mut self, target: impl Into<String>) -> Self {
+        self.otherwise_target = Some(target.into());
+        self
+    }
+
     pub fn build(self) -> ConditionNode {
         ConditionNode {
             name: self.name,
             branches: self.branches,
+            otherwise_target: self.otherwise_target,
         }
     }
 }
@@ -184,9 +219,13 @@ impl GraphNode for ConditionNode {
                 return Ok(NextStep::Goto(target.clone()));
             }
         }
+        // 有兜底目标 → 直接跳转
+        if let Some(ref target) = self.otherwise_target {
+            return Ok(NextStep::Goto(target.clone()));
+        }
         Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
             node: self.name.clone(),
-            source: "no matching branch".into(),
+            source: "no matching branch and no otherwise target".into(),
         }))
     }
 }

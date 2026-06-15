@@ -12,12 +12,12 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::barrier_node::BarrierDefaultAction;
-use crate::error::{GraphError, TerminalError};
+use crate::error::{GraphError, ObservedError, TerminalError};
 use crate::event::{
-    BarrierDecision, BarrierDecisionMessage, BarrierId, GraphEvent, GraphHandle, GraphStream,
+    BarrierDecision, BarrierDecisionMessage, BarrierId, GraphEvent, GraphExecution, GraphHandle,
     SpanId,
 };
-use crate::graph::{Edge, EdgeExceededStrategy, EdgePolicy, Graph};
+use crate::graph::{EdgeExceededStrategy, EdgePolicy, Graph};
 use crate::node::{GraphNode, NextStep, NodeKind, StreamNodeResult};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
@@ -102,6 +102,19 @@ impl DecisionRegistry {
 
 // ─── EdgeVisits ───────────────────────────────────────────────
 
+/// 边跳转结果 — 区分正常跳转、策略超限、静默跳过。
+#[derive(Debug)]
+enum EdgeTransitionResult {
+    /// 跳转成功
+    Ok,
+    /// 策略超限 — 严格模式，路径失败
+    PolicyExceededStrict { edge: String, limit: usize },
+    /// 策略超限 — 软降级，触发 fallback
+    PolicyExceededSoftFallback,
+    /// 策略超限 — 静默跳过
+    Dropped,
+}
+
 /// 边访问计数器 — 跟踪 (from, to) 对的 traversed 次数。
 /// 仅对设置了 EdgePolicy 的边进行运行时拦截。
 #[derive(Default)]
@@ -113,7 +126,7 @@ impl EdgeVisits {
         from: &str,
         to: &str,
         policy: Option<&crate::graph::EdgePolicy>,
-    ) -> Result<(), GraphError> {
+    ) -> EdgeTransitionResult {
         let key = (from.to_string(), to.to_string());
         let count = self.0.entry(key).or_insert(0);
         *count += 1;
@@ -121,26 +134,18 @@ impl EdgeVisits {
         if let Some(EdgePolicy::MaxVisits { limit, on_exceeded }) = policy {
             if *count > *limit {
                 return match on_exceeded {
-                    EdgeExceededStrategy::Strict => {
-                        Err(GraphError::Terminal(TerminalError::EdgePolicyExceeded {
-                            edge: format!("{from}→{to}"),
-                            limit: *limit,
-                        }))
-                    }
+                    EdgeExceededStrategy::Strict => EdgeTransitionResult::PolicyExceededStrict {
+                        edge: format!("{from}→{to}"),
+                        limit: *limit,
+                    },
                     EdgeExceededStrategy::SoftFallback => {
-                        Err(GraphError::Recoverable(
-                            crate::error::RecoverableError::FallbackTriggered {
-                                from: format!("{from}→{to}"),
-                                to: "fallback".into(),
-                                reason: format!("max_visits {limit} exceeded"),
-                            },
-                        ))
+                        EdgeTransitionResult::PolicyExceededSoftFallback
                     }
-                    EdgeExceededStrategy::Drop => Ok(()), // 静默跳过
+                    EdgeExceededStrategy::Drop => EdgeTransitionResult::Dropped,
                 };
             }
         }
-        Ok(())
+        EdgeTransitionResult::Ok
     }
 }
 
@@ -190,13 +195,18 @@ impl GraphExecutor {
             }
         }
 
-        let (mut stream, _handle) = self.execute_stream(graph, initial_state);
+        let GraphExecution { mut stream, handle } =
+            self.execute_stream(graph, initial_state);
+
+        // 阻塞模式：handle 立即 drop，不暴露 cancel 能力
+        // cancel_tx 随 handle 一起 drop，但不触发取消（executor 持有 rx）
+        drop(handle);
 
         let mut result = None;
 
         while let Some(event) = stream.recv().await {
             match event {
-                GraphEvent::GraphComplete { result: r, .. } => {
+                GraphEvent::GraphComplete { result: r } => {
                     result = Some(Ok(r));
                 }
                 GraphEvent::GraphError { error, .. } => {
@@ -215,17 +225,20 @@ impl GraphExecutor {
 
     // ─── 流式执行 ──────────────────────────────────────────────
 
-    /// 流式执行 Graph，返回事件接收器与执行句柄。
+    /// 流式执行 Graph，返回 `GraphExecution`（stream + handle）。
+    ///
+    /// **Stream is primary, Blocking is derived.**
     pub fn execute_stream(
         &self,
         graph: std::sync::Arc<Graph>,
         initial_state: State,
-    ) -> (GraphStream, GraphHandle) {
+    ) -> GraphExecution {
         let executor = self.clone();
         let (event_tx, event_rx) = mpsc::channel(32);
         let (decision_tx, mut decision_rx) = mpsc::channel(16);
+        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
 
-        let handle = GraphHandle::new(decision_tx);
+        let handle = GraphHandle::new(decision_tx, cancel_tx);
 
         tokio::spawn(async move {
             let start_time = Instant::now();
@@ -247,6 +260,22 @@ impl GraphExecutor {
             let mut completed = false;
 
             loop {
+                // ── 循环顶部统一检查 ──────────────────────────────
+
+                // ⚡ 取消信号检测
+                if cancel_rx.try_recv().is_ok() {
+                    let _ = send(
+                        GraphEvent::GraphError {
+                            error: GraphError::Terminal(TerminalError::BarrierCancelled {
+                                node: "execution cancelled by handle".into(),
+                            }),
+                            state: state.clone(),
+                        },
+                    )
+                    .await;
+                    break;
+                }
+
                 step += 1;
 
                 // ⚡ 运行时熔断
@@ -315,7 +344,7 @@ impl GraphExecutor {
                         )
                         .await;
 
-                        // end 节点 → 正常结束
+                        // 🛑 end 节点检查（统一收拢点）
                         if current == graph.end_node() {
                             completed = true;
                             break;
@@ -330,17 +359,61 @@ impl GraphExecutor {
                         ) {
                             Ok(target) => current = target,
                             Err(e) => {
-                                let _ = send(
-                                    GraphEvent::GraphError {
-                                        error: e,
-                                        state: state.clone(),
-                                    },
-                                )
-                                .await;
+                                let _ = send(GraphEvent::GraphError { error: e, state: state.clone() }).await;
                                 break;
                             }
                         }
                     }
+
+                    Ok(StreamNodeResult::Observed {
+                        error,
+                        next,
+                        span_id: _,
+                    }) => {
+                        execution_log.push(ExecutionEntry {
+                            node_name: node_name.clone(),
+                            start_time: node_start,
+                            end_time: node_end,
+                            success: true,
+                        });
+
+                        let _ = send(
+                            GraphEvent::NodeEnd {
+                                node_name: node_name.clone(),
+                                span_id,
+                                success: true,
+                                duration,
+                            },
+                        )
+                        .await;
+
+                        let _ = send(GraphEvent::ObservedError {
+                            error,
+                            node_name: node_name.clone(),
+                        })
+                        .await;
+
+                        // 🛑 end 节点检查
+                        if current == graph.end_node() {
+                            completed = true;
+                            break;
+                        }
+
+                        match executor.resolve_next(
+                            &graph,
+                            &current,
+                            &mut state,
+                            &mut edge_visits,
+                            next,
+                        ) {
+                            Ok(target) => current = target,
+                            Err(e) => {
+                                let _ = send(GraphEvent::GraphError { error: e, state: state.clone() }).await;
+                                break;
+                            }
+                        }
+                    }
+
                     Ok(StreamNodeResult::BarrierPaused {
                         barrier_id: _, // 由 registry 生成
                         node_name: barrier_name,
@@ -361,7 +434,7 @@ impl GraphExecutor {
                         )
                         .await;
 
-                        // 等待决策
+                        // 等待决策（检测取消信号）
                         let decision = executor
                             .wait_barrier_decision(
                                 &mut decision_rx,
@@ -369,8 +442,23 @@ impl GraphExecutor {
                                 &barrier_id,
                                 timeout,
                                 &default_action,
+                                &mut cancel_rx,
                             )
                             .await;
+
+                        // 检查取消信号（独立于决策结果）
+                        if cancel_rx.try_recv().is_ok() {
+                            let _ = send(
+                                GraphEvent::GraphError {
+                                    error: GraphError::Terminal(TerminalError::BarrierCancelled {
+                                        node: barrier_name.clone(),
+                                    }),
+                                    state: state.clone(),
+                                },
+                            )
+                            .await;
+                            break;
+                        }
 
                         // 发射 BarrierResolved 事件
                         let _ = send(
@@ -383,21 +471,15 @@ impl GraphExecutor {
 
                         // 应用决策
                         let next = match node {
-                            NodeKind::Barrier(b) => {
-                                match b.apply_decision(decision, &mut state) {
-                                    Ok(ns) => ns,
-                                    Err(e) => {
-                                        let _ = send(
-                                            GraphEvent::GraphError {
-                                                error: e,
-                                                state: state.clone(),
-                                            },
-                                        )
-                                        .await;
-                                        break;
-                                    }
+                            NodeKind::Barrier(b) => match b.apply_decision(decision, &mut state) {
+                                Ok(ns) => ns,
+                                Err(e) => {
+                                    let _ =
+                                        send(GraphEvent::GraphError { error: e, state: state.clone() })
+                                            .await;
+                                    break;
                                 }
-                            }
+                            },
                             _ => unreachable!("expected BarrierNode for BarrierPaused"),
                         };
 
@@ -418,6 +500,7 @@ impl GraphExecutor {
                         )
                         .await;
 
+                        // 🛑 end 节点检查
                         if current == graph.end_node() {
                             completed = true;
                             break;
@@ -432,17 +515,12 @@ impl GraphExecutor {
                         ) {
                             Ok(target) => current = target,
                             Err(e) => {
-                                let _ = send(
-                                    GraphEvent::GraphError {
-                                        error: e,
-                                        state: state.clone(),
-                                    },
-                                )
-                                .await;
+                                let _ = send(GraphEvent::GraphError { error: e, state: state.clone() }).await;
                                 break;
                             }
                         }
                     }
+
                     Err(e) => {
                         execution_log.push(ExecutionEntry {
                             node_name: node_name.clone(),
@@ -461,23 +539,99 @@ impl GraphExecutor {
                         )
                         .await;
 
-                        let _ = send(
-                            GraphEvent::GraphError {
-                                error: e,
-                                state: state.clone(),
-                            },
-                        )
-                        .await;
-                        break;
+                        // 🌟 错误三分法：真正区分 Terminal / Recoverable / Observed
+                        match &e {
+                            GraphError::Terminal(_) => {
+                                let _ = send(GraphEvent::GraphError { error: e, state: state.clone() }).await;
+                                break;
+                            }
+                            GraphError::Recoverable(recoverable) => {
+                                // Recoverable：尝试 fallback 路径
+                                tracing::warn!(
+                                    node = %node_name,
+                                    error = %recoverable,
+                                    "Recoverable error captured. Attempting fallback route..."
+                                );
+
+                                if let Some(fallback_target) = graph.find_fallback_edge(&current) {
+                                    // 发送 FallbackTriggered 事件
+                                    let _ = send(
+                                        GraphEvent::ObservedError {
+                                            error: ObservedError::Degraded {
+                                                node: node_name.clone(),
+                                                message: format!(
+                                                    "fallback to '{}' due to: {}",
+                                                    fallback_target, recoverable
+                                                ),
+                                            },
+                                            node_name: node_name.clone(),
+                                        },
+                                    )
+                                    .await;
+
+                                    // 跳转到 fallback 目标
+                                    current = fallback_target;
+                                } else {
+                                    // 无 fallback 边 → 降级为 Terminal
+                                    let _ = send(
+                                        GraphEvent::GraphError {
+                                            error: GraphError::Terminal(
+                                                TerminalError::NodeExecutionFailed {
+                                                    node: node_name.clone(),
+                                                    source: format!(
+                                                        "Recoverable error with no fallback edge: {}",
+                                                        recoverable
+                                                    )
+                                                    .into(),
+                                                },
+                                            ),
+                                            state: state.clone(),
+                                        },
+                                    )
+                                    .await;
+                                    break;
+                                }
+                            }
+                            GraphError::Observed(observed) => {
+                                // Observed：发射事件，不影响控制流
+                                let _ = send(
+                                    GraphEvent::ObservedError {
+                                        error: observed.clone(),
+                                        node_name: node_name.clone(),
+                                    },
+                                )
+                                .await;
+                                // 继续执行下一个节点（不 break）
+                                // 注：节点返回 Err(Observed) 是不规范的，
+                                // 应使用 StreamNodeResult::Observed 变体。
+                                // 这里作为兼容处理。
+                                if current == graph.end_node() {
+                                    completed = true;
+                                    break;
+                                }
+                                match executor.resolve_next(
+                                    &graph,
+                                    &current,
+                                    &mut state,
+                                    &mut edge_visits,
+                                    NextStep::GoToNext,
+                                ) {
+                                    Ok(target) => current = target,
+                                    Err(e) => {
+                                        let _ = send(GraphEvent::GraphError { error: e, state: state.clone() }).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // 正常结束 → GraphComplete
+            // 正常结束 → GraphComplete（仅携带 GraphResult，无冗余 state）
             if completed {
                 let _ = send(
                     GraphEvent::GraphComplete {
-                        state: state.clone(),
                         result: GraphResult {
                             state,
                             execution_log,
@@ -489,10 +643,10 @@ impl GraphExecutor {
             }
         });
 
-        (event_rx, handle)
+        GraphExecution { stream: event_rx, handle }
     }
 
-    /// 等待 Barrier 决策。
+    /// 等待 Barrier 决策（支持取消信号）。
     async fn wait_barrier_decision(
         &self,
         decision_rx: &mut mpsc::Receiver<BarrierDecisionMessage>,
@@ -500,6 +654,7 @@ impl GraphExecutor {
         target_id: &BarrierId,
         timeout: Option<std::time::Duration>,
         default_action: &BarrierDefaultAction,
+        cancel_rx: &mut mpsc::Receiver<()>,
     ) -> BarrierDecision {
         // 1. 先查缓存
         if let Some(decision) = registry.take(target_id) {
@@ -513,7 +668,12 @@ impl GraphExecutor {
             }
         }
 
-        // 3. 超时分支
+        // 3. 检查取消信号
+        if cancel_rx.try_recv().is_ok() {
+            return Self::default_decision(default_action);
+        }
+
+        // 4. 超时分支
         if let Some(timeout) = timeout {
             let start = std::time::Instant::now();
             loop {
@@ -531,6 +691,10 @@ impl GraphExecutor {
                     Ok(None) => return Self::default_decision(default_action),
                     Err(_) => {}
                 }
+                // 检查取消信号
+                if cancel_rx.try_recv().is_ok() {
+                    return Self::default_decision(default_action);
+                }
                 if start.elapsed() >= timeout {
                     return Self::default_decision(default_action);
                 }
@@ -542,6 +706,10 @@ impl GraphExecutor {
                         return decision;
                     }
                 } else {
+                    return Self::default_decision(default_action);
+                }
+                // 检查取消信号
+                if cancel_rx.try_recv().is_ok() {
                     return Self::default_decision(default_action);
                 }
             }
@@ -561,6 +729,8 @@ impl GraphExecutor {
     // ─── 路由解析 ──────────────────────────────────────────────
 
     /// 解析 NextStep 为目标节点名称。
+    ///
+    /// 处理 EdgeTransitionResult 的所有变体，包括 Recoverable 的 fallback 逻辑。
     fn resolve_next(
         &self,
         graph: &Graph,
@@ -571,13 +741,52 @@ impl GraphExecutor {
     ) -> Result<String, GraphError> {
         match next {
             NextStep::Goto(target) => {
-                Self::transition(graph, current, &target, edge_visits)?;
-                Ok(target)
+                match Self::transition(graph, current, &target, edge_visits)? {
+                    EdgeTransitionResult::Ok => Ok(target),
+                    EdgeTransitionResult::PolicyExceededStrict { edge, limit } => {
+                        Err(GraphError::Terminal(TerminalError::EdgePolicyExceeded { edge, limit }))
+                    }
+                    EdgeTransitionResult::PolicyExceededSoftFallback { .. } => {
+                        if let Some(fallback_target) = graph.find_fallback_edge(current) {
+                            Ok(fallback_target)
+                        } else {
+                            Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                                node: current.to_string(),
+                                source:
+                                    "SoftFallback triggered but no fallback edge defined".into(),
+                            }))
+                        }
+                    }
+                    EdgeTransitionResult::Dropped => {
+                        Err(GraphError::Terminal(TerminalError::InvalidGraph(
+                            "edge transition dropped for Goto".into(),
+                        )))
+                    }
+                }
             }
             NextStep::GoToNext => {
                 let (target, policy) = Self::find_next_node(graph, current, state)?;
-                edge_visits.record(current, &target, policy)?;
-                Ok(target)
+                let result = edge_visits.record(current, &target, policy);
+                match result {
+                    EdgeTransitionResult::Ok => Ok(target),
+                    EdgeTransitionResult::PolicyExceededStrict { edge, limit } => {
+                        Err(GraphError::Terminal(TerminalError::EdgePolicyExceeded { edge, limit }))
+                    }
+                    EdgeTransitionResult::PolicyExceededSoftFallback { .. } => {
+                        if let Some(fallback_target) = graph.find_fallback_edge(current) {
+                            Ok(fallback_target)
+                        } else {
+                            Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                                node: current.to_string(),
+                                source:
+                                    "SoftFallback triggered but no fallback edge defined".into(),
+                            }))
+                        }
+                    }
+                    EdgeTransitionResult::Dropped => {
+                        Self::find_fallback_or_any(graph, current, state)
+                    }
+                }
             }
             NextStep::End => {
                 Err(GraphError::Terminal(TerminalError::InvalidGraph(
@@ -587,13 +796,52 @@ impl GraphExecutor {
         }
     }
 
+    /// 当边被 Drop 时，寻找 fallback 或任意可用边。
+    fn find_fallback_or_any(
+        graph: &Graph,
+        current: &str,
+        state: &State,
+    ) -> Result<String, GraphError> {
+        let edges = graph.edges_from(current);
+
+        // 1. 先找 fallback 边
+        for edge in &edges {
+            if edge.fallback && (edge.condition.is_none() || edge.condition.as_ref().is_some_and(|c| c(state))) {
+                return Ok(edge.to.clone());
+            }
+        }
+
+        // 2. 再找无条件 fallback
+        for edge in &edges {
+            if edge.fallback && edge.condition.is_none() {
+                return Ok(edge.to.clone());
+            }
+        }
+
+        // 3. 最后找任意匹配边
+        for edge in &edges {
+            if !edge.fallback && (edge.condition.is_none() || edge.condition.as_ref().is_some_and(|c| c(state))) {
+                return Ok(edge.to.clone());
+            }
+        }
+
+        Err(GraphError::Terminal(TerminalError::Unrouted {
+            node: current.to_string(),
+            attempted_conditions: Vec::new(),
+        }))
+    }
+
     /// 统一跳转校验 — 验证边存在并记录访问计数。
+    ///
+    /// 返回 `Result<EdgeTransitionResult, GraphError>`：
+    /// - `Err` = 边不存在（MissingEdge）
+    /// - `Ok(EdgeTransitionResult)` = 边存在，访问计数结果
     fn transition(
         graph: &Graph,
         current: &str,
         target: &str,
         edge_visits: &mut EdgeVisits,
-    ) -> Result<(), GraphError> {
+    ) -> Result<EdgeTransitionResult, GraphError> {
         let edge = graph.find_edge(current, target).ok_or_else(|| {
             GraphError::Terminal(TerminalError::MissingEdge {
                 from: current.to_string(),
@@ -601,16 +849,16 @@ impl GraphExecutor {
             })
         })?;
 
-        edge_visits.record(current, target, edge.policy.as_ref())?;
-        Ok(())
+        let result = edge_visits.record(current, target, edge.policy.as_ref());
+        Ok(result)
     }
 
     /// 查找下一个节点。
     ///
     /// 优先级：
     /// 1. 匹配 condition 的非 fallback 边
-    /// 2. 匹配 condition 的 fallback 边
-    /// 3. 无条件非 fallback 边
+    /// 2. 无条件非 fallback 边
+    /// 3. 匹配 condition 的 fallback 边
     /// 4. 无条件 fallback 边
     /// 5. 无匹配 → Unrouted TerminalError
     fn find_next_node<'a>(
