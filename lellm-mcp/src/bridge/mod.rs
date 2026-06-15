@@ -104,6 +104,7 @@ impl ToolCatalog for McpCatalog {
                 name: entry.name.clone(),
                 description: entry.description.clone(),
                 parameters: entry.input_schema.clone(),
+                cache_control: None,
             };
 
             let reg = lellm_agent::ToolRegistration::safe(def, move |input: &serde_json::Value| {

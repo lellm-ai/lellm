@@ -131,9 +131,21 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+
+    /// 缓存控制标记。Anthropic 支持 Tool Definition 级别的缓存。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<crate::message::CacheControl>,
 }
 
 impl ToolDefinition {
+    /// 克隆并设置缓存标记。
+    pub fn with_cache(self, cache: crate::message::CacheControl) -> Self {
+        Self {
+            cache_control: Some(cache),
+            ..self
+        }
+    }
+
     /// 从 `schemars::JsonSchema` 类型计算并清洗 JSON Schema。
     ///
     /// 供 `#[tool]` 宏生成的 `LazyLock` 调用，不在泛型函数中使用 `LazyLock`。

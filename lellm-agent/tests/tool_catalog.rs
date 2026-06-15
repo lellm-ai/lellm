@@ -33,6 +33,7 @@ fn make_echo_tool(name: &str) -> ToolRegistration {
                 "type": "object",
                 "properties": { "text": { "type": "string" } }
             }),
+            cache_control: None,
         },
         move |args| {
             let name = name_str.clone();
@@ -56,6 +57,7 @@ fn make_exclusive_tool(name: &str) -> ToolRegistration {
                 "type": "object",
                 "properties": { "text": { "type": "string" } }
             }),
+            cache_control: None,
         },
         move |args| {
             let name = name_str.clone();
@@ -79,6 +81,7 @@ fn make_category_tool(name: &str, cat: lellm_agent::ToolCategory) -> ToolRegistr
                 "type": "object",
                 "properties": { "text": { "type": "string" } }
             }),
+            cache_control: None,
         },
         cat,
         move |args| {

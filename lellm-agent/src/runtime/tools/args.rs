@@ -34,6 +34,7 @@ pub trait ToolArgs {
             name: Self::NAME.to_string(),
             description: Self::DESCRIPTION.to_string(),
             parameters: Self::__schema(),
+            cache_control: None,
         }
     }
 }

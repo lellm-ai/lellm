@@ -74,6 +74,7 @@ fn register_manually() -> Vec<ToolRegistration> {
             },
             "required": ["query"]
         }),
+        cache_control: None,
     };
 
     vec![ToolRegistration::safe(search_def, |args| {

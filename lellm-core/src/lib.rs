@@ -16,7 +16,8 @@ pub use error::{
     ToolErrorKind, ToolResult,
 };
 pub use message::{
-    ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall, text_block,
+    CacheControl, ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall,
+    text_block,
 };
 pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};

@@ -235,7 +235,10 @@ impl ChatCodec for GoogleCodec {
         for part in parts {
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
-                    content.push(ContentBlock::Text(TextBlock { text: text.into() }));
+                    content.push(ContentBlock::Text(TextBlock {
+                        text: text.into(),
+                        cache_control: None,
+                    }));
                 }
             }
             if let Some(func_call) = part.get("functionCall") {

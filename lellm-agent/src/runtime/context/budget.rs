@@ -59,7 +59,10 @@ impl ContextBudget {
                 ContentBlock::Text(t) => {
                     let truncated = self.truncate_tool_result(t.text.clone());
                     if truncated != t.text {
-                        ContentBlock::Text(lellm_core::TextBlock { text: truncated })
+                        ContentBlock::Text(lellm_core::TextBlock {
+                            text: truncated,
+                            cache_control: None,
+                        })
                     } else {
                         b.clone()
                     }

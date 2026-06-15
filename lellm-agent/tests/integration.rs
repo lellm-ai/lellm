@@ -50,6 +50,7 @@ async fn test_tool_executor_snapshot_and_execute() {
                 "text": { "type": "string" }
             }
         }),
+        cache_control: None,
     };
     let reg = ToolRegistration::safe(def, |args: &serde_json::Value| {
         let text = args
@@ -329,6 +330,7 @@ async fn test_builder_with_tool() {
             "type": "object",
             "properties": { "msg": { "type": "string" } }
         }),
+        cache_control: None,
     };
 
     let reg = ToolRegistration::safe(def, |args| {
@@ -376,6 +378,7 @@ fn test_builder_chain_api() {
         name: "test_tool".to_string(),
         description: "test".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
+        cache_control: None,
     };
     let reg = ToolRegistration::safe(def, |_| async { Ok(serde_json::json!("done")) });
 
@@ -423,6 +426,7 @@ async fn test_create_agent_with_tools() {
             "type": "object",
             "properties": { "name": { "type": "string" } }
         }),
+        cache_control: None,
     };
     let reg = ToolRegistration::safe(def, |args| {
         let n = args
@@ -493,6 +497,7 @@ fn test_create_agent_full() {
         name: "t".to_string(),
         description: "test".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
+        cache_control: None,
     };
     let reg = ToolRegistration::safe(def, |_| async { Ok(serde_json::json!("ok")) });
 

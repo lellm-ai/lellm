@@ -3,10 +3,27 @@
 use crate::error::{ParseError, ToolResult};
 use serde::{Deserialize, Serialize};
 
+/// 缓存控制标记 — Provider 无关的语义抽象。
+///
+/// 由 Provider Codec 映射为各 Provider 的具体格式：
+/// - Anthropic: `{"type": "ephemeral"}`
+/// - OpenAI: ignore（隐式缓存）
+/// - Google: ignore
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CacheControl {
+    /// 缓存断点 — 标记此处为缓存边界。
+    /// 业务层在稳定性递减的层边界处插入。
+    Breakpoint,
+}
+
 /// 纯文本块
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TextBlock {
     pub text: String,
+
+    /// 缓存控制标记。业务层在 System prompt 的稳定性层边界处设置。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// 思考块（Claude thinking / OpenAI reasoning）
@@ -47,7 +64,18 @@ pub enum ContentBlock {
 
 impl ContentBlock {
     pub fn text(s: String) -> Self {
-        ContentBlock::Text(TextBlock { text: s })
+        ContentBlock::Text(TextBlock {
+            text: s,
+            cache_control: None,
+        })
+    }
+
+    /// 创建带缓存标记的文本块。
+    pub fn text_with_cache(s: String, cache: CacheControl) -> Self {
+        ContentBlock::Text(TextBlock {
+            text: s,
+            cache_control: Some(cache),
+        })
     }
 
     pub fn as_text(&self) -> Option<&str> {

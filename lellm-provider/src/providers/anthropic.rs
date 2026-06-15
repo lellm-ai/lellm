@@ -215,7 +215,10 @@ impl ChatCodec for AnthropicCodec {
                     if let Some(text) = block.get("text").and_then(|t| t.as_str())
                         && !text.is_empty()
                     {
-                        content.push(ContentBlock::Text(TextBlock { text: text.into() }));
+                        content.push(ContentBlock::Text(TextBlock {
+                            text: text.into(),
+                            cache_control: None,
+                        }));
                     }
                 }
                 "tool_use" => {

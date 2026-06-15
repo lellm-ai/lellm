@@ -202,7 +202,10 @@ impl ChatCodec for OpenAICompatCodec {
         if let Some(text) = message.get("content").and_then(|c| c.as_str())
             && !text.is_empty()
         {
-            content.push(ContentBlock::Text(TextBlock { text: text.into() }));
+            content.push(ContentBlock::Text(TextBlock {
+                text: text.into(),
+                cache_control: None,
+            }));
         }
         // reasoning_content 独立于 content — o 系列同时返回两者
         if let Some(reasoning) = message.get("reasoning_content").and_then(|c| c.as_str())

@@ -144,12 +144,14 @@ pub fn build_partial_response(
     if !text_buffer.is_empty() {
         content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
             text: text_buffer,
+            cache_control: None,
         }));
     }
 
     if content.is_empty() {
         content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
             text: String::new(),
+            cache_control: None,
         }));
     }
 
@@ -290,6 +292,7 @@ async fn process_stream_iteration(
             if !text_buffer.is_empty() {
                 content.push(lellm_core::ContentBlock::Text(lellm_core::TextBlock {
                     text: text_buffer.clone(),
+                    cache_control: None,
                 }));
             }
 
