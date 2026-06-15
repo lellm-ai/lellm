@@ -434,7 +434,12 @@ mod tests {
 
         let result: ToolResult = Err::<(), MyError>(MyError).into_tool();
         let err = result.unwrap_err();
-        assert_eq!(err.kind, ToolErrorKind::External { source: std::any::type_name::<MyError>() });
+        assert_eq!(
+            err.kind,
+            ToolErrorKind::External {
+                source: std::any::type_name::<MyError>()
+            }
+        );
         assert_eq!(err.message, "my error");
     }
 

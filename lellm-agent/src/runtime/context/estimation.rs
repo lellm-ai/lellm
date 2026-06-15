@@ -54,8 +54,7 @@ pub fn estimate_message(msg: &Message) -> usize {
 ///
 /// 这是推理 token 估算的唯一真相源。`estimate_block()` 和预算检查都调用它。
 pub fn estimate_reasoning_block(th: &lellm_core::ThinkingBlock) -> usize {
-    estimate_text(&th.thinking)
-        + th.redacted.as_ref().map(|r| estimate_text(r)).unwrap_or(0)
+    estimate_text(&th.thinking) + th.redacted.as_ref().map(|r| estimate_text(r)).unwrap_or(0)
 }
 
 fn estimate_block(block: &ContentBlock) -> usize {

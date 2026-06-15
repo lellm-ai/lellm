@@ -220,7 +220,8 @@ impl AgentBuilder {
             _ => Arc::new(CompositeCatalog::new(sources)),
         };
 
-        let executor = ToolExecutor::with_retry_policy(final_catalog, self.config.retry_policy.clone());
+        let executor =
+            ToolExecutor::with_retry_policy(final_catalog, self.config.retry_policy.clone());
         ToolUseLoop::new(self.model, executor, self.config, self.deps)
     }
 }

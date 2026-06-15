@@ -73,7 +73,7 @@ mod struct_expand;
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
-use syn::{parse_macro_input, DeriveInput, Item};
+use syn::{DeriveInput, Item, parse_macro_input};
 
 // ─────────────────────────────────────────────────────────────────
 // Entry: #[tool] attribute macro (handles both fn and struct)

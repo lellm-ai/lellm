@@ -18,8 +18,7 @@ use async_trait::async_trait;
 use crate::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError};
 
 /// Notification 流类型。
-pub type NotificationStream =
-    futures_util::stream::BoxStream<'static, JsonRpcNotification>;
+pub type NotificationStream = futures_util::stream::BoxStream<'static, JsonRpcNotification>;
 
 /// MCP Transport Trait。
 ///

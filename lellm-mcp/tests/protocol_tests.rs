@@ -4,9 +4,8 @@
 //! 覆盖序列化/反序列化、解析、错误类型、状态机等。
 
 use lellm_mcp::protocol::{
-    CallToolParams, ContentBlock, InitializeParams, JsonRpcMessage, JsonRpcNotification,
-    JsonRpcRequest, McpError, NotificationKind, ImplementationInfo, methods,
-    notification_methods,
+    CallToolParams, ContentBlock, ImplementationInfo, InitializeParams, JsonRpcMessage,
+    JsonRpcNotification, JsonRpcRequest, McpError, NotificationKind, methods, notification_methods,
 };
 
 // ============================================================================
@@ -94,8 +93,7 @@ fn test_parse_response_message_success() {
 
 #[test]
 fn test_parse_response_message_error() {
-    let json =
-        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
+    let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
     let msg = JsonRpcMessage::from_json(json).unwrap();
     match msg {
         JsonRpcMessage::Response(resp) => {
@@ -136,8 +134,7 @@ fn test_initialize_params_new() {
 
 #[test]
 fn test_initialize_params_with_client_info() {
-    let params =
-        InitializeParams::new("2024-11-05").with_client_info("lellm-mcp", "0.1.0");
+    let params = InitializeParams::new("2024-11-05").with_client_info("lellm-mcp", "0.1.0");
     assert_eq!(params.protocol_version, "2024-11-05");
     let info = params.client_info.as_ref().unwrap();
     assert_eq!(info.name, "lellm-mcp");
@@ -146,8 +143,7 @@ fn test_initialize_params_with_client_info() {
 
 #[test]
 fn test_initialize_params_serialization() {
-    let params =
-        InitializeParams::new("2024-11-05").with_client_info("test-client", "1.0.0");
+    let params = InitializeParams::new("2024-11-05").with_client_info("test-client", "1.0.0");
     let json = serde_json::to_value(&params).unwrap();
     assert_eq!(json["protocolVersion"], "2024-11-05");
     assert_eq!(json["clientInfo"]["name"], "test-client");
@@ -193,7 +189,9 @@ fn test_call_tool_params_skip_none_args() {
 
 #[test]
 fn test_content_block_text_as_text() {
-    let block = ContentBlock::Text { text: "hello world".to_string() };
+    let block = ContentBlock::Text {
+        text: "hello world".to_string(),
+    };
     assert_eq!(block.as_text(), Some("hello world"));
 }
 
@@ -214,7 +212,9 @@ fn test_content_block_unknown_as_text() {
 
 #[test]
 fn test_content_block_text_serialization() {
-    let block = ContentBlock::Text { text: "result".to_string() };
+    let block = ContentBlock::Text {
+        text: "result".to_string(),
+    };
     let json = serde_json::to_value(&block).unwrap();
     assert_eq!(json["type"], "text");
     assert_eq!(json["text"], "result");
@@ -374,7 +374,10 @@ fn test_method_constants() {
 
 #[test]
 fn test_notification_method_constants() {
-    assert_eq!(notification_methods::INITIALIZED, "notifications/initialized");
+    assert_eq!(
+        notification_methods::INITIALIZED,
+        "notifications/initialized"
+    );
     assert_eq!(
         notification_methods::TOOLS_LIST_CHANGED,
         "notifications/tools/list_changed"

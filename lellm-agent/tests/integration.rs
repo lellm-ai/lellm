@@ -1,9 +1,8 @@
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{
-    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety,
-    StaticCatalog, ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message,
-    estimate_tokens,
+    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety, StaticCatalog,
+    ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
 use lellm_macros::Tool;
@@ -231,9 +230,10 @@ struct GreetArgs {
 #[test]
 fn test_tool_safe_method() {
     // 验证 safe() 方法正常工作
-    let reg = GreetArgs::safe(|args| async move {
-        Ok(serde_json::json!(format!("你好, {}!", args.name)))
-    });
+    let reg =
+        GreetArgs::safe(
+            |args| async move { Ok(serde_json::json!(format!("你好, {}!", args.name))) },
+        );
 
     assert_eq!(reg.definition().name, "greet_tool");
     assert_eq!(reg.definition().description, "打招呼");
@@ -241,9 +241,10 @@ fn test_tool_safe_method() {
 
 #[tokio::test]
 async fn test_tool_safe_execution() {
-    let reg = GreetArgs::safe(|args| async move {
-        Ok(serde_json::json!(format!("你好, {}!", args.name)))
-    });
+    let reg =
+        GreetArgs::safe(
+            |args| async move { Ok(serde_json::json!(format!("你好, {}!", args.name))) },
+        );
 
     let catalog = StaticCatalog::from_tools(vec![reg]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
@@ -376,9 +377,7 @@ fn test_builder_chain_api() {
         description: "test".to_string(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
     };
-    let reg = ToolRegistration::safe(def, |_| async {
-        Ok(serde_json::json!("done"))
-    });
+    let reg = ToolRegistration::safe(def, |_| async { Ok(serde_json::json!("done")) });
 
     // 完整链式调用
     let _agent = AgentBuilder::new(model)

@@ -7,13 +7,16 @@ mod executor;
 
 pub use args::ToolArgs;
 pub use executor::{
-    execute_batch_with, BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor,
-    ToolRegistration,
+    BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration,
+    execute_batch_with,
 };
 
 /// 异步工具函数类型（executor 内部使用）
 pub(crate) type ToolFn = std::sync::Arc<
-    dyn Fn(&serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = lellm_core::ToolResult> + Send>>
+    dyn Fn(
+            &serde_json::Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = lellm_core::ToolResult> + Send>>
         + Send
         + Sync,
 >;
@@ -167,7 +170,10 @@ impl ToolCatalog for CompositeCatalog {
             }
         }
 
-        let version = self.version_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let version = self
+            .version_counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         std::sync::Arc::new(ToolSnapshot::new(merged, version))
     }
 }

@@ -121,9 +121,7 @@ impl ChatCodec for AnthropicCodec {
         if let Some(ref reasoning) = req.reasoning {
             match reasoning {
                 ReasoningConfig::Disabled => {} // 不推理，omit thinking 字段
-                ReasoningConfig::Low
-                | ReasoningConfig::Medium
-                | ReasoningConfig::High => {
+                ReasoningConfig::Low | ReasoningConfig::Medium | ReasoningConfig::High => {
                     let default_budget = match reasoning {
                         ReasoningConfig::Low => 2048,
                         ReasoningConfig::Medium => 8192,

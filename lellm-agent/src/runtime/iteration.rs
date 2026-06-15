@@ -8,11 +8,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
 use super::LoopState;
-use super::runtime::ResolvedRound;
 use super::context::{ContextBudget, estimate_text};
 use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::retry::RetryPolicy;
+use super::runtime::ResolvedRound;
 use super::tools::{ToolExecutor, ToolSnapshot};
 
 // ─── 带 Fallback 的执行器 ────────────────────────────────────────
@@ -98,9 +98,11 @@ pub(super) async fn emit_and_execute_tools_with(
         }
 
         let raw_result = match snapshot.get(&tc.name) {
-            Some(entry) => retry_policy
-                .execute_with_retry_and_emission(&entry.func, &tc.arguments, tx, &tc.id)
-                .await,
+            Some(entry) => {
+                retry_policy
+                    .execute_with_retry_and_emission(&entry.func, &tc.arguments, tx, &tc.id)
+                    .await
+            }
             None => Err(ToolError::not_found(format!("unknown tool: {}", tc.name))),
         };
 
@@ -262,9 +264,7 @@ async fn process_stream_iteration(
 
         // ThinkingDelta 根据 stream_thinking 决定是否向消费者发射。
         // 注意：预算检查和累积始终执行，不受 stream_thinking 影响。
-        if matches!(&ev, lellm_provider::ProviderEvent::ThinkingDelta { .. })
-            && !stream_thinking
-        {
+        if matches!(&ev, lellm_provider::ProviderEvent::ThinkingDelta { .. }) && !stream_thinking {
             // 跳过 ThinkingDelta 发射，继续下一事件
         } else if !emit(tx, AgentEvent::Provider(ev.clone())).await {
             return Ok(StreamIterResult::Cancelled { response: None });

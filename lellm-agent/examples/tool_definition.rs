@@ -21,7 +21,7 @@ use lellm_agent::{
     AgentBuilder, ToolArgs, ToolCategory, ToolRegistration, ToolResult, ToolUseLoop,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition};
-use lellm_macros::{tool, Tool};
+use lellm_macros::{Tool, tool};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -30,14 +30,20 @@ use std::sync::Arc;
 /// 搜索互联网信息
 #[tool(name = "search", description = "搜索互联网信息")]
 fn search(query: String, limit: Option<u32>) -> ToolResult {
-    Ok(serde_json::json!(format!("搜索结果: {} (限制: {:?})", query, limit)))
+    Ok(serde_json::json!(format!(
+        "搜索结果: {} (限制: {:?})",
+        query, limit
+    )))
 }
 
 /// 获取指定位置的天气信息
 #[tool(name = "get_weather", description = "获取指定位置的天气信息")]
 fn get_weather(location: String, unit: Option<String>) -> ToolResult {
     let unit = unit.unwrap_or_else(|| "摄氏度".to_string());
-    Ok(serde_json::json!(format!("{} 的天气：晴朗，25{}", location, unit)))
+    Ok(serde_json::json!(format!(
+        "{} 的天气：晴朗，25{}",
+        location, unit
+    )))
 }
 
 // ─── Level 2: #[derive(Tool)] + safe()（高级用户）─────────────
@@ -88,7 +94,11 @@ fn register_level1() -> Vec<ToolRegistration> {
 /// 使用 Level 2 注册工具
 fn register_level2() -> Vec<ToolRegistration> {
     vec![WeatherArgs::safe(|args| async move {
-        let forecast = if args.include_forecast { "含预报" } else { "无预报" };
+        let forecast = if args.include_forecast {
+            "含预报"
+        } else {
+            "无预报"
+        };
         Ok(serde_json::json!(format!(
             "{} 天气: 晴朗, 25{}, {}",
             args.city,
@@ -120,14 +130,22 @@ fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
 async fn main() {
     // ─── Level 1: #[tool] 函数宏 ───
     println!("=== Level 1: #[tool] 函数宏 ===");
-    println!("搜索工具: {} - {}", SearchArgs::NAME, SearchArgs::DESCRIPTION);
+    println!(
+        "搜索工具: {} - {}",
+        SearchArgs::NAME,
+        SearchArgs::DESCRIPTION
+    );
     println!(
         "Schema: {}",
         serde_json::to_string_pretty(&SearchArgs::__schema()).unwrap()
     );
     println!();
 
-    println!("天气工具: {} - {}", GetWeatherArgs::NAME, GetWeatherArgs::DESCRIPTION);
+    println!(
+        "天气工具: {} - {}",
+        GetWeatherArgs::NAME,
+        GetWeatherArgs::DESCRIPTION
+    );
     println!();
 
     // ─── Level 2: #[derive(Tool)] + safe() ───
@@ -147,7 +165,11 @@ async fn main() {
     println!("=== Level 3: ToolRegistration::safe() ===");
     let manual = register_manually();
     for reg in &manual {
-        println!("  - {} ({})", reg.definition().name, reg.definition().description);
+        println!(
+            "  - {} ({})",
+            reg.definition().name,
+            reg.definition().description
+        );
     }
     println!();
 

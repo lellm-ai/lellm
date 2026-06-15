@@ -40,7 +40,10 @@ struct MockDbClient {
 
 #[tool(name = "db_query", description = "查询数据库")]
 fn db_query(table: String, condition: String) -> ToolResult {
-    Ok(serde_json::json!(format!("default: {} WHERE {}", table, condition)))
+    Ok(serde_json::json!(format!(
+        "default: {} WHERE {}",
+        table, condition
+    )))
 }
 
 #[test]

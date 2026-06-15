@@ -47,10 +47,9 @@ fn file_read(path: String) -> ToolResult {
 
 #[test]
 fn test_category_exclusive_registration() {
-    let reg = SearchUserArgs::category_exclusive(
-        ToolCategory::DATABASE,
-        |args| async move { Ok(serde_json::json!(format!("search: {}", args.user_id))) },
-    );
+    let reg = SearchUserArgs::category_exclusive(ToolCategory::DATABASE, |args| async move {
+        Ok(serde_json::json!(format!("search: {}", args.user_id)))
+    });
 
     assert_eq!(
         reg.safety(),
@@ -116,7 +115,10 @@ async fn test_async_tool_execution() {
 
     assert!(result.is_ok());
     let val = result.unwrap();
-    assert_eq!(val, serde_json::json!("async results for 'Rust' (limit=10)"));
+    assert_eq!(
+        val,
+        serde_json::json!("async results for 'Rust' (limit=10)")
+    );
 }
 
 // ============================================================================
@@ -183,10 +185,7 @@ fn test_raw_function_direct_call() {
     assert_eq!(sum.unwrap(), serde_json::json!(30));
 
     let greeting = greet("世界".to_string(), true);
-    assert_eq!(
-        greeting.unwrap(),
-        serde_json::json!("尊敬的 世界，您好！")
-    );
+    assert_eq!(greeting.unwrap(), serde_json::json!("尊敬的 世界，您好！"));
 }
 
 // ============================================================================
@@ -196,10 +195,7 @@ fn test_raw_function_direct_call() {
 #[test]
 fn test_backward_compat_methods() {
     assert_eq!(AddNumbersArgs::__name(), AddNumbersArgs::NAME);
-    assert_eq!(
-        AddNumbersArgs::__description(),
-        AddNumbersArgs::DESCRIPTION
-    );
+    assert_eq!(AddNumbersArgs::__description(), AddNumbersArgs::DESCRIPTION);
     assert_eq!(
         AddNumbersArgs::__schema(),
         AddNumbersArgs::tool_definition().parameters

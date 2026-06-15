@@ -49,10 +49,7 @@ pub trait LlmProvider: Send + Sync {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// 流式调用，返回标准 Stream。
-    async fn stream(
-        &self,
-        request: &ChatRequest,
-    ) -> Result<ProviderStream, LlmError>;
+    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError>;
 
     /// Provider 标识
     fn provider_id(&self) -> &str;

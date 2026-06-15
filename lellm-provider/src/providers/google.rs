@@ -6,8 +6,8 @@
 use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
-    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage,
-    ToolCall, ToolChoice,
+    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TextBlock, TokenUsage, ToolCall,
+    ToolChoice,
 };
 use std::borrow::Cow;
 
@@ -97,9 +97,12 @@ impl ChatCodec for GoogleCodec {
         if let Some(si) = system_instruction {
             body.insert("systemInstruction".into(), si);
         }
-        body.insert("contents".into(), serde_json::to_value(contents).map_err(|e| LlmError::Parse {
-            detail: format!("Failed to serialize contents: {}", e),
-        })?);
+        body.insert(
+            "contents".into(),
+            serde_json::to_value(contents).map_err(|e| LlmError::Parse {
+                detail: format!("Failed to serialize contents: {}", e),
+            })?,
+        );
 
         // generationConfig
         let mut gen_config = serde_json::Map::new();
@@ -116,12 +119,18 @@ impl ChatCodec for GoogleCodec {
             gen_config.insert("seed".into(), seed.into());
         }
         if let Some(ref stop_sequences) = req.stop_sequences {
-            gen_config.insert("stopSequences".into(), serde_json::to_value(stop_sequences).unwrap());
+            gen_config.insert(
+                "stopSequences".into(),
+                serde_json::to_value(stop_sequences).unwrap(),
+            );
         }
         // Gemini 不支持 thinking tokens，静默忽略 reasoning 配置
 
         if !gen_config.is_empty() {
-            body.insert("generationConfig".into(), serde_json::Value::Object(gen_config));
+            body.insert(
+                "generationConfig".into(),
+                serde_json::Value::Object(gen_config),
+            );
         }
 
         // 工具
@@ -185,9 +194,7 @@ impl ChatCodec for GoogleCodec {
 
         // 检查 prompts/usageMetadata (safety filtering 等错误)
         if let Some(prompt_feedback) = raw.get("promptFeedback") {
-            if let Some(block_reason) = prompt_feedback
-                .get("blockReason")
-                .and_then(|b| b.as_str())
+            if let Some(block_reason) = prompt_feedback.get("blockReason").and_then(|b| b.as_str())
             {
                 return Err(LlmError::Provider {
                     provider: "google".into(),
@@ -198,12 +205,12 @@ impl ChatCodec for GoogleCodec {
             }
         }
 
-        let candidates = raw
-            .get("candidates")
-            .and_then(|c| c.as_array())
-            .ok_or(LlmError::Parse {
-                detail: "Missing candidates array".into(),
-            })?;
+        let candidates =
+            raw.get("candidates")
+                .and_then(|c| c.as_array())
+                .ok_or(LlmError::Parse {
+                    detail: "Missing candidates array".into(),
+                })?;
 
         if candidates.is_empty() {
             // 可能是 safety filtering
@@ -305,9 +312,7 @@ impl ChatCodec for GoogleCodec {
                                     .get("name")
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string());
-                                let args = func_call
-                                    .get("args")
-                                    .map(|v| v.to_string());
+                                let args = func_call.get("args").map(|v| v.to_string());
 
                                 results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
                                     index: 0,
@@ -421,10 +426,7 @@ fn serialize_google_tools(tools: &[lellm_core::ToolDefinition]) -> Vec<serde_jso
             if !tool.description.is_empty() {
                 obj.insert("description".into(), tool.description.clone().into());
             }
-            obj.insert(
-                "parameters".into(),
-                tool.parameters.clone(),
-            );
+            obj.insert("parameters".into(), tool.parameters.clone());
             serde_json::Value::Object(obj)
         })
         .collect()

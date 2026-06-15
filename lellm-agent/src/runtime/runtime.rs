@@ -25,7 +25,7 @@ use super::context::{
 use super::event::{AgentEvent, AgentStream, StopReason};
 use super::fallback::{FallbackAction, FallbackContext};
 use super::iteration::{StreamIterResult, do_stream_iteration, emit, execute_with_fallback};
-use super::tools::{execute_batch_with, ToolExecutor, ToolSnapshot};
+use super::tools::{ToolExecutor, ToolSnapshot, execute_batch_with};
 
 // ─── 本轮解析数据 ────────────────────────────────────────────────
 
@@ -136,11 +136,7 @@ impl LoopState {
     }
 
     /// 追加工具执行结果到历史。
-    pub fn push_tool_results(
-        &mut self,
-        results: Vec<Message>,
-        budget: &ContextBudget,
-    ) {
+    pub fn push_tool_results(&mut self, results: Vec<Message>, budget: &ContextBudget) {
         let results: Vec<Message> = results
             .into_iter()
             .map(|m| {
@@ -344,7 +340,9 @@ impl ToolUseLoop {
                     .content
                     .iter()
                     .filter_map(|b| match b {
-                        lellm_core::ContentBlock::Thinking(th) => Some(estimate_reasoning_block(th)),
+                        lellm_core::ContentBlock::Thinking(th) => {
+                            Some(estimate_reasoning_block(th))
+                        }
                         _ => None,
                     })
                     .sum();
@@ -377,12 +375,9 @@ impl ToolUseLoop {
             state.push_assistant(response.content.clone());
             state.add_tool_calls(tool_calls.len());
 
-            let batch = execute_batch_with(
-                &tool_calls,
-                &round.snapshot,
-                &self.executor.retry_policy(),
-            )
-            .await;
+            let batch =
+                execute_batch_with(&tool_calls, &round.snapshot, &self.executor.retry_policy())
+                    .await;
 
             if batch.panicked {
                 tracing::warn!("tool batch task panicked — error results filled in by executor");
@@ -532,7 +527,8 @@ impl ToolUseLoop {
                     let _ = emit(
                         &tx,
                         AgentEvent::LoopEnd {
-                            result: state.finish_output_budget(last_response.unwrap_or_else(empty_response)),
+                            result: state
+                                .finish_output_budget(last_response.unwrap_or_else(empty_response)),
                         },
                     )
                     .await;
@@ -543,7 +539,9 @@ impl ToolUseLoop {
                     let _ = emit(
                         &tx,
                         AgentEvent::LoopEnd {
-                            result: state.finish_reasoning_budget(last_response.unwrap_or_else(empty_response)),
+                            result: state.finish_reasoning_budget(
+                                last_response.unwrap_or_else(empty_response),
+                            ),
                         },
                     )
                     .await;

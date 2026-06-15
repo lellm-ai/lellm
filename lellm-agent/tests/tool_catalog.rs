@@ -11,13 +11,13 @@
 //! - Case 8: ToolSnapshot 基本行为
 
 use lellm_agent::{
-    execute_batch_with, BackoffStrategy, CompositeCatalog, ParallelSafety, RetryPolicy,
-    StaticCatalog, ToolCatalog, ToolExecutor, ToolRegistration, ToolSnapshot,
+    BackoffStrategy, CompositeCatalog, ParallelSafety, RetryPolicy, StaticCatalog, ToolCatalog,
+    ToolExecutor, ToolRegistration, ToolSnapshot, execute_batch_with,
 };
 use lellm_core::{ToolCall, ToolDefinition, ToolErrorKind};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::Mutex;
 
@@ -102,7 +102,10 @@ fn make_tool_call(id: &str, name: &str, arg: &str) -> ToolCall {
 }
 
 fn default_retry() -> RetryPolicy {
-    RetryPolicy::new(1, BackoffStrategy::Fixed(std::time::Duration::from_millis(0)))
+    RetryPolicy::new(
+        1,
+        BackoffStrategy::Fixed(std::time::Duration::from_millis(0)),
+    )
 }
 
 /// 从 Message 中提取 JSON 内容（第一个 ContentBlock）
@@ -134,10 +137,7 @@ async fn test_static_catalog_snapshot_and_execute() {
 
 #[tokio::test]
 async fn test_static_batch() {
-    let catalog = StaticCatalog::from_tools(vec![
-        make_echo_tool("echo"),
-        make_echo_tool("greet"),
-    ]);
+    let catalog = StaticCatalog::from_tools(vec![make_echo_tool("echo"), make_echo_tool("greet")]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
     let snapshot = executor.snapshot().await;
@@ -311,10 +311,7 @@ async fn test_composite_catalog_shadowing() {
         make_echo_tool("only_in_low"),
     ]);
 
-    let composite = CompositeCatalog::new(vec![
-        Arc::new(high_priority),
-        Arc::new(low_priority),
-    ]);
+    let composite = CompositeCatalog::new(vec![Arc::new(high_priority), Arc::new(low_priority)]);
 
     let snap = composite.snapshot().await;
 
@@ -404,10 +401,8 @@ async fn test_empty_snapshot() {
 
 #[tokio::test]
 async fn test_parallel_safety_safe() {
-    let catalog = StaticCatalog::from_tools(vec![
-        make_echo_tool("safe_a"),
-        make_echo_tool("safe_b"),
-    ]);
+    let catalog =
+        StaticCatalog::from_tools(vec![make_echo_tool("safe_a"), make_echo_tool("safe_b")]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
     let snapshot = executor.snapshot().await;

@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use super::protocol::{
-    InitializeParams, JsonRpcRequest, JsonRpcResponse, McpError, methods,
-};
+use super::protocol::{InitializeParams, JsonRpcRequest, JsonRpcResponse, McpError, methods};
 use super::transport::{ConnectionState, McpTransport};
 
 /// MCP Client。
@@ -33,33 +31,27 @@ impl McpClient {
 
     /// 发送 initialize 请求。
     pub async fn initialize(&self) -> Result<crate::protocol::InitializeResult, McpError> {
-        let params = InitializeParams::new("2024-11-05").with_client_info(
-            "lellm-mcp",
-            env!("CARGO_PKG_VERSION"),
-        );
-        let params_value = serde_json::to_value(&params)
-            .map_err(|e| McpError::Protocol(e.to_string()))?;
+        let params = InitializeParams::new("2024-11-05")
+            .with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
+        let params_value =
+            serde_json::to_value(&params).map_err(|e| McpError::Protocol(e.to_string()))?;
 
         let req = JsonRpcRequest::new(0, methods::INITIALIZE, Some(params_value));
         let resp = self.request(req).await?;
 
-        let result: crate::protocol::InitializeResult =
-            serde_json::from_value(match resp.result {
-                crate::protocol::JsonRpcResult::Success(v) => v,
-                crate::protocol::JsonRpcResult::Error(e) => {
-                    return Err(McpError::ServerError(e.message));
-                }
-            })
-            .map_err(|e| McpError::Protocol(e.to_string()))?;
+        let result: crate::protocol::InitializeResult = serde_json::from_value(match resp.result {
+            crate::protocol::JsonRpcResult::Success(v) => v,
+            crate::protocol::JsonRpcResult::Error(e) => {
+                return Err(McpError::ServerError(e.message));
+            }
+        })
+        .map_err(|e| McpError::Protocol(e.to_string()))?;
 
         Ok(result)
     }
 
     /// 发送 JSON-RPC Request。
-    pub async fn request(
-        &self,
-        req: JsonRpcRequest,
-    ) -> Result<JsonRpcResponse, McpError> {
+    pub async fn request(&self, req: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         // Fail-fast: 非 Ready 状态直接返回
         let state = *self.state.borrow();
         if !state.allows_request() {
@@ -79,4 +71,3 @@ impl McpClient {
         self.state.clone()
     }
 }
-

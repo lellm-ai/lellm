@@ -69,7 +69,10 @@ pub(crate) fn expand_tool_for_struct(
 }
 
 /// Derive(Tool) implementation (shared by derive & attribute paths).
-pub(crate) fn generate_tool_for_struct(input: &DeriveInput, _data: &syn::DataStruct) -> TokenStream {
+pub(crate) fn generate_tool_for_struct(
+    input: &DeriveInput,
+    _data: &syn::DataStruct,
+) -> TokenStream {
     let struct_name = &input.ident;
     let (name, description) = parse_struct_meta(&input.attrs, input);
 

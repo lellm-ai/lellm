@@ -81,7 +81,8 @@ pub async fn observe_react_loop(
                             if let Ok(value) = serde_json::from_str::<serde_json::Value>(s) {
                                 println!(
                                     "{}",
-                                    serde_json::to_string_pretty(&value).unwrap_or_else(|_| s.to_string())
+                                    serde_json::to_string_pretty(&value)
+                                        .unwrap_or_else(|_| s.to_string())
                                 );
                             } else {
                                 println!("{}", s);

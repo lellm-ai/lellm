@@ -44,12 +44,8 @@ struct FrameResult {
 /// - `S`: 任意字节流
 /// - `A`: ChatCodec 实现
 /// - `E`: 事件输出端
-pub async fn process_stream<S, A, E>(
-    sink: &mut E,
-    codec: &A,
-    model: String,
-    mut bytes_stream: S,
-) where
+pub async fn process_stream<S, A, E>(sink: &mut E, codec: &A, model: String, mut bytes_stream: S)
+where
     S: Stream<Item = Result<Bytes, LlmError>> + Unpin,
     A: ChatCodec,
     E: EventSink,

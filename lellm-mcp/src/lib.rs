@@ -13,8 +13,10 @@ pub mod bridge;
 #[cfg(feature = "bridge")]
 pub mod client;
 
-pub use protocol::{JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, JsonRpcNotification, McpError};
-pub use transport::{McpTransport, ConnectionState};
+pub use protocol::{
+    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
+};
+pub use transport::{ConnectionState, McpTransport};
 
 #[cfg(feature = "bridge")]
 pub use bridge::{McpCatalog, ToolCatalog};

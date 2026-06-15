@@ -178,10 +178,16 @@ fn create_react_agent() -> ToolUseLoop {
             )))
         }),
         CheckInventoryArgs::safe(|args| async move {
-            Ok(serde_json::json!(format!("产品 {}：库存 10 件", args.product_id)))
+            Ok(serde_json::json!(format!(
+                "产品 {}：库存 10 件",
+                args.product_id
+            )))
         }),
         GetWeatherArgs::safe(|args| async move {
-            Ok(serde_json::json!(format!("{} 的天气：晴朗，25°C", args.location)))
+            Ok(serde_json::json!(format!(
+                "{} 的天气：晴朗，25°C",
+                args.location
+            )))
         }),
     ];
 

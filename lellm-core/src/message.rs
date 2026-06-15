@@ -109,7 +109,10 @@ impl Message {
     /// 失败 → `"tool error: {e}"` 文本 content，`is_error: true`
     pub fn tool_result(call: &ToolCall, result: &ToolResult) -> Self {
         let (content_str, is_error) = match result {
-            Ok(v) => (serde_json::to_string(v).unwrap_or_else(|_| v.to_string()), false),
+            Ok(v) => (
+                serde_json::to_string(v).unwrap_or_else(|_| v.to_string()),
+                false,
+            ),
             Err(e) => (format!("tool error: {e}"), true),
         };
         Message::ToolResult {

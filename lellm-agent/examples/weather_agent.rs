@@ -14,7 +14,9 @@ mod shared;
 #[path = "_shared/city_resolver.rs"]
 mod city_resolver;
 
-use lellm_agent::{AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
+use lellm_agent::{
+    AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
+};
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
 use lellm_macros::Tool;
 use lellm_provider::LlmProvider;
@@ -76,13 +78,14 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
             async move {
                 // 第一、二级：alias + 腾讯地图（阻塞线程）
                 let address_for_blocking = address.clone();
-                let mut result =
-                    tokio::task::spawn_blocking(move || city_resolver::resolve_city(&address_for_blocking))
-                        .await
-                        .map_err(|e| ToolError {
-                            kind: ToolErrorKind::Internal,
-                            message: format!("任务失败: {e}"),
-                        })?;
+                let mut result = tokio::task::spawn_blocking(move || {
+                    city_resolver::resolve_city(&address_for_blocking)
+                })
+                .await
+                .map_err(|e| ToolError {
+                    kind: ToolErrorKind::Internal,
+                    message: format!("任务失败: {e}"),
+                })?;
 
                 // 第三级 miss → 第四级：LLM 轻量推理
                 if result.source == "unknown" {
@@ -95,10 +98,12 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
                     }
                 }
 
-                Ok(serde_json::json!(serde_json::to_string(&result).map_err(|e| ToolError {
-                    kind: ToolErrorKind::Internal,
-                    message: format!("序列化失败: {e}"),
-                })?))
+                Ok(serde_json::json!(serde_json::to_string(&result).map_err(
+                    |e| ToolError {
+                        kind: ToolErrorKind::Internal,
+                        message: format!("序列化失败: {e}"),
+                    }
+                )?))
             }
         }),
         ToolRegistration::safe(HttpGetArgs::tool_definition(), |args| {

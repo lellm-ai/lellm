@@ -33,8 +33,6 @@ impl<'de> Deserialize<'de> for JsonRpcResult {
     where
         D: serde::Deserializer<'de>,
     {
-        
-
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Helper {
@@ -92,8 +90,14 @@ pub struct CallToolResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Image { data: String, #[serde(rename = "mimeType")] mime_type: String },
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
     #[serde(other)]
     Unknown,
 }

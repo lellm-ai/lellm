@@ -8,9 +8,7 @@
 
 use async_trait::async_trait;
 use futures_util::stream;
-use lellm_mcp::protocol::{
-    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult,
-};
+use lellm_mcp::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult};
 use lellm_mcp::transport::{ConnectionState, McpTransport, NotificationStream};
 use lellm_mcp::{McpError, ToolCatalog};
 use std::sync::Arc;
@@ -90,10 +88,7 @@ impl McpTransport for MockTransport {
         }
     }
 
-    async fn request(
-        &self,
-        req: JsonRpcRequest,
-    ) -> Result<JsonRpcResponse, McpError> {
+    async fn request(&self, req: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         let idx = self
             .behavior
             .lock()
@@ -141,11 +136,9 @@ impl McpTransport for MockTransport {
 // ============================================================================
 
 fn create_client(transport: MockTransport) -> lellm_mcp::McpClient {
-    std::thread::spawn(move || {
-        lellm_mcp::McpClient::with_transport(transport)
-    })
-    .join()
-    .unwrap()
+    std::thread::spawn(move || lellm_mcp::McpClient::with_transport(transport))
+        .join()
+        .unwrap()
 }
 
 // ============================================================================
@@ -198,7 +191,9 @@ async fn test_transport_connect_fail() {
 #[tokio::test]
 async fn test_transport_request_success() {
     let mut transport = MockTransport::new();
-    transport.connect_ok(true).add_success(serde_json::json!({"status": "ok"}));
+    transport
+        .connect_ok(true)
+        .add_success(serde_json::json!({"status": "ok"}));
     transport.connect().await.unwrap();
 
     let req = JsonRpcRequest::new(1, "ping", None);
@@ -299,7 +294,9 @@ async fn test_client_request_not_ready() {
 #[tokio::test]
 async fn test_client_request_forward() {
     let mut transport = MockTransport::new();
-    transport.connect_ok(true).add_success(serde_json::json!({}));
+    transport
+        .connect_ok(true)
+        .add_success(serde_json::json!({}));
     let client = create_client(transport);
     client.connect().await.unwrap();
 
@@ -454,7 +451,10 @@ async fn test_catalog_refresh() {
     ]});
 
     let mut transport = MockTransport::new();
-    transport.connect_ok(true).add_success(list1).add_success(list2);
+    transport
+        .connect_ok(true)
+        .add_success(list1)
+        .add_success(list2);
     let client = Arc::new(create_client(transport));
     client.connect().await.unwrap();
 
@@ -503,7 +503,10 @@ async fn test_full_mcp_flow() {
     });
 
     let mut transport = MockTransport::new();
-    transport.connect_ok(true).add_success(init_resp).add_success(tools_resp);
+    transport
+        .connect_ok(true)
+        .add_success(init_resp)
+        .add_success(tools_resp);
     let client = Arc::new(create_client(transport));
 
     // 1. 连接
@@ -514,7 +517,9 @@ async fn test_full_mcp_flow() {
     assert_eq!(init.server_info.name, "mcp-server");
 
     // 3. 发现工具
-    let catalog = lellm_mcp::McpCatalog::discover(client.clone()).await.unwrap();
+    let catalog = lellm_mcp::McpCatalog::discover(client.clone())
+        .await
+        .unwrap();
     assert_eq!(catalog.len(), 2);
 
     // 4. 快照

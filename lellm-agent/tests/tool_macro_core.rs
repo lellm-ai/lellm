@@ -33,7 +33,12 @@ fn test_basic_tool_factory() {
 #[test]
 fn test_basic_tool_schema() {
     let def = AddNumbersArgs::tool_definition();
-    let properties = def.parameters.get("properties").unwrap().as_object().unwrap();
+    let properties = def
+        .parameters
+        .get("properties")
+        .unwrap()
+        .as_object()
+        .unwrap();
 
     assert_eq!(properties["a"]["type"], "integer");
     assert_eq!(properties["b"]["type"], "integer");
@@ -109,7 +114,12 @@ fn typed_function(
 #[test]
 fn test_various_param_types_schema() {
     let def = TypedFunctionArgs::tool_definition();
-    let properties = def.parameters.get("properties").unwrap().as_object().unwrap();
+    let properties = def
+        .parameters
+        .get("properties")
+        .unwrap()
+        .as_object()
+        .unwrap();
 
     assert_eq!(properties["text"]["type"], "string");
     assert_eq!(properties["count"]["type"], "integer");
@@ -125,10 +135,8 @@ fn test_various_param_types_schema() {
     assert_eq!(properties["tags"]["type"], "array");
 
     let required = def.parameters.get("required").unwrap().as_array().unwrap();
-    let required_set: std::collections::HashSet<&str> = required
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let required_set: std::collections::HashSet<&str> =
+        required.iter().filter_map(|v| v.as_str()).collect();
 
     assert!(required_set.contains("text"));
     assert!(required_set.contains("count"));

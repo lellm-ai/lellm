@@ -44,10 +44,7 @@ impl LlmProvider for MockProvider {
         })
     }
 
-    async fn stream(
-        &self,
-        request: &ChatRequest,
-    ) -> Result<ProviderStream, LlmError> {
+    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         self.received_requests.lock().unwrap().push(request.clone());
 
         let response = self.responses.first().cloned().ok_or(LlmError::Provider {

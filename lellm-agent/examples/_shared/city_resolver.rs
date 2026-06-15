@@ -21,9 +21,9 @@ use lellm_provider::LlmProvider;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CityResult {
-    pub city_en: String,  // wttr.in 城市名 (kebab-case)，未知 → "unknown"
-    pub source: String,   // alias / tencent / llm / unknown
-    pub address: String,  // 原始请求地址
+    pub city_en: String, // wttr.in 城市名 (kebab-case)，未知 → "unknown"
+    pub source: String,  // alias / tencent / llm / unknown
+    pub address: String, // 原始请求地址
 }
 
 // ─── 第二级：腾讯地图 ───────────────────────────────────────────

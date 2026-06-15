@@ -29,7 +29,10 @@ pub enum NotificationKind {
     /// 进度通知。
     Progress { progress: u64, total: Option<u64> },
     /// 其他通知。
-    Other { method: String, params: Option<serde_json::Value> },
+    Other {
+        method: String,
+        params: Option<serde_json::Value>,
+    },
 }
 
 impl JsonRpcNotification {
