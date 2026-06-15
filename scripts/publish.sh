@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-CRATES="lellm-core lellm-macros lellm-provider lellm-agent lellm-mcp lellm"
+CRATES="lellm-core lellm-macros lellm-provider lellm-agent lellm-mcp lellm-graph lellm"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # 读取 workspace version
