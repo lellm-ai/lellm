@@ -480,36 +480,75 @@ pub enum GraphEvent {
 
 ## [S6] Builder API
 
+GraphBuilder 是**图编辑器**（Graph Editor），不是配置 DSL。
+核心 API 为 `&mut self` 可变式，链式调用作为语法糖保留。
+
+### 可变式（主要用法）
+
 ```rust
-let graph = GraphBuilder::new("workflow")
-    .start("init")
-    .node("init", NodeKind::Task(TaskNode::new("init", |state| { ... })))
-    .node("agent", NodeKind::Agent(Box::new(AgentNode::new("agent", agent)
-        .with_prefix("calc"))))
-    .node("check", NodeKind::Condition(
-        ConditionNode::builder("check")
-            .branch("retry", |s| !s.satisfied())
-            .branch("done", |_| true)
-            .build()
-    ))
-    .edge("init", "agent")
-    .edge_if("agent", "check", |s| s.has_tool_calls())  // 条件边
-    .edge("agent", "done")                                // 无条件 fallback
-    .end("done")
+let mut g = GraphBuilder::new("workflow");
+
+g.start("init")?;
+g.node("init", NodeKind::Task(TaskNode::new("init", |state| { ... })))?;
+g.node("agent", NodeKind::Agent(Box::new(AgentNode::new("agent", agent)
+    .with_prefix("calc"))))?;
+
+// 循环注册节点
+for tool in tools {
+    g.node(tool.name(), tool_node(tool))?;
+}
+
+g.edge("init", "agent")?;
+g.edge_if("agent", "check", |s| s.has_tool_calls())?;
+g.edge("agent", "done")?;
+g.end("done")?;
+
+let graph = g.build()?;
+```
+
+### 链式调用（语法糖）
+
+```rust
+// 简单图：链式调用更简洁
+let graph = GraphBuilder::new("simple")
+    .start("a")
+    .node("a", node_a)
+    .edge("a", "b")
+    .end("b")
     .build()?;
+```
+
+### 模块化注册
+
+```rust
+let mut g = GraphBuilder::new("workflow");
+g.start("init")?;
+
+register_auth_nodes(&mut g)?;
+register_mcp_nodes(&mut g)?;
+register_review_nodes(&mut g)?;
+
+g.end("done")?;
+let graph = g.build()?;
 ```
 
 ### GraphBuilder 方法
 
-| 方法 | 说明 |
-|------|------|
-| `new(name)` | 创建构建器 |
-| `start(node)` | 设置起始节点 |
-| `end(node)` | 设置结束节点 |
-| `node(name, kind)` | 添加节点 |
-| `edge(from, to)` | 添加无条件边 |
-| `edge_if(from, to, condition)` | 添加条件边 |
-| `build()` | 构建并验证，返回 `Result<Graph, GraphError>` |
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| `new(name)` | `-> Self` | 创建构建器 |
+| `start(node)` | `&mut self -> Result<&mut Self>` | 设置起始节点 |
+| `end(node)` | `&mut self -> Result<&mut Self>` | 设置结束节点 |
+| `node(name, kind)` | `&mut self -> Result<&mut Self>` | 添加节点 |
+| `edge(from, to)` | `&mut self -> Result<&mut Self>` | 添加无条件边 |
+| `edge_if(from, to, cond)` | `&mut self -> Result<&mut Self>` | 添加条件边 |
+| `build()` | `self -> Result<Graph, GraphError>` | 构建并验证 |
+
+**设计原则：**
+- 所有验证返回 `Result`，不允许 panic
+- `build()` 消费 Builder，执行最终验证
+- 链式调用通过 `Result<&mut Self>` 或 `try_*` 包装实现
+- 对应 LangGraph 经验：`StateGraph` 也是可变式编辑器（`add_node` / `add_edge` / `compile`）
 
 ---
 
