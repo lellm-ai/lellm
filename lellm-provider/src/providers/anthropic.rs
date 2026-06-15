@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use http::HeaderMap;
 use lellm_core::{
-    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, ReasoningConfig, TextBlock,
-    ThinkingBlock, TokenUsage, ToolCall, ToolChoice,
+    CacheControl, ChatRequest, ChatResponse, ContentBlock, LlmError, Message, ReasoningConfig,
+    TextBlock, ThinkingBlock, TokenUsage, ToolCall, ToolChoice,
 };
 use std::borrow::Cow;
 
@@ -40,13 +40,13 @@ impl ChatCodec for AnthropicCodec {
     fn encode(&self, req: &ChatRequest, stream: bool) -> Result<CodecRequest, LlmError> {
         // Anthropic 需要 {"role": "...", "content": [...]} 格式
         // system 消息必须放在单独的 system 字段，不能在 messages 数组中
-        let mut system_text = String::new();
+        let mut system_blocks: Vec<ContentBlock> = Vec::new();
         let mut messages: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
 
         for m in &req.messages {
             match m {
                 Message::System { content } => {
-                    system_text = content.iter().filter_map(|b| b.as_text()).collect();
+                    system_blocks = content.clone();
                 }
                 Message::User { content } => {
                     let mut map = serde_json::Map::new();
@@ -94,8 +94,18 @@ impl ChatCodec for AnthropicCodec {
         // 构建 Anthropic 请求 body
         let mut body = serde_json::Map::new();
         body.insert("model".into(), req.model.clone().into());
-        if !system_text.is_empty() {
-            body.insert("system".into(), system_text.into());
+        if !system_blocks.is_empty() {
+            // 检查是否有缓存断点 — 有则用数组格式，无则用字符串格式
+            let has_cache = system_blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(tb) if tb.cache_control.is_some()));
+            if has_cache {
+                let blocks = serialize_anthropic_content_blocks(&system_blocks)?;
+                body.insert("system".into(), blocks);
+            } else {
+                let text: String = system_blocks.iter().filter_map(|b| b.as_text()).collect();
+                body.insert("system".into(), text.into());
+            }
         }
         body.insert(
             "messages".into(),
@@ -162,12 +172,23 @@ impl ChatCodec for AnthropicCodec {
             );
         }
         if let Some(ref tools) = req.tools {
-            body.insert(
-                "tools".into(),
-                serde_json::to_value(tools).map_err(|e| LlmError::Parse {
-                    detail: format!("Failed to serialize tools: {}", e),
-                })?,
-            );
+            let anthropic_tools: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("name".into(), t.name.clone().into());
+                    obj.insert("description".into(), t.description.clone().into());
+                    obj.insert("input_schema".into(), t.parameters.clone());
+                    if t.cache_control == Some(CacheControl::Breakpoint) {
+                        obj.insert(
+                            "cache_control".into(),
+                            serde_json::json!({"type": "ephemeral"}),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+            body.insert("tools".into(), serde_json::Value::Array(anthropic_tools));
         }
         // Provider 特有参数（extra 最后合并，允许覆盖标准字段）
         if let Some(ref extra) = req.extra {
@@ -435,6 +456,7 @@ impl ModelCapabilities for AnthropicCodec {
 ///
 /// 关键映射：
 /// - `Text` → `{"type": "text", "text": "..."}`
+/// - `Text` + `CacheControl::Breakpoint` → 追加 `"cache_control": {"type": "ephemeral"}`
 /// - `ToolCall` → `{"type": "tool_use", "id": ..., "name": ..., "input": {...}}`
 /// - `Thinking` → `{"type": "thinking", "thinking": "..."}`
 /// - `Image` → 暂不支持，返回 `UnsupportedFeature` 错误
@@ -444,10 +466,18 @@ fn serialize_anthropic_content_blocks(
     let arr: Vec<serde_json::Value> = blocks
         .iter()
         .map(|block| match block {
-            ContentBlock::Text(tb) => Ok(serde_json::json!({
-                "type": "text",
-                "text": tb.text
-            })),
+            ContentBlock::Text(tb) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".into(), "text".into());
+                obj.insert("text".into(), serde_json::json!(tb.text));
+                if tb.cache_control == Some(CacheControl::Breakpoint) {
+                    obj.insert(
+                        "cache_control".into(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
+                }
+                Ok(serde_json::Value::Object(obj))
+            }
             ContentBlock::Thinking(tb) => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("type".into(), "thinking".into());
@@ -479,5 +509,120 @@ fn serialize_anthropic_tool_choice(choice: &ToolChoice) -> serde_json::Value {
             serde_json::json!({"type": "tool", "name": name})
         }
         ToolChoice::Any => "any".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lellm_core::{CacheControl, ChatRequest, TextBlock};
+
+    #[test]
+    fn test_text_block_with_cache_control() {
+        let blocks = vec![ContentBlock::Text(TextBlock {
+            text: "system prompt".into(),
+            cache_control: Some(CacheControl::Breakpoint),
+        })];
+        let result = serialize_anthropic_content_blocks(&blocks).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "system prompt");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_text_block_without_cache_control() {
+        let blocks = vec![ContentBlock::Text(TextBlock {
+            text: "hello".into(),
+            cache_control: None,
+        })];
+        let result = serialize_anthropic_content_blocks(&blocks).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr[0]["type"], "text");
+        assert!(arr[0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn test_system_message_with_cache_uses_array_format() {
+        let codec = AnthropicCodec;
+        let req = ChatRequest {
+            model: "claude-3".into(),
+            messages: vec![Message::System {
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: "system prompt".into(),
+                    cache_control: Some(CacheControl::Breakpoint),
+                })],
+            }],
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+        let encoded = codec.encode(&req, false).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&encoded.body).unwrap();
+        // system 应为数组格式（带 cache_control）
+        assert!(body["system"].is_array());
+        let system_arr = body["system"].as_array().unwrap();
+        assert_eq!(system_arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_system_message_without_cache_uses_string_format() {
+        let codec = AnthropicCodec;
+        let req = ChatRequest {
+            model: "claude-3".into(),
+            messages: vec![Message::System {
+                content: vec![ContentBlock::text("system prompt".into())],
+            }],
+            max_tokens: Some(1024),
+            ..Default::default()
+        };
+        let encoded = codec.encode(&req, false).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&encoded.body).unwrap();
+        // system 应为字符串格式（无 cache_control）
+        assert!(body["system"].is_string());
+        assert_eq!(body["system"], "system prompt");
+    }
+
+    #[test]
+    fn test_tool_with_cache_control() {
+        let codec = AnthropicCodec;
+        let req = ChatRequest {
+            model: "claude-3".into(),
+            messages: vec![],
+            max_tokens: Some(1024),
+            tools: Some(vec![lellm_core::ToolDefinition {
+                name: "search".into(),
+                description: "Search the web".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                cache_control: Some(CacheControl::Breakpoint),
+            }]),
+            ..Default::default()
+        };
+        let encoded = codec.encode(&req, false).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&encoded.body).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["name"], "search");
+        assert_eq!(tools[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_tool_without_cache_control() {
+        let codec = AnthropicCodec;
+        let req = ChatRequest {
+            model: "claude-3".into(),
+            messages: vec![],
+            max_tokens: Some(1024),
+            tools: Some(vec![lellm_core::ToolDefinition {
+                name: "search".into(),
+                description: "Search the web".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                cache_control: None,
+            }]),
+            ..Default::default()
+        };
+        let encoded = codec.encode(&req, false).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&encoded.body).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert!(tools[0].get("cache_control").is_none());
     }
 }
