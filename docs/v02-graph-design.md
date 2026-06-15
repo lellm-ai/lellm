@@ -178,10 +178,28 @@ pub struct BarrierNode {
 
 **仅支持流式模式。** 阻塞模式直接报错，引导使用 `execute_stream()`。
 
-执行流程：
-1. 发射 `GraphEvent::BarrierPaused { signal }` 到 sink
-2. `tokio::select!` 等待决策信号或超时
-3. 根据决策写入 State，决定下一步
+**执行流程（三级传递）：**
+
+```
+GraphHandle::decide(barrier_id, decision)
+  → mpsc::Sender<(BarrierId, BarrierDecision)>
+  → executor 的 DecisionRegistry 缓存
+  → wait_barrier_decision() 取出并 apply_decision()
+```
+
+1. BarrierNode 返回 `StreamNodeResult::BarrierPaused`，executor 发射 `BarrierPaused` 事件
+2. executor 调用 `wait_barrier_decision()` — 先查 `DecisionRegistry` 缓存，再 drain channel
+3. 用户通过 `GraphHandle::decide()` 提交决策，决策进入 channel
+4. executor 接收决策：匹配的立即返回，不匹配的缓存（**level-triggered 语义**）
+5. executor 调用 `BarrierNode::apply_decision(decision, state)` 应用决策
+
+**Level-triggered 原则：** 决策提交早于 Barrier 激活 MUST 被保留。
+这是 correctness 要求，不是性能优化。
+
+**DecisionRegistry 设计：**
+- `HashMap<BarrierId, BarrierDecision>` — plain HashMap，无需 Arc/Mutex
+- 唯一消费者是 GraphExecutor 的 spawned task
+- 不传递给 `execute_stream`（签名仅 3 参数：state, sink, trace_id）
 
 四种决策：
 
@@ -227,14 +245,22 @@ pub trait GraphNode: Send + Sync {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError>;
 
     /// 流式执行，将内部事件转发到 channel
-    /// 默认实现直接调用 execute，不产生流式事件
+    /// 默认实现直接调用 execute，返回 StreamNodeResult::Done
+    /// AgentNode 覆写以转发 AgentEvent
+    /// BarrierNode 覆写以返回 StreamNodeResult::BarrierPaused
     async fn execute_stream(
         &self,
         state: &mut State,
         sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-    ) -> Result<NextStep, GraphError>;
+        trace_id: TraceId,
+    ) -> Result<StreamNodeResult, GraphError>;
 }
 ```
+
+**签名说明：**
+- `trace_id` — 执行实例 ID，区分同一节点的不同执行（回跳循环）
+- 返回 `StreamNodeResult` 而非 `NextStep` — 支持 BarrierPaused 变体
+- Barrier 决策不通过此签名传递（走 `GraphHandle::decide` + `DecisionRegistry`）
 
 ---
 
@@ -519,10 +545,16 @@ planner/c3e1...  Complete
 ```rust
 pub struct BarrierId(Uuid);
 
-pub struct GraphHandle;
+pub struct GraphHandle {
+    decision_tx: mpsc::Sender<(BarrierId, BarrierDecision)>,
+}
 
 impl GraphHandle {
-    /// 提交 Barrier 决策（一次性，重复提交报错）
+    /// 提交 Barrier 决策
+    ///
+    /// **Level-triggered 语义：** 决策可以在 Barrier 暂停之前提交。
+    /// executor 的 DecisionRegistry 会缓存提前到达的决策，
+    /// 待对应 Barrier 激活时取出应用。
     pub async fn decide(
         &self,
         barrier_id: BarrierId,
@@ -549,17 +581,14 @@ while let Some(event) = stream.recv().await {
 **设计优势：**
 1. **事件可序列化** — `GraphEvent` 不含 `Sender`，可直接转 JSON 推送给 Web UI
 2. **支持 Remote UI** — 浏览器收到 `barrier_paused` 事件，通过 HTTP/WebSocket 调用 `decide()`
-3. **隐藏内部同步** — 内部仍用 `HashMap<BarrierId, oneshot::Sender>` 管理，调用方不受影响
-4. **一次性语义保留** — 内部 `oneshot` 保证决策只能提交一次
+3. **隐藏内部同步** — executor 私有 `DecisionRegistry` 管理决策缓存，调用方不受影响
+4. **Level-triggered** — 决策顺序 ≠ Barrier 到达顺序时不会丢失（缓存机制）
+5. **无同步原语开销** — `DecisionRegistry` 是 plain HashMap，无需 Arc/Mutex
 
 **生命周期契约：**
 - 正常结束：`GraphComplete` 恰好一次，然后 channel 关闭
 - 异常结束：`GraphError` 恰好一次，然后 channel 关闭
 - 终态事件后不再发送任何事件
-
-> **v0.2 现状：** 当前代码 `GraphEvent::Agent { node_name, event }` 直接包裹 `AgentEvent`，
-> 无 `trace_id`，无 `NodeEvent` 中间层。
-> `NodeEvent` + `TraceId` + `BarrierId` + `GraphHandle` 为 v0.2.1 目标设计，待实现。
 
 ### 错误处理
 
@@ -703,6 +732,7 @@ lellm-graph/
 | Barrier Modify | `test_barrier_modify` | ✅ |
 | Barrier 超时 | `test_barrier_timeout` | ✅ |
 | Barrier Reroute | `test_barrier_reroute` | ✅ |
+| 双重 Barrier 顺序执行 | `test_double_barrier_sequential` | ✅ |
 | 执行日志 | `test_execution_log` | ✅ |
 | 缺失节点 | `test_missing_node/start/end` | ✅ |
 
@@ -712,11 +742,12 @@ lellm-graph/
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| P0 | `Edge::max_visits` | 边级循环预算，`find_next_node` 中检查 |
-| P0 | `analyze_cycles()` | 诊断用，找出图中所有环，生成诊断信息 |
-| P0 | `StateExt` 强类型 getter/setter | `get_str/get_u64/get_json/set/remove/contains` |
-| P0 | `NodeEvent` + `TraceId` | 事件分层，隔离 Graph 与节点内部事件 |
-| P0 | `BarrierId` + `GraphHandle::decide()` | 剥离 oneshot Sender，支持事件序列化与 Remote UI |
+| ✅ | `Edge::max_visits` | 边级循环预算，`find_next_node` 中检查 |
+| ✅ | `analyze_cycles()` | 诊断用，找出图中所有环，生成诊断信息 |
+| ✅ | `StateExt` 强类型 getter/setter | `get_str/get_u64/get_json/set/remove/contains` |
+| ✅ | `NodeEvent` + `TraceId` | 事件分层，隔离 Graph 与节点内部事件 |
+| ✅ | `BarrierId` + `GraphHandle::decide()` | 剥离 oneshot Sender，支持事件序列化与 Remote UI |
+| ✅ | `DecisionRegistry` | level-triggered 决策缓存，修复 out-of-order 决策丢失 Bug |
 | P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 |
 | P1 | ParallelNode | 并行子图，`join_all` + Reducer 聚合 |
 | P2 | 可达性验证 | validate() 检查所有节点是否可达 |
