@@ -199,24 +199,47 @@ pub type ToolResult = Result<serde_json::Value, ToolError>;
 
 // ─── IntoToolError ───────────────────────────────────────────────
 
-/// 将任意错误转换为 `ToolError`。
+/// 将已知错误类型转换为 `ToolError`。
 ///
-/// **默认实现：** 任何 `E: Display` 自动转为 `External { source: type_name::<E>() }`。
+/// **设计原则：** 不使用 blanket impl（`impl<E: Display>`），避免吞掉 `ToolError` 原始分类。
+/// 只为核心错误类型提供显式实现。
 ///
-/// **用户覆盖：** 为自己的错误类型实现 `IntoToolError`，精确控制 `ToolErrorKind`。
+/// **已有实现：**
+/// - `ToolError` → 直接透传
+/// - `std::io::Error` → `External`
+/// - `serde_json::Error` → `Internal`
+/// - `anyhow::Error` → `External`（需 `anyhow` feature）
 pub trait IntoToolError {
     fn into_tool_error(self) -> ToolError;
 }
 
-/// 默认兜底：任何 `Display` 错误 → `External`
-///
-/// 注意：`ToolError` 已经实现了 `Display`，所以会被此 blanket impl 覆盖。
-/// 但 `ToolError::into_tool_error()` 会返回 `External` 而非原样透传。
-/// 如果需要精确透传，用户应使用 `Result<T, ToolError>` 的专用实现。
-impl<E> IntoToolError for E
-where
-    E: std::fmt::Display,
-{
+/// `ToolError` → 直接透传，不包装
+impl IntoToolError for ToolError {
+    fn into_tool_error(self) -> ToolError {
+        self
+    }
+}
+
+/// `std::io::Error` → `External`
+impl IntoToolError for std::io::Error {
+    fn into_tool_error(self) -> ToolError {
+        ToolError::external(self)
+    }
+}
+
+/// `serde_json::Error` → `Internal`
+impl IntoToolError for serde_json::Error {
+    fn into_tool_error(self) -> ToolError {
+        ToolError {
+            kind: ToolErrorKind::Internal,
+            message: self.to_string(),
+        }
+    }
+}
+
+/// `anyhow::Error` → `External`
+#[cfg(feature = "anyhow")]
+impl IntoToolError for anyhow::Error {
     fn into_tool_error(self) -> ToolError {
         ToolError::external(self)
     }
@@ -269,11 +292,14 @@ where
     }
 }
 
-/// `Result<T, E>` (T: Serialize, E: Display) → 自动桥接
+/// `Result<T, E>` (T: Serialize, E: IntoToolError) → 自动桥接
+///
+/// `E: IntoToolError` 约束确保只有显式实现的错误类型才能转换。
+/// `ToolError` → 直接透传，`std::io::Error` → External，`serde_json::Error` → Internal。
 impl<T, E> IntoToolResult for Result<T, E>
 where
     T: serde::Serialize,
-    E: std::fmt::Display,
+    E: IntoToolError,
 {
     fn into_tool(self) -> ToolResult {
         match self {
@@ -399,11 +425,27 @@ mod tests {
                 write!(f, "my error")
             }
         }
+        // 自定义错误需显式实现 IntoToolError
+        impl IntoToolError for MyError {
+            fn into_tool_error(self) -> ToolError {
+                ToolError::external(self)
+            }
+        }
 
         let result: ToolResult = Err::<(), MyError>(MyError).into_tool();
         let err = result.unwrap_err();
         assert_eq!(err.kind, ToolErrorKind::External { source: std::any::type_name::<MyError>() });
         assert_eq!(err.message, "my error");
+    }
+
+    #[test]
+    fn test_into_tool_result_tool_error_passthrough() {
+        // ToolError 应直接透传，不被包装成 External
+        let err = ToolError::invalid_input("bad param");
+        let result: ToolResult = Err::<serde_json::Value, ToolError>(err).into_tool();
+        let out_err = result.unwrap_err();
+        assert_eq!(out_err.kind, ToolErrorKind::InvalidInput);
+        assert_eq!(out_err.message, "bad param");
     }
 
     #[test]

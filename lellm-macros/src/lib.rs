@@ -10,17 +10,27 @@
 //!
 //! #[tool(name = "search", description = "搜索互联网信息")]
 //! async fn search(query: String, limit: Option<u32>) -> ToolResult {
+//!     // 实现逻辑
 //!     Ok(format!("搜索结果: {}", query))
 //! }
 //!
-//! // 注册：
+//! // 无依赖 — 直接调用生成的工厂函数：
 //! builder.tool(search_tool());
+//!
+//! // 有依赖 — 使用 _with 后缀工厂函数：
+//! let client = SearchClient::new();
+//! builder.tool(search_tool_with({
+//!     let client = client.clone();
+//!     move |args| async move {
+//!         client.search(&args.query, args.limit).await
+//!     }
+//! }));
 //! ```
 //!
 //! ## Level 2: `#[derive(Tool)]` struct 宏（高级用户）
 //!
 //! ```ignore
-//! use lellm_agent::{schemars::JsonSchema, ToolResult};
+//! use lellm_agent::ToolResult;
 //! use lellm_macros::Tool;
 //!
 //! #[derive(Tool, JsonSchema)]
@@ -74,14 +84,14 @@ pub fn tool(args: TokenStream, input: TokenStream) -> TokenStream {
 
     match parsed {
         Item::Fn(func) => {
-            // Level 1: function → generate Args struct + registration function
+            // Level 1: function → generate Args struct + factory functions
             match expand_tool_for_fn(args.into(), func) {
                 Ok(out) => out.into(),
                 Err(e) => e.to_compile_error().into(),
             }
         }
         Item::Struct(s) => {
-            // Level 2: struct → generate ToolArgs impl (same as derive(Tool))
+            // Level 2: struct → generate ToolArgs impl
             match expand_tool_for_struct(args.into(), s) {
                 Ok(out) => out.into(),
                 Err(e) => e.to_compile_error().into(),
@@ -150,6 +160,7 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
     let pascal_name = snake_to_pascal(&func.sig.ident.to_string());
     let struct_name = format_ident!("{}Args", pascal_name);
     let reg_fn_name = format_ident!("{}_tool", func.sig.ident);
+    let reg_fn_name_with = format_ident!("{}_tool_with", func.sig.ident);
     let fn_name = &func.sig.ident;
 
     // Generate struct fields using parse_quote for each param
@@ -183,15 +194,16 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
 
     let visibility = &func.vis;
 
-    // Generate ToolArgs impl + helper methods inline (don't use derive(Tool))
-    // to avoid issues with the #[tool] attribute macro chain.
+    // Generate ToolArgs impl + helper methods
     let schema_fn = generate_schema_impl(&struct_name);
     let compat_methods = generate_compat_methods(&struct_name);
     let safe_methods = generate_safe_methods(&struct_name);
 
     Ok(quote! {
+        // 1. 原始函数 — 保留语义，可直接调用
         #cleaned_func
 
+        // 2. 自动生成的参数结构体
         /// Auto-generated tool arguments for `#fn_name`
         #[derive(
             ::lellm_agent::serde::Deserialize,
@@ -201,6 +213,7 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
             #(#fields),*
         }
 
+        // 3. ToolArgs trait 实现（含 LazyLock schema 缓存）
         impl ::lellm_agent::ToolArgs for #struct_name {
             const NAME: &'static str = #name;
             const DESCRIPTION: &'static str = #description;
@@ -208,14 +221,41 @@ fn expand_tool_for_fn(args: TokenStream2, func: ItemFn) -> Result<TokenStream2, 
             #schema_fn
         }
 
+        // 4. 向后兼容方法
         #compat_methods
+
+        // 5. safe / category_exclusive / exclusive 便捷注册
         #safe_methods
 
-        /// Auto-generated tool registration for `#fn_name`
+        // 6. 无依赖工厂函数 — 调用原始函数
+        /// Auto-generated tool registration for `#fn_name` (no dependency injection).
         #visibility fn #reg_fn_name() -> ::lellm_agent::ToolRegistration {
-            #struct_name::safe(|args| async move {
+            #reg_fn_name_with(|args| async move {
                 #fn_name(#(#arg_refs),*)
             })
+        }
+
+        // 7. 依赖注入工厂函数 — 用户传入闭包
+        /// Tool registration factory with dependency injection.
+        ///
+        /// Pass a closure that receives `#struct_name` and returns `ToolResult`.
+        ///
+        /// # Example
+        /// ```ignore
+        /// let client = MyClient::new();
+        /// builder.tool(#reg_fn_name_with({
+        ///     let client = client.clone();
+        ///     move |args| async move {
+        ///         client.do_something(&args.field).await
+        ///     }
+        /// }));
+        /// ```
+        #visibility fn #reg_fn_name_with<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
+        where
+            F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
+            Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+        {
+            #struct_name::safe(f)
         }
     })
 }
@@ -306,10 +346,14 @@ fn generate_tool_for_struct(input: &DeriveInput, _data: &syn::DataStruct) -> Tok
 fn generate_schema_impl(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
         fn __schema() -> serde_json::Value {
-            let full = ::serde_json::to_value(
-                ::lellm_agent::schemars::schema_for!(#struct_name)
-            ).expect("schemars schema_for always produces valid JSON");
-            Self::extract_inner_schema(&full)
+            static SCHEMA: ::std::sync::LazyLock<serde_json::Value> =
+                ::std::sync::LazyLock::new(|| {
+                    let full = ::serde_json::to_value(
+                        ::lellm_agent::schemars::schema_for!(#struct_name)
+                    ).expect("schema generation failed");
+                    #struct_name::extract_inner_schema(&full)
+                });
+            SCHEMA.clone()
         }
     }
 }
@@ -317,19 +361,19 @@ fn generate_schema_impl(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
 fn generate_compat_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
         impl #struct_name {
-            /// 从 schemars 完整 schema 中提取 inner schema。
+            /// 从 schemars 完整 schema 中提取 inner schema（LazyLock 缓存）。
             pub fn __schema() -> serde_json::Value {
-                <Self as ::lellm_agent::ToolArgs>::__schema()
+                <#struct_name as ::lellm_agent::ToolArgs>::__schema()
             }
 
             /// 工具名称 — 向后兼容
             pub fn __name() -> &'static str {
-                <Self as ::lellm_agent::ToolArgs>::NAME
+                <#struct_name as ::lellm_agent::ToolArgs>::NAME
             }
 
             /// 工具描述 — 向后兼容
             pub fn __description() -> &'static str {
-                <Self as ::lellm_agent::ToolArgs>::DESCRIPTION
+                <#struct_name as ::lellm_agent::ToolArgs>::DESCRIPTION
             }
 
             fn extract_inner_schema(full: &serde_json::Value) -> serde_json::Value {
@@ -357,26 +401,19 @@ fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
         impl #struct_name {
             /// 便捷注册 — 并行安全（Safe）。
             ///
-            /// 闭包接收反序列化后的 `Self`，直接操作强类型参数。
-            ///
-            /// # 示例
-            /// ```ignore
-            /// let reg = SearchArgs::safe(|args| async move {
-            ///     Ok(format!("搜索: {}", args.query))
-            /// });
-            /// ```
+            /// 闭包接收反序列化后的 `#struct_name`，直接操作强类型参数。
             pub fn safe<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
             where
-                F: Fn(Self) -> Fut + Send + Sync + 'static,
+                F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
                 ::lellm_agent::ToolRegistration::safe(
-                    <Self as ::lellm_agent::ToolArgs>::tool_definition(),
+                    <#struct_name as ::lellm_agent::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
                         move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
-                            match ::serde_json::from_value::<Self>(args.clone()) {
+                            match ::serde_json::from_value::<#struct_name>(args.clone()) {
                                 Ok(parsed) => {
                                     let f = ::std::sync::Arc::clone(&f);
                                     Box::pin(async move { f(parsed).await })
@@ -402,17 +439,17 @@ fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
                 f: F,
             ) -> ::lellm_agent::ToolRegistration
             where
-                F: Fn(Self) -> Fut + Send + Sync + 'static,
+                F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
                 ::lellm_agent::ToolRegistration::category_exclusive(
-                    <Self as ::lellm_agent::ToolArgs>::tool_definition(),
+                    <#struct_name as ::lellm_agent::ToolArgs>::tool_definition(),
                     category,
                     {
                         let f = ::std::sync::Arc::clone(&f);
                         move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
-                            match ::serde_json::from_value::<Self>(args.clone()) {
+                            match ::serde_json::from_value::<#struct_name>(args.clone()) {
                                 Ok(parsed) => {
                                     let f = ::std::sync::Arc::clone(&f);
                                     Box::pin(async move { f(parsed).await })
@@ -435,16 +472,16 @@ fn generate_safe_methods(struct_name: &syn::Ident) -> proc_macro2::TokenStream {
             /// 便捷注册 — 全局互斥（Exclusive）。
             pub fn exclusive<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
             where
-                F: Fn(Self) -> Fut + Send + Sync + 'static,
+                F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
                 ::lellm_agent::ToolRegistration::exclusive(
-                    <Self as ::lellm_agent::ToolArgs>::tool_definition(),
+                    <#struct_name as ::lellm_agent::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
                         move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
-                            match ::serde_json::from_value::<Self>(args.clone()) {
+                            match ::serde_json::from_value::<#struct_name>(args.clone()) {
                                 Ok(parsed) => {
                                     let f = ::std::sync::Arc::clone(&f);
                                     Box::pin(async move { f(parsed).await })

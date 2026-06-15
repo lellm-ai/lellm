@@ -8,7 +8,7 @@ documentation = "https://docs.rs/lellm-agent"
 repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
-lellm-core.workspace = true
+lellm-core = { workspace = true, features = ["anyhow"] }
 lellm-provider.workspace = true
 async-trait.workspace = true
 serde.workspace = true

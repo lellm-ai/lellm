@@ -9,6 +9,9 @@
 //! # 需要 Agent 运行时
 //! lellm = { version = "0.1", features = ["agent"] }
 //!
+//! # 需要 MCP 客户端
+//! lellm = { version = "0.1", features = ["mcp"] }
+//!
 //! # 全部启用
 //! lellm = { version = "0.1", features = ["full"] }
 //! ```
@@ -24,3 +27,6 @@ pub use lellm_agent as agent;
 
 #[cfg(feature = "macros")]
 pub use lellm_macros as macros;
+
+#[cfg(feature = "mcp")]
+pub use lellm_mcp as mcp;

@@ -8,7 +8,12 @@ documentation = "https://docs.rs/lellm-core"
 repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
+anyhow = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
+
+[features]
+default = []
+anyhow = ["dep:anyhow"]
