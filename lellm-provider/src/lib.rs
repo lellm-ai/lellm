@@ -7,66 +7,58 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures_core::Stream;
-use lellm_core::{ChatRequest, ChatResponse, LlmError, ToolCall};
+use lellm_core::{ChatRequest, ChatResponse, LlmError, TokenUsage, ToolCall};
 
-pub mod builder;
 pub mod providers;
 pub mod router;
 
-pub use builder::ProviderBuilder;
 #[cfg(feature = "mock")]
 pub use providers::mock::*;
-pub use providers::{anthropic::*, base::*, openai_compat::*};
-pub use router::{ModelRouter, ModelRouterConfig, ProviderModels, TaskLevel};
+pub use providers::{anthropic::*, base::*, codec::*, google::*, openai_compat::*};
+pub use router::{ModelRouter, ProviderRegistry, ResolvedModel, RouteEntry, TaskLevel};
 
 /// 流式调用返回的 Stream 类型别名。
-/// Provider 内部可用 mpsc::Receiver 实现，对外暴露标准 Stream trait。
-pub type LlmStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>;
+pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ProviderEvent, LlmError>> + Send>>;
 
-/// 流式事件类型
+/// Provider 层流式事件
 #[derive(Debug, Clone)]
-pub enum StreamEvent {
+pub enum ProviderEvent {
     /// LLM 开始调用
-    LlmStart {
-        model: String,
-        messages_count: usize,
-    },
+    Start { model: String },
     /// LLM 增量令牌
-    LlmToken { token: String },
-    /// LLM 调用完成，包含 tool_calls
-    LlmEnd { tool_calls: Vec<ToolCall> },
-    /// 工具开始执行
-    ToolStart { tool_call_id: String, name: String },
-    /// 工具执行完成
-    ToolEnd {
-        tool_call_id: String,
-        result: String,
+    Token { token: String },
+    /// LLM 思考块增量（Claude thinking / OpenAI reasoning_content）
+    ThinkingDelta {
+        thinking: String,
+        redacted: Option<String>,
     },
-    /// 自定义更新（用户定义的进度信号）
-    Custom { data: serde_json::Value },
-}
-
-/// 流式模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamMode {
-    /// 仅代理进度（updates）
-    Updates,
-    /// LLM 令牌 + 元数据（messages）
-    Messages,
-    /// 自定义事件（custom）
-    Custom,
+    /// 单次 LLM 响应结束（HTTP/SSE 请求完成）。
+    ///
+    /// 注意：这不等于 Agent 推理结束。如果 `tool_calls` 非空，
+    /// Agent 会继续执行工具并发起下一轮调用。
+    ResponseComplete {
+        tool_calls: Vec<ToolCall>,
+        usage: Option<TokenUsage>,
+    },
 }
 
 /// 统一的 LLM Provider 接口。
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// 非流式调用
-    async fn llm_call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
+    async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// 流式调用，返回标准 Stream。
-    /// Provider 内部可用 mpsc::Receiver 实现，转为 BoxStream 返回。
-    async fn llm_call_stream(&self, request: &ChatRequest) -> Result<LlmStream, LlmError>;
+    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError>;
 
     /// Provider 标识
     fn provider_id(&self) -> &str;
+
+    /// 返回指定模型的能力矩阵。
+    ///
+    /// 默认实现返回全 false（最保守假设）。
+    /// Provider 应 override 以提供精确的能力声明。
+    fn capabilities_for(&self, _model: &str) -> Capabilities {
+        Capabilities::default()
+    }
 }

@@ -3,11 +3,15 @@ name = "lellm-macros"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Derive macros for LeLLM — ToolSchema, ParallelSafety"
+documentation = "https://docs.rs/lellm-macros"
+repository = "https://github.com/lellm-ai/lellm"
 
 [lib]
 proc-macro = true
 
 [dependencies]
+heck = "0.5"
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "extra-traits"] }
+syn = { version = "2", features = ["full", "extra-traits", "parsing", "printing"] }

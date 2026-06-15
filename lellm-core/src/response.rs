@@ -14,33 +14,26 @@ pub struct ChatResponse {
 }
 
 impl ChatResponse {
-    /// 提取所有文本块拼接为字符串（便捷方法）。
-    pub fn extract_text(&self) -> String {
-        self.content
-            .iter()
-            .filter_map(|b| b.as_text().map(|s| s.to_string()))
-            .collect::<Vec<_>>()
-            .join("")
+    /// 构造函数
+    pub fn new(content: Vec<ContentBlock>, usage: TokenUsage, raw: serde_json::Value) -> Self {
+        Self {
+            content,
+            usage,
+            raw,
+        }
     }
 
-    /// 提取所有 ToolCall。
-    pub fn extract_tool_calls(&self) -> Vec<ToolCall> {
-        self.content
-            .iter()
-            .filter_map(|b| {
-                if let ContentBlock::ToolCall(tc) = b {
-                    Some(tc.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
+    /// 借用视图 — 零分配、零拷贝的 tool_call 迭代器
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCall> {
+        self.content.iter().filter_map(|block| match block {
+            ContentBlock::ToolCall(call) => Some(call),
+            _ => None,
+        })
     }
 
+    /// 是否存在 tool_calls
     pub fn has_tool_calls(&self) -> bool {
-        self.content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::ToolCall(_)))
+        self.tool_calls().next().is_some()
     }
 }
 
@@ -50,4 +43,49 @@ pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContentBlock, ToolCall};
+
+    #[test]
+    fn test_chat_response_tool_calls_iterator() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "test".into(),
+            arguments: serde_json::json!({}),
+        };
+        let content = vec![
+            ContentBlock::text("hello".to_string()),
+            ContentBlock::ToolCall(tc.clone()),
+        ];
+        let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
+        let calls: Vec<_> = resp.tool_calls().collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "1");
+    }
+
+    #[test]
+    fn test_chat_response_has_tool_calls() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "test".into(),
+            arguments: serde_json::json!({}),
+        };
+        let content = vec![
+            ContentBlock::text("hello".to_string()),
+            ContentBlock::ToolCall(tc),
+        ];
+        let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
+        assert!(resp.has_tool_calls());
+    }
+
+    #[test]
+    fn test_chat_response_no_tool_calls() {
+        let content = vec![ContentBlock::text("hello".to_string())];
+        let resp = ChatResponse::new(content, TokenUsage::default(), serde_json::json!(null));
+        assert!(!resp.has_tool_calls());
+    }
 }

@@ -3,7 +3,17 @@ name = "lellm-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Core types for LeLLM — Message, ChatRequest, LlmError"
+documentation = "https://docs.rs/lellm-core"
+repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
+anyhow = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+
+[features]
+default = []
+anyhow = ["dep:anyhow"]

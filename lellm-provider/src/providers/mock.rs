@@ -1,42 +1,82 @@
 //! Mock Provider — 测试用。
 
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use futures_util::stream;
 use lellm_core::{ChatRequest, ChatResponse, LlmError};
 
-use crate::{LlmProvider, LlmStream, StreamEvent};
+use crate::{LlmProvider, ProviderEvent, ProviderStream};
 
 /// 测试用 Mock Provider。
 pub struct MockProvider {
-    pub responses: Vec<ChatResponse>,
-    pub received_requests: std::sync::Mutex<Vec<ChatRequest>>,
+    responses: Vec<ChatResponse>,
+    received_requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl MockProvider {
     pub fn new(responses: Vec<ChatResponse>) -> Self {
         Self {
             responses,
-            received_requests: std::sync::Mutex::new(Vec::new()),
+            received_requests: Mutex::new(Vec::new()),
         }
     }
 
     pub fn reply_with(response: ChatResponse) -> Self {
         Self::new(vec![response])
     }
+
+    pub fn received_requests(&self) -> Vec<ChatRequest> {
+        self.received_requests.lock().unwrap().clone()
+    }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl LlmProvider for MockProvider {
-    async fn llm_call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.received_requests.lock().unwrap().push(request.clone());
 
-        self.responses.first().cloned().ok_or(LlmError::ApiError {
-            status: 500,
-            body: "No mock response configured".into(),
+        self.responses.first().cloned().ok_or(LlmError::Provider {
+            provider: "mock".into(),
+            status: Some(500),
+            code: None,
+            message: "No mock response configured".into(),
         })
     }
 
-    async fn llm_call_stream(&self, _request: &ChatRequest) -> Result<LlmStream, LlmError> {
-        // TODO: 实现流式 mock
-        Ok(Box::pin(futures_core::stream::empty()))
+    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
+        self.received_requests.lock().unwrap().push(request.clone());
+
+        let response = self.responses.first().cloned().ok_or(LlmError::Provider {
+            provider: "mock".into(),
+            status: Some(500),
+            code: None,
+            message: "No mock response configured".into(),
+        })?;
+
+        let model = String::new();
+        let events: Vec<Result<ProviderEvent, LlmError>> = vec![
+            Ok(ProviderEvent::Start {
+                model: model.clone(),
+            }),
+            Ok(ProviderEvent::Token {
+                token: response
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        lellm_core::ContentBlock::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            }),
+            Ok(ProviderEvent::ResponseComplete {
+                tool_calls: response.tool_calls().cloned().collect(),
+                usage: Some(response.usage),
+            }),
+        ];
+
+        let stream = stream::iter(events);
+        Ok(Box::pin(stream))
     }
 
     fn provider_id(&self) -> &str {

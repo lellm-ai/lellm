@@ -1,14 +1,15 @@
 # lellm v0.1 产品蓝图
 
-> 版本：v0.1 | 日期：2026-06-01 | 状态：已确认
+> 版本：v0.1 | 日期：2026-06-15 | 状态：代码已对齐
+> 设计决策详见 [DESIGN.md](./DESIGN.md)
 
 ## 一、项目愿景
 
 做 Rust 版本的 LangChain / LangGraph / AutoGen。
 
-- LLM 抽象层，以及帮助快速构建常用应用的高层接口；标准化消息内容格式；提供基础的 LLM provider 适配
-- 低层编排层，让开发者能精准控制 Agent 的执行流程；提供基础的 function call, agent loop, tool use, mcp client/server
-- 支持节点 node, 边 edge, 图 graph, Multi-Agent Orchestration
+- LLM 抽象层，标准化消息内容格式；提供基础的 LLM provider 适配
+- 低层编排层，让开发者能精准控制 Agent 的执行流程；提供基础的 function call, agent loop, tool use, MCP client
+- 支持节点 node, 边 edge, 图 graph, Multi-Agent Orchestration（v0.2+）
 - 支持流式输出、持久化执行、短期记忆、人类介入（human-in-the-loop）
 
 ## 二、v0.1 范围
@@ -17,150 +18,101 @@
 
 | Crate | 职责 | 核心内容 |
 |-------|------|----------|
-| `lellm-core` | 协议对象 | Message, ContentBlock(Text/Thinking/Image/ToolCall/ToolResult), ChatRequest/Response, ToolDefinition, TokenUsage, LlmError |
-| `lellm-provider` | Provider trait + 适配器 | LlmProvider trait, OpenAI/Anthropic/NVIDIA/DeepSeek/VLLM/LLaMA, ModelRouter, ProviderBuilder, StreamEvent |
-| `lellm-agent` | Agent 运行时 | ToolRegistry, ToolExecutor, ToolUseLoop, ParallelSafety, RetryPolicy, LoopDetector, FallbackStrategy, ShortTermMemory, LongTermMemory, MemoryStore |
-| `lellm-macros` | 派生宏 | `#[derive(ToolDefinition)]` — JSON Schema 生成 + 参数反序列化 |
+| `lellm` | 门面 crate | Feature-gated re-export 所有子 crate；用户统一入口 |
+| `lellm-core` | 协议对象 | Message, ContentBlock, ChatRequest/Response, ToolDefinition, CacheControl, TokenUsage, LlmError |
+| `lellm-provider` | Provider trait + Codec | LlmProvider, CodecProvider, ProviderExtension (三权分立), ModelRouter, ProviderRegistry, MockProvider |
+| `lellm-agent` | Agent 运行时 | ToolExecutor, ToolUseLoop, AgentEvent, ParallelSafety, RetryPolicy, FallbackStrategy |
+| `lellm-macros` | 派生宏 + 属性宏 | `#[tool]` 函数宏, `#[derive(Tool)]` struct 宏, `ToolDefinition` 向后兼容别名 |
+| `lellm-mcp` | MCP Client | McpClient, McpTransport (stdio), McpCatalog (ToolCatalog), ToolBridge |
 
 ### 不包含（v0.2+）
 
-- Graph/Node/Edge 编排层（v0.1 完全不包含）
-- MCP Client/Server（v0.1 仅预留 `ToolSource::Mcp`）
-- Sandbox（v0.1 暂不提取）
-- Harness Orchestrator（v0.1 暂不提取）
+- Graph/Node/Edge 编排层
+- Sandbox / Harness Orchestrator
+- LongTermMemory / MemoryStore
 
 ## 三、Workspace 结构
 
 ```
 lellm/
 ├── Cargo.toml                  # workspace root
-├── docs/
-│   └── BLUEPRINT.md            # 本文件
+├── lellm/                      # 门面 crate — feature-gated re-export
 ├── lellm-core/                 # 协议对象，零运行时依赖
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── message.rs          # Message, ContentBlock
-│       ├── request.rs          # ChatRequest, ToolDefinition, ToolChoice
-│       ├── response.rs         # ChatResponse, ToolCall, ToolResult, TokenUsage
-│       └── error.rs            # LlmError, ToolError, MemoryError, ParseError
 ├── lellm-provider/             # Provider trait + 适配器
-│   ├── Cargo.toml              # features: openai, anthropic, openai-compat
-│   └── src/
-│       ├── lib.rs              # LlmProvider trait, StreamEvent, StreamMode
-│       ├── builder.rs          # ProviderBuilder
-│       ├── router.rs           # ModelRouter, TaskLevel
-│       └── providers/
-│           ├── mod.rs
-│           ├── base.rs         # GenericProvider<Adapter>, ProviderAdapter trait
-│           ├── openai.rs       # OpenAIAdapter (feature = "openai")
-│           ├── anthropic.rs    # AnthropicAdapter (feature = "anthropic")
-│           └── openai_compat.rs # OpenAI兼容 (NVIDIA/DeepSeek/VLLM/LLaMA)
-│           └── mock.rs         # MockProvider (测试用)
 ├── lellm-agent/                # Agent 运行时
-│   ├── Cargo.toml              # features: sqlite
-│   └── src/
-│       ├── lib.rs
-│       ├── agent.rs            # Agent 主结构
-│       ├── tools/
-│       │   ├── mod.rs
-│       │   ├── registry.rs     # ToolRegistry, ToolSource, ToolSearchResult
-│       │   ├── executor.rs     # ToolExecutor, ParallelSafety, ToolRegistration
-│       │   ├── loop_.rs        # ToolUseLoop (含流式 execute_stream)
-│       │   ├── retry.rs        # ToolErrorKind, RetryPolicy, BackoffStrategy
-│       │   ├── loop_detector.rs # LoopDetector, ToolCallFingerprint
-│       │   ├── fallback.rs     # FallbackStrategy trait, FallbackReason, DefaultFallback
-│       │   └── signal_voter.rs # SignalVoter, NegativeSignal
-│       └── memory/
-│           ├── mod.rs
-│           ├── short_term.rs   # ShortTermMemory (环形缓冲)
-│           ├── long_term.rs    # LongTermMemory
-│           └── store.rs        # MemoryStore (SQLite, feature = "sqlite")
-└── lellm-macros/               # 派生宏
-    ├── Cargo.toml              # proc-macro = true
-    └── src/
-        └── lib.rs              # #[derive(ToolDefinition)]
+├── lellm-macros/               # 派生宏
+└── lellm-mcp/                  # MCP Client（v0.1 提前纳入）
 ```
 
-## 四、核心设计决策
+> 完整文档：[MCP 集成概览](./mcp-overview.md) → [ADR 系列](./adr/)
 
-### 4.1 Crate 划分原则
+## 四、架构总览
 
-**Crate 拆分准则：** 只有当某个模块未来可能被单独引用（被其他项目依赖）时，才值得拆成独立 crate。
+```
+用户
+ ↓
+Graph (v0.2)
+ ↓
+Agent (ToolUseLoop)
+ ↓
+ToolExecutor
+ ↓
+ToolRegistration
+ ├─ LocalTool (现有)
+ └─ McpToolBridge (v0.1)
+      ↓
+   McpClient
+      ↓
+   McpTransport (stdio)
+      ↓
+   外部 MCP Server
+```
 
-**Core 原则：**
-- 零 Provider 依赖
-- 零 Runtime 依赖
-- 尽量少 Feature
-- 能被所有 crate 引用
+## 五、核心 API
 
-**v0.1 选择 4 个 crate 而非 5 个的原因：**
-
-1. **Memory 不单独 crate** — ShortTermMemory 本质是 `VecDeque<Message>`；LongTermMemory 本质是 SQLite 存储。两者都与 Agent Loop 高度耦合，很少被单独引用。
-2. **Tool System 不单独 crate** — ToolRegistry、ToolExecutor、ToolUseLoop、Fallback、LoopDetector 全部是 Agent Runtime 的组成部分。LangChain、AutoGen、OpenAI Agents SDK 都没有将 Tool 独立成包。
-3. **真正独立的是协议对象** — Tool trait、ToolDefinition、ToolCall、ToolResult 放在 `lellm-core`，作为统一抽象层（类似 openai-types / anthropic-types 的统一版）。
-
-### 4.2 发布策略 — 分阶段
-
-v0.1 只确保 **LLM ↔ Tool Call** 核心闭环独立可运行且通过测试。Graph 编排和 MCP 建立在此闭环之上。
-
-### 4.3 Feature Gate
-
-provider 适配器通过 feature flag 可选编译，用户只编译需要的 provider。避免拆成独立 crate 的过度设计。
-
-### 4.4 剥离策略 — 复制 + 净化
-
-1. 读取 devops-agent 源文件
-2. 手动移除所有对 devops-agent 内部模块的引用
-3. 用 trait/接口替代具体类型依赖
-4. 写入 lellm workspace，编写独立测试
-5. 最后让 devops-agent `Cargo.toml` 依赖 `lellm-*`，删除原代码
-
-### 4.5 Memory 存储 — SQLite 直接绑定
-
-v0.1 只做 SQLite 后端，feature gate 开关。等真正需要第二个存储时再抽象。
-
-### 4.6 流式支持 — 全程事件流式（LangChain 模式）
+### 4.1 LlmProvider
 
 ```rust
-pub type LlmStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>;
-
-#[derive(Debug, Clone)]
-pub enum StreamEvent {
-    LlmStart { model: String, messages_count: usize },
-    LlmToken { token: String },
-    LlmEnd { tool_calls: Vec<ToolCall> },
-    ToolStart { tool_call_id: String, name: String },
-    ToolEnd { tool_call_id: String, result: String },
-    Custom { data: serde_json::Value },
+pub trait LlmProvider: Send + Sync {
+    async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
+    async fn stream(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<ProviderStream, LlmError>;
+    fn provider_id(&self) -> &str;
 }
 ```
 
-**Trait 暴露 `Stream`，Provider 内部用 `mpsc`：**
-- `LlmProvider::llm_call_stream` 返回 `Result<LlmStream, LlmError>`
-- Provider 内部仍用 `mpsc::channel(32)` 实现，转换为 BoxStream 返回
-- 消费者可以用 tokio-stream 的 `.merge()`、`.take()` 等组合操作
-
-ToolUseLoop 提供两个接口：
+### 4.2 ToolUseLoop
 
 ```rust
+// 推荐入口 — AgentBuilder
+let agent = AgentBuilder::new(model)
+    .system_prompt("...".into())
+    .tool(search_tool)
+    .max_iterations(20)
+    .build();
+
+// 内部结构 — Config vs Deps 分层
+pub struct ToolUseLoop {
+    model: ResolvedModel,
+    executor: ToolExecutor,
+    config: ToolUseConfig,    // 纯参数 (system_prompt, max_iterations)
+    deps: ToolUseDeps,        // 策略服务 (fallback)
+}
+
 impl ToolUseLoop {
-    // 非流式
-    pub async fn execute(self) -> Result<ToolUseResult, LlmError>;
-
-    // 流式（返回事件接收器）
-    pub fn execute_stream(
-        self,
-        mode: StreamMode,
-    ) -> tokio::sync::mpsc::Receiver<Result<StreamEvent, LlmError>>;
+    pub fn new(model, executor, config, deps) -> Self;
+    pub fn simple(model, executor) -> Self;  // 默认配置
+    pub fn with_system_prompt(self, prompt) -> Self;  // 链式微调
+    pub fn with_max_iterations(self, max) -> Self;
+    // &self 借用，不消费 — 支持复用
+    pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError>;
+    pub fn execute_stream(&self, messages: Vec<Message>) -> AgentStream;
 }
 ```
 
-内部累积 + 外部流式：纯文本部分实时发送 `LlmToken`，tool_calls 在 LLM 返回完成后统一解析并原子执行。
-
-### 4.6.5 ContentBlock 统一协议
-
-`ContentBlock` 是 Message 和 ChatResponse 的唯一内容载体：
+### 4.3 ContentBlock
 
 ```rust
 pub enum ContentBlock {
@@ -168,429 +120,147 @@ pub enum ContentBlock {
     Thinking(ThinkingBlock),
     Image { source: ImageSource },
     ToolCall(ToolCall),
-    ToolResult(ToolResult),
 }
 ```
 
-**ChatResponse 与 Message::Assistant 对齐：**
+Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 ContentBlock。
+`ToolResult` 携带 `is_error: bool` 标记，区分工具成功与失败。
 
-```rust
-pub struct ChatResponse {
-    pub content: Vec<ContentBlock>,  // 与 Message::Assistant 一致
-    pub usage: TokenUsage,
-    pub raw: serde_json::Value,      // provider 特有字段兜底
-}
-```
-
-`ContentBlock::ToolCall` 是唯一真相源（Source of Truth），不再有独立的 `tool_calls` 字段。
-`raw` 保留用于 provider 特有字段（stop_reason, safety_ratings 等）。
-
-### 4.7 工具并行执行 — 按 ParallelSafety 分级
-
-```rust
-pub enum ParallelSafety {
-    Safe,                  // 可安全并行
-    CategoryExclusive,     // 同类互斥（类别从 tool.category() 读取）
-    Exclusive,             // 完全互斥
-}
-
-pub struct ToolCategory(Cow<'static, str>);
-impl ToolCategory {
-    pub const FILE_IO: Self = ...;
-    pub const NETWORK: Self = ...;
-    pub const DATABASE: Self = ...;
-    pub fn custom(name: impl Into<Cow<'static, str>>) -> Self;
-}
-```
-
-执行器逻辑：
-- `Safe` → 直接 `tokio::join!` 并行
-- `CategoryExclusive` → 按 `category()` 分组，组内串行、组间并行
-- `Exclusive` → 全局逐个串行
-
-### 4.8 Provider 架构 — 三层分离
+### 4.4 Provider 三层架构
 
 ```
-用户          LlmProvider (public API)
-               ↓
-框架内部      GenericProvider<A>
-               ↓
-内部 SPI      ProviderAdapter (pub(crate))
+用户 → LlmProvider (public API)
+       → CodecProvider<C> (框架内部)
+          → ProviderExtension 三权分立 (生态扩展 SPI)
+              ├── ChatCodec (协议编解码)
+              ├── ModelCapabilities (能力矩阵)
+              └── ProviderMeta (连接元数据)
 ```
 
-```rust
-// ─── 对外 Public API ───
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError>;
-    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError>;
-    fn provider_id(&self) -> &str;
-}
+详见 [DESIGN.md §5](./DESIGN.md#5-providercodec---%E4%B8%89%E6%9D%83%E5%88%86%E7%AB%8B%E7%9A%84%E5%8D%8F%E8%AE%AE%E7%BC%96%E8%A7%A3%E7%A0%81-spi)
 
-// ─── 内部 SPI (pub(crate)) ───
-pub(crate) trait ProviderAdapter: Send + Sync {
-    fn name(&self) -> &str;
-    fn build_request(&self, req: &ChatRequest) -> Result<HttpRequest, LlmError>;
-    fn parse_response(&self, resp: &HttpResponse) -> Result<ChatResponse, LlmError>;
-    fn parse_stream_chunk(&self, chunk: &[u8])
-        -> Result<Option<StreamChunk>, LlmError>;
-}
+## 五、关键设计决策索引
 
-// ─── 自动实现 ───
-#[async_trait]
-impl<A: ProviderAdapter + Send + Sync> LlmProvider for GenericProvider<A> { ... }
-```
-
-`OpenAICompatAdapter` 一个实现覆盖 7+ provider（OpenAI, NVIDIA, DeepSeek, VLLM, LLaMA, LM Studio, Ollama, OpenRouter），仅 `base_url` 不同。
-
-用户永远只面对 `LlmProvider`，无需创建 `XxxProvider` 包装类型。
-
-### 4.9 ModelRouter — 三级路由（配置解析器）
-
-```rust
-pub enum TaskLevel { Flash, Standard, Pro }
-
-pub struct RouteEntry {
-    pub provider_id: String,
-    pub model: String,
-}
-
-pub struct ModelRouter {
-    routes: HashMap<TaskLevel, RouteEntry>,
-}
-
-impl ModelRouter {
-    pub fn resolve(&self, level: TaskLevel) -> Option<&RouteEntry>;
-}
-```
-
-**Router 不持有 `Arc<dyn LlmProvider>`** — 只做配置解析，返回 `RouteEntry` 由外部组装。
-
-### 4.9.1 ProviderRegistry — Provider 容器
-
-```rust
-pub struct ProviderRegistry {
-    providers: HashMap<String, Arc<dyn LlmProvider>>,
-}
-
-impl ProviderRegistry {
-    pub fn register(&self, id: &str, provider: Arc<dyn LlmProvider>);
-    pub fn get(&self, id: &str) -> Option<Arc<dyn LlmProvider>>;
-}
-```
-
-### 4.9.2 使用模式
-
-```rust
-let route = router.resolve(TaskLevel::Flash)?;
-let provider = registry.get(&route.provider_id)?;
-provider.call(request.with_model(route.model.clone()));
-```
-
-### 4.10 配置管理 — 构建器模式
-
-```rust
-let registry = ProviderRegistry::new();
-registry.register("openai", Arc::new(
-    GenericProvider::<OpenAICompatAdapter>::new(...)
-));
-registry.register("anthropic", Arc::new(
-    GenericProvider::<AnthropicAdapter>::new(...)
-));
-```
-
-库不读配置文件，配置加载留给上层应用。
-
-### 4.11 Tool 声明 — Schema 与 Runtime 分离
-
-**核心原则：** Tool Schema（给 LLM 看）与 Tool Runtime（给 Agent 执行）是完全不同的职责，不应绑死。
-
-```rust
-// ─── Schema 层 — derive 宏生成 JSON Schema + 反序列化 ───
-#[derive(ToolDefinition)]
-pub struct ReadFileArgs {
-    /// 文件路径
-    pub path: String,
-}
-
-// 宏生成：
-// impl ReadFileArgs {
-//     fn schema() -> ToolDefinition { ... }
-//     fn from_args(value: &serde_json::Value) -> Result<Self, ToolError> { ... }
-// }
-
-// ─── Runtime 层 — 用户手动实现执行逻辑 ───
-#[async_trait]
-pub trait ToolExecutor {
-    type Args;
-
-    fn definition(&self) -> ToolDefinition;
-    fn category(&self) -> Option<ToolCategory>;
-    fn parallel_safety(&self) -> ParallelSafety;
-    async fn execute(&self, args: Self::Args, ctx: &ToolContext)
-        -> Result<ToolResult, ToolError>;
-}
-
-// 用户实现
-pub struct ReadFileTool;
-#[async_trait]
-impl ToolExecutor for ReadFileTool {
-    type Args = ReadFileArgs;
-
-    fn definition(&self) -> ToolDefinition { ReadFileArgs::schema() }
-    fn category(&self) -> Option<ToolCategory> { Some(ToolCategory::FILE_IO) }
-    fn parallel_safety(&self) -> ParallelSafety { ParallelSafety::CategoryExclusive }
-
-    async fn execute(&self, args: ReadFileArgs, _ctx: &ToolContext)
-        -> Result<ToolResult, ToolError>
-    {
-        // ... 执行文件读取
-    }
-}
-
-// ─── Registry 层 — 类型擦除，统一存储 ───
-// ToolRegistry 内部存储 Box<dyn DynToolExecutor>
-// 通过 erased_serde 或类似机制擦除 Args 类型参数
-```
-
-**为什么这样设计：**
-- Local Tool、MCP Tool、Remote Tool、HTTP Tool 未来都可接入同一 Registry
-- Schema 与 Runtime 解耦，避免框架把三合一绑死导致的重构痛苦
-
-### 4.12 循环检测 — 指纹去重 + 阈值触发
-
-```rust
-pub struct LoopDetector {
-    history: Vec<ToolCallFingerprint>,
-    threshold: usize,
-}
-
-#[derive(Hash, Eq, PartialEq)]
-struct ToolCallFingerprint {
-    tool_name: String,
-    normalized_args: String,  // JSON 键排序 + 空白去除
-}
-```
-
-相同指纹连续出现超过阈值 → 注入系统提示干预。
-
-### 4.13 Fallback 策略 — Agent Runtime 统一恢复机制
-
-**归属：** `lellm-agent`（不是 Provider 层，不是 Graph 层）
-
-```rust
-pub enum FallbackReason {
-    LlmError(LlmError),
-    ToolError(ToolError),
-    LoopDetected,
-    MaxIterationsReached,
-}
-
-pub struct FallbackContext {
-    pub reason: FallbackReason,
-    pub conversation: Arc<[Message]>,
-    pub attempt: usize,
-}
-
-pub enum FallbackAction {
-    Retry,                       // 原样重试
-    RetryWithMessages(Vec<Message>), // 注入消息后重试
-    SwitchProvider(RouteEntry),  // 切换 provider
-    Complete(ChatResponse),      // 直接返回响应
-    Abort,                       // 放弃
-}
-
-#[async_trait]
-pub trait FallbackStrategy {
-    async fn handle(&self, ctx: &FallbackContext) -> FallbackAction;
-}
-```
-
-**v0.1 DefaultFallback：** 仅支持 `Retry` / `Abort`
-**v0.2+：** 扩展 `SwitchProvider`, `RetryWithMessages`, `Complete`
-
-### 4.14 ContentBlock — 核心层极简
-
-见 4.6.5 节的统一 ContentBlock 设计。
-
-`cache_control` 等 provider 特有标记下沉到 provider adapter 层。
-
-### 4.15 错误体系 — 每层自定义 Error
-
-```rust
-// lellm-core
-pub enum LellmError {
-    Llm(LlmError),
-    Tool(ToolError),
-    Memory(MemoryError),
-    Parse(ParseError),
-}
-```
-
-库边界用自定义 Error，内部用 anyhow。
-
-### 4.16 异步运行时 — 分层绑定
-
-- `lellm-core`：零运行时依赖（仅 serde + serde_json）
-- `lellm-provider`：绑定 tokio + reqwest
-- `lellm-agent`：绑定 tokio
-- `lellm-macros`：proc-macro，零运行时
-
-### 4.17 测试策略 — 三层 + Mock Provider
-
-| 层级 | 内容 |
+| 主题 | 详见 |
 |------|------|
-| 单元测试 | 每个 crate 内部测试 |
-| 集成测试 | `tests/` 目录，跨 crate 集成场景 |
-| 示例项目 | `examples/` 可运行 demo |
+| 门面 crate 与 Feature Gate | [DESIGN.md §0](./DESIGN.md#0-lellm-门面-crate) / [§16](./DESIGN.md#16-门面-crate-feature-gate) |
+| MaxIterationsReached 归 Ok | [DESIGN.md §1](./DESIGN.md#1-maxiterationsreached--ok-还是-err) |
+| AgentEvent 终态契约 | [DESIGN.md §2](./DESIGN.md#2-agentevent-终态契约) |
+| ToolUseLoop 与 model 单向流动 | [DESIGN.md §3](./DESIGN.md#3-tooluseloop-不知道-router--registry--model-单向流动) |
+| ProviderCodec 三权分立 | [DESIGN.md §5](./DESIGN.md#5-providercodec---三权分立的协议编解码-spi) |
+| ToolError 类型化 + RetryPolicy 集成 | [DESIGN.md §7.1-7.2](./DESIGN.md#7-%E5%87%86%E5%A4%8D%E5%B1%82---retypolicy%E5%8B%BE%E6%97%B6%E6%95%85%E9%9A%9C%E4%B8%8E-fallbackstrategy%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96) |
+| FallbackStrategy 路由决策 | [DESIGN.md §7.3](./DESIGN.md#73-fallbackstrategy---%E8%B7%AF%E7%94%B1%E5%86%B3%E7%AD%96%EF%BC%88%22%E6%8D%A2%E6%9D%A1%E8%B7%AF%E8%B5%B0%22%EF%BC%89) |
+| AgentEvent 流式阶段事件 | [DESIGN.md §8](./DESIGN.md#8-agentevent-流式阶段事件) |
+| Message 语义校验 | [DESIGN.md §9](./DESIGN.md#9-message-%E8%AF%AD%E4%B9%89%E6%A0%A1%E9%AA%8C) |
+| build_request 序列化完整性 | [DESIGN.md §10](./DESIGN.md#10-build_request-%E5%BA%8F%E5%88%97%E5%8C%96%E5%AE%8C%E6%95%B4%E6%80%A7) |
+| 输出 + 推理预算保险丝 | [DESIGN.md §11](./DESIGN.md#11-%E8%BE%93%E5%87%BA%E9%A4%88%E7%AE%97%E4%BF%9D%E9%99%A9%E4%B8%9D) |
+| 日志降噪 | [DESIGN.md §12](./DESIGN.md#12-%E6%97%A5%E5%BF%97%E5%87%8F%E5%99%B2) |
+| 推理控制 | [DESIGN.md §13](./DESIGN.md#13-%E6%8E%A8%E7%90%86%E6%8E%A7%E5%88%B6--reasoningconfig-stream_thinking-%E4%B8%A4%E5%B1%82%E6%A8%A1%E5%9E%8B) |
+| RequestOptions | [DESIGN.md §14](./DESIGN.md#14-requestoptions--agent-%E5%B1%8F%E7%94%9F%E6%88%90%E5%8F%82%E6%95%B0%E8%A6%BD%E7%9B%96) |
+| Context Compaction | [DESIGN.md §15](./DESIGN.md#15-context-compaction---%E4%B8%8A%E4%B8%8B%E6%96%87%E5%8E%8B%E7%BC%A9) |
 
-MockProvider 通过 feature = "mock" 提供，支持预设响应和 tool_call 注入。
+### MCP 设计决策（v0.3+）
 
-## 五、版本路线图
+| 主题 | 详见 |
+|------|------|
+| ARG 评审报告 | [ARG-000](./adr/000-architecture-review-gate.md) |
+| MCP 职责边界 | [ADR-001](./adr/001-mcp-as-tool-runtime-extension.md) |
+| Crate 拆分策略 | [ADR-002](./adr/002-mcp-crate-structure.md) |
+| Transport 抽象 | [ADR-003](./adr/003-mcp-transport-abstraction.md) |
+| Tool 桥接设计 | [ADR-004](./adr/004-mcp-tool-bridge.md) |
 
-| 版本 | 范围 | 状态 |
+## 六、实现状态
+
+### v0.1 闭环
+
+```
+ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → LLM (循环)
+```
+
+### 核心模块
+
+| 模块 | 状态 |
+|------|------|
+| lellm-core 协议对象 | ✅ |
+| LlmProvider trait | ✅ |
+| ProviderCodec 三权分立 | ✅ |
+| CodecProvider | ✅ |
+| ProviderBuilder + CodecProvider::openrouter() + ProviderProfile | ✅ |
+| ProviderMeta::default_headers() | ✅ |
+| stream/ 传输层解耦 | ✅ |
+| SseParser + ToolCallAccumulator | ✅ |
+| EventSink + StreamEvent | ✅ |
+| ToolExecutor | ✅ |
+| ToolUseLoop | ✅ |
+| AgentBuilder | ✅ |
+| ModelRouter + Registry | ✅ |
+| ShortTermMemory | ❌ v0.1 删除（LoopState 足够） |
+| ToolRegistry | ❌ v0.1 删除（ToolExecutor 内置 HashMap） |
+| 输出预算保险丝 | ✅ |
+| 推理预算保险丝 | ✅ |
+| Context Compaction | ✅ |
+| RequestOptions | ✅ |
+| derive(ToolDefinition) | ✅ |
+
+### 输出预算
+
+| 功能 | 状态 | 说明 |
 |------|------|------|
-| **v0.1** | core + provider + agent + macros | 蓝图已确认 |
-| **v0.2** | Graph/Node/Edge 编排层 + MCP Client | 规划中 |
-| **v0.3** | MCP Server + Multi-Agent Orchestration | 规划中 |
+| `max_output_tokens` 单轮上限 | ✅ | 注入 `ChatRequest.max_tokens`，流式消费时实时检查 |
+| `max_total_output_tokens` 总上限 | ✅ | 整个 Agent Run 累计，防止多轮成本失控 |
+| `StopReason::OutputBudgetExceeded` | ✅ | 区分 token 超限与轮次超限 |
+| `estimate_text()` 导出 | ✅ | CJK-aware 启发式，供流式 delta 增量估算 |
+| 日志降噪 | ✅ | 移除 stream_processor 高频 trace，channel 满静默丢弃 |
 
-### 未来 Crate 结构
+### 推理预算
 
-```
-lellm-core        # 协议对象（不变）
-    ↓
-lellm-provider    # Provider 适配（不变）
-    ↓
-lellm-agent       # Agent 运行时（不变）
-    ↓
-lellm-graph       # v0.2 — Graph/Node/Edge 编排
-    ↓
-lellm-mcp         # v0.3 — MCP Client/Server
-```
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| `ChatRequest.max_reasoning_tokens` 单轮上限 | ✅ | 流式消费 ThinkingDelta 时实时检查 |
+| `StopReason::ReasoningBudgetExceeded` | ✅ | 区分推理超限与输出超限 |
+| `LoopState.total_reasoning_tokens` | ✅ | 累计推理 Token |
+| `max_total_reasoning_tokens` 总上限 | ✅ | 非流式 + 流式均已接入 |
 
-依赖关系：`core → provider → agent → graph`，清晰分层。
+### Context Compaction
 
-### v0.2 — lellm-graph 详细规划
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| ContextBudget 配置 | ✅ | max_tokens / warning_ratio / keep_recent_turns |
+| ContextCompactor trait | ✅ | 可插拔压缩策略 |
+| LocalCompactor | ✅ | 滑动窗口 + 纯文本摘要 |
+| ContextCompacted 事件 | ✅ | 可观测性 |
+| 工具结果截断 | ✅ | 两条路径统一截断 |
 
-v0.2 将创建独立的 `lellm-graph` crate，实现完整的 Graph 编排能力（类似 LangGraph）。
+### Resilience Layer
 
-**核心设计原则：**
-- Node、Edge、GraphState 等属于 **Graph Runtime**，不属于 Core Protocol
-- v0.1 的 Core 已彻底剥离 graph.rs，Core 只做协议对象
-- v0.2 再决定 Node trait 用 `async-trait` 还是 `impl Future`
+| 模块 | 类型定义 | 集成状态 | v0.1 范围 |
+|------|---------|---------|----------|
+| ToolError (类型化) | ✅ | ✅ | ✅ 必须 |
+| RetryPolicy → ToolExecutor | ✅ | ✅ | ✅ 必须 |
+| FallbackStrategy → ToolUseLoop | ✅ | ✅ | ✅ 必须 |
+| AgentEvent::Retry | ✅ | ✅ | ✅ 已接入 |
+| LoopDetector | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
+| SignalVoter | ✅ | 🔒 `v02-preview` | ❌ v0.2 |
 
-**lellm-graph 目录结构：**
+> **v0.1 铁律：** 仓库中不允许存在 "Runtime 永远不会调用到的恢复模块"。要么接入，要么标记 v0.2。
 
-```
-lellm-graph/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── node.rs       # Node trait — 接收状态并返回新状态
-    ├── edge.rs       # Edge — 条件边、默认边
-    ├── graph.rs      # Graph, GraphState — 节点间共享的键值存储
-    ├── executor.rs   # GraphExecutor — 图的执行调度器
-    ├── checkpoint.rs # CheckpointStore — 执行状态持久化
-    ├── interrupt.rs  # HumanInterrupt — 人类介入点
-    ├── subgraph.rs   # SubGraph — 子图嵌套
-    └── multi_agent.rs # MultiAgentGraph — 多 Agent 编排
-```
+### 待完成
 
-**Node trait 设计方向（v0.2 时再拍板）：**
+| 优先级 | 模块 | 状态 |
+|--------|------|------|
+| P0 | `ToolError` 类型化 + `ToolResult = Result<String, ToolError>` | ✅ 已完成（core/error.rs） |
+| P0 | `ToolExecutor` 集成 `RetryPolicy` | ✅ 已完成（agent/tools/executor.rs） |
+| P1-H | AnthropicCodec `encode` / `decode_sse` 完善 | ✅ 已完成 |
+| P1-H | OpenAICompatCodec `encode` 完善 | ✅ 已完成 |
+| P3 | lellm-macros derive | ✅ 已完成 |
+| P4 | examples/ | ✅ 已完成 |
 
-```rust
-// 方案 A：async-trait（简洁但间接调用开销）
-#[async_trait]
-pub trait Node: Send + Sync {
-    fn name(&self) -> &str;
-    async fn execute(&self, state: &mut GraphState) -> Result<NodeResult, GraphError>;
-}
+## 七、版本路线图
 
-// 方案 B：返回 Future（零间接调用开销但签名复杂）
-pub trait Node: Send + Sync {
-    fn name(&self) -> &str;
-    fn execute(
-        &self,
-        state: &mut GraphState,
-    ) -> impl Future<Output = Result<NodeResult, GraphError>> + Send;
-}
-```
-
-**GraphState 设计方向：**
-
-```rust
-// 基于 serde_json::Value 的灵活方案
-pub type GraphState = HashMap<String, serde_json::Value>;
-
-// 或基于强类型的方案（v0.2 时根据实际需求决定）
-pub struct GraphState {
-    data: HashMap<String, serde_json::Value>,
-    version: u64,       // 乐观锁版本号
-    checkpoint_id: Option<String>,
-}
-```
-
-### v0.2 — lellm-graph 详细规划
-
-v0.2 将创建独立的 `lellm-graph` crate，实现完整的 Graph 编排能力（类似 LangGraph）。
-
-**核心设计原则：**
-- Node、Edge、GraphState 等属于 **Graph Runtime**，不属于 Core Protocol
-- v0.1 的 Core 已彻底剥离 graph.rs，Core 只做协议对象
-- v0.2 再决定 Node trait 用 `async-trait` 还是 `impl Future`
-
-**lellm-graph 目录结构：**
-
-```
-lellm-graph/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── node.rs       # Node trait — 接收状态并返回新状态
-    ├── edge.rs       # Edge — 条件边、默认边
-    ├── graph.rs      # Graph, GraphState — 节点间共享的键值存储
-    ├── executor.rs   # GraphExecutor — 图的执行调度器
-    ├── checkpoint.rs # CheckpointStore — 执行状态持久化
-    ├── interrupt.rs  # HumanInterrupt — 人类介入点
-    ├── subgraph.rs   # SubGraph — 子图嵌套
-    └── multi_agent.rs # MultiAgentGraph — 多 Agent 编排
-```
-
-**Node trait 设计方向（v0.2 时再拍板）：**
-
-```rust
-// 方案 A：async-trait（简洁但间接调用开销）
-#[async_trait]
-pub trait Node: Send + Sync {
-    fn name(&self) -> &str;
-    async fn execute(&self, state: &mut GraphState) -> Result<NodeResult, GraphError>;
-}
-
-// 方案 B：返回 Future（零间接调用开销但签名复杂）
-pub trait Node: Send + Sync {
-    fn name(&self) -> &str;
-    fn execute(
-        &self,
-        state: &mut GraphState,
-    ) -> impl Future<Output = Result<NodeResult, GraphError>> + Send;
-}
-```
-
-**GraphState 设计方向：**
-
-```rust
-// 基于 serde_json::Value 的灵活方案
-pub type GraphState = HashMap<String, serde_json::Value>;
-
-// 或基于强类型的方案（v0.2 时根据实际需求决定）
-pub struct GraphState {
-    data: HashMap<String, serde_json::Value>,
-    version: u64,       // 乐观锁版本号
-    checkpoint_id: Option<String>,
-}
-```
-
-## 六、参考项目
-
-- **devops-agent**: `/Users/pengh/www/enjoy/devops-agent/backend/src/` — 提取源
-- **LangChain**: 流式传输系统设计参考（stream_mode: updates/messages/custom）
+| 版本 | 范围 |
+|------|------|
+| **v0.1** | core + provider + agent + macros |
+| **v0.2** | Graph/Node/Edge + LoopDetector/SignalVoter 集成 |
+| **v0.3** | MCP Client (Tools only, stdio, ToolBridge) |
+| **v0.4** | MCP Server + Resources + HTTP/SSE Transport |
+| **v0.5** | Sampling + Agent↔Agent via MCP |

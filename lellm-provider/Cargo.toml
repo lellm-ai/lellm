@@ -3,6 +3,9 @@ name = "lellm-provider"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Provider adapters for LeLLM — OpenAI, Anthropic, and more"
+documentation = "https://docs.rs/lellm-provider"
+repository = "https://github.com/lellm-ai/lellm"
 
 [features]
 default = ["openai", "anthropic", "openai-compat"]
@@ -21,4 +24,9 @@ tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 reqwest = { version = "0.12", features = ["json", "stream"] }
-futures-core = "0.3"
+futures-core.workspace = true
+futures-util.workspace = true
+secrecy.workspace = true
+url.workspace = true
+http = "1"
+bytes = "1"

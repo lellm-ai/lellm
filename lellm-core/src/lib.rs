@@ -11,10 +11,13 @@ pub mod message;
 pub mod request;
 pub mod response;
 
-pub use error::{LellmError, LlmError, MemoryError, ParseError, ToolError};
+pub use error::{
+    IntoToolError, IntoToolResult, LellmError, LlmError, MemoryError, ParseError, ToolError,
+    ToolErrorKind, ToolResult,
+};
 pub use message::{
     CacheControl, ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall,
-    ToolResult, text_block,
+    text_block,
 };
-pub use request::{ChatRequest, ToolChoice, ToolDefinition};
+pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};
