@@ -620,3 +620,46 @@ fn serialize_max_reasoning_tokens(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lellm_core::{CacheControl, TextBlock};
+
+    #[test]
+    fn test_tool_cache_control_ignored() {
+        let tools = vec![ToolDefinition {
+            name: "search".into(),
+            description: "Search".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            cache_control: Some(CacheControl::Breakpoint),
+        }];
+        let result = serialize_openai_tools(&tools);
+        assert_eq!(result.len(), 1);
+        // cache_control 不应出现在 OpenAI 输出中
+        assert!(result[0].get("cache_control").is_none());
+        assert_eq!(result[0]["function"]["name"], "search");
+    }
+
+    #[test]
+    fn test_text_block_cache_control_ignored_in_system() {
+        let blocks = vec![ContentBlock::Text(TextBlock {
+            text: "system prompt".into(),
+            cache_control: Some(CacheControl::Breakpoint),
+        })];
+        let text = serialize_openai_text_blocks(&blocks);
+        // OpenAI 只取文本，忽略 cache_control
+        assert_eq!(text, "system prompt");
+    }
+
+    #[test]
+    fn test_text_block_cache_control_ignored_in_user() {
+        let blocks = vec![ContentBlock::Text(TextBlock {
+            text: "hello".into(),
+            cache_control: Some(CacheControl::Breakpoint),
+        })];
+        let result = serialize_openai_content_blocks(&blocks).unwrap();
+        // OpenAI 只取文本，忽略 cache_control
+        assert_eq!(result, "hello");
+    }
+}

@@ -446,3 +446,38 @@ fn serialize_google_tool_choice(choice: &ToolChoice) -> serde_json::Value {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lellm_core::{CacheControl, TextBlock};
+
+    #[test]
+    fn test_tool_cache_control_ignored() {
+        let tools = vec![lellm_core::ToolDefinition {
+            name: "search".into(),
+            description: "Search".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            cache_control: Some(CacheControl::Breakpoint),
+        }];
+        let result = serialize_google_tools(&tools);
+        assert_eq!(result.len(), 1);
+        // cache_control 不应出现在 Google 输出中
+        assert!(result[0].get("cache_control").is_none());
+        assert_eq!(result[0]["name"], "search");
+    }
+
+    #[test]
+    fn test_text_block_cache_control_ignored() {
+        let blocks = vec![ContentBlock::Text(TextBlock {
+            text: "hello".into(),
+            cache_control: Some(CacheControl::Breakpoint),
+        })];
+        let text: String = blocks
+            .iter()
+            .filter_map(|b| b.as_text().map(|s| s.to_string()))
+            .collect();
+        // Google 只取文本，忽略 cache_control
+        assert_eq!(text, "hello");
+    }
+}
