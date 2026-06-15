@@ -75,7 +75,11 @@ impl ToolRegistration {
         }
     }
 
-    pub fn category_exclusive<F, Fut>(def: lellm_core::ToolDefinition, category: ToolCategory, f: F) -> Self
+    pub fn category_exclusive<F, Fut>(
+        def: lellm_core::ToolDefinition,
+        category: ToolCategory,
+        f: F,
+    ) -> Self
     where
         F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ToolResult> + Send + 'static,
@@ -169,12 +173,17 @@ impl ToolExecutor {
     /// 执行单个工具调用，自带重试。
     ///
     /// 使用预解析的快照执行。
-    pub async fn execute_with_snapshot(&self, call: &ToolCall, snapshot: &ToolSnapshot) -> ToolResult {
+    pub async fn execute_with_snapshot(
+        &self,
+        call: &ToolCall,
+        snapshot: &ToolSnapshot,
+    ) -> ToolResult {
         match snapshot.get(&call.name) {
-            Some(entry) => self
-                .retry_policy
-                .execute_with_retry(&entry.func, &call.arguments)
-                .await,
+            Some(entry) => {
+                self.retry_policy
+                    .execute_with_retry(&entry.func, &call.arguments)
+                    .await
+            }
             None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
         }
     }
@@ -187,15 +196,11 @@ impl ToolExecutor {
         tx: &Sender<AgentEvent>,
     ) -> ToolResult {
         match snapshot.get(&call.name) {
-            Some(entry) => self
-                .retry_policy
-                .execute_with_retry_and_emission(
-                    &entry.func,
-                    &call.arguments,
-                    tx,
-                    &call.id,
-                )
-                .await,
+            Some(entry) => {
+                self.retry_policy
+                    .execute_with_retry_and_emission(&entry.func, &call.arguments, tx, &call.id)
+                    .await
+            }
             None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
         }
     }
@@ -396,27 +401,14 @@ async fn run_serial_indexed_with(
 ) -> Vec<(usize, Message)> {
     let mut results = Vec::with_capacity(calls.len());
     for (idx, call) in calls {
-        let tools = Arc::clone(tools);
-        let rp = retry_policy.clone();
-        let call_clone = call.clone();
-        let name = call_clone.name.clone();
-        let exec_result =
-            match tokio::spawn(async move {
-                match tools.get(&call_clone.name) {
-                    Some(entry) => {
-                        rp.execute_with_retry(&entry.func, &call_clone.arguments).await
-                    }
-                    None => Err(ToolError::not_found(format!("unknown tool: {}", call_clone.name))),
-                }
-            })
-            .await
-            {
-                Ok(tool_result) => tool_result,
-                Err(join_err) => Err(ToolError {
-                    kind: ToolErrorKind::Internal,
-                    message: format!("tool '{name}' panicked: {join_err}"),
-                }),
-            };
+        let exec_result = match tools.get(&call.name) {
+            Some(entry) => {
+                retry_policy
+                    .execute_with_retry(&entry.func, &call.arguments)
+                    .await
+            }
+            None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
+        };
         results.push((idx, Message::tool_result(&call, &exec_result)));
     }
     results

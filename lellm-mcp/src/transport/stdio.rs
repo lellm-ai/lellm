@@ -93,7 +93,7 @@ impl McpTransport for StdioTransport {
         cmd.args(&self.config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         if let Some(ref envs) = self.config.env {
             for (key, value) in envs {
@@ -105,6 +105,30 @@ impl McpTransport for StdioTransport {
 
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stdin = child.stdin.take().expect("stdin should be piped");
+        let stderr = child.stderr.take().expect("stderr should be piped");
+
+        // 后台读取 stderr，转为 tracing 日志
+        let command_name = self.config.command.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            tracing::warn!(target: "mcp", command = %command_name, "{}", trimmed);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "mcp", command = %command_name, error = %e, "stderr read error");
+                        break;
+                    }
+                }
+            }
+        });
 
         let (notification_tx, _) =
             tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
