@@ -900,7 +900,7 @@ lellm-graph/
 │   └── graph_test.rs             # 集成测试
 └── src/
     ├── lib.rs                    # 公开 API
-    ├── error.rs                  # BuildError, GraphError (三分法)
+    ├── error.rs                  # BuildError, GraphError (二分法), ObservedError (独立类型，非 GraphError 变体)
     ├── state.rs                  # State, StateExt, StateReducer, GraphResult
     ├── node.rs                   # GraphNode trait, NextStep, NodeKind, StreamNodeResult
     │                              # TaskNode, ConditionNode

@@ -254,7 +254,7 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | 版本 | 范围 |
 |------|------|
 | **v0.1** | core + provider + agent + macros + MCP (Tools only) |
-| **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误三分法 |
+| **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 |
 | **v0.3** | ParallelNode + Checkpoint + 持久化 |
 | **v0.4** | Multi-Agent Orchestration + MCP Server + Resources |
 | **v0.5** | Sampling + Agent↔Agent via MCP |
