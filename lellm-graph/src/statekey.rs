@@ -18,7 +18,7 @@
 //! state.set("legacy_key", 42);  // 仍然可用
 //! ```
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::state::{State, StateError};
 
