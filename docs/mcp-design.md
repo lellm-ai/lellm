@@ -108,19 +108,17 @@ lellm-mcp
 pub trait McpTransport: Send + Sync + 'static {
     type Stream: Stream<Item = JsonRpcNotification> + Send + 'static;
 
-    async fn connect(&self) -> Result<(), McpError>;
+    async fn connect(&mut self) -> Result<(), McpError>;
     async fn request(
         &self,
-        method: &str,
-        params: serde_json::Value,
-        timeout: Option<Duration>,
+        req: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, McpError>;
     fn notifications(&self) -> Self::Stream;
-    async fn close(&self) -> Result<(), McpError>;
+    async fn close(&mut self) -> Result<(), McpError>;
 }
 ```
 
-**设计理由**：MCP 90% 是 request-response，notification 走独立流。单 `request()` 接口封装请求-响应语义，内部管理 request-id 匹配。
+**设计理由**：MCP 90% 是 request-response，notification 走独立流。`request()` 接收 `JsonRpcRequest` 结构体（含 method、params、id、timeout），内部管理请求-响应匹配。`connect()` / `close()` 使用 `&mut self` 以支持连接状态变更。
 
 ### 连接状态机
 
@@ -131,7 +129,7 @@ Disconnected → Connecting → Initializing → Ready → Broken
 ```
 
 - 状态由 `McpClient` 管理，Transport 不感知
-- `request()` 在非 Ready 状态下 **Fail-fast**（返回 `McpError::Disconnected`）
+- `request()` 在非 Ready 状态下 **Fail-fast**（返回 `McpError::Disconnected`），因使用 `&mut self` 可检查并更新连接状态
 - request-id 连续（monotonic counter，重连不重置）
 - notification 不重放（重连后是全新连接）
 
@@ -184,17 +182,17 @@ impl McpError {
 ### ToolCatalog 抽象
 
 ```rust
+#[async_trait]
 pub trait ToolCatalog: Send + Sync {
-    fn definitions(&self) -> Vec<ToolDefinition>;
-    fn snapshot(&self) -> Arc<HashMap<String, ToolRegistration>>;
+    async fn snapshot(&self) -> Arc<ToolSnapshot>;
 }
 
 pub struct StaticCatalog { ... }       // 现有行为
 pub struct McpCatalog { ... }          // MCP 动态目录（RwLock 保护）
-pub struct CompositeCatalog { ... }    // 静态 + 动态组合
+pub struct CompositeCatalog { ... }    // 静态 + 动态组合，将多个 Catalog 合并为一个快照
 ```
 
-`ToolExecutor` 改为持有 `Box<dyn ToolCatalog>`，每次查询最新快照。
+`ToolExecutor` 改为持有 `Arc<dyn ToolCatalog>`，每次查询最新快照。
 
 ### McpTool 桥接
 

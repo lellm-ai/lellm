@@ -17,6 +17,8 @@
 - `provider`（默认）— re-export core + provider
 - `agent` — re-export core + agent（传递依赖 provider）
 - `macros` — re-export macros
+- `mcp` — re-export MCP client
+- `graph` — re-export graph orchestration
 - `full` — 以上全部
 
 ## 1. MaxIterationsReached — Ok 还是 Err？
@@ -138,6 +140,8 @@ pub struct Capabilities {
     pub supports_image_input: bool,
     pub supports_reasoning: bool,
     pub supports_tool_call: bool,
+    pub supports_prefill: bool,
+    pub supports_stream_thinking: bool,
 }
 ```
 
@@ -340,6 +344,7 @@ ChatCodec 的 `decode_sse()` 方法接收 `SseFrame`，返回 `StreamParseResult
 
 **`StreamEvent` — stream 模块对外的数据契约：**
 ```rust
+// pub(crate) — stream/ 模块是 pub(crate)，不对外暴露
 pub(crate) enum StreamEvent {
     Start { model: String },
     Token { token: String },                        // 可丢弃
@@ -351,6 +356,7 @@ pub(crate) enum StreamEvent {
 
 **`EventSink` — 解耦输出端：**
 ```rust
+// pub(crate) — stream/ 模块是 pub(crate)，不对外暴露
 pub trait EventSink {
     async fn emit(&mut self, event: StreamEvent) -> bool;  // false = 消费者断开
     fn is_closed(&self) -> bool { false }                  // 快速探测
@@ -440,6 +446,8 @@ pub enum ToolErrorKind {
     RateLimited,
     LoopDetected,
     Internal,
+    ToolUnavailable,
+    External { source: &'static str },
 }
 ```
 
@@ -471,7 +479,9 @@ async fn execute(&self, call: &ToolCall) -> ToolResult {
 | PermissionDenied | ❌ | 直接返回 |
 | InvalidInput | ❌ | 直接返回 |
 | LoopDetected | ❌ | 直接返回 |
-| Internal | ⚠️ | 视情况 |
+| Internal | ❌ | 不可重试 |
+| ToolUnavailable | ✅ | 固定间隔 |
+| External | ❌ | 直接返回 |
 
 **RetryPolicy 负责：** 是否重试、退避间隔、最大次数。
 **FallbackStrategy 负责：** Retry 耗尽后，换条路走（Abort / SwitchProvider / AskUser）。
@@ -594,15 +604,15 @@ LoopEnd
 **校验方式：**
 ```rust
 impl Message {
-    pub fn validate(&self) -> Result<(), LellmError> {
+    pub fn validate(&self) -> Result<(), ParseError> {
         match self {
             Message::ToolResult { content, .. } => {
                 for block in content {
                     match block {
                         ContentBlock::ToolCall(_) | ContentBlock::Thinking(_) => {
-                            return Err(LellmError::Parse(ParseError {
+                            return Err(ParseError {
                                 detail: "ToolResult must not contain ToolCall or Thinking blocks".into(),
-                            }));
+                            });
                         }
                         _ => {}
                     }
@@ -1131,7 +1141,9 @@ core = ["dep:lellm-core"]
 provider = ["dep:lellm-core", "dep:lellm-provider"]
 agent = ["dep:lellm-core", "dep:lellm-agent"]
 macros = ["dep:lellm-macros"]
-full = ["provider", "agent", "macros"]
+mcp = ["dep:lellm-mcp"]
+graph = ["dep:lellm-graph"]
+full = ["provider", "agent", "macros", "mcp", "graph"]
 ```
 
 **用户体验：** `cargo add lellm` 即可获得 core + provider。需要 Agent 运行时加 `--features agent`。

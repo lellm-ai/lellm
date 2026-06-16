@@ -468,90 +468,6 @@ pub struct ExecutionEntry {
     pub success: bool,
 }
 ```
-用户代码
-  ↓
-StateExt（强类型 getter/setter + Reducer）
-  ↓
-State = HashMap<String, Value>（底层动态存储）
-```
-
-### 底层：动态 State
-
-```rust
-pub type State = HashMap<String, serde_json::Value>;
-```
-
-**为什么不做强类型 State？**
-
-Graph 的状态天然是开放集合（open world）——Agent、Tool、Barrier、Subgraph 各自读写不同的字段。强类型 State（如 `GraphBuilder::<MyState>::new()`）最终会退化为 `known_fields + dynamic_fields`，收益不高。
-
-### 上层：StateExt
-
-```rust
-pub trait StateExt {
-    fn get_str(&self, key: &str) -> Option<&str>;
-    fn get_bool(&self, key: &str) -> Option<bool>;
-    fn get_u64(&self, key: &str) -> Option<u64>;
-    fn get_i64(&self, key: &str) -> Option<i64>;
-    fn get_f64(&self, key: &str) -> Option<f64>;
-    fn get_json<T>(&self, key: &str) -> Result<T, StateError>
-    where
-        T: DeserializeOwned;
-    fn require<T>(&self, key: &str) -> Result<T, StateError>
-    where
-        T: DeserializeOwned;
-    fn set<T>(&mut self, key: impl Into<String>, value: T)
-    where
-        T: Serialize;
-    fn remove(&mut self, key: &str) -> Option<Value>;
-    fn contains(&self, key: &str) -> bool;
-
-    // Reducer 合并
-    fn reduce(&mut self, key: &str, value: Value, reducer: &StateReducer) -> Result<(), String>;
-    fn append_array(&mut self, key: &str, items: Value) -> Result<(), String>;
-}
-```
-
-消除 `as_str().unwrap()` / `serde_json::from_value()` 样板代码。
-
-### StateError
-
-```rust
-pub enum StateError {
-    MissingKey(String),
-    Deserialize(String, String),
-}
-```
-
-### Reducer 机制
-
-```rust
-pub type StateReducer = Box<
-    dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync,
->;
-
-/// 内置：数组追加（类似 LangGraph 的 operator.add for lists）
-pub fn array_reducer() -> StateReducer;
-```
-
-### 执行结果
-
-```rust
-pub struct GraphResult {
-    pub trace_id: TraceId,
-    pub state: State,
-    pub execution_log: Vec<ExecutionEntry>,
-    pub duration: Duration,
-}
-
-pub struct ExecutionEntry {
-    pub step: usize,
-    pub node_name: String,
-    pub start_time: Instant,
-    pub end_time: Instant,
-    pub success: bool,
-}
-```
 
 ---
 
@@ -850,7 +766,7 @@ let graph = g.build()?;
 | `end(node)` | `Result<&mut Self>` | 设置结束节点 |
 | `node(name, kind)` | `Result<&mut Self>` | 添加节点（重复名报错）|
 | `edge(from, to)` | `PendingEdge` | 添加普通边（无条件非 fallback）|
-| `edge_if(from, to, cond)` | `Result<PendingEdge>` | 添加条件边 |
+| `edge_if(from, to, cond)` | `PendingEdge` | 添加条件边 |
 | `edge_fallback(from, to)` | `PendingEdge` | 添加 fallback 边 |
 | `build()` | `Result<Graph>` | 构建并验证 |
 
@@ -879,6 +795,7 @@ pub enum BuildError {
     MissingEntryPoint,
     MissingExitPoint,
     InvalidEdgeDefinition { from: String, to: String, reason: String },
+    Warning { message: String },
 }
 ```
 
