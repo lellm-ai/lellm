@@ -393,7 +393,7 @@ impl GraphExecutor {
                                 }
                             },
                             _ => {
-                                    let _ = send(GraphEvent::GraphError {
+                                let _ = send(GraphEvent::GraphError {
                                         error: GraphError::Terminal(TerminalError::InvalidGraph(
                                             format!(
                                                 "expected BarrierNode but got unexpected node type for BarrierPaused"
@@ -402,8 +402,8 @@ impl GraphExecutor {
                                         state: state.clone(),
                                     })
                                     .await;
-                                    break;
-                                }
+                                break;
+                            }
                         };
 
                         execution_log.push(ExecutionEntry {
