@@ -77,6 +77,7 @@ pub struct EdgeAnalysis {
 /// 图（Graph）— 允许有环，循环保护由 GraphExecutor::max_steps 运行时熔断提供。
 #[derive(Clone)]
 pub struct Graph {
+    pub(crate) name: String,
     pub(crate) nodes: IndexMap<String, NodeKind>,
     pub(crate) edges: Vec<Edge>,
     pub(crate) start: String,
@@ -84,6 +85,10 @@ pub struct Graph {
 }
 
 impl Graph {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn node_names(&self) -> Vec<&str> {
         self.nodes.keys().map(|s| s.as_str()).collect()
     }
@@ -443,6 +448,7 @@ impl GraphBuilder {
         let end = self.end.ok_or(BuildError::MissingExitPoint)?;
 
         let graph = Graph {
+            name: self.name,
             nodes: self.nodes,
             edges: self.edges,
             start,
