@@ -8,7 +8,7 @@
 //!
 //! LeLLM 的设计哲学不同：
 //! - `ToolUseLoop` 内部完成 LLM ↔ Tools 的 ReAct 循环
-//! - `AgentNode` 包装 ToolUseLoop，作为 Graph 的一个节点
+//! - `AgentFlowNode` 包装 ToolUseLoop，作为 Graph 的一个节点
 //! - Graph 层负责宏观编排（预处理 → Agent → 后处理）
 //!
 //! 运行：
@@ -16,14 +16,16 @@
 //! cargo run -p lellm-graph --example calculator_graph
 //! ```
 
+use futures_util::stream;
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
-use lellm_agent::{AgentBuilder, ResolvedModel, ToolUseLoop};
+use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel, ToolUseLoop};
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TokenUsage, ToolCall,
 };
-use lellm_graph::{GraphBuilder, GraphExecutor, NodeKind, TaskNode};
+use lellm_graph::{GraphBuilder, GraphExecutor, NodeKind, StateDelta, TaskNode};
 use lellm_macros::Tool;
+use lellm_provider::{ProviderEvent, ProviderStream};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -78,6 +80,34 @@ impl CalculatorMockProvider {
             current_round: Mutex::new(0),
         }
     }
+
+    /// 将 ChatResponse 转换为 ProviderEvent 流
+    fn response_to_stream(&self, response: &ChatResponse) -> Vec<Result<ProviderEvent, LlmError>> {
+        let model = "calculator-mock".to_string();
+        let tool_calls: Vec<lellm_core::ToolCall> = response.tool_calls().cloned().collect();
+
+        let text_content: String = response
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        vec![
+            Ok(ProviderEvent::Start {
+                model: model.clone(),
+            }),
+            Ok(ProviderEvent::Token {
+                token: text_content,
+            }),
+            Ok(ProviderEvent::ResponseComplete {
+                tool_calls,
+                usage: Some(response.usage),
+            }),
+        ]
+    }
 }
 
 #[::async_trait::async_trait]
@@ -99,11 +129,25 @@ impl lellm_provider::LlmProvider for CalculatorMockProvider {
         }))
     }
 
-    async fn stream(
-        &self,
-        _request: &ChatRequest,
-    ) -> Result<lellm_provider::ProviderStream, LlmError> {
-        unimplemented!("stream not needed for this example")
+    async fn stream(&self, _request: &ChatRequest) -> Result<ProviderStream, LlmError> {
+        let round = {
+            let mut r = self.current_round.lock().unwrap();
+            let current = *r;
+            *r += 1;
+            current
+        };
+
+        let response = self.round_responses.get(round).cloned().unwrap_or_else(|| {
+            ChatResponse::new(
+                vec![ContentBlock::text("计算完成。".to_string())],
+                TokenUsage::default(),
+                serde_json::json!(null),
+            )
+        });
+
+        let events = self.response_to_stream(&response);
+        let stream: ProviderStream = Box::pin(stream::iter(events));
+        Ok(stream)
     }
 
     fn provider_id(&self) -> &str {
@@ -202,48 +246,37 @@ async fn main() {
     //     .addEdge("toolNode", "llmCall")
     //     .compile()
     //
-    // LeLLM 中，AgentNode 内部就是完整的 ToolUseLoop，
+    // LeLLM 中，AgentFlowNode 内部就是完整的 ToolUseLoop，
     // 所以 Graph 只需要一个 Agent 节点 + 预处理/后处理节点。
     let mut g = GraphBuilder::new("calculator");
     // 预处理：初始化状态
     let _ = g.start("init");
     let _ = g.node(
         "init",
-        NodeKind::Task(TaskNode::new("init", |state| {
-            state.insert(
-                "calc.messages".into(),
+        NodeKind::Task(TaskNode::new("init", |_state| {
+            Ok(vec![StateDelta::set(
+                "calc.messages",
                 serde_json::json!(vec![Message::User {
                     content: lellm_core::text_block("3加4等于多少，然后再乘以2。".to_string(),),
                 }]),
-            );
-            Ok(())
+            )])
         })),
     );
     // Agent 节点：执行完整的 ReAct 循环
-    // P0: 显式声明写入 — 默认不写任何 State，用户显式绑定
+    // AgentFlowNode 从 message_key 读取消息，执行后写回更新的消息列表
     let _ = g.node(
         "agent",
-        NodeKind::Agent(Box::new(
-            lellm_graph::AgentNode::new("agent", agent)
-                .with_output("calc.output")
-                .with_messages("calc.messages")
-                .with_input_key("calc.messages"),
+        NodeKind::External(Arc::new(
+            AgentFlowNode::new("agent", agent).message_key("calc.messages"),
         )),
     );
-    // 后处理：读取 AgentNode 显式写回的状态
+    // 后处理：读取 AgentFlowNode 写回的状态
     let _ = g.node(
         "summary",
         NodeKind::Task(TaskNode::new("summary", |state| {
             println!("\n=== Graph 执行结果 ===");
 
-            // 读取最终输出
-            let output = state
-                .get("calc.output")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no output)");
-            println!("最终输出: {}", output);
-
-            // 读取完整对话历史
+            // AgentFlowNode 将消息写回 message_key
             if let Some(msgs) = state.get("calc.messages") {
                 let count = if let Some(arr) = msgs.as_array() {
                     arr.len()
@@ -253,9 +286,26 @@ async fn main() {
                 println!("对话消息数: {}", count);
             }
 
-            // 执行元数据（iterations, tool_calls, stop_reason）不写入 State
-            // 如需获取，应通过 ExecutionTrace 或流式事件
-            Ok(())
+            // 读取执行元数据
+            let stop_reason = state
+                .get("agent_stop_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            println!("停止原因: {}", stop_reason);
+
+            let iterations = state
+                .get("agent_iterations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!("迭代次数: {}", iterations);
+
+            let tool_calls = state
+                .get("agent_tool_calls")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!("工具调用次数: {}", tool_calls);
+
+            Ok(vec![])
         })),
     );
     // 连接边
