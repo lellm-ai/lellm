@@ -172,22 +172,27 @@ pub type BranchCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
 pub struct ConditionNode {
     pub name: String,
     pub branches: Vec<(String, BranchCondition)>,
-    pub otherwise_target: Option<String>,  // 兜底目标 — 所有分支不匹配时跳转
 }
 ```
 
 按声明顺序求值分支条件，返回第一个匹配分支的 `NextStep::Goto(target)`。
-有 `otherwise_target` 时，无匹配直接跳转兜底目标；无 `otherwise_target` 时返回 `TerminalError`。
+无匹配时返回 `NextStep::GoToNext`，由 Graph 层的 `edge_fallback` 处理兜底路由。
 
-提供 Builder：
+**兜底路由统一到 Graph 层：**
 
 ```rust
+// 节点只声明分支条件
 ConditionNode::builder("route")
-    .branch("retry", |s| s.get("valid").map(|v| v.as_bool() == Some(false)).unwrap_or(false))
-    .branch("done", |_| true)
-    .otherwise("default")  // 兜底
+    .branch("fast_path", |s| s.get("score").map(|v| v.as_u64().unwrap_or(0) >= 80))
+    .branch("slow_path", |s| s.get("score").map(|v| v.as_u64().unwrap_or(0) >= 50))
     .build()
+
+// 兜底路由在 Graph 层通过 edge_fallback 定义
+g.edge_fallback("route", "default")?;
 ```
+
+> **为什么不在 ConditionNode 里放 otherwise_target？**
+> 节点只负责计算状态，边只负责控制流向。兜底路由是拓扑概念，应在 Graph 层通过 `edge_fallback` 表达，这样 `build()` 时可以验证目标节点是否存在。
 
 ### BarrierNode — Human-in-the-loop 审批
 

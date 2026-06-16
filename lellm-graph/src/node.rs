@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::{GraphError, ObservedError, TerminalError};
+use crate::error::{GraphError, ObservedError};
 use crate::event::{BarrierId, GraphEvent, SpanId};
 use crate::state::State;
 
@@ -148,12 +148,12 @@ impl GraphNode for TaskNode {
 // ─── ConditionNode ───────────────────────────────────────────
 
 /// 条件分支节点。
+///
+/// 按声明顺序求值分支条件，返回第一个匹配分支的 `NextStep::Goto(target)`。
+/// 无匹配时返回 `NextStep::GoToNext`，由 Graph 层的 `edge_fallback` 处理兜底路由。
 pub struct ConditionNode {
     pub name: String,
     pub branches: Vec<(String, BranchCondition)>,
-    /// 兜底目标 — 当所有 branch 条件均不匹配时，跳转到此节点。
-    /// 未设置时，无匹配则返回 TerminalError。
-    pub otherwise_target: Option<String>,
 }
 
 impl ConditionNode {
@@ -161,7 +161,6 @@ impl ConditionNode {
         ConditionNodeBuilder {
             name: name.into(),
             branches: Vec::new(),
-            otherwise_target: None,
         }
     }
 }
@@ -170,7 +169,6 @@ impl ConditionNode {
 pub struct ConditionNodeBuilder {
     name: String,
     branches: Vec<(String, BranchCondition)>,
-    otherwise_target: Option<String>,
 }
 
 impl ConditionNodeBuilder {
@@ -183,27 +181,10 @@ impl ConditionNodeBuilder {
         self
     }
 
-    /// 设置兜底目标 — 当所有 branch 条件均不匹配时，跳转到此节点。
-    ///
-    /// 解决"边有 fallback，节点没有"的概念不一致问题。
-    ///
-    /// ```rust,ignore
-    /// ConditionNode::builder("route")
-    ///     .branch("fast_path", |s| s.get("score").map(|v| v.as_u64().unwrap_or(0) >= 80))
-    ///     .branch("slow_path", |s| s.get("score").map(|v| v.as_u64().unwrap_or(0) >= 50))
-    ///     .otherwise("default")  // 兜底
-    ///     .build()
-    /// ```
-    pub fn otherwise(mut self, target: impl Into<String>) -> Self {
-        self.otherwise_target = Some(target.into());
-        self
-    }
-
     pub fn build(self) -> ConditionNode {
         ConditionNode {
             name: self.name,
             branches: self.branches,
-            otherwise_target: self.otherwise_target,
         }
     }
 }
@@ -216,14 +197,8 @@ impl GraphNode for ConditionNode {
                 return Ok(NextStep::Goto(target.clone()));
             }
         }
-        // 有兜底目标 → 直接跳转
-        if let Some(ref target) = self.otherwise_target {
-            return Ok(NextStep::Goto(target.clone()));
-        }
-        Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
-            node: self.name.clone(),
-            source: "no matching branch and no otherwise target".into(),
-        }))
+        // 无匹配 → GoToNext，由 Graph 层 edge_fallback 处理兜底
+        Ok(NextStep::GoToNext)
     }
 }
 
