@@ -749,6 +749,7 @@ fn test_state_ext_reduce() {
 }
 
 /// 边级 analysis max_visits 仅用于静态分析，不参与 runtime — 正常退出。
+/// 链式 API：edge_if().max_visits(n) 附加分析约束。
 #[tokio::test]
 async fn test_edge_analysis_no_runtime_interference() {
     let graph = build_graph("edge_analysis_ok", |g| {
@@ -764,15 +765,15 @@ async fn test_edge_analysis_no_runtime_interference() {
         let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
         let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
         let _ = g.edge("a", "b");
-        // analysis max_visits 不参与 runtime，仅用于 analyze_cycles()
-        let _ = g.edge_analysis("b", "a", 5);
+        // 条件回跳 + max_visits 分析约束（不参与 runtime）
+        let _ = g.edge_if("b", "a", |_| true)?.max_visits(5);
         let _ = g.edge("b", "end");
         let _ = g.end("end");
         Ok(())
     })
     .expect("build should succeed");
 
-    // 图有环，但 analyze_cycles 应显示已保护
+    // 图有环，analyze_cycles 应显示已保护
     let analysis = graph.analyze_cycles();
     assert!(analysis.has_cycles);
     assert!(analysis.all_protected());
@@ -821,6 +822,7 @@ fn test_analyze_cycles_detected() {
 }
 
 /// 有环图 + analysis max_visits 保护。
+/// 链式 API：edge().max_visits(n) 给普通边附加分析约束。
 #[test]
 fn test_analyze_cycles_protected() {
     let graph = build_graph("protected_cycle", |g| {
@@ -828,7 +830,7 @@ fn test_analyze_cycles_protected() {
         let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
         let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
         let _ = g.edge("a", "b");
-        let _ = g.edge_analysis("b", "a", 5);
+        let _ = g.edge("b", "a").max_visits(5);
         let _ = g.edge("b", "end");
         let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
         let _ = g.end("end");

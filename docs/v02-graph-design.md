@@ -785,19 +785,38 @@ let mut g = GraphBuilder::new("workflow");
 g.start("init")?;
 g.node("init", NodeKind::Task(TaskNode::new("init", |state| { ... })))?;
 g.node("agent", NodeKind::Agent(Box::new(AgentNode::new("agent", agent)
-    .with_prefix("calc"))))?;
+    .with_output("agent.output")
+    .with_messages("agent.messages"))))?;
 
 // 循环注册节点
 for tool in tools {
     g.node(tool.name(), tool_node(tool))?;
 }
 
-g.edge("init", "agent")?;
+g.edge("init", "agent");
 g.edge_if("agent", "check", |s| s.has_tool_calls())?;
-g.edge("agent", "done")?;
+g.edge("agent", "done");
 g.end("done")?;
 
 let graph = g.build()?;
+```
+
+### 链式 API — PendingEdge
+
+`edge()` / `edge_if()` / `edge_fallback()` 返回 `PendingEdge`，支持链式附加分析约束：
+
+```rust
+// 普通边 + 循环分析
+g.edge("b", "a").max_visits(5);
+
+// 条件回跳 + 循环分析
+g.edge_if("agent", "retry", |s| s.should_retry)?.max_visits(10);
+
+// fallback 边 + 循环分析
+g.edge_fallback("agent", "safe").max_visits(3);
+
+// 不加分析（直接丢弃 PendingEdge）
+g.edge("agent", "end");
 ```
 
 ### 模块化注册
@@ -816,17 +835,22 @@ let graph = g.build()?;
 
 ### GraphBuilder 方法
 
-| 方法 | 签名 | 说明 |
+| 方法 | 返回 | 说明 |
 |------|------|------|
-| `new(name)` | `-> Self` | 创建构建器 |
-| `start(node)` | `&mut self -> Result<&mut Self, BuildError>` | 设置起始节点 |
-| `end(node)` | `&mut self -> Result<&mut Self, BuildError>` | 设置结束节点 |
-| `node(name, kind)` | `&mut self -> Result<&mut Self, BuildError>` | 添加节点（重复名报错）|
-| `edge(from, to)` | `&mut self -> Result<&mut Self, BuildError>` | 添加无条件边 |
-| `edge_if(from, to, cond)` | `&mut self -> Result<&mut Self, BuildError>` | 添加条件边 |
-| `edge_fallback(from, to)` | `&mut self -> Result<&mut Self, BuildError>` | 添加 fallback 边 |
-| `edge_analysis(from, to, max_visits)` | `&mut self -> Result<&mut Self, BuildError>` | 添加 analysis 边（仅诊断）|
-| `edge_policy(from, to, policy)` | `&mut self -> Result<&mut Self, BuildError>` | 添加 policy 边（runtime 拦截）|
+| `new(name)` | `Self` | 创建构建器 |
+| `start(node)` | `Result<&mut Self>` | 设置起始节点 |
+| `end(node)` | `Result<&mut Self>` | 设置结束节点 |
+| `node(name, kind)` | `Result<&mut Self>` | 添加节点（重复名报错）|
+| `edge(from, to)` | `PendingEdge` | 添加普通边（无条件非 fallback）|
+| `edge_if(from, to, cond)` | `Result<PendingEdge>` | 添加条件边 |
+| `edge_fallback(from, to)` | `PendingEdge` | 添加 fallback 边 |
+| `build()` | `Result<Graph>` | 构建并验证 |
+
+**PendingEdge 链式方法：**
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `.max_visits(n)` | `&mut GraphBuilder` | 附加循环分析约束（仅诊断）|
 | `build()` | `self -> Result<Graph, BuildError>` | 构建并验证 |
 
 **设计原则：**

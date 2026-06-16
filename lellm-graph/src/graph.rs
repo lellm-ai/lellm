@@ -270,6 +270,40 @@ impl CycleAnalysis {
     }
 }
 
+// ─── PendingEdge ──────────────────────────────────────────────
+
+/// 待完成的边 — 链式调用的中间句柄。
+///
+/// 由 `GraphBuilder::edge()` / `edge_if()` / `edge_fallback()` 返回。
+/// 通过 `.max_visits(n)` 附加循环分析约束。
+///
+/// ```rust,ignore
+/// // 条件回跳 + 循环分析
+/// g.edge_if("b", "a", |s| s.should_retry)?.max_visits(5);
+///
+/// // 普通边 + 循环分析
+/// g.edge("b", "a").max_visits(5);
+///
+/// // 不加分析（直接丢弃 PendingEdge）
+/// g.edge("b", "end");
+/// ```
+pub struct PendingEdge<'a> {
+    builder: &'a mut GraphBuilder,
+    edge_index: usize,
+}
+
+impl<'a> PendingEdge<'a> {
+    /// 附加循环分析约束（建议的最大访问次数）。
+    ///
+    /// 仅用于 `analyze_cycles()` 静态诊断，不参与运行时路由。
+    /// 返回 `&mut GraphBuilder` 以便继续链式调用。
+    pub fn max_visits(self, n: usize) -> &'a mut GraphBuilder {
+        self.builder.edges[self.edge_index].analysis =
+            Some(EdgeAnalysis { max_visits: Some(n) });
+        self.builder
+    }
+}
+
 // ─── GraphBuilder ─────────────────────────────────────────────
 
 /// Graph 构建器。
@@ -315,12 +349,16 @@ impl GraphBuilder {
         Ok(self)
     }
 
-    /// 添加边（无条件）。
-    pub fn edge(
-        &mut self,
-        from: impl Into<String>,
-        to: impl Into<String>,
-    ) -> Result<&mut Self, BuildError> {
+    /// 添加边（无条件普通边）。
+    ///
+    /// 返回 [`PendingEdge`]，可通过 `.max_visits(n)` 附加循环分析约束。
+    ///
+    /// ```rust,ignore
+    /// g.edge("a", "b");                    // 普通边
+    /// g.edge("b", "a").max_visits(5);      // 普通边 + 循环分析
+    /// ```
+    pub fn edge(&mut self, from: impl Into<String>, to: impl Into<String>) -> PendingEdge<'_> {
+        let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
             to: to.into(),
@@ -328,16 +366,27 @@ impl GraphBuilder {
             analysis: None,
             fallback: false,
         });
-        Ok(self)
+        PendingEdge {
+            builder: self,
+            edge_index,
+        }
     }
 
-    /// 添加条件边。
+    /// 添加条件边（`if/else-if` 规则链）。
+    ///
+    /// 返回 [`PendingEdge`]，可通过 `.max_visits(n)` 附加循环分析约束。
+    ///
+    /// ```rust,ignore
+    /// g.edge_if("agent", "retry", |s| s.has_tool_calls())?.max_visits(10);
+    /// g.edge_if("agent", "end", |_| true)?;
+    /// ```
     pub fn edge_if(
         &mut self,
         from: impl Into<String>,
         to: impl Into<String>,
         condition: impl Fn(&State) -> bool + Send + Sync + 'static,
-    ) -> Result<&mut Self, BuildError> {
+    ) -> Result<PendingEdge<'_>, BuildError> {
+        let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
             to: to.into(),
@@ -345,15 +394,21 @@ impl GraphBuilder {
             analysis: None,
             fallback: false,
         });
-        Ok(self)
+        Ok(PendingEdge {
+            builder: self,
+            edge_index,
+        })
     }
 
     /// 添加 fallback 边（无条件兜底）。
+    ///
+    /// 返回 [`PendingEdge`]，可通过 `.max_visits(n)` 附加循环分析约束。
     pub fn edge_fallback(
         &mut self,
         from: impl Into<String>,
         to: impl Into<String>,
-    ) -> Result<&mut Self, BuildError> {
+    ) -> PendingEdge<'_> {
+        let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
             to: to.into(),
@@ -361,26 +416,10 @@ impl GraphBuilder {
             analysis: None,
             fallback: true,
         });
-        Ok(self)
-    }
-
-    /// 添加带 analysis 约束的边（仅静态分析用，不参与 runtime）。
-    pub fn edge_analysis(
-        &mut self,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        max_visits: usize,
-    ) -> Result<&mut Self, BuildError> {
-        self.edges.push(Edge {
-            from: from.into(),
-            to: to.into(),
-            condition: None,
-            analysis: Some(EdgeAnalysis {
-                max_visits: Some(max_visits),
-            }),
-            fallback: false,
-        });
-        Ok(self)
+        PendingEdge {
+            builder: self,
+            edge_index,
+        }
     }
 
     /// 构建 Graph。返回 `Result<Graph, BuildError>`。
@@ -438,7 +477,6 @@ impl GraphBuilder {
     ///
     /// 条件边按注册顺序求值（first match wins），此警告提醒用户注意顺序。
     fn warn_multiple_conditional_edges(graph: &Graph) {
-        // 统计每个节点的出边中条件边的数量
         let mut cond_count: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for edge in &graph.edges {
