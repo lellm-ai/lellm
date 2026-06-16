@@ -4,8 +4,8 @@
 //! - `GraphEvent` — 图级事件（节点边界、Barrier、完成、错误）
 //! - `NodeEvent` — 节点内部事件中间层
 //!
-//! 通过 `EventLevel` 支持 consumer 按级别 filter。
 //! `TraceId` / `SpanId` 对标 tracing crate 的 trace/span 语义。
+//! 消费者按变体类型过滤事件，不需要额外的 level 字段。
 
 use std::time::Duration;
 
@@ -35,21 +35,6 @@ impl BarrierId {
             occurrence,
         }
     }
-}
-
-// ─── EventLevel ───────────────────────────────────────────────
-
-/// 事件级别 — 给 consumer 用的 filter hint。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EventLevel {
-    /// 图级事件（生命周期、错误）
-    Graph,
-    /// 节点级事件（边界、内部）
-    Node,
-    /// Agent 内部事件（ReAct 轮次）
-    Agent,
-    /// 高频调试事件
-    Debug,
 }
 
 // ─── NodeEvent ────────────────────────────────────────────────
