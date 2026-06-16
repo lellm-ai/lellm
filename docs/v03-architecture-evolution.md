@@ -1,8 +1,21 @@
 # LeLLM v0.3 架构演进
 
-> 版本：v0.3 规划 | 日期：2026-06-16 | 状态：设计决策已确认
+> 版本：v0.3 规划 | 日期：2026-06-16 | 状态：Phase 1~4 已实现 ✅
 >
 > **原则：** 本文档记录所有 v0.3 设计决策，与 v0.2 代码严格区分。
+>
+> **实现进度：**
+> - ✅ 一、Crate 架构重构（lellm-runtime crate 已创建）
+> - ✅ 二、StateDelta + Reducer 状态系统（DeltaOp, Reducer, ReducerRegistry 已实现）
+> - ⏳ 三、ParallelNode 状态合并策略（P2，依赖 StateDelta 基础设施）
+> - ✅ 四、Checkpoint + Resume + ExecutionTrace（结构体已定义）
+> - ✅ 五、错误模型重构（RecoverableError 已删除，Fallback 改为控制流）
+> - ⏳ 六、Executor 语义修复（部分完成，待 handle_continue/handle_barrier/handle_error 拆分）
+> - ✅ 七、Builder 验证与分析分离（build() 纯函数化，GraphDiagnostics 已定义）
+> - ⏳ 八、AgentHook 可观测性扩展点（待实现）
+> - ✅ 九、Event 体系解耦（FlowEvent 替代 NodeEvent::Agent）
+> - ⏳ 十、Executor 重构（Done+Observed 已合并为 Continue，待拆分 handle_* 方法）
+> - ✅ 十一、删除清单（RecoverableError, BuildError::Warning 已删除）
 
 ---
 
