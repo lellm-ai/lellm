@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::error::{GraphError, ObservedError};
 use crate::event::{BarrierId, GraphEvent};
-use crate::state::{SpanId, State};
+use crate::state::{SpanId, State, StateDelta};
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
@@ -32,11 +32,47 @@ pub enum NextStep {
     End,
 }
 
+/// 节点执行输出 — 修改意图 + 下一步。
+///
+/// 节点不再直接修改 State（`&mut State`），而是输出 `Vec<StateDelta>`。
+/// Executor 收集所有 Delta 后统一 apply 到 State。
+#[derive(Debug)]
+pub struct NodeOutput {
+    /// 状态增量（节点对 State 的修改意图）
+    pub deltas: Vec<StateDelta>,
+    /// 下一步路由
+    pub next: NextStep,
+}
+
+impl NodeOutput {
+    /// 创建无 Delta 的输出。
+    pub fn new(next: NextStep) -> Self {
+        Self {
+            deltas: Vec::new(),
+            next,
+        }
+    }
+
+    /// 追加一个 Delta。
+    pub fn with_delta(mut self, delta: StateDelta) -> Self {
+        self.deltas.push(delta);
+        self
+    }
+
+    /// 追加多个 Delta。
+    pub fn with_deltas(mut self, deltas: Vec<StateDelta>) -> Self {
+        self.deltas.extend(deltas);
+        self
+    }
+}
+
 /// 节点流式执行结果。
 #[derive(Debug)]
 pub enum StreamNodeResult {
     /// 节点正常完成（统一 Done + Observed）
     Continue {
+        /// 状态增量
+        deltas: Vec<StateDelta>,
         /// 下一步
         next: NextStep,
         /// 执行实例 ID
@@ -46,6 +82,8 @@ pub enum StreamNodeResult {
     },
     /// Barrier 暂停，等待外部决策
     Pause {
+        /// 状态增量（Barrier 进入等待前的修改）
+        deltas: Vec<StateDelta>,
         /// Barrier 审批请求 ID
         barrier_id: BarrierId,
         /// 节点名称
@@ -62,6 +100,8 @@ pub enum StreamNodeResult {
     /// 与 `GraphError::Terminal` 不同：Fallback 是节点主动声明的降级策略，
     /// executor 根据 fallback 边路由到备用节点。
     Fallback {
+        /// 状态增量（Fallback 前的修改）
+        deltas: Vec<StateDelta>,
         /// 降级原因
         reason: String,
         /// 节点名称
@@ -73,13 +113,20 @@ pub enum StreamNodeResult {
 ///
 /// Graph 只知道 `dyn FlowNode`，不知道 `AgentNode`、`ToolNode` 等具体类型。
 /// `AgentFlowNode` 由 `lellm-agent` crate 提供。
+///
+/// **节点不修改 State。** 节点读取 `&State`，输出 `NodeOutput { deltas, next }`。
+/// Executor 收集 Delta 后统一 apply 到 State。
 #[async_trait]
 pub trait FlowNode: Send + Sync {
     /// 执行节点逻辑（阻塞模式）。
-    async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError>;
+    ///
+    /// - `state` — 只读访问当前 State
+    /// - 返回 `NodeOutput { deltas, next }` — 修改意图 + 下一步路由
+    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError>;
 
     /// 执行节点逻辑（流式模式），将内部事件转发到 channel。
     ///
+    /// - `state` — 只读访问当前 State
     /// - `sink` — 事件输出 channel
     /// - `span_id` — 执行实例 ID（由 executor 生成）
     ///
@@ -87,13 +134,14 @@ pub trait FlowNode: Send + Sync {
     /// BarrierNode 覆写此方法以返回 `StreamNodeResult::Pause`。
     async fn execute_stream(
         &self,
-        state: &mut State,
+        state: &State,
         _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
-        let next = self.execute(state).await?;
+        let output = self.execute(state).await?;
         Ok(StreamNodeResult::Continue {
-            next,
+            deltas: output.deltas,
+            next: output.next,
             span_id,
             observed: None,
         })
@@ -122,8 +170,10 @@ pub enum NodeKind {
 // ─── TaskNode ────────────────────────────────────────────────
 
 /// Task 节点回调类型别名。
+///
+/// 闭包接收只读 `&State`，返回 `Vec<StateDelta>` 作为修改意图。
 /// Arc 包装以支持 Clone。
-pub type TaskFn = Arc<dyn Fn(&mut State) -> Result<(), GraphError> + Send + Sync>;
+pub type TaskFn = Arc<dyn Fn(&State) -> Result<Vec<StateDelta>, GraphError> + Send + Sync>;
 
 /// 条件分支回调类型别名。
 /// Arc 包装以支持 Clone。
@@ -139,7 +189,7 @@ pub struct TaskNode {
 impl TaskNode {
     pub fn new(
         name: impl Into<String>,
-        func: impl Fn(&mut State) -> Result<(), GraphError> + Send + Sync + 'static,
+        func: impl Fn(&State) -> Result<Vec<StateDelta>, GraphError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             name: name.into(),
@@ -150,9 +200,12 @@ impl TaskNode {
 
 #[async_trait]
 impl FlowNode for TaskNode {
-    async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
-        (self.func)(state)?;
-        Ok(NextStep::GoToNext)
+    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
+        let deltas = (self.func)(state)?;
+        Ok(NodeOutput {
+            deltas,
+            next: NextStep::GoToNext,
+        })
     }
 }
 
@@ -203,14 +256,14 @@ impl ConditionNodeBuilder {
 
 #[async_trait]
 impl FlowNode for ConditionNode {
-    async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
+    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
         for (target, condition) in &self.branches {
             if condition(state) {
-                return Ok(NextStep::Goto(target.clone()));
+                return Ok(NodeOutput::new(NextStep::Goto(target.clone())));
             }
         }
         // 无匹配 → GoToNext，由 Graph 层 edge_fallback 处理兜底
-        Ok(NextStep::GoToNext)
+        Ok(NodeOutput::new(NextStep::GoToNext))
     }
 }
 
@@ -218,7 +271,7 @@ impl FlowNode for ConditionNode {
 
 #[async_trait]
 impl FlowNode for NodeKind {
-    async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
+    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
         match self {
             Self::Task(n) => n.execute(state).await,
             Self::Condition(n) => n.execute(state).await,
@@ -229,7 +282,7 @@ impl FlowNode for NodeKind {
 
     async fn execute_stream(
         &self,
-        state: &mut State,
+        state: &State,
         sink: &tokio::sync::mpsc::Sender<GraphEvent>,
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {

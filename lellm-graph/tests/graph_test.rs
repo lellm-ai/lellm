@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, GraphBuilder,
     GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeKind, SK_COUNT, SK_STEPS, State,
-    StateExt, StateKey, TaskNode, TerminalError, TraceId,
+    StateDelta, StateExt, StateKey, TaskNode, TerminalError, TraceId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,23 +23,20 @@ async fn test_linear_pipeline() {
         let _ = g.start("a");
         let _ = g.node(
             "a",
-            NodeKind::Task(TaskNode::new("a", |state| {
-                state.insert("step".into(), serde_json::json!("a"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("a", |_state| {
+                Ok(vec![StateDelta::set("step", serde_json::json!("a"))])
             })),
         );
         let _ = g.node(
             "b",
-            NodeKind::Task(TaskNode::new("b", |state| {
-                state.insert("step".into(), serde_json::json!("b"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("b", |_state| {
+                Ok(vec![StateDelta::set("step", serde_json::json!("b"))])
             })),
         );
         let _ = g.node(
             "c",
-            NodeKind::Task(TaskNode::new("c", |state| {
-                state.insert("step".into(), serde_json::json!("c"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("c", |_state| {
+                Ok(vec![StateDelta::set("step", serde_json::json!("c"))])
             })),
         );
         let _ = g.edge("a", "b");
@@ -76,16 +73,14 @@ async fn test_condition_branching() {
         );
         let _ = g.node(
             "yes",
-            NodeKind::Task(TaskNode::new("yes", |state| {
-                state.insert("result".into(), serde_json::json!("yes"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("yes", |_state| {
+                Ok(vec![StateDelta::set("result", serde_json::json!("yes"))])
             })),
         );
         let _ = g.node(
             "no",
-            NodeKind::Task(TaskNode::new("no", |state| {
-                state.insert("result".into(), serde_json::json!("no"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("no", |_state| {
+                Ok(vec![StateDelta::set("result", serde_json::json!("no"))])
             })),
         );
         let _ = g.edge("check", "yes");
@@ -94,11 +89,11 @@ async fn test_condition_branching() {
         let _ = g.edge("no", "no_end");
         let _ = g.node(
             "yes_end",
-            NodeKind::Task(TaskNode::new("yes_end", |_| Ok(()))),
+            NodeKind::Task(TaskNode::new("yes_end", |_| Ok(vec![]))),
         );
         let _ = g.node(
             "no_end",
-            NodeKind::Task(TaskNode::new("no_end", |_| Ok(()))),
+            NodeKind::Task(TaskNode::new("no_end", |_| Ok(vec![]))),
         );
         let _ = g.end("yes_end");
         Ok(())
@@ -125,7 +120,7 @@ async fn test_task_node_error() {
         let _ = g.node(
             "fail",
             NodeKind::Task(TaskNode::new("fail", |_| {
-                Err(GraphError::Terminal(TerminalError::StateError(
+                Err::<Vec<StateDelta>, _>(GraphError::Terminal(TerminalError::StateError(
                     "boom".into(),
                 )))
             })),
@@ -152,8 +147,8 @@ async fn test_task_node_error() {
 fn test_cyclic_graph_allowed() {
     let result = build_graph("cycle", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "a");
         let _ = g.end("b");
@@ -172,12 +167,14 @@ async fn test_cyclic_graph_steps_exceeded() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
-        let _ = g.node("done", NodeKind::Task(TaskNode::new("done", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node(
+            "done",
+            NodeKind::Task(TaskNode::new("done", |_| Ok(vec![]))),
+        );
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "a");
         let _ = g.end("done");
@@ -204,12 +201,11 @@ async fn test_cyclic_graph_with_edge_if_exit() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge_if("b", "a", |s: &State| {
             s.get("count")
@@ -241,8 +237,7 @@ async fn test_condition_node_back_jump() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node(
@@ -259,7 +254,7 @@ async fn test_condition_node_back_jump() {
                     .build(),
             ),
         );
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "route");
         let _ = g.edge("route", "a");
         let _ = g.edge("route", "end");
@@ -291,7 +286,7 @@ fn test_missing_node() {
 #[test]
 fn test_missing_start() {
     let result = build_graph("no_start", |g| {
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
         let _ = g.end("a");
         Ok(())
     });
@@ -303,7 +298,7 @@ fn test_missing_start() {
 fn test_missing_end() {
     let result = build_graph("no_end", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
         Ok(())
     });
 
@@ -314,8 +309,8 @@ fn test_missing_end() {
 async fn test_execution_log() {
     let graph = build_graph("log", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.end("b");
         Ok(())
@@ -367,7 +362,10 @@ async fn test_barrier_approve() {
     let graph = build_graph("approve_flow", |g| {
         let _ = g.start("barrier");
         let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("review")));
-        let _ = g.node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))));
+        let _ = g.node(
+            "after",
+            NodeKind::Task(TaskNode::new("after", |_| Ok(vec![]))),
+        );
         let _ = g.edge("barrier", "after");
         let _ = g.end("after");
         Ok(())
@@ -408,8 +406,7 @@ async fn test_barrier_reject_with_back_jump() {
             "task",
             NodeKind::Task(TaskNode::new("task", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node("review", NodeKind::Barrier(BarrierNode::new("review")));
@@ -417,7 +414,10 @@ async fn test_barrier_reject_with_back_jump() {
         let _ = g.edge_if("review", "task", |s: &State| {
             s.get("review.reject_reason").is_some()
         });
-        let _ = g.node("done", NodeKind::Task(TaskNode::new("done", |_| Ok(()))));
+        let _ = g.node(
+            "done",
+            NodeKind::Task(TaskNode::new("done", |_| Ok(vec![]))),
+        );
         let _ = g.edge("review", "done");
         let _ = g.end("done");
         Ok(())
@@ -468,7 +468,10 @@ async fn test_barrier_modify() {
     let graph = build_graph("modify_flow", |g| {
         let _ = g.start("barrier");
         let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("input")));
-        let _ = g.node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))));
+        let _ = g.node(
+            "after",
+            NodeKind::Task(TaskNode::new("after", |_| Ok(vec![]))),
+        );
         let _ = g.edge("barrier", "after");
         let _ = g.end("after");
         Ok(())
@@ -516,7 +519,10 @@ async fn test_barrier_timeout() {
                     .default_action(BarrierDefaultAction::Reject),
             ),
         );
-        let _ = g.node("after", NodeKind::Task(TaskNode::new("after", |_| Ok(()))));
+        let _ = g.node(
+            "after",
+            NodeKind::Task(TaskNode::new("after", |_| Ok(vec![]))),
+        );
         let _ = g.edge("barrier", "after");
         let _ = g.end("after");
         Ok(())
@@ -553,23 +559,21 @@ async fn test_barrier_reroute() {
         let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("route")));
         let _ = g.node(
             "path_a",
-            NodeKind::Task(TaskNode::new("path_a", |state| {
-                state.insert("path".into(), serde_json::json!("A"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("path_a", |_state| {
+                Ok(vec![StateDelta::set("path", serde_json::json!("A"))])
             })),
         );
         let _ = g.node(
             "path_b",
-            NodeKind::Task(TaskNode::new("path_b", |state| {
-                state.insert("path".into(), serde_json::json!("B"));
-                Ok(())
+            NodeKind::Task(TaskNode::new("path_b", |_state| {
+                Ok(vec![StateDelta::set("path", serde_json::json!("B"))])
             })),
         );
         let _ = g.edge("barrier", "path_a");
         let _ = g.edge("barrier", "path_b");
         let _ = g.edge("path_a", "end");
         let _ = g.edge("path_b", "end");
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.end("end");
         Ok(())
     })
@@ -609,9 +613,11 @@ async fn test_double_barrier_sequential() {
         let _ = g.start("before_a");
         let _ = g.node(
             "before_a",
-            NodeKind::Task(TaskNode::new("before_a", |state| {
-                state.insert("steps".into(), serde_json::json!(Vec::<String>::new()));
-                Ok(())
+            NodeKind::Task(TaskNode::new("before_a", |_state| {
+                Ok(vec![StateDelta::set(
+                    "steps",
+                    serde_json::json!(Vec::<String>::new()),
+                )])
             })),
         );
         let _ = g.node(
@@ -623,8 +629,10 @@ async fn test_double_barrier_sequential() {
             NodeKind::Task(TaskNode::new("between", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("passed_a".into());
-                state.set("steps", steps);
-                Ok(())
+                Ok(vec![StateDelta::set(
+                    "steps",
+                    serde_json::to_value(steps).unwrap(),
+                )])
             })),
         );
         let _ = g.node(
@@ -636,8 +644,10 @@ async fn test_double_barrier_sequential() {
             NodeKind::Task(TaskNode::new("after_b", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("passed_b".into());
-                state.set("steps", steps);
-                Ok(())
+                Ok(vec![StateDelta::set(
+                    "steps",
+                    serde_json::to_value(steps).unwrap(),
+                )])
             })),
         );
         let _ = g.edge("before_a", "barrier_a");
@@ -758,12 +768,11 @@ async fn test_edge_analysis_no_runtime_interference() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         // 条件回跳 + max_visits 分析约束（不参与 runtime）
         let _ = g.edge_if("b", "a", |_| true).max_visits(5);
@@ -786,8 +795,8 @@ async fn test_edge_analysis_no_runtime_interference() {
 fn test_analyze_cycles_dag() {
     let graph = build_graph("dag", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.end("b");
         Ok(())
@@ -805,9 +814,9 @@ fn test_analyze_cycles_dag() {
 fn test_analyze_cycles_detected() {
     let graph = build_graph("cycle", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
-        let _ = g.node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "c");
         let _ = g.edge("c", "a");
@@ -827,12 +836,12 @@ fn test_analyze_cycles_detected() {
 fn test_analyze_cycles_protected() {
     let graph = build_graph("protected_cycle", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "a").max_visits(5);
         let _ = g.edge("b", "end");
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.end("end");
         Ok(())
     })
@@ -848,8 +857,8 @@ fn test_analyze_cycles_protected() {
 fn test_analyze_cycles_report() {
     let graph = build_graph("report_test", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "a");
         let _ = g.end("a");
@@ -878,8 +887,8 @@ fn test_trace_id_uniqueness() {
 async fn test_stream_has_span_id() {
     let graph = build_graph("trace_test", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.end("b");
         Ok(())
@@ -924,8 +933,7 @@ async fn test_goto_edge_with_analysis() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node(
@@ -942,7 +950,7 @@ async fn test_goto_edge_with_analysis() {
                     .build(),
             ),
         );
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "route");
         // route → a 是 ConditionNode 的 Goto 目标
         let _ = g.edge_if("route", "a", |_| true);
@@ -973,7 +981,7 @@ async fn test_goto_missing_edge_error() {
                     .build(),
             ),
         );
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("route", "end");
         let _ = g.end("end");
         Ok(())
@@ -1087,21 +1095,22 @@ async fn test_statekey_in_graph_execution() {
         let _ = g.start("set");
         let _ = g.node(
             "set",
-            NodeKind::Task(TaskNode::new("set", |state| {
-                state.set_sk(&SK_COUNT, 0u64);
-                state.set_sk(&SK_RESULT, "pending".to_string());
-                Ok(())
+            NodeKind::Task(TaskNode::new("set", |_state| {
+                Ok(vec![
+                    StateDelta::set("count", serde_json::json!(0u64)),
+                    StateDelta::set("result", serde_json::json!("pending")),
+                ])
             })),
         );
         let _ = g.node(
             "increment",
             NodeKind::Task(TaskNode::new("increment", |state| {
                 let count = state.get_sk(&SK_COUNT).unwrap_or(0);
-                state.set_sk(&SK_COUNT, count + 1);
+                let mut deltas = vec![StateDelta::set("count", serde_json::json!(count + 1))];
                 if count + 1 >= 3 {
-                    state.set_sk(&SK_RESULT, "done".to_string());
+                    deltas.push(StateDelta::set("result", serde_json::json!("done")));
                 }
-                Ok(())
+                Ok(deltas)
             })),
         );
         let _ = g.node(
@@ -1120,7 +1129,7 @@ async fn test_statekey_in_graph_execution() {
             NodeKind::Task(TaskNode::new("end", |state| {
                 let result = state.require_sk(&SK_RESULT).unwrap();
                 assert_eq!(result, "done");
-                Ok(())
+                Ok(vec![])
             })),
         );
         let _ = g.edge("set", "increment");
@@ -1148,8 +1157,8 @@ async fn test_statekey_in_graph_execution() {
 async fn test_trace_id_full_lifecycle() {
     let graph = build_graph("trace_lifecycle", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.end("b");
         Ok(())
@@ -1208,7 +1217,7 @@ async fn test_trace_id_full_lifecycle() {
 async fn test_trace_id_blocking_mode() {
     let graph = build_graph("trace_blocking", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
         let _ = g.end("a");
         Ok(())
     })
@@ -1240,7 +1249,7 @@ async fn test_trace_id_blocking_mode() {
 async fn test_fallback_control_flow() {
     use async_trait::async_trait;
     use lellm_graph::node::StreamNodeResult;
-    use lellm_graph::{FlowNode, NextStep};
+    use lellm_graph::{FlowNode, NodeOutput};
     use std::sync::Arc;
 
     // 自定义节点 — 总是返回 Fallback
@@ -1248,7 +1257,7 @@ async fn test_fallback_control_flow() {
 
     #[async_trait]
     impl FlowNode for FallbackNode {
-        async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
+        async fn execute(&self, _state: &State) -> Result<NodeOutput, GraphError> {
             // 阻塞模式不支持 Fallback，直接报错
             Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: "fallback_node".into(),
@@ -1258,11 +1267,12 @@ async fn test_fallback_control_flow() {
 
         async fn execute_stream(
             &self,
-            _state: &mut State,
+            _state: &State,
             _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
             _span_id: lellm_graph::SpanId,
         ) -> Result<StreamNodeResult, GraphError> {
             Ok(StreamNodeResult::Fallback {
+                deltas: Vec::new(),
                 reason: "temporary failure, try fallback".into(),
                 node_name: "fallback_node".into(),
             })
@@ -1274,12 +1284,11 @@ async fn test_fallback_control_flow() {
         let _ = g.node("fallback_node", NodeKind::External(Arc::new(FallbackNode)));
         let _ = g.node(
             "fallback_target",
-            NodeKind::Task(TaskNode::new("fallback_target", |state| {
-                state.insert("recovered".into(), serde_json::json!(true));
-                Ok(())
+            NodeKind::Task(TaskNode::new("fallback_target", |_state| {
+                Ok(vec![StateDelta::set("recovered", serde_json::json!(true))])
             })),
         );
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         // fallback 边：fallback_node → fallback_target
         let _ = g.edge_fallback("fallback_node", "fallback_target");
         let _ = g.edge("fallback_target", "end");
@@ -1318,14 +1327,14 @@ async fn test_fallback_control_flow() {
 async fn test_fallback_no_edge() {
     use async_trait::async_trait;
     use lellm_graph::node::StreamNodeResult;
-    use lellm_graph::{FlowNode, NextStep};
+    use lellm_graph::{FlowNode, NodeOutput};
     use std::sync::Arc;
 
     struct FallbackNode;
 
     #[async_trait]
     impl FlowNode for FallbackNode {
-        async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
+        async fn execute(&self, _state: &State) -> Result<NodeOutput, GraphError> {
             Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: "fallback_node".into(),
                 source: "fallback only in stream mode".into(),
@@ -1334,11 +1343,12 @@ async fn test_fallback_no_edge() {
 
         async fn execute_stream(
             &self,
-            _state: &mut State,
+            _state: &State,
             _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
             _span_id: lellm_graph::SpanId,
         ) -> Result<StreamNodeResult, GraphError> {
             Ok(StreamNodeResult::Fallback {
+                deltas: Vec::new(),
                 reason: "no fallback available".into(),
                 node_name: "fallback_node".into(),
             })
@@ -1348,7 +1358,7 @@ async fn test_fallback_no_edge() {
     let graph = build_graph("no_fallback", |g| {
         let _ = g.start("fallback_node");
         let _ = g.node("fallback_node", NodeKind::External(Arc::new(FallbackNode)));
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         // 没有 fallback 边，只有普通边（不会被 Fallback 命中）
         let _ = g.edge("fallback_node", "end");
         let _ = g.end("end");
@@ -1450,9 +1460,11 @@ async fn test_decide_wildcard() {
         let _ = g.start("before");
         let _ = g.node(
             "before",
-            NodeKind::Task(TaskNode::new("before", |state| {
-                state.insert("steps".into(), serde_json::json!(Vec::<String>::new()));
-                Ok(())
+            NodeKind::Task(TaskNode::new("before", |_state| {
+                Ok(vec![StateDelta::set(
+                    "steps",
+                    serde_json::json!(Vec::<String>::new()),
+                )])
             })),
         );
         let _ = g.node(
@@ -1464,8 +1476,10 @@ async fn test_decide_wildcard() {
             NodeKind::Task(TaskNode::new("between", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("step1".into());
-                state.set("steps", steps);
-                Ok(())
+                Ok(vec![StateDelta::set(
+                    "steps",
+                    serde_json::to_value(steps).unwrap(),
+                )])
             })),
         );
         // 第二个 barrier 实例
@@ -1478,8 +1492,10 @@ async fn test_decide_wildcard() {
             NodeKind::Task(TaskNode::new("done", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("step2".into());
-                state.set("steps", steps);
-                Ok(())
+                Ok(vec![StateDelta::set(
+                    "steps",
+                    serde_json::to_value(steps).unwrap(),
+                )])
             })),
         );
         let _ = g.edge("before", "barrier");
@@ -1572,8 +1588,8 @@ fn test_build_errors_multiple() {
 fn test_build_duplicate_node_warning() {
     let result = build_graph("dup_node", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
         let _ = g.end("a");
         Ok(())
     });
@@ -1587,8 +1603,8 @@ fn test_build_duplicate_node_warning() {
 fn test_build_warning_not_fatal() {
     let result = build_graph("warning_test", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
         let _ = g.edge_if("a", "b", |_| true);
         let _ = g.edge_if("a", "b", |_| false);
         let _ = g.end("b");
@@ -1626,14 +1642,13 @@ async fn test_consumer_drop_cancels_execution() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
+                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
             })),
         );
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
-        let _ = g.node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(()))));
-        let _ = g.node("d", NodeKind::Task(TaskNode::new("d", |_| Ok(()))));
-        let _ = g.node("e", NodeKind::Task(TaskNode::new("e", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(vec![]))));
+        let _ = g.node("d", NodeKind::Task(TaskNode::new("d", |_| Ok(vec![]))));
+        let _ = g.node("e", NodeKind::Task(TaskNode::new("e", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "c");
         let _ = g.edge("c", "d");
@@ -1682,11 +1697,11 @@ async fn test_consumer_drop_cancels_execution() {
 fn test_end_node_outgoing_edge_warning() {
     let result = build_graph("end_outgoing", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.node(
             "after_end",
-            NodeKind::Task(TaskNode::new("after_end", |_| Ok(()))),
+            NodeKind::Task(TaskNode::new("after_end", |_| Ok(vec![]))),
         );
         let _ = g.edge("a", "end");
         // end 节点有出边 — 不可达
@@ -1707,8 +1722,8 @@ fn test_end_node_outgoing_edge_warning() {
 fn test_end_node_no_outgoing_edge() {
     let result = build_graph("end_no_outgoing", |g| {
         let _ = g.start("a");
-        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "end");
         let _ = g.end("end");
         Ok(())
@@ -1724,23 +1739,26 @@ async fn test_end_node_stops_execution() {
         let _ = g.start("a");
         let _ = g.node(
             "a",
-            NodeKind::Task(TaskNode::new("a", |state| {
-                state.insert("visited_a".into(), serde_json::json!(true));
-                Ok(())
+            NodeKind::Task(TaskNode::new("a", |_state| {
+                Ok(vec![StateDelta::set("visited_a", serde_json::json!(true))])
             })),
         );
         let _ = g.node(
             "end",
-            NodeKind::Task(TaskNode::new("end", |state| {
-                state.insert("visited_end".into(), serde_json::json!(true));
-                Ok(())
+            NodeKind::Task(TaskNode::new("end", |_state| {
+                Ok(vec![StateDelta::set(
+                    "visited_end",
+                    serde_json::json!(true),
+                )])
             })),
         );
         let _ = g.node(
             "unreachable",
-            NodeKind::Task(TaskNode::new("unreachable", |state| {
-                state.insert("visited_unreachable".into(), serde_json::json!(true));
-                Ok(())
+            NodeKind::Task(TaskNode::new("unreachable", |_state| {
+                Ok(vec![StateDelta::set(
+                    "visited_unreachable",
+                    serde_json::json!(true),
+                )])
             })),
         );
         let _ = g.edge("a", "end");

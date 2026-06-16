@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 // ─── Re-export from lellm-runtime ──────────────────────────────
 
 pub use lellm_runtime::{
-    SpanId, State, StateError, StateExt, StateReducer, TraceId, array_reducer,
+    ReducerRegistry, SpanId, State, StateDelta, StateError, StateExt, StateReducer, TraceId,
+    array_reducer,
 };
 
 /// Graph 执行结果。

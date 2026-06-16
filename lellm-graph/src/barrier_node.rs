@@ -7,8 +7,8 @@ use async_trait::async_trait;
 
 use crate::error::{GraphError, TerminalError};
 use crate::event::{BarrierDecision, BarrierId, GraphEvent};
-use crate::node::{FlowNode, NextStep, StreamNodeResult};
-use crate::state::{SpanId, State};
+use crate::node::{FlowNode, NextStep, NodeOutput, StreamNodeResult};
+use crate::state::{SpanId, State, StateDelta};
 
 /// Barrier 超时后的默认行为。
 #[derive(Debug, Clone, Default)]
@@ -79,35 +79,35 @@ impl BarrierNode {
         self
     }
 
-    /// 处理决策结果 — 写入 State 并返回 NextStep。
+    /// 处理决策结果 — 返回 NextStep + StateDelta，不直接修改 State。
     ///
-    /// 由 executor 在收到外部决策后调用。
-    pub fn apply_decision(
-        &self,
-        decision: BarrierDecision,
-        state: &mut State,
-    ) -> Result<NextStep, GraphError> {
+    /// 由 executor 在收到外部决策后调用。Executor 负责 apply deltas。
+    pub fn apply_decision(&self, decision: BarrierDecision) -> (NextStep, Vec<StateDelta>) {
         match decision {
             BarrierDecision::Approve => {
                 tracing::info!(barrier = %self.name, "approved");
-                state.insert(self.approve_key.clone(), serde_json::json!(true));
-                state.remove(&self.reject_key);
-                Ok(NextStep::GoToNext)
+                let deltas = vec![
+                    StateDelta::set(&self.approve_key, serde_json::json!(true)),
+                    StateDelta::delete(&self.reject_key),
+                ];
+                (NextStep::GoToNext, deltas)
             }
             BarrierDecision::Reject { reason } => {
                 tracing::warn!(barrier = %self.name, reason = %reason, "rejected");
-                state.insert(self.reject_key.clone(), serde_json::json!(reason));
-                state.remove(&self.approve_key);
-                Ok(NextStep::GoToNext)
+                let deltas = vec![
+                    StateDelta::set(&self.reject_key, serde_json::json!(reason)),
+                    StateDelta::delete(&self.approve_key),
+                ];
+                (NextStep::GoToNext, deltas)
             }
             BarrierDecision::Modify { key, value } => {
                 tracing::info!(barrier = %self.name, key = %key, "state modified");
-                state.insert(key, value);
-                Ok(NextStep::GoToNext)
+                let deltas = vec![StateDelta::set(key, value)];
+                (NextStep::GoToNext, deltas)
             }
             BarrierDecision::Reroute { target } => {
                 tracing::info!(barrier = %self.name, target = %target, "rerouted");
-                Ok(NextStep::Goto(target))
+                (NextStep::Goto(target), vec![])
             }
         }
     }
@@ -116,7 +116,7 @@ impl BarrierNode {
 #[async_trait]
 impl FlowNode for BarrierNode {
     /// 阻塞模式不支持 BarrierNode — 直接报错。
-    async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
+    async fn execute(&self, _state: &State) -> Result<NodeOutput, GraphError> {
         Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
             "BarrierNode '{}' requires stream mode. Use GraphExecutor::execute_stream() for human-in-the-loop.",
             self.name
@@ -126,7 +126,7 @@ impl FlowNode for BarrierNode {
     /// 流式执行 — 返回 Pause，由 executor 发射事件并等待决策。
     async fn execute_stream(
         &self,
-        _state: &mut State,
+        _state: &State,
         _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
@@ -138,6 +138,7 @@ impl FlowNode for BarrierNode {
 
         // 返回 Pause，由 executor 发射 BarrierWaiting 事件
         Ok(StreamNodeResult::Pause {
+            deltas: vec![],
             barrier_id,
             node_name,
             span_id,

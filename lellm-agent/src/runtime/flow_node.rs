@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 
 use lellm_graph::node::StreamNodeResult;
-use lellm_graph::{FlowEvent, FlowNode, GraphError, NextStep};
-use lellm_graph::{GraphEvent, SpanId, State, TerminalError};
+use lellm_graph::{FlowEvent, FlowNode, GraphError, NextStep, NodeOutput};
+use lellm_graph::{GraphEvent, SpanId, State, StateDelta, TerminalError};
 
 use crate::runtime::{AgentEvent, ToolUseLoop, ToolUseResult};
 
@@ -89,36 +89,37 @@ impl AgentFlowNode {
         }
     }
 
-    /// 将执行结果写回 State。
-    fn write_result(&self, state: &mut State, result: &ToolUseResult) {
-        // 将最终消息列表写回 State
+      /// 将执行结果转换为 StateDelta 列表。
+    fn collect_deltas(&self, result: &ToolUseResult) -> Vec<StateDelta> {
+        // 将最终消息列表序列化为 JSON
         let messages: Vec<serde_json::Value> = result
             .messages
             .iter()
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
-        state.insert(self.message_key.clone(), serde_json::json!(messages));
 
-        // 写入执行元数据
-        state.insert(
-            format!("{}_stop_reason", self.name),
-            serde_json::json!(format!("{:?}", result.stop_reason)),
-        );
-        state.insert(
-            format!("{}_iterations", self.name),
-            serde_json::json!(result.iterations),
-        );
-        state.insert(
-            format!("{}_tool_calls", self.name),
-            serde_json::json!(result.tool_calls_executed),
-        );
+        vec![
+            StateDelta::set(&self.message_key, serde_json::json!(messages)),
+            StateDelta::set(
+                format!("{}_stop_reason", self.name),
+                serde_json::json!(format!("{:?}", result.stop_reason)),
+            ),
+            StateDelta::set(
+                format!("{}_iterations", self.name),
+                serde_json::json!(result.iterations),
+            ),
+            StateDelta::set(
+                format!("{}_tool_calls", self.name),
+                serde_json::json!(result.tool_calls_executed),
+            ),
+        ]
     }
 }
 
 #[async_trait]
 impl FlowNode for AgentFlowNode {
     /// 阻塞执行 — 运行完整的 Agent Loop。
-    async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
+    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
         let messages = self.extract_messages(state);
 
         // 如果没有消息，发送一个警告但仍继续执行（agent 可能只需要 system prompt）
@@ -137,7 +138,7 @@ impl FlowNode for AgentFlowNode {
             })
         })?;
 
-        self.write_result(state, &result);
+        let deltas = self.collect_deltas(&result);
 
         tracing::debug!(
             agent = %self.name,
@@ -147,13 +148,16 @@ impl FlowNode for AgentFlowNode {
             "agent execution completed"
         );
 
-        Ok(NextStep::GoToNext)
+        Ok(NodeOutput {
+            deltas,
+            next: NextStep::GoToNext,
+        })
     }
 
     /// 流式执行 — 运行 Agent Loop 并转发事件。
     async fn execute_stream(
         &self,
-        state: &mut State,
+        state: &State,
         sink: &tokio::sync::mpsc::Sender<GraphEvent>,
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
@@ -175,7 +179,7 @@ impl FlowNode for AgentFlowNode {
         let mut agent_stream = self.loop_.execute_stream(messages);
 
         let mut final_result: Option<ToolUseResult> = None;
-        let mut has_error = false;
+        let mut error_delta: Option<StateDelta> = None;
 
         while let Some(agent_event) = agent_stream.recv().await {
             // 检查是否是终态事件
@@ -206,12 +210,11 @@ impl FlowNode for AgentFlowNode {
                         final_result = Some(result.clone());
                     }
                     AgentEvent::LoopError { error, .. } => {
-                        has_error = true;
-                        // 保存错误信息到 state
-                        state.insert(
+                        // 错误信息转为 Delta
+                        error_delta = Some(StateDelta::set(
                             format!("{}_error", self.name),
                             serde_json::json!(error.to_string()),
-                        );
+                        ));
                     }
                     _ => {}
                 }
@@ -219,8 +222,9 @@ impl FlowNode for AgentFlowNode {
         }
 
         // 如果有错误，返回 Fallback 让 Graph 决定如何处理
-        if has_error {
+        if let Some(err_delta) = error_delta {
             return Ok(StreamNodeResult::Fallback {
+                deltas: vec![err_delta],
                 reason: format!("agent loop error in '{}'", self.name),
                 node_name: self.name.clone(),
             });
@@ -228,7 +232,7 @@ impl FlowNode for AgentFlowNode {
 
         // 写入最终结果
         if let Some(result) = final_result {
-            self.write_result(state, &result);
+            let deltas = self.collect_deltas(&result);
 
             // 发射 NodeCompleted 事件
             let _ = sink
@@ -244,6 +248,7 @@ impl FlowNode for AgentFlowNode {
                 .await;
 
             return Ok(StreamNodeResult::Continue {
+                deltas,
                 next: NextStep::GoToNext,
                 span_id,
                 observed: None,
@@ -252,6 +257,7 @@ impl FlowNode for AgentFlowNode {
 
         // 没有收到终态事件（channel 意外关闭）
         Ok(StreamNodeResult::Fallback {
+            deltas: vec![],
             reason: "agent stream ended without terminal event".into(),
             node_name: self.name.clone(),
         })

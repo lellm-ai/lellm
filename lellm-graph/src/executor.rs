@@ -14,11 +14,14 @@ use tokio::sync::mpsc;
 use crate::barrier_node::BarrierDefaultAction;
 use crate::error::{GraphError, ObservedError, TerminalError};
 use crate::event::{
-    BarrierDecision, BarrierDecisionMessage, BarrierId, GraphEvent, GraphExecution, GraphHandle,
+    BarrierDecision, BarrierDecisionMessage, BarrierId, FlowEvent, GraphEvent, GraphExecution,
+    GraphHandle,
 };
 use crate::graph::Graph;
 use crate::node::{FlowNode, NextStep, NodeKind, StreamNodeResult};
-use crate::state::{ExecutionEntry, GraphResult, SpanId, State, TraceId};
+use crate::state::{
+    ExecutionEntry, GraphResult, ReducerRegistry, SpanId, State, StateDelta, TraceId,
+};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -209,6 +212,7 @@ impl GraphExecutor {
         let mut state = initial_state;
         let mut execution_log = Vec::new();
         let mut decision_registry = DecisionRegistry::new();
+        let mut reducer_registry = ReducerRegistry::new();
 
         let mut current = graph.start_node().to_string();
         let mut step: usize = 0;
@@ -293,16 +297,27 @@ impl GraphExecutor {
             }
 
             let node_start = Instant::now();
-            let result = node.execute_stream(&mut state, &event_tx, span_id).await;
+            let result = node.execute_stream(&state, &event_tx, span_id).await;
             let node_end = Instant::now();
             let duration = node_end.duration_since(node_start);
 
             match result {
                 Ok(StreamNodeResult::Continue {
+                    deltas,
                     next,
                     span_id,
                     observed,
                 }) => {
+                    // Apply deltas to state
+                    self.apply_deltas(
+                        &event_tx,
+                        &mut reducer_registry,
+                        &mut state,
+                        &node_name,
+                        &deltas,
+                    )
+                    .await;
+
                     let outcome = self
                         .handle_continue(
                             &event_tx,
@@ -345,12 +360,23 @@ impl GraphExecutor {
                 }
 
                 Ok(StreamNodeResult::Pause {
+                    deltas: barrier_deltas,
                     node_name: barrier_name,
                     span_id,
                     timeout,
                     default_action,
                     ..
                 }) => {
+                    // Apply pre-pause deltas
+                    self.apply_deltas(
+                        &event_tx,
+                        &mut reducer_registry,
+                        &mut state,
+                        &barrier_name,
+                        &barrier_deltas,
+                    )
+                    .await;
+
                     let outcome = self
                         .handle_barrier(
                             &event_tx,
@@ -358,6 +384,7 @@ impl GraphExecutor {
                             &mut decision_rx,
                             &mut decision_registry,
                             &mut cancel_rx,
+                            &mut reducer_registry,
                             node,
                             &current,
                             &mut state,
@@ -395,9 +422,20 @@ impl GraphExecutor {
                 }
 
                 Ok(StreamNodeResult::Fallback {
+                    deltas: fallback_deltas,
                     reason,
                     node_name: fallback_node,
                 }) => {
+                    // Apply pre-fallback deltas
+                    self.apply_deltas(
+                        &event_tx,
+                        &mut reducer_registry,
+                        &mut state,
+                        &fallback_node,
+                        &fallback_deltas,
+                    )
+                    .await;
+
                     let outcome = self
                         .handle_fallback(
                             &event_tx,
@@ -536,6 +574,7 @@ impl GraphExecutor {
         decision_rx: &mut mpsc::Receiver<BarrierDecisionMessage>,
         decision_registry: &mut DecisionRegistry,
         cancel_rx: &mut mpsc::Receiver<()>,
+        reducer_registry: &mut ReducerRegistry,
         node: &NodeKind,
         current: &str,
         state: &mut State,
@@ -607,16 +646,9 @@ impl GraphExecutor {
             return StepOutcome::Break;
         }
 
-        // 应用决策
-        let next = match node {
-            NodeKind::Barrier(b) => match b.apply_decision(decision, state) {
-                Ok(ns) => ns,
-                Err(e) => {
-                    self.send_graph_error(event_tx, e, state, execution_log, node_start, trace_id)
-                        .await;
-                    return StepOutcome::ErrorSent;
-                }
-            },
+        // 应用决策 — apply_decision 返回 (NextStep, Vec<StateDelta>)
+        let (next, barrier_deltas) = match node {
+            NodeKind::Barrier(b) => b.apply_decision(decision),
             _ => {
                 self.send_graph_error(
                     event_tx,
@@ -633,6 +665,16 @@ impl GraphExecutor {
                 return StepOutcome::ErrorSent;
             }
         };
+
+        // Apply decision deltas
+        self.apply_deltas(
+            event_tx,
+            reducer_registry,
+            state,
+            barrier_name,
+            &barrier_deltas,
+        )
+        .await;
 
         // 记录执行日志
         let end_time = Instant::now();
@@ -792,6 +834,43 @@ impl GraphExecutor {
     }
 
     // ─── 辅助方法 ──────────────────────────────────────────────
+
+    /// 应用节点返回的 StateDelta 到 State，并发射 StateChanged 事件。
+    async fn apply_deltas(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        reducer_registry: &mut ReducerRegistry,
+        state: &mut State,
+        node_name: &str,
+        deltas: &[StateDelta],
+    ) {
+        for delta in deltas {
+            // Apply delta to state
+            if let Err(e) = reducer_registry.apply_delta(state, delta) {
+                tracing::warn!(
+                    node = %node_name,
+                    key = %delta.key,
+                    error = %e,
+                    "failed to apply state delta"
+                );
+            }
+
+            // 发射 StateChanged 事件
+            let _ = self
+                .send(
+                    event_tx,
+                    GraphEvent::Node {
+                        span_id: SpanId::new(), // TODO: 使用节点的 span_id
+                        node_name: node_name.to_string(),
+                        event: FlowEvent::StateChanged {
+                            node_id: node_name.to_string(),
+                            delta: delta.clone(),
+                        },
+                    },
+                )
+                .await;
+        }
+    }
 
     /// 发送事件，返回 `true` 表示 consumer 已断开（应终止执行）。
     async fn send(&self, event_tx: &mpsc::Sender<GraphEvent>, event: GraphEvent) -> bool {
