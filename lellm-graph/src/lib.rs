@@ -10,6 +10,7 @@ pub mod graph;
 pub mod llm_node;
 pub mod node;
 pub mod state;
+pub mod statekey;
 pub mod tool_node;
 
 // ─── Error Types ────────────────────────────────────────────────
@@ -34,6 +35,9 @@ pub use node::{
 pub use state::{
     ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer, array_reducer,
 };
+
+// ─── StateKey (编译期类型安全) ──────────────────────────────────
+pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS, StateKey, StateKeyExt};
 
 // ─── Executor ───────────────────────────────────────────────────
 pub use executor::GraphExecutor;

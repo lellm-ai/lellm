@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, GraphBuilder, GraphError,
-    GraphEvent, GraphExecution, GraphExecutor, NodeKind, State, StateExt, TaskNode, TerminalError,
-    TraceId, array_reducer,
+    GraphEvent, GraphExecution, GraphExecutor, NodeKind, State, StateExt, StateKey, TaskNode,
+    TerminalError, TraceId, array_reducer, SK_COUNT, SK_STEPS,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -992,4 +992,150 @@ async fn test_goto_missing_edge_error() {
         }
         other => panic!("expected MissingEdge, got: {other}"),
     }
+}
+
+// ─── StateKey<T> 测试 ──────────────────────────────────────────
+
+/// StateKey 基本读写 — set_sk / get_sk / require_sk。
+#[test]
+fn test_statekey_basic_read_write() {
+    use lellm_graph::StateKeyExt;
+
+    let mut state = State::new();
+    state.set_sk(&SK_COUNT, 42u64);
+
+    assert_eq!(state.get_sk(&SK_COUNT), Some(42u64));
+    assert_eq!(state.require_sk(&SK_COUNT).unwrap(), 42u64);
+}
+
+/// StateKey 类型安全 — 类型不匹配时返回 None（不会 panic）。
+#[test]
+fn test_statekey_type_mismatch() {
+    use lellm_graph::StateKeyExt;
+
+    let mut state = State::new();
+    state.set_sk(&SK_COUNT, 42u64);
+
+    // 定义一个与 SK_COUNT 同 key 但不同类型的 StateKey
+    const SK_COUNT_AS_STRING: StateKey<String> = StateKey::new("count");
+
+    // 期望 String，但实际存储的是 u64 → 反序列化失败 → None
+    assert_eq!(state.get_sk::<String>(&SK_COUNT_AS_STRING), None);
+
+    // require_sk 返回 Deserialize 错误（不是 MissingKey）
+    let err = state.require_sk::<String>(&SK_COUNT_AS_STRING);
+    assert!(matches!(err, Err(lellm_graph::StateError::Deserialize(_, _))));
+}
+
+/// StateKey MissingKey — key 不存在时 require_sk 返回错误。
+#[test]
+fn test_statekey_missing_key() {
+    use lellm_graph::StateKeyExt;
+
+    let state = State::new();
+    let err = state.require_sk(&SK_COUNT);
+    assert!(matches!(err, Err(lellm_graph::StateError::MissingKey(_))));
+}
+
+/// StateKey contains_sk / remove_sk。
+#[test]
+fn test_statekey_contains_remove() {
+    use lellm_graph::StateKeyExt;
+
+    let mut state = State::new();
+    state.set_sk(&SK_STEPS, vec!["step1".to_string()]);
+
+    assert!(state.contains_sk(&SK_STEPS));
+    assert!(!state.contains_sk(&SK_COUNT));
+
+    let removed = state.remove_sk(&SK_STEPS);
+    assert!(removed.is_some());
+    assert!(!state.contains_sk(&SK_STEPS));
+}
+
+/// StateKey 与现有 StateExt 共存 — 同一个 state 可以同时使用两种 API。
+#[test]
+fn test_statekey_coexist_with_stateext() {
+    use lellm_graph::{StateExt, StateKeyExt};
+
+    let mut state = State::new();
+
+    // StateKey API
+    state.set_sk(&SK_COUNT, 100u64);
+
+    // 传统 StateExt API
+    state.set("legacy_flag", true);
+
+    // 互相读取不受影响
+    assert_eq!(state.get_sk(&SK_COUNT), Some(100u64));
+    assert_eq!(state.get_bool("legacy_flag"), Some(true));
+}
+
+/// StateKey 在 Graph 执行中的真实使用场景。
+#[tokio::test]
+async fn test_statekey_in_graph_execution() {
+    use lellm_graph::StateKeyExt;
+
+    // 自定义 StateKey
+    const SK_RESULT: StateKey<String> = StateKey::new("result");
+
+    let graph = build_graph("statekey_graph", |g| {
+        let _ = g.start("set");
+        let _ = g.node(
+            "set",
+            NodeKind::Task(TaskNode::new("set", |state| {
+                state.set_sk(&SK_COUNT, 0u64);
+                state.set_sk(&SK_RESULT, "pending".to_string());
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "increment",
+            NodeKind::Task(TaskNode::new("increment", |state| {
+                let count = state.get_sk(&SK_COUNT).unwrap_or(0);
+                state.set_sk(&SK_COUNT, count + 1);
+                if count + 1 >= 3 {
+                    state.set_sk(&SK_RESULT, "done".to_string());
+                }
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "check",
+            NodeKind::Condition(
+                lellm_graph::ConditionNode::builder("check")
+                    .branch("increment", |s: &State| {
+                        s.get_sk(&SK_COUNT).unwrap_or(0) < 3
+                    })
+                    .branch("end", |_| true)
+                    .build(),
+            ),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |state| {
+                let result = state.require_sk(&SK_RESULT).unwrap();
+                assert_eq!(result, "done");
+                Ok(())
+            })),
+        );
+        let _ = g.edge("set", "increment");
+        let _ = g.edge("increment", "check");
+        let _ = g.edge("check", "increment");
+        let _ = g.edge("check", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(Arc::new(graph), HashMap::new())
+        .await
+        .expect("execution should succeed");
+
+    assert_eq!(result.state.get_sk(&SK_COUNT).unwrap(), 3u64);
+    assert_eq!(
+        result.state.get_sk(&SK_RESULT).unwrap(),
+        "done".to_string()
+    );
 }
