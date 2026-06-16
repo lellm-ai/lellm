@@ -101,6 +101,38 @@ impl Graph {
         &self.end
     }
 
+    /// 计算图结构指纹 hash。
+    ///
+    /// 用于 Checkpoint 恢复时校验图结构是否变更。
+    /// 基于节点名和边定义生成简化的 hash 字符串。
+    pub fn hash(&self) -> String {
+        let mut s = String::new();
+        // 排序节点名，确保确定性
+        let mut names: Vec<&str> = self.nodes.keys().map(|k| k.as_str()).collect();
+        names.sort();
+        s.push_str(&names.join(","));
+        s.push('|');
+        // 排序边，确保确定性
+        let mut edge_strs: Vec<String> = self
+            .edges
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}->{}{:?}{}",
+                    e.from,
+                    e.to,
+                    if e.condition.is_some() { "?" } else { "" },
+                    if e.fallback { "!" } else { "" }
+                )
+            })
+            .collect();
+        edge_strs.sort();
+        s.push_str(&edge_strs.join(","));
+        // Simple hash — FNV-1a
+        let hash = fnv_hash(&s);
+        format!("{:016x}", hash)
+    }
+
     pub fn edges_from(&self, from: &str) -> Vec<&Edge> {
         self.edges.iter().filter(|e| e.from == from).collect()
     }
@@ -215,7 +247,9 @@ impl Graph {
         let mut adj: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for edge in &self.edges {
-            adj.entry(edge.from.clone()).or_default().push(edge.to.clone());
+            adj.entry(edge.from.clone())
+                .or_default()
+                .push(edge.to.clone());
         }
         adj
     }
@@ -605,11 +639,7 @@ fn format_cycle(cycle: &[String]) -> String {
 }
 
 /// 检查 fallback 边是否参与循环。
-fn check_fallback_in_cycles(
-    graph: &Graph,
-    cycles: &[Vec<String>],
-    diag: &mut GraphDiagnostics,
-) {
+fn check_fallback_in_cycles(graph: &Graph, cycles: &[Vec<String>], diag: &mut GraphDiagnostics) {
     // 收集所有 fallback 边的 (from, to)
     let fallback_edges: std::collections::HashSet<(&str, &str)> = graph
         .edges
@@ -683,11 +713,7 @@ fn check_unreachable_nodes(
 
 /// 检查 end 节点是否有出边。
 fn check_end_node_outgoing(graph: &Graph, diag: &mut GraphDiagnostics) {
-    let outgoing: Vec<&Edge> = graph
-        .edges
-        .iter()
-        .filter(|e| e.from == graph.end)
-        .collect();
+    let outgoing: Vec<&Edge> = graph.edges.iter().filter(|e| e.from == graph.end).collect();
 
     if !outgoing.is_empty() {
         let targets: Vec<&str> = outgoing.iter().map(|e| e.to.as_str()).collect();
@@ -701,4 +727,14 @@ fn check_end_node_outgoing(graph: &Graph, diag: &mut GraphDiagnostics) {
             ),
         );
     }
+}
+
+/// FNV-1a hash — 无外部依赖的简单 hash。
+fn fnv_hash(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in s.as_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }

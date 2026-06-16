@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::error::{GraphError, ObservedError};
 use crate::state::{GraphResult, State};
 pub use crate::state::{SpanId, TraceId};
+pub use lellm_runtime::CheckpointId;
 
 // ─── BarrierId ────────────────────────────────────────────────
 
@@ -156,6 +157,18 @@ pub enum GraphEvent {
         error: ObservedError,
         node_name: String,
     },
+    /// Checkpoint 已保存。
+    ///
+    /// 当 `CheckpointPolicy::EveryNode` 或 `BarrierOnly` 自动保存时发射。
+    /// `Manual` 模式下通过 `GraphHandle::checkpoint()` 触发。
+    CheckpointSaved {
+        /// Checkpoint ID
+        checkpoint_id: CheckpointId,
+        /// 当前节点名称
+        node_name: String,
+        /// 当前步骤序号
+        step: usize,
+    },
     /// Graph 执行完成（恰好一次）
     ///
     /// `GraphResult` 即为终态的终极真理之源——内含 `state`、`execution_log`、`duration`。
@@ -185,10 +198,11 @@ pub struct GraphExecution {
 
 /// Graph 执行句柄 — 用于与运行中的 Graph 交互。
 ///
-/// 通过 `execute_stream()` 返回，消费者使用此句柄提交 Barrier 决策或取消执行。
+/// 通过 `execute_stream()` 返回，消费者使用此句柄提交 Barrier 决策、触发 Checkpoint 或取消执行。
 pub struct GraphHandle {
     decision_tx: tokio::sync::mpsc::Sender<BarrierDecisionMessage>,
     cancel_tx: tokio::sync::mpsc::Sender<()>,
+    checkpoint_tx: tokio::sync::mpsc::Sender<()>,
 }
 
 /// 决策消息 — 支持精确匹配和通配匹配。
@@ -210,10 +224,12 @@ impl GraphHandle {
     pub(crate) fn new(
         decision_tx: tokio::sync::mpsc::Sender<BarrierDecisionMessage>,
         cancel_tx: tokio::sync::mpsc::Sender<()>,
+        checkpoint_tx: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         Self {
             decision_tx,
             cancel_tx,
+            checkpoint_tx,
         }
     }
 
@@ -277,5 +293,20 @@ impl GraphHandle {
     pub fn cancel(&self) {
         // send 失败说明 executor 已结束，忽略即可
         let _ = self.cancel_tx.try_send(());
+    }
+
+    /// 手动触发 Checkpoint 保存。
+    ///
+    /// 在 `CheckpointPolicy::Manual` 模式下，executor 不会自动保存，
+    /// 调用此方法可让 executor 在当前步骤后保存一个 Checkpoint。
+    ///
+    /// 在 `EveryNode` / `BarrierOnly` 模式下调用无副作用（已被自动保存覆盖）。
+    /// 多次调用安全（idempotent）。
+    pub async fn checkpoint(&self) -> Result<(), GraphError> {
+        self.checkpoint_tx.send(()).await.map_err(|_| {
+            GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
+                node: "checkpoint channel closed".into(),
+            })
+        })
     }
 }

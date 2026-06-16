@@ -1796,18 +1796,9 @@ async fn test_end_node_stops_execution() {
 fn test_analyze_dag_clean() {
     let graph = build_graph("dag", |g| {
         let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "b",
-            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
-        );
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "end");
         let _ = g.end("end");
@@ -1830,18 +1821,9 @@ fn test_analyze_dag_clean() {
 fn test_analyze_unprotected_cycle() {
     let graph = build_graph("cycle", |g| {
         let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "b",
-            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
-        );
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "a"); // 回跳，无 max_visits
         let _ = g.edge("b", "end");
@@ -1869,14 +1851,8 @@ fn test_analyze_unprotected_cycle() {
 fn test_analyze_unreachable_node() {
     let graph = build_graph("unreachable", |g| {
         let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
-        );
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.node(
             "orphan",
             NodeKind::Task(TaskNode::new("orphan", |_| Ok(vec![]))),
@@ -1905,14 +1881,8 @@ fn test_analyze_unreachable_node() {
 fn test_analyze_end_node_outgoing() {
     let graph = build_graph("end-outgoing", |g| {
         let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
-        );
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.node(
             "extra",
             NodeKind::Task(TaskNode::new("extra", |_| Ok(vec![]))),
@@ -1942,18 +1912,9 @@ fn test_analyze_end_node_outgoing() {
 fn test_analyze_fallback_in_cycle() {
     let graph = build_graph("fallback-cycle", |g| {
         let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "b",
-            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
-        );
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge_fallback("b", "a"); // fallback 回跳，形成环
         let _ = g.edge("b", "end");
@@ -1989,18 +1950,9 @@ fn test_analyze_fallback_in_cycle() {
 fn test_analyze_protected_cycle() {
     let graph = build_graph("protected-cycle", |g| {
         let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "b",
-            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
-        );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
-        );
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
         let _ = g.edge("a", "b");
         let _ = g.edge("b", "a").max_visits(5); // 回跳，有 max_visits 保护
         let _ = g.edge("b", "end");

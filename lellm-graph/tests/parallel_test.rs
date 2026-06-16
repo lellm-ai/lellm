@@ -17,13 +17,19 @@ async fn test_parallel_basic_two_branches() {
         .branch(
             "branch_a",
             Arc::new(TaskNode::new("branch_a", |_state| {
-                Ok(vec![StateDelta::set("a_result", serde_json::json!("from_a"))])
+                Ok(vec![StateDelta::set(
+                    "a_result",
+                    serde_json::json!("from_a"),
+                )])
             })),
         )
         .branch(
             "branch_b",
             Arc::new(TaskNode::new("branch_b", |_state| {
-                Ok(vec![StateDelta::set("b_result", serde_json::json!("from_b"))])
+                Ok(vec![StateDelta::set(
+                    "b_result",
+                    serde_json::json!("from_b"),
+                )])
             })),
         )
         .build();
@@ -83,7 +89,10 @@ async fn test_parallel_reads_input_state() {
             "reader",
             Arc::new(TaskNode::new("reader", |state| {
                 let base = state.get_u64("base").unwrap_or(0);
-                Ok(vec![StateDelta::set("computed", serde_json::json!(base * 2))])
+                Ok(vec![StateDelta::set(
+                    "computed",
+                    serde_json::json!(base * 2),
+                )])
             })),
         )
         .build();
@@ -148,13 +157,17 @@ async fn test_parallel_same_key_conflict() {
         .branch(
             "writer_a",
             Arc::new(TaskNode::new("writer_a", |_state| {
-                Ok(vec![StateDelta::set("count", serde_json::json!(1)).with_writer("writer_a")])
+                Ok(vec![
+                    StateDelta::set("count", serde_json::json!(1)).with_writer("writer_a"),
+                ])
             })),
         )
         .branch(
             "writer_b",
             Arc::new(TaskNode::new("writer_b", |_state| {
-                Ok(vec![StateDelta::set("count", serde_json::json!(2)).with_writer("writer_b")])
+                Ok(vec![
+                    StateDelta::set("count", serde_json::json!(2)).with_writer("writer_b"),
+                ])
             })),
         )
         .build();
@@ -303,10 +316,7 @@ async fn test_parallel_collect_all() {
 async fn test_parallel_emits_events() {
     let parallel = ParallelNode::builder()
         .label("my_parallel")
-        .branch(
-            "fast",
-            Arc::new(TaskNode::new("fast", |_state| Ok(vec![]))),
-        )
+        .branch("fast", Arc::new(TaskNode::new("fast", |_state| Ok(vec![]))))
         .branch(
             "also_fast",
             Arc::new(TaskNode::new("also_fast", |_state| Ok(vec![]))),
@@ -368,14 +378,20 @@ async fn test_parallel_in_pipeline() {
             "compute_a",
             Arc::new(TaskNode::new("compute_a", |state| {
                 let base = state.get_u64("base").unwrap_or(0);
-                Ok(vec![StateDelta::set("result_a", serde_json::json!(base + 1))])
+                Ok(vec![StateDelta::set(
+                    "result_a",
+                    serde_json::json!(base + 1),
+                )])
             })),
         )
         .branch(
             "compute_b",
             Arc::new(TaskNode::new("compute_b", |state| {
                 let base = state.get_u64("base").unwrap_or(0);
-                Ok(vec![StateDelta::set("result_b", serde_json::json!(base * 2))])
+                Ok(vec![StateDelta::set(
+                    "result_b",
+                    serde_json::json!(base * 2),
+                )])
             })),
         )
         .build();
@@ -410,7 +426,7 @@ async fn test_parallel_in_pipeline() {
     assert_eq!(result.state.get_u64("base"), Some(10));
     assert_eq!(result.state.get_u64("result_a"), Some(11)); // 10 + 1
     assert_eq!(result.state.get_u64("result_b"), Some(20)); // 10 * 2
-    assert_eq!(result.state.get_u64("total"), Some(31));    // 11 + 20
+    assert_eq!(result.state.get_u64("total"), Some(31)); // 11 + 20
 }
 
 // ─── 边界情况 ────────────────────────────────────────────────

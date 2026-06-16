@@ -79,10 +79,7 @@ pub async fn observe_react_loop(
                 }
             }
 
-            AgentEvent::ToolStart {
-                tool_call_id,
-                name,
-            } => {
+            AgentEvent::ToolStart { tool_call_id, name } => {
                 tool_timings.insert(
                     tool_call_id,
                     ToolTiming {
@@ -97,10 +94,7 @@ pub async fn observe_react_loop(
                 result,
             } => {
                 let timing = tool_timings.remove(&tool_call_id);
-                let tool_name = timing
-                    .as_ref()
-                    .map(|t| t.name.clone())
-                    .unwrap_or_default();
+                let tool_name = timing.as_ref().map(|t| t.name.clone()).unwrap_or_default();
                 let elapsed = timing
                     .map(|t| t.start.elapsed().as_secs_f64())
                     .unwrap_or(0.0);
@@ -108,10 +102,7 @@ pub async fn observe_react_loop(
                 println!(
                     "=============================== 工具观察 ================================"
                 );
-                println!(
-                    "🔧 {}  (耗时: {:.2}s)",
-                    tool_name, elapsed
-                );
+                println!("🔧 {}  (耗时: {:.2}s)", tool_name, elapsed);
                 tool_times.push((tool_name, elapsed));
                 match result {
                     Ok(ref output) => {

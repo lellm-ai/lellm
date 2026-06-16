@@ -89,7 +89,7 @@ impl AgentFlowNode {
         }
     }
 
-      /// 将执行结果转换为 StateDelta 列表。
+    /// 将执行结果转换为 StateDelta 列表。
     fn collect_deltas(&self, result: &ToolUseResult) -> Vec<StateDelta> {
         // 将最终消息列表序列化为 JSON
         let messages: Vec<serde_json::Value> = result

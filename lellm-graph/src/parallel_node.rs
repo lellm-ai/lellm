@@ -79,12 +79,17 @@ impl ParallelNode {
 
     /// 获取分支名称列表。
     pub fn branch_names(&self) -> Vec<&str> {
-        self.branches.iter().map(|(name, _)| name.as_str()).collect()
+        self.branches
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect()
     }
 
     /// 迭代所有分支（名称, 节点）引用。
     pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode>)> {
-        self.branches.iter().map(|(name, node)| (name.as_str(), node))
+        self.branches
+            .iter()
+            .map(|(name, node)| (name.as_str(), node))
     }
 
     /// 获取错误处理策略。
@@ -101,10 +106,7 @@ impl ParallelNode {
     ///
     /// ⚠️ 此方法顺序执行各分支，不发挥并行优势。
     /// 真正的并行执行由 `Executor::handle_parallel()` 完成。
-    pub async fn execute_sequential(
-        &self,
-        state: &State,
-    ) -> Result<NodeOutput, GraphError> {
+    pub async fn execute_sequential(&self, state: &State) -> Result<NodeOutput, GraphError> {
         let mut all_deltas = Vec::new();
 
         for (name, branch) in &self.branches {
@@ -154,11 +156,7 @@ impl ParallelNodeBuilder {
     ///
     /// - `name` — 分支名称（用于调试和事件标识）
     /// - `node` — 分支执行的节点
-    pub fn branch(
-        mut self,
-        name: impl Into<String>,
-        node: Arc<dyn FlowNode>,
-    ) -> Self {
+    pub fn branch(mut self, name: impl Into<String>, node: Arc<dyn FlowNode>) -> Self {
         self.branches.push((name.into(), node));
         self
     }
@@ -192,7 +190,11 @@ impl std::fmt::Debug for ParallelNode {
             .field("label", &self.label)
             .field(
                 "branches",
-                &self.branches.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                &self
+                    .branches
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>(),
             )
             .field("error_strategy", &self.error_strategy)
             .finish()

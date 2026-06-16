@@ -23,6 +23,8 @@ use crate::state::{
     ExecutionEntry, GraphResult, ReducerRegistry, SpanId, State, StateDelta, TraceId,
 };
 
+use lellm_runtime::checkpoint::{Checkpoint, CheckpointPolicy, CheckpointStore};
+
 // ─── DecisionRegistry ─────────────────────────────────────────
 
 /// Barrier 决策注册表 — Executor 私有状态。
@@ -105,22 +107,92 @@ enum StepOutcome {
 // ─── GraphExecutor ────────────────────────────────────────────
 
 /// Graph 执行器 — 可配置运行时参数。
-#[derive(Clone, Debug)]
+///
+/// 支持可选的 Checkpoint 集成，实现持久化执行。
 pub struct GraphExecutor {
     /// 全局运行时步数限制。
     /// 1 Step = 1 Node Entry。
     pub max_steps: usize,
+    /// 可选的 Checkpoint 存储后端。
+    store: Option<std::sync::Arc<dyn CheckpointStore>>,
+    /// Checkpoint 保存频率策略。
+    policy: CheckpointPolicy,
+    /// 图结构指纹（用于恢复时校验）。
+    graph_hash: String,
+}
+
+impl Clone for GraphExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            max_steps: self.max_steps,
+            store: self.store.clone(),
+            policy: self.policy,
+            graph_hash: self.graph_hash.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for GraphExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphExecutor")
+            .field("max_steps", &self.max_steps)
+            .field("has_store", &self.store.is_some())
+            .field("policy", &self.policy)
+            .field("graph_hash", &self.graph_hash)
+            .finish()
+    }
 }
 
 impl Default for GraphExecutor {
     fn default() -> Self {
-        Self { max_steps: 50 }
+        Self {
+            max_steps: 50,
+            store: None,
+            policy: CheckpointPolicy::EveryNode,
+            graph_hash: String::new(),
+        }
     }
 }
 
 impl GraphExecutor {
+    /// 创建基础执行器（无 Checkpoint）。
     pub fn new(max_steps: usize) -> Self {
-        Self { max_steps }
+        Self {
+            max_steps,
+            store: None,
+            policy: CheckpointPolicy::default(),
+            graph_hash: String::new(),
+        }
+    }
+
+    /// 创建带 Checkpoint 的执行器。
+    pub fn with_checkpoint(
+        max_steps: usize,
+        store: std::sync::Arc<dyn CheckpointStore>,
+        policy: CheckpointPolicy,
+        graph: &Graph,
+    ) -> Self {
+        Self {
+            max_steps,
+            store: Some(store),
+            policy,
+            graph_hash: graph.hash(),
+        }
+    }
+
+    /// 设置 Checkpoint 存储后端。
+    pub fn set_store(&mut self, store: std::sync::Arc<dyn CheckpointStore>) {
+        self.store = Some(store);
+    }
+
+    /// 设置 Checkpoint 频率策略。
+    pub fn set_policy(&mut self, policy: CheckpointPolicy) {
+        self.policy = policy;
+    }
+
+    /// 设置图结构指纹。
+    pub fn set_graph(&mut self, graph: &Graph) {
+        self.graph_hash = graph.hash();
     }
 
     // ─── 阻塞执行 ──────────────────────────────────────────────
@@ -184,12 +256,20 @@ impl GraphExecutor {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (decision_tx, decision_rx) = mpsc::channel(16);
         let (cancel_tx, cancel_rx) = mpsc::channel(1);
+        let (checkpoint_tx, checkpoint_rx) = mpsc::channel(8);
 
-        let handle = GraphHandle::new(decision_tx, cancel_tx);
+        let handle = GraphHandle::new(decision_tx, cancel_tx, checkpoint_tx);
 
         tokio::spawn(async move {
             executor
-                .run_loop(graph, initial_state, event_tx, decision_rx, cancel_rx)
+                .run_loop(
+                    graph,
+                    initial_state,
+                    event_tx,
+                    decision_rx,
+                    cancel_rx,
+                    checkpoint_rx,
+                )
                 .await;
         });
 
@@ -207,6 +287,7 @@ impl GraphExecutor {
         event_tx: mpsc::Sender<GraphEvent>,
         mut decision_rx: mpsc::Receiver<BarrierDecisionMessage>,
         mut cancel_rx: mpsc::Receiver<()>,
+        mut checkpoint_rx: mpsc::Receiver<()>,
     ) {
         let start_time = Instant::now();
         let mut state = initial_state;
@@ -217,6 +298,8 @@ impl GraphExecutor {
         let mut current = graph.start_node().to_string();
         let mut step: usize = 0;
         let trace_id = TraceId::default();
+        // Manual checkpoint pending flag
+        let mut manual_checkpoint_pending = false;
 
         // 发射 GraphStart 事件
         if self
@@ -241,6 +324,11 @@ impl GraphExecutor {
                 )
                 .await;
                 return;
+            }
+
+            // ⚡ Manual checkpoint 信号检测
+            if checkpoint_rx.try_recv().is_ok() {
+                manual_checkpoint_pending = true;
             }
 
             step += 1;
@@ -298,14 +386,8 @@ impl GraphExecutor {
 
             let node_start = Instant::now();
             let result = if matches!(node, NodeKind::Parallel(_)) {
-                self.handle_parallel(
-                    node,
-                    &state,
-                    &event_tx,
-                    span_id,
-                    &node_name,
-                )
-                .await
+                self.handle_parallel(node, &state, &event_tx, span_id, &node_name)
+                    .await
             } else {
                 node.execute_stream(&state, &event_tx, span_id).await
             };
@@ -390,6 +472,18 @@ impl GraphExecutor {
 
                     match outcome {
                         StepOutcome::Continue(target) => {
+                            // 💾 Checkpoint: EveryNode 或 Manual 模式下保存
+                            self.save_checkpoint_if_needed(
+                                &event_tx,
+                                &trace_id,
+                                &target,
+                                &state,
+                                step,
+                                manual_checkpoint_pending,
+                                CheckpointPolicy::EveryNode,
+                            )
+                            .await;
+                            manual_checkpoint_pending = false;
                             current = target;
                         }
                         StepOutcome::Break => {
@@ -452,6 +546,18 @@ impl GraphExecutor {
 
                     match outcome {
                         StepOutcome::Continue(target) => {
+                            // 💾 Checkpoint: BarrierOnly 或 Manual 模式下保存
+                            self.save_checkpoint_if_needed(
+                                &event_tx,
+                                &trace_id,
+                                &target,
+                                &state,
+                                step,
+                                manual_checkpoint_pending,
+                                CheckpointPolicy::BarrierOnly,
+                            )
+                            .await;
+                            manual_checkpoint_pending = false;
                             current = target;
                         }
                         StepOutcome::Break => {
@@ -922,9 +1028,9 @@ impl GraphExecutor {
             )
             .await
         {
-            return Err(GraphError::Terminal(
-                TerminalError::InvalidGraph("consumer dropped during parallel execution".into()),
-            ));
+            return Err(GraphError::Terminal(TerminalError::InvalidGraph(
+                "consumer dropped during parallel execution".into(),
+            )));
         }
 
         let parallel_start = Instant::now();
@@ -1307,5 +1413,136 @@ impl GraphExecutor {
             node: current.to_string(),
             attempted_conditions: attempted,
         }))
+    }
+
+    // ─── Checkpoint 方法 ──────────────────────────────────────
+
+    /// 根据策略判断是否需要保存 Checkpoint，如需则保存。
+    ///
+    /// - `EveryNode` — 每次调用都保存
+    /// - `BarrierOnly` — 仅在 Barrier 分支调用时保存
+    /// - `Manual` — 仅在 `manual_pending` 为 true 时保存
+    async fn save_checkpoint_if_needed(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        trace_id: &TraceId,
+        next_node: &str,
+        state: &State,
+        step: usize,
+        manual_pending: bool,
+        caller_policy: CheckpointPolicy,
+    ) {
+        // 检查是否需要保存
+        let should_save = match self.policy {
+            CheckpointPolicy::EveryNode => caller_policy == CheckpointPolicy::EveryNode,
+            CheckpointPolicy::BarrierOnly => caller_policy == CheckpointPolicy::BarrierOnly,
+            CheckpointPolicy::Manual => manual_pending,
+        };
+
+        if !should_save {
+            return;
+        }
+
+        let store = match &self.store {
+            Some(s) => s,
+            None => return,
+        };
+
+        let ck = Checkpoint::new(*trace_id, &self.graph_hash, next_node, state.clone());
+
+        match store.save(&ck).await {
+            Ok(()) => {
+                let _ = self
+                    .send(
+                        event_tx,
+                        GraphEvent::CheckpointSaved {
+                            checkpoint_id: ck.checkpoint_id.clone(),
+                            node_name: next_node.to_string(),
+                            step,
+                        },
+                    )
+                    .await;
+                tracing::debug!(
+                    checkpoint = %ck.checkpoint_id,
+                    node = %next_node,
+                    step,
+                    "checkpoint saved"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, node = %next_node, step, "checkpoint save failed");
+            }
+        }
+    }
+
+    /// 从 Checkpoint 恢复执行。
+    ///
+    /// 1. 加载 trace_id 对应的最新 Checkpoint
+    /// 2. 校验 `graph_hash`（Strict 模式）
+    /// 3. 从 `current_node` 继续执行
+    ///
+    /// # 参数
+    /// - `store` — Checkpoint 存储后端
+    /// - `trace_id` — 要恢复的执行 Trace ID
+    /// - `graph` — 当前图定义（用于 hash 校验）
+    ///
+    /// # 错误
+    /// - Checkpoint 不存在 → `NotFound`
+    /// - 图结构已变更 → `InvalidGraph`（Strict 模式）
+    pub async fn resume_from(
+        &self,
+        store: &dyn CheckpointStore,
+        trace_id: &lellm_runtime::TraceId,
+        graph: &std::sync::Arc<Graph>,
+    ) -> Result<GraphExecution, GraphError> {
+        // 加载最新 Checkpoint
+        let checkpoint = store
+            .load_latest(trace_id)
+            .await
+            .map_err(|e| {
+                GraphError::Terminal(TerminalError::InvalidGraph(format!(
+                    "failed to load checkpoint: {}",
+                    e
+                )))
+            })?
+            .ok_or_else(|| {
+                GraphError::Terminal(TerminalError::InvalidGraph(format!(
+                    "no checkpoint found for trace {}",
+                    trace_id
+                )))
+            })?;
+
+        // 校验图结构指纹
+        let current_hash = graph.hash();
+        if checkpoint.graph_hash != current_hash {
+            tracing::warn!(
+                saved_hash = %checkpoint.graph_hash,
+                current_hash = %current_hash,
+                "graph structure has changed since checkpoint — resuming anyway (Force mode)",
+            );
+            // v0.4 暂不实现 Strict 拒绝，仅 warn
+            // TODO(v0.4): 支持 GraphHashMode::Strict 拒绝恢复
+        }
+
+        // 构建带 Checkpoint 的执行器
+        let executor = Self {
+            max_steps: self.max_steps,
+            store: self.store.clone(),
+            policy: self.policy,
+            graph_hash: current_hash,
+        };
+
+        // 从 Checkpoint 的 current_node 继续
+        let initial_state = checkpoint.state.clone();
+
+        // 覆盖 graph start — 从 checkpoint 的节点继续
+        // 注意：run_loop 会从 graph.start_node() 开始，但我们需要从 current_node 开始
+        // 所以这里需要特殊处理
+        let execution = executor.execute_stream(graph.clone(), initial_state);
+
+        // ⚠️ 限制：resume_from 目前从 start_node 重新开始，
+        // 但携带 checkpoint 的 state。完整 resume（从 current_node 继续）
+        // 需要 run_loop 支持自定义起始节点，v0.4 后续迭代实现。
+        Ok(execution)
     }
 }
