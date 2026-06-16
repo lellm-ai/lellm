@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::error::{BuildError, BuildErrors};
+use crate::error::{BuildError, BuildErrors, DiagnosticCategory, GraphDiagnostics};
 use crate::node::NodeKind;
 use crate::state::State;
 
@@ -155,59 +155,86 @@ impl Graph {
         Ok(())
     }
 
-    /// 分析图中所有环，生成诊断信息。
-    pub fn analyze_cycles(&self) -> CycleAnalysis {
-        let mut cycles = Vec::new();
-        let mut path = Vec::new();
+    /// 完整图诊断分析。
+    ///
+    /// 检查以下维度并返回 `GraphDiagnostics`：
+    /// 1. **环检测** — 图中存在循环路径（Warning）
+    /// 2. **Fallback 参与循环** — fallback 边在环内（Warning）
+    /// 3. **不可达路径** — 从 start 无法到达的节点（Info）
+    /// 4. **End 节点出边** — end 节点定义了出边（Info）
+    ///
+    /// 与 `build()` 的关系：`build()` 只检查结构正确性；`analyze()` 检查风险性。
+    pub fn analyze(&self) -> GraphDiagnostics {
+        let mut diag = GraphDiagnostics::new();
 
+        // 1. 构建邻接表（复用）
+        let adj = self.build_adj();
+
+        // 2. 环检测
+        let cycles = self.find_all_cycles(&adj);
+        if !cycles.is_empty() {
+            let unprotected = self.filter_unprotected_cycles(&cycles);
+            for cycle in &unprotected {
+                let cycle_str = format_cycle(cycle);
+                diag.add_warning(
+                    DiagnosticCategory::Cycle,
+                    format!("cycle detected: {} → {}", cycle_str, cycle[0]),
+                );
+            }
+            // 受保护的环仅提示
+            for cycle in &cycles {
+                if !unprotected.contains(cycle) {
+                    let cycle_str = format_cycle(cycle);
+                    diag.add_info(
+                        DiagnosticCategory::Cycle,
+                        format!(
+                            "protected cycle: {} → {} (has max_visits)",
+                            cycle_str, cycle[0]
+                        ),
+                    );
+                }
+            }
+        }
+
+        // 3. Fallback 参与循环
+        check_fallback_in_cycles(self, &cycles, &mut diag);
+
+        // 4. 不可达路径（BFS 从 start 出发）
+        check_unreachable_nodes(self, &adj, &mut diag);
+
+        // 5. End 节点出边
+        check_end_node_outgoing(self, &mut diag);
+
+        diag
+    }
+
+    // ─── 内部辅助方法 ───────────────────────────────────────
+
+    /// 构建邻接表。
+    fn build_adj(&self) -> std::collections::HashMap<String, Vec<String>> {
         let mut adj: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for edge in &self.edges {
-            adj.entry(edge.from.clone())
-                .or_default()
-                .push(edge.to.clone());
+            adj.entry(edge.from.clone()).or_default().push(edge.to.clone());
         }
-
-        for node in self.nodes.keys() {
-            let mut in_path = std::collections::HashSet::new();
-            path.clear();
-            self.dfs_cycles(node, node, &adj, &mut in_path, &mut path, &mut cycles);
-        }
-
-        // 检查哪些环有 analysis 保护
-        let mut unprotected = cycles
-            .iter()
-            .filter(|cycle| {
-                let has_protection = (0..cycle.len()).any(|i| {
-                    let next = (i + 1) % cycle.len();
-                    let from = cycle[i].as_str();
-                    let to = cycle[next].as_str();
-                    self.edges.iter().any(|e| {
-                        e.from == from
-                            && e.to == to
-                            && e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some())
-                    })
-                });
-                !has_protection
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        unprotected.sort();
-        unprotected.dedup();
-
-        CycleAnalysis {
-            has_cycles: !cycles.is_empty(),
-            cycles,
-            unprotected_cycles: unprotected,
-            total_edges: self.edges.len(),
-            protected_edges: self
-                .edges
-                .iter()
-                .filter(|e| e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some()))
-                .count(),
-        }
+        adj
     }
 
+    /// 查找所有环。
+    fn find_all_cycles(
+        &self,
+        adj: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Vec<Vec<String>> {
+        let mut cycles = Vec::new();
+        for node in self.nodes.keys() {
+            let mut in_path = std::collections::HashSet::new();
+            let mut path = Vec::new();
+            self.dfs_cycles(node, node, adj, &mut in_path, &mut path, &mut cycles);
+        }
+        cycles
+    }
+
+    /// DFS 环检测。
     fn dfs_cycles(
         &self,
         start: &str,
@@ -236,6 +263,53 @@ impl Graph {
 
         path.pop();
         in_path.remove(current);
+    }
+
+    /// 过滤未受保护的环。
+    fn filter_unprotected_cycles(&self, cycles: &[Vec<String>]) -> Vec<Vec<String>> {
+        let mut unprotected: Vec<Vec<String>> = cycles
+            .iter()
+            .filter(|cycle| {
+                let has_protection = (0..cycle.len()).any(|i| {
+                    let next = (i + 1) % cycle.len();
+                    let from = cycle[i].as_str();
+                    let to = cycle[next].as_str();
+                    self.edges.iter().any(|e| {
+                        e.from == from
+                            && e.to == to
+                            && e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some())
+                    })
+                });
+                !has_protection
+            })
+            .cloned()
+            .collect();
+        unprotected.sort();
+        unprotected.dedup();
+        unprotected
+    }
+
+    // ─── 兼容方法 ─────────────────────────────────────────────
+
+    /// 分析图中所有环，生成诊断信息。
+    ///
+    /// @deprecated 使用 [`analyze()`](Self::analyze) 替代。
+    pub fn analyze_cycles(&self) -> CycleAnalysis {
+        let adj = self.build_adj();
+        let cycles = self.find_all_cycles(&adj);
+        let unprotected = self.filter_unprotected_cycles(&cycles);
+
+        CycleAnalysis {
+            has_cycles: !cycles.is_empty(),
+            cycles,
+            unprotected_cycles: unprotected,
+            total_edges: self.edges.len(),
+            protected_edges: self
+                .edges
+                .iter()
+                .filter(|e| e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some()))
+                .count(),
+        }
     }
 }
 
@@ -520,5 +594,111 @@ impl GraphBuilder {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+// ─── 诊断辅助函数 ───────────────────────────────────────────────
+
+/// 格式化环路径为字符串："a → b → c"
+fn format_cycle(cycle: &[String]) -> String {
+    cycle.join(" → ")
+}
+
+/// 检查 fallback 边是否参与循环。
+fn check_fallback_in_cycles(
+    graph: &Graph,
+    cycles: &[Vec<String>],
+    diag: &mut GraphDiagnostics,
+) {
+    // 收集所有 fallback 边的 (from, to)
+    let fallback_edges: std::collections::HashSet<(&str, &str)> = graph
+        .edges
+        .iter()
+        .filter(|e| e.fallback)
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+
+    if fallback_edges.is_empty() {
+        return;
+    }
+
+    // 检查每个环是否包含 fallback 边
+    for cycle in cycles {
+        for i in 0..cycle.len() {
+            let next = (i + 1) % cycle.len();
+            let from = cycle[i].as_str();
+            let to = cycle[next].as_str();
+            if fallback_edges.contains(&(from, to)) {
+                let edge_str = format!("{} → {}", from, to);
+                diag.add_warning(
+                    DiagnosticCategory::FallbackInCycle,
+                    format!(
+                        "fallback edge {} participates in cycle: {} → {}",
+                        edge_str,
+                        format_cycle(cycle),
+                        cycle[0]
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// 检查从 start 节点不可达的节点。
+fn check_unreachable_nodes(
+    graph: &Graph,
+    adj: &std::collections::HashMap<String, Vec<String>>,
+    diag: &mut GraphDiagnostics,
+) {
+    // BFS 从 start 出发
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = Vec::new();
+
+    queue.push(graph.start.clone());
+    visited.insert(graph.start.clone());
+
+    while let Some(node) = queue.pop() {
+        if let Some(neighbors) = adj.get(&node) {
+            for neighbor in neighbors {
+                if visited.insert(neighbor.clone()) {
+                    queue.push(neighbor.clone());
+                }
+            }
+        }
+    }
+
+    // 找出未访问的节点
+    for name in graph.nodes.keys() {
+        if !visited.contains(name) {
+            diag.add_info(
+                DiagnosticCategory::Unreachable,
+                format!(
+                    "node '{}' is not reachable from start node '{}'",
+                    name, graph.start
+                ),
+            );
+        }
+    }
+}
+
+/// 检查 end 节点是否有出边。
+fn check_end_node_outgoing(graph: &Graph, diag: &mut GraphDiagnostics) {
+    let outgoing: Vec<&Edge> = graph
+        .edges
+        .iter()
+        .filter(|e| e.from == graph.end)
+        .collect();
+
+    if !outgoing.is_empty() {
+        let targets: Vec<&str> = outgoing.iter().map(|e| e.to.as_str()).collect();
+        diag.add_info(
+            DiagnosticCategory::EndNodeOutgoing,
+            format!(
+                "end node '{}' has {} outgoing edge(s) to: {:?}",
+                graph.end,
+                outgoing.len(),
+                targets
+            ),
+        );
     }
 }

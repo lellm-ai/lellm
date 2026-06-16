@@ -11,7 +11,7 @@
 > - ✅ 四、Checkpoint + Resume + ExecutionTrace（结构体已定义）
 > - ✅ 五、错误模型重构（RecoverableError 已删除，Fallback 改为控制流）
 > - ✅ 六、Executor 语义修复（handle_continue/handle_barrier/handle_fallback/handle_error 全部分裂完成）
-> - ✅ 七、Builder 验证与分析分离（build() 纯函数化，GraphDiagnostics 已定义）
+> - ✅ 七、Builder 验证与分析分离（build() 纯函数化，GraphDiagnostics 已定义，Graph::analyze() 已实现）
 > - ✅ 八、AgentHook 可观测性扩展点（已实现，v0.3 短期妥协 &mut State）
 > - ✅ 九、Event 体系解耦（FlowEvent 替代 NodeEvent::Agent）
 > - ✅ 十、Executor 重构（Done+Observed 合并为 Continue，handle_continue/handle_barrier/handle_fallback/handle_error 全部分裂）
@@ -81,7 +81,7 @@ lellm-runtime
 lellm-graph
 ├── Graph, GraphBuilder, GraphExecutor
 ├── TaskNode, ConditionNode, BarrierNode
-├── ParallelNode（P2，未开始）
+├── ParallelNode（已实现 ✅）
 ├── FlowEvent, FlowNode trait
 └── 编排层
     ↑ 依赖 runtime
@@ -471,7 +471,7 @@ if self.send(&event_tx, GraphEvent::GraphStart { trace_id }).await {
 
 End Node 执行完成 → 立即终止 → 忽略 NextStep。
 
-- **Builder 层：** end 节点有出边 → `GraphDiagnostics` Warning（待实现 `Graph::analyze()`）
+- **Builder 层：** end 节点有出边 → `GraphDiagnostics` Warning（`Graph::analyze()` 已实现 ✅）
 - **Runtime 层：** `handle_continue()` / `handle_barrier()` 中，`current == graph.end_node()` → `StepOutcome::Break`
 
 end 节点会被正常执行（如 summary/cleanup），执行后无条件终止。
@@ -519,9 +519,9 @@ for w in diagnostics.warnings() {
 }
 ```
 
-**⚠️ 实现状态：** `GraphDiagnostics` 结构体已定义，但 `Graph::analyze()` 方法未实现。
-当前仅有 `Graph::analyze_cycles()` 返回 `CycleAnalysis`（基于 `EdgeAnalysis` 的 `max_visits` 约束）。
-`analyze()` 的完整实现是 P2 优先级任务。
+**✅ 实现状态：** `GraphDiagnostics` 结构体已定义，`Graph::analyze()` 方法已实现。
+覆盖以下诊断维度：环检测、Fallback 参与循环、不可达路径、End 节点出边。
+`analyze_cycles()` 保留为兼容方法，标记为 @deprecated。
 
 ### 类型设计
 
@@ -741,20 +741,19 @@ State / StateDelta / Reducer / StateKey / Checkpoint / ExecutionTrace 已在 `le
 
 `Done + Observed` 合并为 `Continue`。主循环拆为 `handle_continue` / `handle_barrier` / `handle_fallback` / `handle_error`。
 
-### ⏳ 第五步：引入 StateDelta（P2）
+### ✅ 第五步：引入 StateDelta（已完成）
 
-节点签名从 `fn(&mut State) -> NextStep` 改为 `fn(&State) -> NodeOutput { deltas, next }`。
-前置条件：`FlowNode` trait 签名变更（breaking change）。
+节点签名已从 `fn(&mut State) -> NextStep` 改为 `fn(&State) -> NodeOutput { deltas, next }`。
+`FlowNode` trait 签名已变更，所有节点和测试已完成迁移。
 
-### ⏳ 第六步：ParallelNode（P2）
+### ✅ 第六步：ParallelNode（已完成）
 
-在 `NodeKind` 中添加 `Parallel` 变体，实现分支 fork/merge + ReducerRegistry 冲突解决。
+`NodeKind::Parallel` 已实现，支持分支 fork/merge + ReducerRegistry 冲突解决。
 
-### ⏳ 第七步：完善 GraphDiagnostics（P2）
+### ✅ 第七步：完善 GraphDiagnostics（已完成）
 
-实现 `Graph::analyze()` 方法，替代 `analyze_cycles()`，返回 `GraphDiagnostics`。
-届时可评估是否移除 `EdgeAnalysis` / `PendingEdge::max_visits()`。
+`Graph::analyze()` 方法已实现，返回 `GraphDiagnostics`。`analyze_cycles()` 保留为兼容方法。
 
-### ⏳ 第八步：删除废弃类型（P2）
+### ⏳ 第八步：删除废弃类型（待评估）
 
-待第五、六、七步完成后，评估删除 `EdgeAnalysis`、`CycleAnalysis`、`PendingEdge::max_visits()`。
+第五、六、七步已完成。`EdgeAnalysis`、`CycleAnalysis`、`PendingEdge::max_visits()` 暂时保留以支持 `analyze_cycles()` 兼容方法。v0.4 评估是否移除。

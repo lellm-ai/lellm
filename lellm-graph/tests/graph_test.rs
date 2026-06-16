@@ -1,7 +1,8 @@
 use lellm_graph::{
-    BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, GraphBuilder,
-    GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeKind, SK_COUNT, SK_STEPS, State,
-    StateDelta, StateExt, StateKey, TaskNode, TerminalError, TraceId,
+    BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, Diagnostic,
+    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor,
+    NodeKind, SK_COUNT, SK_STEPS, State, StateDelta, StateExt, StateKey, TaskNode, TerminalError,
+    TraceId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1786,4 +1787,249 @@ async fn test_end_node_stops_execution() {
         "unreachable node should not be executed"
     );
     assert_eq!(result.execution_log.len(), 2);
+}
+
+// ─── Graph::analyze() 测试 ─────────────────────────────────────
+
+/// analyze() — DAG 图，无诊断问题。
+#[test]
+fn test_analyze_dag_clean() {
+    let graph = build_graph("dag", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "b",
+            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
+        );
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let diag = graph.analyze();
+
+    assert!(
+        diag.warnings.is_empty(),
+        "DAG should have no warnings, got: {:?}",
+        diag.warnings
+    );
+    // 可能有 info（如 protected cycle 不存在），但不应有 Warning
+}
+
+/// analyze() — 检测未受保护的环。
+#[test]
+fn test_analyze_unprotected_cycle() {
+    let graph = build_graph("cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "b",
+            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
+        );
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "a"); // 回跳，无 max_visits
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let diag = graph.analyze();
+
+    // 应该有 Cycle Warning
+    let cycle_warnings: Vec<&Diagnostic> = diag
+        .warnings
+        .iter()
+        .filter(|w| w.category == DiagnosticCategory::Cycle)
+        .collect();
+    assert!(
+        !cycle_warnings.is_empty(),
+        "Should detect unprotected cycle"
+    );
+}
+
+/// analyze() — 检测不可达节点。
+#[test]
+fn test_analyze_unreachable_node() {
+    let graph = build_graph("unreachable", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "orphan",
+            NodeKind::Task(TaskNode::new("orphan", |_| Ok(vec![]))),
+        );
+        let _ = g.edge("a", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let diag = graph.analyze();
+
+    let unreachable_infos: Vec<&Diagnostic> = diag
+        .infos
+        .iter()
+        .filter(|i| i.category == DiagnosticCategory::Unreachable)
+        .collect();
+    assert!(
+        !unreachable_infos.is_empty(),
+        "Should detect unreachable node 'orphan'"
+    );
+}
+
+/// analyze() — 检测 End 节点出边。
+#[test]
+fn test_analyze_end_node_outgoing() {
+    let graph = build_graph("end-outgoing", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "extra",
+            NodeKind::Task(TaskNode::new("extra", |_| Ok(vec![]))),
+        );
+        let _ = g.edge("a", "end");
+        let _ = g.edge("end", "extra"); // end 节点有出边
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let diag = graph.analyze();
+
+    let end_outgoing: Vec<&Diagnostic> = diag
+        .infos
+        .iter()
+        .filter(|i| i.category == DiagnosticCategory::EndNodeOutgoing)
+        .collect();
+    assert!(
+        !end_outgoing.is_empty(),
+        "Should detect end node has outgoing edges"
+    );
+}
+
+/// analyze() — Fallback 边参与循环。
+#[test]
+fn test_analyze_fallback_in_cycle() {
+    let graph = build_graph("fallback-cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "b",
+            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
+        );
+        let _ = g.edge("a", "b");
+        let _ = g.edge_fallback("b", "a"); // fallback 回跳，形成环
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let diag = graph.analyze();
+
+    // 应该有 Cycle Warning（未受保护）
+    let cycle_warnings: Vec<&Diagnostic> = diag
+        .warnings
+        .iter()
+        .filter(|w| w.category == DiagnosticCategory::Cycle)
+        .collect();
+    assert!(!cycle_warnings.is_empty(), "Should detect cycle");
+
+    // 应该有 FallbackInCycle Warning
+    let fallback_warnings: Vec<&Diagnostic> = diag
+        .warnings
+        .iter()
+        .filter(|w| w.category == DiagnosticCategory::FallbackInCycle)
+        .collect();
+    assert!(
+        !fallback_warnings.is_empty(),
+        "Should detect fallback edge in cycle"
+    );
+}
+
+/// analyze() — 受保护的环仅产生 Info。
+#[test]
+fn test_analyze_protected_cycle() {
+    let graph = build_graph("protected-cycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "b",
+            NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))),
+        );
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "a").max_visits(5); // 回跳，有 max_visits 保护
+        let _ = g.edge("b", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let diag = graph.analyze();
+
+    // 不应有 Cycle Warning（受保护）
+    let cycle_warnings: Vec<&Diagnostic> = diag
+        .warnings
+        .iter()
+        .filter(|w| w.category == DiagnosticCategory::Cycle)
+        .collect();
+    assert!(
+        cycle_warnings.is_empty(),
+        "Protected cycle should not produce warnings"
+    );
+
+    // 应该有 Cycle Info
+    let cycle_infos: Vec<&Diagnostic> = diag
+        .infos
+        .iter()
+        .filter(|i| i.category == DiagnosticCategory::Cycle)
+        .collect();
+    assert!(
+        !cycle_infos.is_empty(),
+        "Protected cycle should produce info"
+    );
 }
