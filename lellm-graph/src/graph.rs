@@ -512,6 +512,25 @@ impl GraphBuilder {
             }
         }
 
+        // 4.5 语义检查：end 节点有出边 → Warning
+        let end_outgoing: Vec<&str> = self
+            .edges
+            .iter()
+            .filter(|e| e.from == end)
+            .map(|e| e.to.as_str())
+            .collect();
+        if !end_outgoing.is_empty() {
+            errors.push(BuildError::Warning {
+                message: format!(
+                    "end node '{}' has {} outgoing edge(s) to: [{}]. \
+                     These edges are unreachable — execution stops at the end node.",
+                    end,
+                    end_outgoing.len(),
+                    end_outgoing.join(", ")
+                ),
+            });
+        }
+
         // 5. 有致命错误则返回
         if errors.has_fatal() {
             return Err(errors);

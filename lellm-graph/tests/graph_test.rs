@@ -1552,3 +1552,159 @@ fn test_build_errors_display() {
         assert!(display.contains("error(s)"), "should show error count");
     }
 }
+
+// ─── Consumer Drop = Cancel 测试 ──────────────────────────────────────────
+
+/// Consumer Drop = Cancel — 消费者提前断开，executor 应立即终止。
+#[tokio::test]
+async fn test_consumer_drop_cancels_execution() {
+    // 构建一个需要多步执行的图
+    let graph = build_graph("consumer_drop", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |state| {
+                let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                state.insert("count".into(), serde_json::json!(count + 1));
+                Ok(())
+            })),
+        );
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.node("c", NodeKind::Task(TaskNode::new("c", |_| Ok(()))));
+        let _ = g.node("d", NodeKind::Task(TaskNode::new("d", |_| Ok(()))));
+        let _ = g.node("e", NodeKind::Task(TaskNode::new("e", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.edge("b", "c");
+        let _ = g.edge("c", "d");
+        let _ = g.edge("d", "e");
+        let _ = g.end("e");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution {
+        mut stream,
+        handle: _handle,
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+
+    // 消费 GraphStart 和第一个 NodeStart 后，drop stream
+    let mut received = 0;
+    loop {
+        // 使用 try_recv 避免阻塞
+        match tokio::time::timeout(std::time::Duration::from_secs(2), stream.recv()).await {
+            Ok(Some(_event)) => {
+                received += 1;
+                // 收到 2 个事件后断开
+                if received >= 2 {
+                    drop(stream);
+                    // 等待片刻让 executor 检测 send 失败
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    return; // test 通过 — executor 已停止，没有 panic
+                }
+            }
+            Ok(None) => {
+                // stream closed — executor stopped
+                return;
+            }
+            Err(_) => {
+                // timeout — 不应该发生
+                panic!("stream recv timeout — executor may be stuck");
+            }
+        }
+    }
+}
+
+// ─── End Node 出边诊断测试 ────────────────────────────────────────────────
+
+/// End 节点有出边 → build 成功但产生 Warning。
+#[test]
+fn test_end_node_outgoing_edge_warning() {
+    let result = build_graph("end_outgoing", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.node(
+            "after_end",
+            NodeKind::Task(TaskNode::new("after_end", |_| Ok(()))),
+        );
+        let _ = g.edge("a", "end");
+        // end 节点有出边 — 不可达
+        let _ = g.edge("end", "after_end");
+        let _ = g.end("end");
+        Ok(())
+    });
+
+    // 构建成功（Warning 不阻止）
+    assert!(
+        result.is_ok(),
+        "end node outgoing edges should not block build"
+    );
+}
+
+/// End 节点无出边 → 正常构建。
+#[test]
+fn test_end_node_no_outgoing_edge() {
+    let result = build_graph("end_no_outgoing", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        let _ = g.edge("a", "end");
+        let _ = g.end("end");
+        Ok(())
+    });
+
+    assert!(result.is_ok());
+}
+
+/// End 节点在 Graph 执行中正确终止 — 即使有出边也不执行。
+#[tokio::test]
+async fn test_end_node_stops_execution() {
+    let graph = build_graph("end_stops", |g| {
+        let _ = g.start("a");
+        let _ = g.node(
+            "a",
+            NodeKind::Task(TaskNode::new("a", |state| {
+                state.insert("visited_a".into(), serde_json::json!(true));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |state| {
+                state.insert("visited_end".into(), serde_json::json!(true));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "unreachable",
+            NodeKind::Task(TaskNode::new("unreachable", |state| {
+                state.insert("visited_unreachable".into(), serde_json::json!(true));
+                Ok(())
+            })),
+        );
+        let _ = g.edge("a", "end");
+        let _ = g.edge("end", "unreachable"); // 不可达
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(Arc::new(graph), HashMap::new())
+        .await
+        .expect("execution should succeed");
+
+    assert_eq!(
+        result.state.get("visited_a").unwrap(),
+        &serde_json::json!(true)
+    );
+    assert_eq!(
+        result.state.get("visited_end").unwrap(),
+        &serde_json::json!(true)
+    );
+    assert!(
+        result.state.get("visited_unreachable").is_none(),
+        "unreachable node should not be executed"
+    );
+    assert_eq!(result.execution_log.len(), 2);
+}

@@ -901,12 +901,12 @@ lellm-graph/
 
 ## [S10] 待实现
 
-### v0.2 修复（代码未实现）
+### v0.2 修复
 
 | 优先级 | 功能 | 说明 | 状态 |
 |--------|------|------|------|
-| P0 | Consumer Drop = Cancel | `send` 失败立即终止，不再继续执行 | 待实现 |
-| P2 | End Node 出边诊断 | end 节点有出边 → GraphDiagnostics Warning | 待实现 |
+| P0 | Consumer Drop = Cancel | `send` 失败立即终止，不再继续执行 | ✅ |
+| P2 | End Node 出边诊断 | end 节点有出边 → BuildError::Warning | ✅ |
 
 ### v0.3 规划（详见 [v03-architecture-evolution.md](./v03-architecture-evolution.md)）
 

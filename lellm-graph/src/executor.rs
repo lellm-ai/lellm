@@ -183,27 +183,33 @@ impl GraphExecutor {
 
             let trace_id = TraceId::new();
 
-            let send = |event: GraphEvent| async {
-                if event_tx.send(event).await.is_err() {
-                    tracing::warn!("graph event consumer dropped");
-                }
-            };
-
             // 发射 GraphStart 事件
-            let _ = send(GraphEvent::GraphStart { trace_id }).await;
+            if executor
+                .send(&event_tx, GraphEvent::GraphStart { trace_id })
+                .await
+            {
+                return;
+            }
 
             let mut completed = false;
 
             loop {
                 // ⚡ 取消信号检测
                 if cancel_rx.try_recv().is_ok() {
-                    let _ = send(GraphEvent::GraphError {
-                        error: GraphError::Terminal(TerminalError::BarrierCancelled {
-                            node: "execution cancelled by handle".into(),
-                        }),
-                        state: state.clone(),
-                    })
-                    .await;
+                    if executor
+                        .send(
+                            &event_tx,
+                            GraphEvent::GraphError {
+                                error: GraphError::Terminal(TerminalError::BarrierCancelled {
+                                    node: "execution cancelled by handle".into(),
+                                }),
+                                state: state.clone(),
+                            },
+                        )
+                        .await
+                    {
+                        return;
+                    }
                     break;
                 }
 
@@ -211,26 +217,40 @@ impl GraphExecutor {
 
                 // ⚡ 运行时熔断
                 if step > executor.max_steps {
-                    let _ = send(GraphEvent::GraphError {
-                        error: GraphError::Terminal(TerminalError::StepsExceeded {
-                            limit: executor.max_steps,
-                        }),
-                        state: state.clone(),
-                    })
-                    .await;
+                    if executor
+                        .send(
+                            &event_tx,
+                            GraphEvent::GraphError {
+                                error: GraphError::Terminal(TerminalError::StepsExceeded {
+                                    limit: executor.max_steps,
+                                }),
+                                state: state.clone(),
+                            },
+                        )
+                        .await
+                    {
+                        return;
+                    }
                     break;
                 }
 
                 let node = match graph.nodes.get(&current) {
                     Some(n) => n,
                     None => {
-                        let _ = send(GraphEvent::GraphError {
-                            error: GraphError::Terminal(TerminalError::NodeNotFound(
-                                current.clone(),
-                            )),
-                            state: state.clone(),
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::GraphError {
+                                    error: GraphError::Terminal(TerminalError::NodeNotFound(
+                                        current.clone(),
+                                    )),
+                                    state: state.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
                         break;
                     }
                 };
@@ -238,13 +258,20 @@ impl GraphExecutor {
                 let node_name = current.clone();
                 let span_id = SpanId::new();
 
-                let _ = send(GraphEvent::NodeStart {
-                    node_name: node_name.clone(),
-                    trace_id,
-                    span_id,
-                    step,
-                })
-                .await;
+                if executor
+                    .send(
+                        &event_tx,
+                        GraphEvent::NodeStart {
+                            node_name: node_name.clone(),
+                            trace_id,
+                            span_id,
+                            step,
+                        },
+                    )
+                    .await
+                {
+                    return;
+                }
 
                 let node_start = Instant::now();
                 let result = node.execute_stream(&mut state, &event_tx, span_id).await;
@@ -261,14 +288,21 @@ impl GraphExecutor {
                             success: true,
                         });
 
-                        let _ = send(GraphEvent::NodeEnd {
-                            node_name: node_name.clone(),
-                            trace_id,
-                            span_id,
-                            success: true,
-                            duration,
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::NodeEnd {
+                                    node_name: node_name.clone(),
+                                    trace_id,
+                                    span_id,
+                                    success: true,
+                                    duration,
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
                         // 🛑 end 节点检查
                         if current == graph.end_node() {
@@ -279,11 +313,18 @@ impl GraphExecutor {
                         match executor.resolve_next(&graph, &current, &mut state, next) {
                             Ok(target) => current = target,
                             Err(e) => {
-                                let _ = send(GraphEvent::GraphError {
-                                    error: e,
-                                    state: state.clone(),
-                                })
-                                .await;
+                                if executor
+                                    .send(
+                                        &event_tx,
+                                        GraphEvent::GraphError {
+                                            error: e,
+                                            state: state.clone(),
+                                        },
+                                    )
+                                    .await
+                                {
+                                    return;
+                                }
                                 break;
                             }
                         }
@@ -302,20 +343,34 @@ impl GraphExecutor {
                             success: true,
                         });
 
-                        let _ = send(GraphEvent::NodeEnd {
-                            node_name: node_name.clone(),
-                            trace_id,
-                            span_id,
-                            success: true,
-                            duration,
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::NodeEnd {
+                                    node_name: node_name.clone(),
+                                    trace_id,
+                                    span_id,
+                                    success: true,
+                                    duration,
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
-                        let _ = send(GraphEvent::ObservedError {
-                            error,
-                            node_name: node_name.clone(),
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::ObservedError {
+                                    error,
+                                    node_name: node_name.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
                         // 🛑 end 节点检查
                         if current == graph.end_node() {
@@ -326,11 +381,18 @@ impl GraphExecutor {
                         match executor.resolve_next(&graph, &current, &mut state, next) {
                             Ok(target) => current = target,
                             Err(e) => {
-                                let _ = send(GraphEvent::GraphError {
-                                    error: e,
-                                    state: state.clone(),
-                                })
-                                .await;
+                                if executor
+                                    .send(
+                                        &event_tx,
+                                        GraphEvent::GraphError {
+                                            error: e,
+                                            state: state.clone(),
+                                        },
+                                    )
+                                    .await
+                                {
+                                    return;
+                                }
                                 break;
                             }
                         }
@@ -345,12 +407,19 @@ impl GraphExecutor {
                     }) => {
                         let barrier_id = decision_registry.next_id(&barrier_name);
 
-                        let _ = send(GraphEvent::BarrierWaiting {
-                            barrier_id: barrier_id.clone(),
-                            node_name: barrier_name.clone(),
-                            span_id,
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::BarrierWaiting {
+                                    barrier_id: barrier_id.clone(),
+                                    node_name: barrier_name.clone(),
+                                    span_id,
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
                         let decision = executor
                             .wait_barrier_decision(
@@ -364,44 +433,66 @@ impl GraphExecutor {
                             .await;
 
                         if cancel_rx.try_recv().is_ok() {
-                            let _ = send(GraphEvent::GraphError {
-                                error: GraphError::Terminal(TerminalError::BarrierCancelled {
-                                    node: barrier_name.clone(),
-                                }),
-                                state: state.clone(),
-                            })
-                            .await;
+                            if executor
+                                .send(
+                                    &event_tx,
+                                    GraphEvent::GraphError {
+                                        error: GraphError::Terminal(
+                                            TerminalError::BarrierCancelled {
+                                                node: barrier_name.clone(),
+                                            },
+                                        ),
+                                        state: state.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                return;
+                            }
                             break;
                         }
 
-                        let _ = send(GraphEvent::BarrierResolved {
-                            barrier_id: barrier_id.clone(),
-                            decision: decision.clone(),
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::BarrierResolved {
+                                    barrier_id: barrier_id.clone(),
+                                    decision: decision.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
                         let next = match node {
                             NodeKind::Barrier(b) => match b.apply_decision(decision, &mut state) {
                                 Ok(ns) => ns,
                                 Err(e) => {
-                                    let _ = send(GraphEvent::GraphError {
-                                        error: e,
-                                        state: state.clone(),
-                                    })
-                                    .await;
+                                    if executor
+                                        .send(
+                                            &event_tx,
+                                            GraphEvent::GraphError {
+                                                error: e,
+                                                state: state.clone(),
+                                            },
+                                        )
+                                        .await
+                                    {
+                                        return;
+                                    }
                                     break;
                                 }
                             },
                             _ => {
-                                let _ = send(GraphEvent::GraphError {
+                                if executor.send(&event_tx, GraphEvent::GraphError {
                                         error: GraphError::Terminal(TerminalError::InvalidGraph(
                                             format!(
                                                 "expected BarrierNode but got unexpected node type for BarrierPaused"
                                             ),
                                         )),
                                         state: state.clone(),
-                                    })
-                                    .await;
+                                    }).await { return; }
                                 break;
                             }
                         };
@@ -414,14 +505,21 @@ impl GraphExecutor {
                             success: true,
                         });
 
-                        let _ = send(GraphEvent::NodeEnd {
-                            node_name: barrier_name.clone(),
-                            trace_id,
-                            span_id,
-                            success: true,
-                            duration: Instant::now().duration_since(node_start),
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::NodeEnd {
+                                    node_name: barrier_name.clone(),
+                                    trace_id,
+                                    span_id,
+                                    success: true,
+                                    duration: Instant::now().duration_since(node_start),
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
                         // 🛑 end 节点检查
                         if current == graph.end_node() {
@@ -432,11 +530,18 @@ impl GraphExecutor {
                         match executor.resolve_next(&graph, &current, &mut state, next) {
                             Ok(target) => current = target,
                             Err(e) => {
-                                let _ = send(GraphEvent::GraphError {
-                                    error: e,
-                                    state: state.clone(),
-                                })
-                                .await;
+                                if executor
+                                    .send(
+                                        &event_tx,
+                                        GraphEvent::GraphError {
+                                            error: e,
+                                            state: state.clone(),
+                                        },
+                                    )
+                                    .await
+                                {
+                                    return;
+                                }
                                 break;
                             }
                         }
@@ -451,23 +556,37 @@ impl GraphExecutor {
                             success: false,
                         });
 
-                        let _ = send(GraphEvent::NodeEnd {
-                            node_name: node_name.clone(),
-                            trace_id,
-                            span_id,
-                            success: false,
-                            duration,
-                        })
-                        .await;
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::NodeEnd {
+                                    node_name: node_name.clone(),
+                                    trace_id,
+                                    span_id,
+                                    success: false,
+                                    duration,
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
 
                         // 错误二分法：Terminal / Recoverable
                         match &e {
                             GraphError::Terminal(_) => {
-                                let _ = send(GraphEvent::GraphError {
-                                    error: e,
-                                    state: state.clone(),
-                                })
-                                .await;
+                                if executor
+                                    .send(
+                                        &event_tx,
+                                        GraphEvent::GraphError {
+                                            error: e,
+                                            state: state.clone(),
+                                        },
+                                    )
+                                    .await
+                                {
+                                    return;
+                                }
                                 break;
                             }
                             GraphError::Recoverable(recoverable) => {
@@ -478,21 +597,28 @@ impl GraphExecutor {
                                 );
 
                                 if let Some(fallback_target) = graph.find_fallback_edge(&current) {
-                                    let _ = send(GraphEvent::ObservedError {
-                                        error: crate::error::ObservedError::Degraded {
-                                            node: node_name.clone(),
-                                            message: format!(
-                                                "fallback to '{}' due to: {}",
-                                                fallback_target, recoverable
-                                            ),
-                                        },
-                                        node_name: node_name.clone(),
-                                    })
-                                    .await;
+                                    if executor
+                                        .send(
+                                            &event_tx,
+                                            GraphEvent::ObservedError {
+                                                error: crate::error::ObservedError::Degraded {
+                                                    node: node_name.clone(),
+                                                    message: format!(
+                                                        "fallback to '{}' due to: {}",
+                                                        fallback_target, recoverable
+                                                    ),
+                                                },
+                                                node_name: node_name.clone(),
+                                            },
+                                        )
+                                        .await
+                                    {
+                                        return;
+                                    }
 
                                     current = fallback_target;
                                 } else {
-                                    let _ = send(GraphEvent::GraphError {
+                                    if executor.send(&event_tx, GraphEvent::GraphError {
                                         error: GraphError::Terminal(
                                             TerminalError::NodeExecutionFailed {
                                                 node: node_name.clone(),
@@ -504,8 +630,7 @@ impl GraphExecutor {
                                             },
                                         ),
                                         state: state.clone(),
-                                    })
-                                    .await;
+                                    }).await { return; }
                                     break;
                                 }
                             }
@@ -516,15 +641,19 @@ impl GraphExecutor {
 
             // 正常结束 → GraphComplete
             if completed {
-                let _ = send(GraphEvent::GraphComplete {
-                    result: GraphResult {
-                        trace_id,
-                        state,
-                        execution_log,
-                        duration: start_time.elapsed(),
-                    },
-                })
-                .await;
+                let _ = executor
+                    .send(
+                        &event_tx,
+                        GraphEvent::GraphComplete {
+                            result: GraphResult {
+                                trace_id,
+                                state,
+                                execution_log,
+                                duration: start_time.elapsed(),
+                            },
+                        },
+                    )
+                    .await;
             }
         });
 
@@ -685,5 +814,12 @@ impl GraphExecutor {
             node: current.to_string(),
             attempted_conditions: attempted,
         }))
+    }
+
+    /// 发送事件，返回 `true` 表示 consumer 已断开（应终止执行）。
+    ///
+    /// Consumer Drop = Cancel：一旦 `send` 失败，立即终止执行，不再继续。
+    async fn send(&self, event_tx: &mpsc::Sender<GraphEvent>, event: GraphEvent) -> bool {
+        event_tx.send(event).await.is_err()
     }
 }
