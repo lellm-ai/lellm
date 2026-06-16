@@ -434,9 +434,8 @@ pub trait StateExt {
 ### StateError
 
 ```rust
-pub enum StateError {
-    MissingKey(String),
-    Deserialize(String, String),
+pub enum NodeEvent {
+    Agent(lellm_agent::AgentEvent),
 }
 ```
 
@@ -455,12 +454,14 @@ pub fn array_reducer() -> StateReducer;
 
 ```rust
 pub struct GraphResult {
+    pub trace_id: TraceId,
     pub state: State,
     pub execution_log: Vec<ExecutionEntry>,
     pub duration: Duration,
 }
 
 pub struct ExecutionEntry {
+    pub step: usize,
     pub node_name: String,
     pub start_time: Instant,
     pub end_time: Instant,
@@ -513,6 +514,15 @@ pub trait StateExt {
 
 消除 `as_str().unwrap()` / `serde_json::from_value()` 样板代码。
 
+### StateError
+
+```rust
+pub enum StateError {
+    MissingKey(String),
+    Deserialize(String, String),
+}
+```
+
 ### Reducer 机制
 
 ```rust
@@ -528,12 +538,14 @@ pub fn array_reducer() -> StateReducer;
 
 ```rust
 pub struct GraphResult {
+    pub trace_id: TraceId,
     pub state: State,
     pub execution_log: Vec<ExecutionEntry>,
     pub duration: Duration,
 }
 
 pub struct ExecutionEntry {
+    pub step: usize,
     pub node_name: String,
     pub start_time: Instant,
     pub end_time: Instant,
@@ -592,7 +604,7 @@ loop {
 
 | NextStep | 行为 |
 |----------|------|
-| `Goto(target)` | 查找 `from→target` 边，记录 EdgeVisits，检查 policy |
+| `Goto(target)` | 查找 `from→target` 边，验证存在 |
 | `GoToNext` | `find_next_node()` 按优先级查找下一个节点 |
 | `End` | 返回 `TerminalError::InvalidGraph("unexpected End")` |
 
@@ -628,14 +640,6 @@ loop {
 
 **警告：** `validate()` 在检测到同一节点有多条条件边时，输出 Warning（非 Error）提醒用户注意顺序。
 
-### EdgeVisits — 边级循环预算
-
-```rust
-struct EdgeVisits(HashMap<(String, String), usize>);
-```
-
-仅对设置了 `EdgePolicy` 的边进行运行时拦截。访问计数器跟踪 `(from, to)` 对的 traversed 次数。
-
 ### 流式执行
 
 `execute_stream()` 返回 `GraphExecution { stream, handle }`。
@@ -644,15 +648,15 @@ struct EdgeVisits(HashMap<(String, String), usize>);
 
 ```
 GraphEvent（图级）
-  ├── NodeStart / NodeEnd        — 节点执行边界
-  ├── Node                       — 节点内部事件（NodeEvent）
-  │     ├── Agent(AgentEvent)    — Agent 内部事件
-  │     └── Barrier(BarrierInnerEvent)
-  ├── BarrierWaiting             — 等待外部审批（需响应）
-  ├── BarrierResolved            — 决策已应用
-  ├── ObservedError              — 观测错误（不影响控制流）
-  ├── GraphComplete              — 执行完成
-  └── GraphError                 — 执行出错
+  ├── GraphStart            — 执行开始（携带 trace_id）
+  ├── NodeStart / NodeEnd   — 节点执行边界
+  ├── Node                  — 节点内部事件（NodeEvent）
+  │     └── Agent(AgentEvent) — Agent 内部事件
+  ├── BarrierWaiting        — 等待外部审批（需响应）
+  ├── BarrierResolved       — 决策已应用
+  ├── ObservedError         — 观测错误（不影响控制流）
+  ├── GraphComplete         — 执行完成
+  └── GraphError            — 执行出错
 ```
 
 **Graph 编排 Agent，不暴露 Agent 内部实现。** `NodeEvent` 是中间层，隔离 `GraphEvent` 与节点内部事件。
@@ -663,7 +667,6 @@ pub struct SpanId(Uuid);
 
 pub enum NodeEvent {
     Agent(lellm_agent::AgentEvent),
-    Barrier(BarrierInnerEvent),
 }
 
 pub enum GraphEvent {
@@ -926,19 +929,20 @@ lellm-graph/
 ├── examples/
 │   └── calculator_graph.rs       # LangGraph Tutorial 对照实现
 ├── tests/
-│   └── graph_test.rs             # 集成测试
+│   └── graph_test.rs             # 集成测试（41 个）
 └── src/
     ├── lib.rs                    # 公开 API
-    ├── error.rs                  # BuildError, GraphError (二分法), ObservedError (独立类型，非 GraphError 变体)
-    ├── state.rs                  # State, StateExt, StateReducer, GraphResult
+    ├── error.rs                  # BuildError, GraphError (二分法), ObservedError
+    ├── state.rs                  # State, StateExt, StateReducer, GraphResult, TraceId, SpanId
+    ├── statekey.rs               # StateKey<T> 编译期类型安全
     ├── node.rs                   # GraphNode trait, NextStep, NodeKind, StreamNodeResult
     │                              # TaskNode, ConditionNode
-    ├── llm_node.rs               # AgentNode, LLMNode
-    ├── tool_node.rs              # ToolNode
+    ├── llm_node.rs               # AgentNode (with_output/with_messages), LLMNode (with_tools)
+    ├── tool_node.rs              # ToolNode (追加模式)
     ├── barrier_node.rs           # BarrierNode, BarrierDecision, BarrierDefaultAction
     ├── event.rs                  # GraphEvent, GraphStream, GraphHandle, SpanId, BarrierId
-    ├── graph.rs                  # Graph, Edge (三层语义), EdgeAnalysis, EdgePolicy, GraphBuilder
-    └── executor.rs               # GraphExecutor（阻塞 + 流式）, DecisionRegistry, EdgeVisits
+    ├── graph.rs                  # Graph (Clone + name), Edge (PendingEdge), EdgeAnalysis, GraphBuilder
+    └── executor.rs               # GraphExecutor（阻塞 + 流式）, DecisionRegistry
 ```
 
 ---
@@ -950,31 +954,54 @@ lellm-graph/
 | 线性流水线 | `test_linear_pipeline` | ✅ |
 | 条件分支 | `test_condition_branching` | ✅ |
 | 节点错误 | `test_task_node_error` | ✅ |
+| Goto 缺失边 | `test_goto_missing_edge_error` | ✅ |
+| Goto 边 + analysis | `test_goto_edge_with_analysis` | ✅ |
 | 有环图构建 | `test_cyclic_graph_allowed` | ✅ |
 | 有环图熔断 | `test_cyclic_graph_steps_exceeded` | ✅ |
 | 有环图 + edge_if 退出 | `test_cyclic_graph_with_edge_if_exit` | ✅ |
 | ConditionNode 回跳 | `test_condition_node_back_jump` | ✅ |
+| Edge analysis 不参与 runtime | `test_edge_analysis_no_runtime_interference` | ✅ |
+| Barrier 阻塞模式报错 | `test_barrier_blocked_mode_error` | ✅ |
+| Barrier Approve | `test_barrier_approve` | ✅ |
+| Barrier Reject + 回跳 | `test_barrier_reject_with_back_jump` | ✅ |
+| Barrier Modify | `test_barrier_modify` | ✅ |
+| Barrier 超时 | `test_barrier_timeout` | ✅ |
+| Barrier Reroute | `test_barrier_reroute` | ✅ |
 | 双重 Barrier 顺序执行 | `test_double_barrier_sequential` | ✅ |
 | 执行日志 | `test_execution_log` | ✅ |
 | 缺失节点 | `test_missing_node/start/end` | ✅ |
+| Stream SpanId | `test_stream_has_span_id` | ✅ |
+| TraceId 唯一性 | `test_trace_id_uniqueness` | ✅ |
+| TraceId 流式生命周期 | `test_trace_id_full_lifecycle` | ✅ |
+| TraceId 阻塞模式 | `test_trace_id_blocking_mode` | ✅ |
+| StateExt getter/setter | `test_state_ext_*` (6 个) | ✅ |
+| StateKey 读写 | `test_statekey_basic_read_write` | ✅ |
+| StateKey 共存 | `test_statekey_coexist_with_stateext` | ✅ |
+| StateKey 缺失/类型不匹配 | `test_statekey_missing_key/type_mismatch` | ✅ |
+| StateKey Graph 执行 | `test_statekey_in_graph_execution` | ✅ |
 
 ---
 
 ## [S10] 待实现
 
-| 优先级 | 功能 | 说明 |
-|--------|------|------|
-| P0 | 移除 EdgePolicy | 保留 EdgeAnalysis，Runtime 安全由 max_steps 负责 | ✅ 已完成 |
-| P0 | NodeKind 移除 Loop | 循环通过回边表达 | ✅ 已完成 |
-| P0 | AgentNode 显式写入 | 默认不写 State，用户显式绑定 output/messages | P1 |
-| P0 | GraphError 移除 Observed | 可观测性移到事件系统 | ✅ 已完成 |
-| P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 |
-| P1 | ReducerRegistry | 并行分支的 State 合并策略 |
-| P1 | ExecutionTrace 扩展 | 元数据（iterations/tool_calls）进入 Trace 而非 State |
-| P2 | TraceId 落地 | 关联 Graph Execution 全链路 |
-| P2 | SpanId 持久化 | 关联到 ExecutionEntry，等 ParallelNode |
-| P3 | ParallelNode | 并行子图，SpanId 真正发挥价值 |
-| P3 | Loop DSL | Builder 层循环语法糖，展开为回边 + 条件节点 |
+| 优先级 | 功能 | 说明 | 状态 |
+|--------|------|------|------|
+| P0 | 移除 EdgePolicy | 保留 EdgeAnalysis，Runtime 安全由 max_steps 负责 | ✅ |
+| P0 | NodeKind 移除 Loop | 循环通过回边表达 | ✅ |
+| P0 | AgentNode 显式写入 | 默认不写 State，用户显式绑定 output/messages | ✅ |
+| P0 | GraphError 移除 Observed | 可观测性移到事件系统 | ✅ |
+| P0 | Builder API 简化 | 方法返回 &mut Self，验证推迟到 build() | ✅ |
+| P0 | ToolNode 追加模式 | 只追加 ToolResult，不重写整个 messages | ✅ |
+| P0 | ConditionNode otherwise_target | 统一到 edge_fallback | ✅ |
+| P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 | ✅ |
+| P1 | Graph Clone + name | 支持测试复用和热更新 | ✅ |
+| P1 | TraceId 落地 | 关联 Graph Execution 全链路 | ✅ |
+| P1 | LLMNode tools | 支持手动 ReAct 循环 | ✅ |
+| P2 | SpanId 持久化 | 关联到 ExecutionEntry，等 ParallelNode | |
+| P2 | ReducerRegistry | 并行分支的 State 合并策略 | |
+| P2 | ExecutionTrace 扩展 | 元数据（iterations/tool_calls）进入 Trace 而非 State | |
+| P3 | ParallelNode | 并行子图，SpanId 真正发挥价值 | |
+| P3 | Loop DSL | Builder 层循环语法糖，展开为回边 + 条件节点 | |
 
 ---
 
@@ -982,9 +1009,9 @@ lellm-graph/
 
 | 版本 | 范围 | 状态 |
 |------|------|------|
-| **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 | ✅ 已完成 |
-| **v0.2.1** | Grill 重构：移除 LoopNode/EdgePolicy/Observed，AgentNode 显式写入 | 规划中 |
-| **v0.3** | StateKey<T> + ParallelNode + Checkpoint + Resume | 规划中 |
+| **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 | ✅ |
+| **v0.2.1** | Grill 重构：删除 LoopNode/EdgePolicy/Observed/EventLevel，AgentNode 显式写入，Builder 简化，Graph Clone，TraceId，StateKey，LLMNode tools | ✅ |
+| **v0.3** | ParallelNode + Checkpoint + Resume + ReducerRegistry | 规划中 |
 | **v0.4** | Multi-Agent Orchestration + Durable Execution | 规划中 |
 
 > **注意：** 原始路线图的 v0.3"StateGraph（任意环）"已被 v0.2 路线 B 覆盖——有环图已是 v0.2 的核心特性。
@@ -1049,16 +1076,23 @@ v0.3 提供 `MemoryStore` + `FileStore`。Redis 放 v0.4+。
 
 ## [S14] Grill 结论 — 架构决策总览
 
-| 议题 | 结论 | 优先级 |
-|------|------|--------|
-| LoopNode 定位 | 已删除。循环通过回边表达，Runtime 不需要专门的 Loop 节点 | ✅ 已完成 |
-| EdgePolicy | 已删除。保留 EdgeAnalysis + max_steps | ✅ 已完成 |
-| AgentNode 写入 | P1。改为显式声明，元数据进 ExecutionTrace 而非 State | P1 |
-| SubGraph | 已删除。SubGraph 仅被 LoopNode 使用，一并清理 | ✅ 已完成 |
-| GraphError Observed | 已完成。移到事件系统，GraphError 只保留 Terminal + Recoverable | ✅ 已完成 |
-| BarrierNode 仅流式 | 正确设计决策。Barrier = suspension point，v0.3 引入 Checkpoint/Resume | 确认 |
-| StateKey<T> | P1 最高。v0.2 常量化 + namespace，v0.3 StateKey，v0.4+ TypedStateSchema | P1 |
-| TraceId/SpanId | 部分实现，P2。SpanId 在 ParallelNode 中才真正有价值 | P2 |
+| 议题 | 结论 | 状态 |
+|------|------|------|
+| LoopNode 定位 | 已删除。循环通过回边表达，Runtime 不需要专门的 Loop 节点 | ✅ |
+| EdgePolicy | 已删除。保留 EdgeAnalysis + max_steps | ✅ |
+| AgentNode 写入 | 改为显式声明（with_output/with_messages），元数据进 ExecutionTrace | ✅ |
+| SubGraph | 已删除。SubGraph 仅被 LoopNode 使用，一并清理 | ✅ |
+| GraphError Observed | 移到事件系统，GraphError 只保留 Terminal + Recoverable | ✅ |
+| BarrierNode 仅流式 | 正确设计决策。Barrier = suspension point，v0.3 引入 Checkpoint/Resume | ✅ 确认 |
+| StateKey<T> | 编译期类型安全，消除字符串魔法值 | ✅ |
+| TraceId | 贯穿执行生命周期，GraphResult + GraphEvent 全链路 | ✅ |
+| Graph Clone | 所有节点 + Graph 实现 Clone，支持测试复用和热更新 | ✅ |
+| Builder API | 返回 &mut Self，验证推迟到 build()，PendingEdge 链式 API | ✅ |
+| ToolNode | 只追加 ToolResult，不重写整个 messages | ✅ |
+| ConditionNode otherwise_target | 统一到 edge_fallback | ✅ |
+| EventLevel | 删除。消费者按变体类型过滤 | ✅ |
+| BarrierInnerEvent | 删除。NodeEvent 只保留 Agent | ✅ |
+| LLMNode tools | 支持手动 ReAct 循环 | ✅ |
 
 > **系统级定性：** LeLLM Graph 的 Runtime Core 只理解一种循环模型（回边）、
 > 一种安全机制（max_steps）、一种错误分类（Terminal / Recoverable）。
