@@ -111,7 +111,7 @@ impl Graph {
 
     /// 查找指定节点的 fallback 边目标。
     ///
-    /// 用于 RecoverableError 恢复：寻找 fallback 边作为降级路径。
+    /// 用于 Fallback 控制流：节点主动声明降级后，Executor 查找 fallback 边路由。
     pub fn find_fallback_edge(&self, from: &str) -> Option<String> {
         self.edges
             .iter()
