@@ -114,8 +114,15 @@ impl StateKeyExt for State {
     where
         T: Serialize,
     {
-        let json = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        self.insert(key.name().to_string(), json);
+        let key_str = key.name().to_string();
+        let json = match serde_json::to_value(value) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(key = %key_str, error = %e, "failed to serialize state value, storing null");
+                serde_json::Value::Null
+            }
+        };
+        self.insert(key_str, json);
     }
 
     fn get_sk<T>(&self, key: &StateKey<T>) -> Option<T>

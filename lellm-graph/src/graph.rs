@@ -389,8 +389,8 @@ impl GraphBuilder {
     /// 返回 [`PendingEdge`]，可通过 `.max_visits(n)` 附加循环分析约束。
     ///
     /// ```rust,ignore
-    /// g.edge_if("agent", "retry", |s| s.has_tool_calls())?.max_visits(10);
-    /// g.edge_if("agent", "end", |_| true)?;
+    /// g.edge_if("agent", "retry", |s| s.has_tool_calls()).max_visits(10);
+    /// g.edge_if("agent", "end", |_| true);
     /// ```
     pub fn edge_if(
         &mut self,
@@ -452,7 +452,7 @@ impl GraphBuilder {
             if !graph.nodes.contains_key(&edge.from) {
                 return Err(BuildError::MissingNode {
                     from: edge.from.clone(),
-                    to: edge.from.clone(),
+                    to: edge.to.clone(),
                 });
             }
             if !graph.nodes.contains_key(&edge.to) {

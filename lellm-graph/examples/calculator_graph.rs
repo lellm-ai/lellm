@@ -24,7 +24,6 @@ use lellm_core::{
 };
 use lellm_graph::{GraphBuilder, GraphExecutor, NodeKind, TaskNode};
 use lellm_macros::Tool;
-use schemars;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

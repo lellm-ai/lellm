@@ -3,6 +3,7 @@
 //! 提供扁平 KV 状态管理，以及显式的 Reducer 合并机制（P1）。
 
 use std::collections::HashMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
@@ -26,9 +27,11 @@ impl TraceId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
+impl fmt::Display for TraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -49,9 +52,11 @@ impl SpanId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
+}
 
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
+impl fmt::Display for SpanId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -182,8 +187,15 @@ impl StateExt for State {
     where
         T: serde::Serialize,
     {
-        let json = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        HashMap::insert(self, key.into(), json);
+        let key_str = key.into();
+        let json = match serde_json::to_value(value) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(key = %key_str, error = %e, "failed to serialize state value, storing null");
+                serde_json::Value::Null
+            }
+        };
+        HashMap::insert(self, key_str, json);
     }
 
     fn remove(&mut self, key: &str) -> Option<serde_json::Value> {

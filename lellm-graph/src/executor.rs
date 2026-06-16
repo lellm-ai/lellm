@@ -75,10 +75,11 @@ impl DecisionRegistry {
                 }
             }
             BarrierDecisionMessage::Wildcard { node_id, decision } => {
+                // 始终存储通配决策，以便后续 occurrence 使用
+                self.wildcards.insert(node_id.clone(), decision.clone());
                 if node_id == target_id.node_id {
                     Some(decision)
                 } else {
-                    self.wildcards.insert(node_id, decision);
                     None
                 }
             }
@@ -391,7 +392,18 @@ impl GraphExecutor {
                                     break;
                                 }
                             },
-                            _ => unreachable!("expected BarrierNode for BarrierPaused"),
+                            _ => {
+                                    let _ = send(GraphEvent::GraphError {
+                                        error: GraphError::Terminal(TerminalError::InvalidGraph(
+                                            format!(
+                                                "expected BarrierNode but got unexpected node type for BarrierPaused"
+                                            ),
+                                        )),
+                                        state: state.clone(),
+                                    })
+                                    .await;
+                                    break;
+                                }
                         };
 
                         execution_log.push(ExecutionEntry {
@@ -659,7 +671,7 @@ impl GraphExecutor {
             }
         }
 
-        // 5. 无匹配 → Unrouted
+        // 4. 无匹配 → Unrouted
         let attempted: Vec<crate::error::ConditionEval> = edges
             .iter()
             .map(|e| crate::error::ConditionEval {

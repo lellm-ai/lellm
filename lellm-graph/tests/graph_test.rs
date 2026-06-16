@@ -1228,3 +1228,253 @@ async fn test_trace_id_blocking_mode() {
         "trace_id should be UUID format"
     );
 }
+
+// ─── 测试覆盖缺口补充 ─────────────────────────────────────────
+
+/// Recoverable 错误 + fallback 边路由 — 核心容错路径。
+#[tokio::test]
+async fn test_recoverable_error_fallback() {
+    let graph = build_graph("recoverable_fallback", |g| {
+        let _ = g.start("fail_node");
+        let _ = g.node(
+            "fail_node",
+            NodeKind::Task(TaskNode::new("fail_node", |_| {
+                Err(lellm_graph::GraphError::Recoverable(
+                    lellm_graph::RecoverableError::Retryable {
+                        node: "fail_node".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        reason: "temporary failure".into(),
+                    },
+                ))
+            })),
+        );
+        let _ = g.node(
+            "fallback",
+            NodeKind::Task(TaskNode::new("fallback", |state| {
+                state.insert("recovered".into(), serde_json::json!(true));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "end",
+            NodeKind::Task(TaskNode::new("end", |_| Ok(()))),
+        );
+        // fallback 边：fail_node → fallback
+        let _ = g.edge_fallback("fail_node", "fallback");
+        let _ = g.edge("fallback", "end");
+        let _ = g.end("end");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(Arc::new(graph), HashMap::new())
+        .await
+        .expect("execution should succeed via fallback");
+
+    // 应该通过 fallback 边路由到 fallback 节点
+    assert_eq!(
+        result.state.get("recovered").unwrap(),
+        &serde_json::json!(true)
+    );
+    // fail_node 执行失败，fallback 和 end 成功
+    assert_eq!(result.execution_log.len(), 3);
+}
+
+/// Recoverable 错误无 fallback 边 → TerminalError。
+#[tokio::test]
+async fn test_recoverable_error_no_fallback() {
+    let graph = build_graph("no_fallback", |g| {
+        let _ = g.start("fail_node");
+        let _ = g.node(
+            "fail_node",
+            NodeKind::Task(TaskNode::new("fail_node", |_| {
+                Err(lellm_graph::GraphError::Recoverable(
+                    lellm_graph::RecoverableError::Retryable {
+                        node: "fail_node".into(),
+                        attempt: 1,
+                        max_attempts: 3,
+                        reason: "failure".into(),
+                    },
+                ))
+            })),
+        );
+        // 不添加 fallback 边
+        let _ = g.end("fail_node");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(Arc::new(graph), HashMap::new())
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        lellm_graph::GraphError::Terminal(
+            lellm_graph::TerminalError::NodeExecutionFailed { node, .. },
+        ) => {
+            assert_eq!(node, "fail_node");
+        }
+        other => panic!("expected NodeExecutionFailed, got: {other:?}"),
+    }
+}
+
+/// GraphHandle::cancel() — 取消正在执行的 Graph。
+#[tokio::test]
+async fn test_graph_cancel() {
+    let graph = build_graph("cancel_test", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node(
+            "barrier",
+            NodeKind::Barrier(
+                lellm_graph::BarrierNode::new("review")
+                    .timeout(std::time::Duration::from_secs(60)),
+            ),
+        );
+        let _ = g.end("barrier");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+
+    // 等待 BarrierWaiting 事件
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::BarrierWaiting { .. } => {
+                // 不发送决策，直接取消
+                handle.cancel();
+                break;
+            }
+            GraphEvent::GraphError { error, .. } => {
+                // 取消可能先于我们到达
+                match error {
+                    lellm_graph::GraphError::Terminal(
+                        lellm_graph::TerminalError::BarrierCancelled { .. },
+                    ) => return, // 正常
+                    _ => panic!("unexpected error: {error:?}"),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 等待取消结果
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::GraphError { error, .. } => {
+                match error {
+                    lellm_graph::GraphError::Terminal(
+                        lellm_graph::TerminalError::BarrierCancelled { .. },
+                    ) => {} // 预期行为
+                    _ => panic!("unexpected error: {error:?}"),
+                }
+                return;
+            }
+            GraphEvent::GraphComplete { .. } => {
+                // 也可能正常完成（如果 barrier 被跳过），不报错
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// GraphHandle::decide_wildcard() — 通配决策匹配所有 occurrence。
+#[tokio::test]
+async fn test_decide_wildcard() {
+    let graph = build_graph("wildcard_test", |g| {
+        let _ = g.start("before");
+        let _ = g.node(
+            "before",
+            NodeKind::Task(TaskNode::new("before", |state| {
+                state.insert("steps".into(), serde_json::json!(Vec::<String>::new()));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "barrier",
+            NodeKind::Barrier(lellm_graph::BarrierNode::new("review")),
+        );
+        let _ = g.node(
+            "between",
+            NodeKind::Task(TaskNode::new("between", |state| {
+                let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
+                steps.push("step1".into());
+                state.set("steps", steps);
+                Ok(())
+            })),
+        );
+        // 第二个 barrier 实例
+        let _ = g.node(
+            "barrier2",
+            NodeKind::Barrier(lellm_graph::BarrierNode::new("review")),
+        );
+        let _ = g.node(
+            "done",
+            NodeKind::Task(TaskNode::new("done", |state| {
+                let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
+                steps.push("step2".into());
+                state.set("steps", steps);
+                Ok(())
+            })),
+        );
+        let _ = g.edge("before", "barrier");
+        let _ = g.edge("barrier", "between");
+        let _ = g.edge("between", "barrier2");
+        let _ = g.edge("barrier2", "done");
+        let _ = g.end("done");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+
+    let mut barrier_count = 0;
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::BarrierWaiting { node_name, .. } => {
+                assert_eq!(node_name, "review");
+                barrier_count += 1;
+                // 第一次遇到时，使用通配决策覆盖所有 occurrence
+                if barrier_count == 1 {
+                    let _ = handle
+                        .decide_wildcard("review", BarrierDecision::Approve)
+                        .await;
+                }
+            }
+            GraphEvent::GraphComplete { result } => {
+                // 两个 barrier 都被通配决策覆盖
+                let steps: Vec<String> = result.state.get_json("steps").unwrap();
+                assert_eq!(steps, vec!["step1", "step2"]);
+                break;
+            }
+            GraphEvent::GraphError { error, .. } => {
+                panic!("unexpected error: {error:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// append_array 对非数组值的错误处理。
+#[test]
+fn test_append_array_non_array_error() {
+    use lellm_graph::StateExt;
+
+    let mut state = State::new();
+    state.insert("items".into(), serde_json::json!("not_an_array"));
+
+    let err = state.append_array("items", serde_json::json!([1, 2]));
+    assert!(err.is_err());
+    assert!(err
+        .unwrap_err()
+        .contains("existing value is not an array"));
+}
