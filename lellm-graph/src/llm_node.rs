@@ -276,10 +276,7 @@ impl LLMNode {
 impl GraphNode for LLMNode {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
         // 读取消息
-        let mut messages = state
-            .get(&self.messages_key)
-            .and_then(|v| serde_json::from_value::<Vec<lellm_core::Message>>(v.clone()).ok())
-            .unwrap_or_default();
+        let mut messages = read_messages(state, &self.messages_key);
 
         // 注入系统提示
         if let Some(ref sys) = self.system_prompt {
