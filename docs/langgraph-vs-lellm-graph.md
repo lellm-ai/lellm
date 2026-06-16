@@ -17,7 +17,8 @@ LangGraph（以 Python/JS 为代表的动态语言图生态）与 LeLLM（以 Ru
 | **工具定义** | `@tool` decorator / `tool()` + zod schema | `#[derive(Tool)]` macro + `ToolRegistration` + `ToolCatalog` 动态发现 |
 | **Agent 循环** | 手动构建 `llm_node → tool_node → condition → back` | `ToolUseLoop` 内置 ReAct 循环；也可用 `LLMNode` + `ToolNode` + `ConditionNode` 手动构建 |
 | **条件路由** | `should_continue()` 函数返回 node name / `END` | `ConditionNode` 声明式分支 + `edge_if()` 条件边（first-match-wins）|
-| **图构建** | `StateGraph.add_node().add_edge().compile()` | `GraphBuilder.node().edge().build()` |
+| **图构建** | `StateGraph.add_node().add_edge().compile()` (fail-fast) | `GraphBuilder.node().edge().build()` (多错误收集，返回 `BuildErrors`) |
+| **构建校验** | fail-fast（遇错即停） | 多错误收集 + `Warning` 非致命变体 + 重复节点检测 |
 | **执行** | `agent.invoke({messages: [...]})` | `GraphExecutor::execute()` (阻塞) / `execute_stream()` (流式，stream-first) |
 | **循环支持** | 天然支持（边可回环） | 允许有环图 + `max_steps` 运行时熔断 + `CycleAnalysis` 静态诊断 |
 | **错误分类** | Exception 机制 | 三分法：`TerminalError`（不可恢复）/ `RecoverableError`（触发 fallback 边）/ `ObservedError`（可观测，不影响控制流）|
@@ -240,7 +241,28 @@ Rust 的强类型系统 + `#[derive(Tool)]` 编译期 schema 生成 + `StateKey<
 
 `execute()` 内部消费 `execute_stream()` 的流 — 流式是首要的执行模式，阻塞模式是派生。全链路 `GraphEvent` 配合 `TraceId`/`SpanId` 贯穿，开箱即用的可观测性。
 
-### 5. Human-in-the-loop 一等公民
+### 5. 构建期校验 — 多错误收集
+
+`build()` 一次性收集所有错误后统一报告（而非遇到第一个错误就停止），返回 `Result<Graph, BuildErrors>`：
+
+```rust
+// 多错误收集 — 所有问题一次性暴露
+match builder.build() {
+    Ok(graph) => { /* 使用 graph */ }
+    Err(errors) => {
+        // 可能包含 MissingNode × 3, DuplicateNode × 1, Warning × 2
+        for e in &errors.0 {
+            eprintln!("{}", e);
+        }
+    }
+}
+```
+
+`BuildError::Warning` 是非致命变体（如多条件边警告、重复节点名），不阻止构建成功。致命错误（`MissingNode`, `MissingEntryPoint` 等）才导致 `build()` 失败。
+
+LangGraph 的 `compile()` 是 fail-fast（遇到第一个错误就抛异常），开发者需要多次修正、多次编译。LeLLM 的多错误收集减少了 edit-compile 循环。
+
+### 6. Human-in-the-loop 一等公民
 
 `BarrierNode` 提供结构化的审批决策（Approve/Reject/Modify/Reroute），而非 LangGraph 式的底层中断+手动恢复。
 
