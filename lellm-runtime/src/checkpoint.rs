@@ -8,6 +8,72 @@ use serde_json::Value;
 use crate::delta::StateDelta;
 use crate::state::State;
 
+// ─── CheckpointPolicy ──────────────────────────────────────────
+
+/// Checkpoint 存储频率策略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CheckpointPolicy {
+    /// 每节点执行后保存（默认）
+    #[default]
+    EveryNode,
+    /// 仅在 Barrier 节点决策后保存
+    BarrierOnly,
+    /// 手动控制 — 调用方显式调用 save()
+    Manual,
+}
+
+// ─── CheckpointStoreError ──────────────────────────────────────
+
+/// Checkpoint 存储操作错误。
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointStoreError {
+    /// 存储层错误（I/O、网络等）
+    #[error("storage error: {0}")]
+    Storage(String),
+    /// Checkpoint 不存在
+    #[error("checkpoint not found: {0}")]
+    NotFound(CheckpointId),
+    /// Checkpoint 数据损坏
+    #[error("corrupted checkpoint: {0}")]
+    Corrupted(String),
+}
+
+// ─── CheckpointStore trait ─────────────────────────────────────
+
+/// Checkpoint 存储后端 SPI。
+///
+/// 后端的职责：
+/// - 持久化 Checkpoint 快照
+/// - 支持按 ID 精确加载
+/// - 支持按 trace_id 查找最新快照
+/// - 支持列出、删除、清理过期快照
+///
+/// **不知道** ReducerRegistry、Delta 序列、Graph 结构。
+#[async_trait::async_trait]
+pub trait CheckpointStore: Send + Sync {
+    /// 保存 Checkpoint。
+    async fn save(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointStoreError>;
+
+    /// 加载指定 ID 的 Checkpoint。
+    async fn load(&self, id: &CheckpointId) -> Result<Option<Checkpoint>, CheckpointStoreError>;
+
+    /// 按 trace_id 查找最新 Checkpoint（按 created_at 倒序）。
+    async fn load_latest(
+        &self,
+        trace_id: &TraceId,
+    ) -> Result<Option<Checkpoint>, CheckpointStoreError>;
+
+    /// 列出 trace_id 下的所有 Checkpoint ID（按时间倒序）。
+    async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError>;
+
+    /// 删除指定 Checkpoint。返回 `true` 表示已删除，`false` 表示不存在。
+    async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError>;
+
+    /// 清理 — 删除 trace_id 下除最近 `keep` 个之外的所有 Checkpoint。
+    /// 返回实际删除的数量。
+    async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError>;
+}
+
 // ─── Checkpoint ─────────────────────────────────────────────────
 
 /// Checkpoint ID — 唯一标识一个快照。
@@ -21,7 +87,7 @@ impl std::fmt::Display for CheckpointId {
 }
 
 /// 执行游标 — 标识当前执行到哪个节点。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeId(pub String);
 
 impl std::fmt::Display for NodeId {

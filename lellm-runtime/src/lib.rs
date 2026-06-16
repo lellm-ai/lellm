@@ -9,18 +9,23 @@ pub mod checkpoint;
 pub mod delta;
 pub mod state;
 pub mod statekey;
+pub mod store;
 
-// ─── State ──────────────────────────────────────────────────────
+// ─── State ──────────────────────────────────────────────
 pub use state::{SpanId, State, StateError, StateExt, StateReducer, array_reducer};
 
-// ─── Delta + Reducer ────────────────────────────────────────────
+// ─── Delta + Reducer ────────────────────────────────────
 pub use delta::{DeltaOp, Reducer, ReducerRegistry, StateDelta};
 
-// ─── StateKey ───────────────────────────────────────────────────
+// ─── StateKey ───────────────────────────────────────────
 pub use statekey::{StateKey, StateKeyExt};
 
-// ─── Checkpoint + Trace ─────────────────────────────────────────
+// ─── Checkpoint + Trace ─────────────────────────────────
 pub use checkpoint::{
-    BarrierDecision, Checkpoint, CheckpointId, ExecutionEntry, ExecutionTrace, GraphHashMode,
-    GraphResult, NodeId, TraceId,
+    BarrierDecision, Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore,
+    CheckpointStoreError, ExecutionEntry, ExecutionTrace, GraphHashMode, GraphResult, NodeId,
+    TraceId,
 };
+
+// ─── Storage ────────────────────────────────────────────
+pub use store::InMemoryCheckpointStore;

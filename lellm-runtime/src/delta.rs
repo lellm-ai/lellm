@@ -396,8 +396,7 @@ impl ReducerRegistry {
             }
             DeltaOp::Sum | DeltaOp::Max | DeltaOp::Min => {
                 let existing_val = state.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let values: Vec<f64> =
-                    key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
+                let values: Vec<f64> = key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
 
                 let result = if values.is_empty() {
                     existing_val
@@ -481,8 +480,7 @@ impl ReducerRegistry {
             }
             Reducer::Sum | Reducer::Max | Reducer::Min => {
                 let existing_val = state.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let values: Vec<f64> =
-                    key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
+                let values: Vec<f64> = key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
 
                 let result = if values.is_empty() {
                     existing_val
