@@ -111,7 +111,10 @@ pub enum BarrierDecision {
     /// 拒绝 — 写入拒绝原因到 State，由 edge_if 决定是否回跳
     Reject { reason: String },
     /// 修改 State 中的指定 key，然后继续
-    Modify { key: String, value: serde_json::Value },
+    Modify {
+        key: String,
+        value: serde_json::Value,
+    },
     /// 跳转到指定节点（覆盖默认流转）
     Reroute { target: String },
 }
@@ -167,16 +170,11 @@ pub enum GraphEvent {
     ///
     /// `GraphResult` 即为终态的终极真理之源——内含 `state`、`execution_log`、`duration`。
     /// 不再在外层冗余携带 `state`。
-    GraphComplete {
-        result: GraphResult,
-    },
+    GraphComplete { result: GraphResult },
     /// Graph 执行出错（恰好一次）
     ///
     /// 携带出错瞬间的 `state` 快照，便于诊断。
-    GraphError {
-        error: GraphError,
-        state: State,
-    },
+    GraphError { error: GraphError, state: State },
 }
 
 /// Graph 事件通道类型别名
@@ -207,9 +205,15 @@ pub struct GraphHandle {
 #[allow(dead_code)]
 pub(crate) enum BarrierDecisionMessage {
     /// 精确匹配特定 BarrierId
-    Exact { barrier_id: BarrierId, decision: BarrierDecision },
+    Exact {
+        barrier_id: BarrierId,
+        decision: BarrierDecision,
+    },
     /// 通配匹配 — 匹配 node_id 的所有 occurrence
-    Wildcard { node_id: String, decision: BarrierDecision },
+    Wildcard {
+        node_id: String,
+        decision: BarrierDecision,
+    },
 }
 
 impl GraphHandle {
@@ -240,9 +244,11 @@ impl GraphHandle {
                 decision,
             })
             .await
-            .map_err(|_| GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
-                node: "decision channel closed".into(),
-            }))
+            .map_err(|_| {
+                GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
+                    node: "decision channel closed".into(),
+                })
+            })
     }
 
     /// 提交通配决策 — 匹配指定 node_id 的所有 occurrence。
@@ -264,9 +270,11 @@ impl GraphHandle {
                 decision,
             })
             .await
-            .map_err(|_| GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
-                node: "decision channel closed".into(),
-            }))
+            .map_err(|_| {
+                GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
+                    node: "decision channel closed".into(),
+                })
+            })
     }
 
     /// 强制取消正在执行的 Graph。

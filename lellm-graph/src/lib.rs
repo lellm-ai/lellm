@@ -1,6 +1,6 @@
 //! lellm-graph — Graph/Node/Edge 编排层。
 //!
-//! 提供 Workflow DAG + Loop Node + Human-in-the-loop 编排能力。
+//! 提供 Workflow Graph + Human-in-the-loop 编排能力。
 
 pub mod barrier_node;
 pub mod error;
@@ -22,9 +22,7 @@ pub use event::{
 };
 
 // ─── Graph ──────────────────────────────────────────────────────
-pub use graph::{
-    CycleAnalysis, Edge, EdgeAnalysis, EdgeExceededStrategy, EdgePolicy, Graph, GraphBuilder,
-};
+pub use graph::{CycleAnalysis, Edge, EdgeAnalysis, Graph, GraphBuilder};
 
 // ─── Nodes ──────────────────────────────────────────────────────
 pub use node::{

@@ -106,8 +106,6 @@ pub enum NodeKind {
     Tool(ToolNode),
     /// 条件分支
     Condition(ConditionNode),
-    /// 循环容器
-    Loop(Box<LoopNode>),
     /// Human-in-the-loop 审批屏障（仅流式模式）
     Barrier(BarrierNode),
 }
@@ -352,7 +350,6 @@ impl GraphNode for NodeKind {
             Self::Agent(n) => n.execute(state).await,
             Self::Tool(n) => n.execute(state).await,
             Self::Condition(n) => n.execute(state).await,
-            Self::Loop(n) => n.execute(state).await,
             Self::Barrier(n) => n.execute(state).await,
         }
     }
@@ -368,7 +365,6 @@ impl GraphNode for NodeKind {
             Self::Agent(n) => n.execute_stream(state, sink, span_id).await,
             Self::Tool(n) => n.execute_stream(state, sink, span_id).await,
             Self::Condition(n) => n.execute_stream(state, sink, span_id).await,
-            Self::Loop(n) => n.execute_stream(state, sink, span_id).await,
             Self::Barrier(n) => n.execute_stream(state, sink, span_id).await,
         }
     }

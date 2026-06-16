@@ -956,6 +956,52 @@ Provider 层是无脑管道，永远转发所有协议事件。
 - `stream_thinking` 过滤：`lellm-provider/.../stream_processor.rs` — `process_stream()` 中根据标志决定是否发射 `ThinkingDelta`
 - Codec 映射：各 Codec 的 `encode()` 中
 
+## 13.1 CacheControl — Prompt Cache 控制原语
+
+> **v2026-06-15 新增：** Provider 无关的缓存控制标记。
+
+**背景：** Prompt Caching 是 LLM Provider 的重要成本优化手段。Anthropic 显式标记，OpenAI 隐式前缀缓存，Google 不支持。缓存断点的**放置位置**是业务层决策，但**信号载体**必须在 Core 类型上表达。
+
+### CacheControl 枚举
+
+```rust
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CacheControl {
+    /// 缓存断点 — 标记此处为缓存边界
+    Breakpoint,
+}
+```
+
+### TextBlock 扩展
+
+```rust
+pub struct TextBlock {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+```
+
+### ToolDefinition 扩展
+
+```rust
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+```
+
+### Provider Codec 映射
+
+| Provider | `CacheControl::Breakpoint` 映射 |
+|---|---|
+| `AnthropicCodec` | ContentBlock: `{"cache_control": {"type": "ephemeral"}}` |
+| `AnthropicCodec` | Tool: 在该工具后插入只含 `cache_control` 的 JSON 对象 |
+| `OpenAICompatCodec` | ignore（OpenAI 隐式前缀缓存） |
+
 ## 14. RequestOptions — Agent 层生成参数覆盖
 
 > **v2026-06-10 新增：** 独立于 ChatRequest 的 Agent 层参数覆盖。

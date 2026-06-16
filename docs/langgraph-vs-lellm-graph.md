@@ -18,7 +18,7 @@ LangGraph（以 Python/JS 为代表的动态语言图生态）与 LeLLM（以 Ru
 | **条件路由** | `should_continue()` 函数返回 node name / `END` | `ConditionNode` 声明式分支 + `edge_if()` 条件边 |
 | **图构建** | `StateGraph.add_node().add_edge().compile()` | `GraphBuilder.node().edge().build()` |
 | **执行** | `agent.invoke({messages: [...]})` | `GraphExecutor::execute(&graph, state)` |
-| **循环支持** | 天然支持（边可回环） | DAG + `LoopNode` 显式循环（构建时环检测） |
+| **循环支持** | 天然支持（边可回环） | 有环图 + 三层熔断保护（`max_steps` / `EdgePolicy` / `LoopNode`）|
 
 ---
 

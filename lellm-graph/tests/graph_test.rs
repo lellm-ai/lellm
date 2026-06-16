@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, GraphBuilder, GraphError,
-    GraphEvent, GraphExecutor, GraphExecution, LoopNode, NodeKind, State, StateExt, SubGraph, TaskNode, TerminalError, TraceId,
-    array_reducer, EdgePolicy, EdgeExceededStrategy,
+    GraphEvent, GraphExecution, GraphExecutor, NodeKind, State, StateExt, TaskNode, TerminalError,
+    TraceId, array_reducer,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -125,7 +125,9 @@ async fn test_task_node_error() {
         let _ = g.node(
             "fail",
             NodeKind::Task(TaskNode::new("fail", |_| {
-                Err(GraphError::Terminal(TerminalError::StateError("boom".into())))
+                Err(GraphError::Terminal(TerminalError::StateError(
+                    "boom".into(),
+                )))
             })),
         );
         let _ = g.end("fail");
@@ -330,75 +332,6 @@ async fn test_execution_log() {
     assert!(result.duration.as_nanos() > 0);
 }
 
-/// LoopNode — 独立迭代保护的封装场景。
-#[tokio::test]
-async fn test_loop_node_basic() {
-    let body = SubGraph {
-        nodes: vec![Arc::new(TaskNode::new("increment", |state| {
-            let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-            state.insert("count".into(), serde_json::json!(count + 1));
-            Ok(())
-        }))],
-        edges: vec![],
-    };
-
-    let loop_node = LoopNode::new(
-        "counter",
-        body,
-        |s: &State| {
-            s.get("count")
-                .and_then(|v| v.as_u64())
-                .map(|c| c < 3)
-                .unwrap_or(true)
-        },
-        10,
-    );
-
-    let graph = build_graph("loop_test", |g| {
-        let _ = g.start("loop");
-        let _ = g.node("loop", NodeKind::Loop(Box::new(loop_node)));
-        let _ = g.end("loop");
-        Ok(())
-    })
-    .expect("build should succeed");
-
-    let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
-        .await
-        .expect("execution should succeed");
-
-    assert_eq!(result.state.get("count").unwrap(), &serde_json::json!(3));
-}
-
-/// LoopNode 超限 — 独立于全局 max_steps。
-#[tokio::test]
-async fn test_loop_node_limit_exceeded() {
-    let body = SubGraph {
-        nodes: vec![Arc::new(TaskNode::new("no_op", |_| Ok(())))],
-        edges: vec![],
-    };
-
-    let loop_node = LoopNode::new("infinite", body, |_| true, 2);
-
-    let graph = build_graph("loop_limit", |g| {
-        let _ = g.start("loop");
-        let _ = g.node("loop", NodeKind::Loop(Box::new(loop_node)));
-        let _ = g.end("loop");
-        Ok(())
-    })
-    .expect("build should succeed");
-
-    let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
-        .await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        GraphError::Terminal(TerminalError::LoopLimitExceeded { limit }) => assert_eq!(limit, 2),
-        other => panic!("expected LoopLimitExceeded, got: {other}"),
-    }
-}
-
 // ─── BarrierNode 测试（Human-in-the-loop）────────────────────────
 
 /// BarrierNode 在阻塞模式下必须报错。
@@ -441,8 +374,8 @@ async fn test_barrier_approve() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle } = GraphExecutor::default()
-        .execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -491,8 +424,8 @@ async fn test_barrier_reject_with_back_jump() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle } = GraphExecutor::default()
-        .execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     let mut reject_count = 0;
     loop {
@@ -542,8 +475,8 @@ async fn test_barrier_modify() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle } = GraphExecutor::default()
-        .execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -590,8 +523,10 @@ async fn test_barrier_timeout() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle: _handle } = GraphExecutor::default()
-        .execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution {
+        mut stream,
+        handle: _handle,
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -640,8 +575,8 @@ async fn test_barrier_reroute() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle } = GraphExecutor::default()
-        .execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -714,8 +649,8 @@ async fn test_double_barrier_sequential() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle } = GraphExecutor::default()
-        .execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -811,59 +746,6 @@ fn test_state_ext_reduce() {
 
     let items = state.get("items").unwrap();
     assert_eq!(items, &serde_json::json!([1, 2, 3, 4]));
-}
-
-// ─── Edge Policy 测试 ──────────────────────────────────────────
-
-/// 边级 policy — 超过 MaxVisits 返回 EdgePolicyExceeded。
-#[tokio::test]
-async fn test_edge_policy_exceeded() {
-    let graph = build_graph("edge_policy", |g| {
-        let _ = g.start("a");
-        let _ = g.node(
-            "a",
-            NodeKind::Task(TaskNode::new("a", |state| {
-                let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                state.insert("count".into(), serde_json::json!(count + 1));
-                Ok(())
-            })),
-        );
-        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
-        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
-        let _ = g.edge("a", "b");
-        // 条件边 + policy MaxVisits=2：最多回跳 2 次
-        let _ = g.edge_if("b", "a", |s: &State| {
-            s.get("count")
-                .and_then(|v| v.as_u64())
-                .map(|c| c < 10)
-                .unwrap_or(true)
-        });
-        let _ = g.edge_policy(
-            "b",
-            "a",
-            EdgePolicy::MaxVisits {
-                limit: 2,
-                on_exceeded: EdgeExceededStrategy::Strict,
-            },
-        );
-        let _ = g.edge("b", "end");
-        let _ = g.end("end");
-        Ok(())
-    })
-    .expect("build should succeed");
-
-    let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
-        .await;
-
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        GraphError::Terminal(TerminalError::EdgePolicyExceeded { edge, limit }) => {
-            assert_eq!(edge, "b→a");
-            assert_eq!(limit, 2);
-        }
-        other => panic!("expected EdgePolicyExceeded, got: {other}"),
-    }
 }
 
 /// 边级 analysis max_visits 仅用于静态分析，不参与 runtime — 正常退出。
@@ -1002,8 +884,10 @@ async fn test_stream_has_span_id() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle: _handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution {
+        mut stream,
+        handle: _handle,
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     let mut span_ids = Vec::new();
     loop {

@@ -142,14 +142,12 @@ impl GraphNode for AgentNode {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
         let messages = read_messages(state, &self.prefix);
 
-        let result =
-            self.agent
-                .execute(messages)
-                .await
-                .map_err(|e| GraphError::Terminal(TerminalError::NodeExecutionFailed {
-                    node: self.name.clone(),
-                    source: Box::new(e),
-                }))?;
+        let result = self.agent.execute(messages).await.map_err(|e| {
+            GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                node: self.name.clone(),
+                source: Box::new(e),
+            })
+        })?;
 
         write_agent_result(self, &result, state);
         Ok(NextStep::GoToNext)
@@ -335,7 +333,9 @@ impl GraphNode for LLMNode {
         state.insert(
             self.messages_key.clone(),
             serde_json::to_value(&messages).map_err(|e| {
-                GraphError::Terminal(TerminalError::StateError(format!("failed to serialize messages: {e}")))
+                GraphError::Terminal(TerminalError::StateError(format!(
+                    "failed to serialize messages: {e}"
+                )))
             })?,
         );
 

@@ -1,9 +1,11 @@
 //! Graph 错误类型。
 //!
-//! 错误三分法：
+//! 错误二分法：
 //! - `Terminal` — 终止执行，stream 关闭
 //! - `Recoverable` — 内部重试 / fallback，stream 继续
-//! - `Observed` — 仅事件，不影响 control flow
+//!
+//! 可观测性（Warning/Diagnostic）不属于错误体系，
+//! 通过 `GraphEvent::ObservedError` 事件发送。
 
 use std::fmt;
 
@@ -23,7 +25,11 @@ pub enum BuildError {
     /// 未指定出口节点
     MissingExitPoint,
     /// 边定义无效
-    InvalidEdgeDefinition { from: String, to: String, reason: String },
+    InvalidEdgeDefinition {
+        from: String,
+        to: String,
+        reason: String,
+    },
 }
 
 impl fmt::Display for BuildError {
@@ -31,7 +37,11 @@ impl fmt::Display for BuildError {
         match self {
             Self::DuplicateNode { id } => write!(f, "duplicate node id: '{}'", id),
             Self::MissingNode { from, to } => {
-                write!(f, "edge references non-existent node: '{}' (in {}→{})", to, from, to)
+                write!(
+                    f,
+                    "edge references non-existent node: '{}' (in {}→{})",
+                    to, from, to
+                )
             }
             Self::MissingEntryPoint => write!(f, "entry point not set"),
             Self::MissingExitPoint => write!(f, "exit point not set"),
@@ -46,15 +56,13 @@ impl std::error::Error for BuildError {}
 
 // ─── GraphError ──────────────────────────────────────────────
 
-/// Graph 运行时错误 — 三分法。
+/// Graph 运行时错误 — 二分法。
 #[derive(Debug)]
 pub enum GraphError {
     /// 终止执行 — stream 关闭，不可恢复
     Terminal(TerminalError),
     /// 可恢复 — 内部重试 / fallback 触发，stream 继续
     Recoverable(RecoverableError),
-    /// 仅事件 — 不影响 control flow，stream 继续
-    Observed(ObservedError),
 }
 
 /// 终止错误 — Graph 执行不可恢复地停止。
@@ -67,15 +75,19 @@ pub enum TerminalError {
     /// Goto 目标缺少对应的边
     MissingEdge { from: String, to: String },
     /// 节点执行失败（不可恢复）
-    NodeExecutionFailed { node: String, source: Box<dyn std::error::Error + Send + Sync> },
+    NodeExecutionFailed {
+        node: String,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// 全局步数超限（运行时熔断）
     StepsExceeded { limit: usize },
     /// 循环超限
     LoopLimitExceeded { limit: usize },
-    /// 边级 policy 超限
-    EdgePolicyExceeded { edge: String, limit: usize },
     /// Barrier 超时
-    BarrierTimeout { node: String, timeout: std::time::Duration },
+    BarrierTimeout {
+        node: String,
+        timeout: std::time::Duration,
+    },
     /// Barrier 被取消
     BarrierCancelled { node: String },
     /// 无匹配边 — 没有任何 outgoing edge 满足条件，且无 fallback
@@ -107,7 +119,7 @@ pub enum RecoverableError {
     },
 }
 
-/// 观测错误 — 仅作为事件发出，不影响执行流。
+/// 可观测性事件 — 不属于错误体系，通过 GraphEvent 发送。
 #[derive(Debug, Clone)]
 pub enum ObservedError {
     /// 警告
@@ -115,7 +127,36 @@ pub enum ObservedError {
     /// 降级执行
     Degraded { node: String, message: String },
     /// 部分失败
-    PartialFailure { node: String, succeeded: usize, failed: usize, message: String },
+    PartialFailure {
+        node: String,
+        succeeded: usize,
+        failed: usize,
+        message: String,
+    },
+}
+
+impl fmt::Display for ObservedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Warning { node, message } => write!(f, "node '{}': {}", node, message),
+            Self::Degraded { node, message } => write!(f, "node '{}' degraded: {}", node, message),
+            Self::PartialFailure {
+                node,
+                succeeded,
+                failed,
+                message,
+            } => {
+                write!(
+                    f,
+                    "node '{}' partial: {}/{} ok, {}",
+                    node,
+                    succeeded,
+                    succeeded + failed,
+                    message
+                )
+            }
+        }
+    }
 }
 
 /// 条件评估结果 — 用于 Unrouted 错误报告。
@@ -136,7 +177,6 @@ impl fmt::Display for GraphError {
         match self {
             Self::Terminal(e) => write!(f, "[terminal] {}", e),
             Self::Recoverable(e) => write!(f, "[recoverable] {}", e),
-            Self::Observed(e) => write!(f, "[observed] {}", e),
         }
     }
 }
@@ -147,7 +187,11 @@ impl fmt::Display for TerminalError {
             Self::InvalidGraph(msg) => write!(f, "invalid graph: {msg}"),
             Self::NodeNotFound(name) => write!(f, "node not found: {name}"),
             Self::MissingEdge { from, to } => {
-                write!(f, "goto '{}' from '{}' failed: no edge {}→{} exists", to, from, from, to)
+                write!(
+                    f,
+                    "goto '{}' from '{}' failed: no edge {}→{} exists",
+                    to, from, from, to
+                )
             }
             Self::NodeExecutionFailed { node, source } => {
                 write!(f, "node '{node}' execution failed: {source}")
@@ -156,21 +200,26 @@ impl fmt::Display for TerminalError {
                 write!(f, "step limit {limit} exceeded (potential infinite loop)")
             }
             Self::LoopLimitExceeded { limit } => write!(f, "loop limit exceeded: {limit}"),
-            Self::EdgePolicyExceeded { edge, limit } => {
-                write!(f, "edge '{edge}' policy limit {limit} exceeded (cycle protection)")
-            }
             Self::BarrierTimeout { node, timeout } => {
                 write!(f, "barrier '{node}' timed out after {timeout:?}")
             }
             Self::BarrierCancelled { node } => {
-                write!(f, "barrier '{node}' cancelled: consumer dropped the signal channel")
+                write!(
+                    f,
+                    "barrier '{node}' cancelled: consumer dropped the signal channel"
+                )
             }
-            Self::Unrouted { node, attempted_conditions } => {
+            Self::Unrouted {
+                node,
+                attempted_conditions,
+            } => {
                 write!(f, "node '{}' has no matching outgoing edge", node)?;
                 if !attempted_conditions.is_empty() {
                     write!(f, ". evaluated: [")?;
                     for (i, ce) in attempted_conditions.iter().enumerate() {
-                        if i > 0 { write!(f, ", ")?; }
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
                         write!(f, "{}={}", ce.edge, ce.matched)?;
                     }
                     write!(f, "]")?;
@@ -185,23 +234,20 @@ impl fmt::Display for TerminalError {
 impl fmt::Display for RecoverableError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Retryable { node, attempt, max_attempts, reason } => {
-                write!(f, "node '{node}' retry {}/{}, reason: {}", attempt, max_attempts, reason)
+            Self::Retryable {
+                node,
+                attempt,
+                max_attempts,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "node '{node}' retry {}/{}, reason: {}",
+                    attempt, max_attempts, reason
+                )
             }
             Self::FallbackTriggered { from, to, reason } => {
                 write!(f, "fallback edge {}→{} triggered: {}", from, to, reason)
-            }
-        }
-    }
-}
-
-impl fmt::Display for ObservedError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Warning { node, message } => write!(f, "node '{}': {}", node, message),
-            Self::Degraded { node, message } => write!(f, "node '{}' degraded: {}", node, message),
-            Self::PartialFailure { node, succeeded, failed, message } => {
-                write!(f, "node '{}' partial: {}/{} ok, {}", node, succeeded, succeeded + failed, message)
             }
         }
     }
@@ -228,4 +274,3 @@ impl std::error::Error for TerminalError {
 }
 
 impl std::error::Error for RecoverableError {}
-impl std::error::Error for ObservedError {}

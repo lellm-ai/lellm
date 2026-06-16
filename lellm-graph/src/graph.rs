@@ -1,11 +1,11 @@
 //! Graph 和 GraphBuilder。
 //!
-//! Edge 三层语义：
+//! Edge 语义：
 //! - `condition` — 业务路由条件（必须满足）
 //! - `analysis` — 分析用约束（不参与 runtime 决策）
-//! - `policy` — runtime policy（显式声明才生效）
+//! - `fallback` — 兜底边，无匹配时优先尝试
 //!
-//! `fallback` — 兜底边，无匹配时优先尝试。
+//! 运行时安全由 `GraphExecutor::max_steps` 统一负责。
 
 use std::sync::Arc;
 
@@ -21,49 +21,25 @@ use crate::state::State;
 /// Arc 包装以支持 Graph Clone（条件回调不可 Clone）。
 pub type EdgeCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
 
-/// 边（Edge）— 三层语义叠加。
+/// 边（Edge）。
 pub struct Edge {
     pub from: String,
     pub to: String,
-    /// ① 业务路由条件（必须满足）
+    /// 业务路由条件（必须满足）
     pub condition: Option<EdgeCondition>,
-    /// ② 分析用约束（不参与 runtime 决策）
+    /// 分析用约束（不参与 runtime 决策）
     pub analysis: Option<EdgeAnalysis>,
-    /// ③ runtime policy（显式声明才生效）
-    pub policy: Option<EdgePolicy>,
-    /// ④ fallback 标记 — 兜底边
+    /// 兜底边标记
     pub fallback: bool,
 }
 
 /// 分析用约束 — 仅用于 `analyze_cycles()` 静态分析。
 ///
-/// `analysis` = "你可能会出事"，不参与执行控制。
+/// 不参与执行控制。运行时安全由 `GraphExecutor::max_steps` 负责。
 #[derive(Debug, Clone)]
 pub struct EdgeAnalysis {
     /// 建议的最大访问次数 — 用于循环分析诊断。
-    /// 不参与运行时拦截。
     pub max_visits: Option<usize>,
-}
-
-/// Runtime Policy — 显式声明的运行时拦截策略。
-///
-/// `policy` = "我现在要拦你"，参与执行控制。
-#[derive(Debug, Clone)]
-pub enum EdgePolicy {
-    /// 限制边被 traversed 的次数。超过后按策略处理。
-    MaxVisits { limit: usize, on_exceeded: EdgeExceededStrategy },
-}
-
-/// Edge Policy 被 exceeded 时的处理策略。
-#[derive(Debug, Clone, Copy, Default)]
-pub enum EdgeExceededStrategy {
-    /// 严格模式（默认）— 路径失败，回溯到上一个 decision node
-    #[default]
-    Strict,
-    /// 软降级 — 尝试其他满足 condition 的 edge → fallback → 失败
-    SoftFallback,
-    /// 静默跳过 — 不报错，继续执行其他逻辑
-    Drop,
 }
 
 // ─── Graph ─────────────────────────────────────────────────────
@@ -99,8 +75,7 @@ impl Graph {
 
     /// 查找指定节点的 fallback 边目标。
     ///
-    /// 用于 RecoverableError 恢复：当边级 policy 触发 SoftFallback 时，
-    /// 寻找 fallback 边作为降级路径。
+    /// 用于 RecoverableError 恢复：寻找 fallback 边作为降级路径。
     pub fn find_fallback_edge(&self, from: &str) -> Option<String> {
         self.edges
             .iter()
@@ -152,7 +127,9 @@ impl Graph {
         let mut adj: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for edge in &self.edges {
-            adj.entry(edge.from.clone()).or_default().push(edge.to.clone());
+            adj.entry(edge.from.clone())
+                .or_default()
+                .push(edge.to.clone());
         }
 
         for node in self.nodes.keys() {
@@ -161,7 +138,7 @@ impl Graph {
             self.dfs_cycles(node, node, &adj, &mut in_path, &mut path, &mut cycles);
         }
 
-        // 检查哪些环有 analysis 或 policy 保护
+        // 检查哪些环有 analysis 保护
         let mut unprotected = cycles
             .iter()
             .filter(|cycle| {
@@ -172,8 +149,7 @@ impl Graph {
                     self.edges.iter().any(|e| {
                         e.from == from
                             && e.to == to
-                            && (e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some())
-                                || e.policy.is_some())
+                            && e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some())
                     })
                 });
                 !has_protection
@@ -188,9 +164,11 @@ impl Graph {
             cycles,
             unprotected_cycles: unprotected,
             total_edges: self.edges.len(),
-            protected_edges: self.edges.iter().filter(|e| {
-                e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some()) || e.policy.is_some()
-            }).count(),
+            protected_edges: self
+                .edges
+                .iter()
+                .filter(|e| e.analysis.as_ref().is_some_and(|a| a.max_visits.is_some()))
+                .count(),
         }
     }
 
@@ -251,7 +229,7 @@ impl CycleAnalysis {
 
         lines.push(format!("Found {} cycle(s).", self.cycles.len()));
         lines.push(format!(
-            "Edge protection: {}/{} edges have analysis or policy set.",
+            "Edge protection: {}/{} edges have analysis set.",
             self.protected_edges, self.total_edges
         ));
 
@@ -260,18 +238,15 @@ impl CycleAnalysis {
             lines.push(format!("  Cycle {}: {} → {}", i + 1, cycle_str, cycle[0]));
 
             if self.unprotected_cycles.contains(cycle) {
-                lines.push("    ⚠️ UNPROTECTED — no max_visits or policy on back-edge".into());
+                lines.push("    ⚠️ UNPROTECTED — no max_visits on back-edge".into());
             } else {
-                lines.push("    ✅ Protected by edge-level analysis or policy".into());
+                lines.push("    ✅ Protected by edge-level analysis".into());
             }
         }
 
         if !self.all_protected() {
             lines.push("".into());
-            lines.push(
-                "⚠️ Recommendation: Set analysis.max_visits or policy on back-edges."
-                    .to_string(),
-            );
+            lines.push("⚠️ Recommendation: Set analysis.max_visits on back-edges.".to_string());
         }
 
         lines.join("\n")
@@ -323,7 +298,7 @@ impl GraphBuilder {
         Ok(self)
     }
 
-    /// 添加边（无条件，无 policy）。
+    /// 添加边（无条件）。
     pub fn edge(
         &mut self,
         from: impl Into<String>,
@@ -334,7 +309,6 @@ impl GraphBuilder {
             to: to.into(),
             condition: None,
             analysis: None,
-            policy: None,
             fallback: false,
         });
         Ok(self)
@@ -352,7 +326,6 @@ impl GraphBuilder {
             to: to.into(),
             condition: Some(Arc::new(condition)),
             analysis: None,
-            policy: None,
             fallback: false,
         });
         Ok(self)
@@ -369,7 +342,6 @@ impl GraphBuilder {
             to: to.into(),
             condition: None,
             analysis: None,
-            policy: None,
             fallback: true,
         });
         Ok(self)
@@ -389,25 +361,6 @@ impl GraphBuilder {
             analysis: Some(EdgeAnalysis {
                 max_visits: Some(max_visits),
             }),
-            policy: None,
-            fallback: false,
-        });
-        Ok(self)
-    }
-
-    /// 添加带 runtime policy 的边（显式拦截）。
-    pub fn edge_policy(
-        &mut self,
-        from: impl Into<String>,
-        to: impl Into<String>,
-        policy: EdgePolicy,
-    ) -> Result<&mut Self, BuildError> {
-        self.edges.push(Edge {
-            from: from.into(),
-            to: to.into(),
-            condition: None,
-            analysis: None,
-            policy: Some(policy),
             fallback: false,
         });
         Ok(self)
@@ -442,13 +395,11 @@ impl GraphBuilder {
         }
 
         graph.validate().map_err(|e| match e {
-            crate::error::TerminalError::InvalidGraph(msg) => {
-                BuildError::InvalidEdgeDefinition {
-                    from: "unknown".into(),
-                    to: "unknown".into(),
-                    reason: msg,
-                }
-            }
+            crate::error::TerminalError::InvalidGraph(msg) => BuildError::InvalidEdgeDefinition {
+                from: "unknown".into(),
+                to: "unknown".into(),
+                reason: msg,
+            },
             _ => BuildError::InvalidEdgeDefinition {
                 from: "unknown".into(),
                 to: "unknown".into(),

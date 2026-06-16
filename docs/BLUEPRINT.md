@@ -44,7 +44,7 @@ lellm/
 └── lellm-mcp/                  # MCP Client（v0.1 提前纳入）
 ```
 
-> 完整文档：[MCP 集成概览](./mcp-overview.md) → [ADR 系列](./adr/)
+> 完整文档：[MCP 集成设计](./mcp-design.md)
 
 ## 四、架构总览
 
@@ -161,13 +161,7 @@ Message 使用 `Message::ToolResult` 变体携带工具执行结果，不混入 
 
 ### MCP 设计决策（v0.3+）
 
-| 主题 | 详见 |
-|------|------|
-| ARG 评审报告 | [ARG-000](./adr/000-architecture-review-gate.md) |
-| MCP 职责边界 | [ADR-001](./adr/001-mcp-as-tool-runtime-extension.md) |
-| Crate 拆分策略 | [ADR-002](./adr/002-mcp-crate-structure.md) |
-| Transport 抽象 | [ADR-003](./adr/003-mcp-transport-abstraction.md) |
-| Tool 桥接设计 | [ADR-004](./adr/004-mcp-tool-bridge.md) |
+详见 [MCP 集成设计](./mcp-design.md)。
 
 ## 六、实现状态
 
@@ -259,8 +253,8 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 
 | 版本 | 范围 |
 |------|------|
-| **v0.1** | core + provider + agent + macros |
-| **v0.2** | Graph/Node/Edge + LoopDetector/SignalVoter 集成 |
-| **v0.3** | MCP Client (Tools only, stdio, ToolBridge) |
-| **v0.4** | MCP Server + Resources + HTTP/SSE Transport |
+| **v0.1** | core + provider + agent + macros + MCP (Tools only) |
+| **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误三分法 |
+| **v0.3** | ParallelNode + Checkpoint + 持久化 |
+| **v0.4** | Multi-Agent Orchestration + MCP Server + Resources |
 | **v0.5** | Sampling + Agent↔Agent via MCP |
