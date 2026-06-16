@@ -1,45 +1,48 @@
 //! lellm-graph — Graph/Node/Edge 编排层。
 //!
-//! 提供 Workflow Graph + Human-in-the-loop 编排能力。
+//! 通用工作流引擎（类似 LangGraph / Temporal / Prefect）。
+//! 依赖 `lellm-runtime`，不依赖 agent/provider/core。
 
 pub mod barrier_node;
 pub mod error;
 pub mod event;
 pub mod executor;
 pub mod graph;
-pub mod llm_node;
 pub mod node;
 pub mod state;
 pub mod statekey;
-pub mod tool_node;
+
+// ─── Re-export from lellm-runtime ─────────────────────────────
+pub use lellm_runtime::{
+    DeltaOp, Reducer, ReducerRegistry, State, StateDelta, StateError, StateExt, StateKey,
+    StateKeyExt, StateReducer, SpanId, TraceId, array_reducer,
+};
 
 // ─── Error Types ────────────────────────────────────────────────
 pub use error::{
-    BuildError, BuildErrors, GraphError, ObservedError, RecoverableError, TerminalError,
+    BuildError, BuildErrors, Diagnostic, DiagnosticCategory, DiagnosticSeverity, GraphDiagnostics,
+    GraphError, ObservedError, TerminalError,
 };
 
 // ─── Events ─────────────────────────────────────────────────────
 pub use event::{
-    BarrierDecision, BarrierId, GraphEvent, GraphExecution, GraphHandle, GraphStream, NodeEvent,
-    SpanId, TraceId,
+    BarrierDecision, BarrierId, FlowEvent, GraphEvent, GraphExecution, GraphHandle, GraphStream,
 };
 
 // ─── Graph ──────────────────────────────────────────────────────
-pub use graph::{CycleAnalysis, Edge, EdgeAnalysis, Graph, GraphBuilder};
+pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
 
 // ─── Nodes ──────────────────────────────────────────────────────
 pub use node::{
-    AgentNode, BarrierDefaultAction, BarrierNode, ConditionNode, ConditionNodeBuilder, GraphNode,
-    LLMNode, NextStep, NodeKind, TaskNode, ToolNode,
+    BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
+    FlowNode, NextStep, NodeKind, TaskNode, TaskFn,
 };
 
-// ─── State ──────────────────────────────────────────────────────
-pub use state::{
-    ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer, array_reducer,
-};
+// ─── State (graph-specific) ─────────────────────────────────────
+pub use state::{ExecutionEntry, GraphResult};
 
-// ─── StateKey (编译期类型安全) ──────────────────────────────────
-pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS, StateKey, StateKeyExt};
+// ─── StateKey (built-in constants) ──────────────────────────────
+pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS};
 
 // ─── Executor ───────────────────────────────────────────────────
 pub use executor::GraphExecutor;

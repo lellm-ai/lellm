@@ -15,11 +15,10 @@ use crate::barrier_node::BarrierDefaultAction;
 use crate::error::{GraphError, TerminalError};
 use crate::event::{
     BarrierDecision, BarrierDecisionMessage, BarrierId, GraphEvent, GraphExecution, GraphHandle,
-    SpanId,
 };
 use crate::graph::Graph;
-use crate::node::{GraphNode, NextStep, NodeKind, StreamNodeResult};
-use crate::state::{ExecutionEntry, GraphResult, State, TraceId};
+use crate::node::{FlowNode, NextStep, NodeKind, StreamNodeResult};
+use crate::state::{ExecutionEntry, GraphResult, State, SpanId, TraceId};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -181,7 +180,7 @@ impl GraphExecutor {
             let mut current = graph.start_node().to_string();
             let mut step: usize = 0;
 
-            let trace_id = TraceId::new();
+            let trace_id = TraceId::default();
 
             // 发射 GraphStart 事件
             if executor
@@ -279,7 +278,7 @@ impl GraphExecutor {
                 let duration = node_end.duration_since(node_start);
 
                 match result {
-                    Ok(StreamNodeResult::Done { next, span_id: _ }) => {
+                    Ok(StreamNodeResult::Continue { next, span_id: _, observed }) => {
                         execution_log.push(ExecutionEntry {
                             step,
                             node_name: node_name.clone(),
@@ -302,6 +301,22 @@ impl GraphExecutor {
                             .await
                         {
                             return;
+                        }
+
+                        // 如果有观测错误，发送 ObservedError 事件
+                        if let Some(error) = observed {
+                            if executor
+                                .send(
+                                    &event_tx,
+                                    GraphEvent::ObservedError {
+                                        error,
+                                        node_name: node_name.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                return;
+                            }
                         }
 
                         // 🛑 end 节点检查
@@ -330,75 +345,7 @@ impl GraphExecutor {
                         }
                     }
 
-                    Ok(StreamNodeResult::Observed {
-                        error,
-                        next,
-                        span_id: _,
-                    }) => {
-                        execution_log.push(ExecutionEntry {
-                            step,
-                            node_name: node_name.clone(),
-                            start_time: node_start,
-                            end_time: node_end,
-                            success: true,
-                        });
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::NodeEnd {
-                                    node_name: node_name.clone(),
-                                    trace_id,
-                                    span_id,
-                                    success: true,
-                                    duration,
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::ObservedError {
-                                    error,
-                                    node_name: node_name.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        // 🛑 end 节点检查
-                        if current == graph.end_node() {
-                            completed = true;
-                            break;
-                        }
-
-                        match executor.resolve_next(&graph, &current, &mut state, next) {
-                            Ok(target) => current = target,
-                            Err(e) => {
-                                if executor
-                                    .send(
-                                        &event_tx,
-                                        GraphEvent::GraphError {
-                                            error: e,
-                                            state: state.clone(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    return;
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    Ok(StreamNodeResult::BarrierPaused {
+                    Ok(StreamNodeResult::Pause {
                         barrier_id: _,
                         node_name: barrier_name,
                         span_id: _,
@@ -547,6 +494,57 @@ impl GraphExecutor {
                         }
                     }
 
+                    Ok(StreamNodeResult::Fallback { reason, node_name: fallback_node }) => {
+                        // Fallback 是控制流 — 节点主动声明降级
+                        // 查找 fallback 边，路由到备用节点
+                        execution_log.push(ExecutionEntry {
+                            step,
+                            node_name: fallback_node.clone(),
+                            start_time: node_start,
+                            end_time: node_end,
+                            success: false,
+                        });
+
+                        if let Some(fallback_target) = graph.find_fallback_edge(&current) {
+                            if executor
+                                .send(
+                                    &event_tx,
+                                    GraphEvent::ObservedError {
+                                        error: crate::error::ObservedError::Degraded {
+                                            node: fallback_node.clone(),
+                                            message: format!("fallback to '{}': {}", fallback_target, reason),
+                                        },
+                                        node_name: fallback_node.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                return;
+                            }
+                            current = fallback_target;
+                        } else {
+                            // 无 fallback 边 → 终止
+                            if executor
+                                .send(
+                                    &event_tx,
+                                    GraphEvent::GraphError {
+                                        error: GraphError::Terminal(
+                                            TerminalError::NodeExecutionFailed {
+                                                node: fallback_node.clone(),
+                                                source: format!("fallback with no fallback edge: {}", reason).into(),
+                                            },
+                                        ),
+                                        state: state.clone(),
+                                    },
+                                )
+                                .await
+                            {
+                                return;
+                            }
+                            break;
+                        }
+                    }
+
                     Err(e) => {
                         execution_log.push(ExecutionEntry {
                             step,
@@ -572,69 +570,20 @@ impl GraphExecutor {
                             return;
                         }
 
-                        // 错误二分法：Terminal / Recoverable
-                        match &e {
-                            GraphError::Terminal(_) => {
-                                if executor
-                                    .send(
-                                        &event_tx,
-                                        GraphEvent::GraphError {
-                                            error: e,
-                                            state: state.clone(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    return;
-                                }
-                                break;
-                            }
-                            GraphError::Recoverable(recoverable) => {
-                                tracing::warn!(
-                                    node = %node_name,
-                                    error = %recoverable,
-                                    "Recoverable error captured. Attempting fallback route..."
-                                );
-
-                                if let Some(fallback_target) = graph.find_fallback_edge(&current) {
-                                    if executor
-                                        .send(
-                                            &event_tx,
-                                            GraphEvent::ObservedError {
-                                                error: crate::error::ObservedError::Degraded {
-                                                    node: node_name.clone(),
-                                                    message: format!(
-                                                        "fallback to '{}' due to: {}",
-                                                        fallback_target, recoverable
-                                                    ),
-                                                },
-                                                node_name: node_name.clone(),
-                                            },
-                                        )
-                                        .await
-                                    {
-                                        return;
-                                    }
-
-                                    current = fallback_target;
-                                } else {
-                                    if executor.send(&event_tx, GraphEvent::GraphError {
-                                        error: GraphError::Terminal(
-                                            TerminalError::NodeExecutionFailed {
-                                                node: node_name.clone(),
-                                                source: format!(
-                                                    "Recoverable error with no fallback edge: {}",
-                                                    recoverable
-                                                )
-                                                .into(),
-                                            },
-                                        ),
-                                        state: state.clone(),
-                                    }).await { return; }
-                                    break;
-                                }
-                            }
+                        // 错误处理：Terminal → 终止执行
+                        if executor
+                            .send(
+                                &event_tx,
+                                GraphEvent::GraphError {
+                                    error: e,
+                                    state: state.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            return;
                         }
+                        break;
                     }
                 }
             }

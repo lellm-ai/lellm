@@ -2,7 +2,7 @@
 //!
 //! 事件分层设计：
 //! - `GraphEvent` — 图级事件（节点边界、Barrier、完成、错误）
-//! - `NodeEvent` — 节点内部事件中间层
+//! - `FlowEvent` — 节点内部事件中间层（解耦，不依赖任何具体节点类型）
 //!
 //! `TraceId` / `SpanId` 对标 tracing crate 的 trace/span 语义。
 //! 消费者按变体类型过滤事件，不需要额外的 level 字段。
@@ -10,10 +10,8 @@
 use std::time::Duration;
 
 use crate::error::{GraphError, ObservedError};
-use crate::state::{GraphResult, State};
-
-// Re-export for backward compatibility — TraceId/SpanId 定义在 state.rs
 pub use crate::state::{SpanId, TraceId};
+use crate::state::{GraphResult, State};
 
 // ─── BarrierId ────────────────────────────────────────────────
 
@@ -37,13 +35,42 @@ impl BarrierId {
     }
 }
 
-// ─── NodeEvent ────────────────────────────────────────────────
+// ─── FlowEvent ────────────────────────────────────────────────
 
-/// 节点内部事件 — 隔离 Graph 与节点内部事件的中间层。
+/// 节点内部事件 — 解耦的通用事件中间层。
+///
+/// Graph 不知道 `AgentEvent`、`ToolCall`、`ToolResult`。
+/// 具体节点（如 AgentFlowNode）通过 `Extension` 变体注入内部事件。
 #[derive(Debug)]
-pub enum NodeEvent {
-    /// Agent 节点内部事件（来自 ToolUseLoop）
-    Agent(lellm_agent::AgentEvent),
+pub enum FlowEvent {
+    /// 节点开始执行
+    NodeStarted {
+        node_id: String,
+        span_id: SpanId,
+    },
+    /// 节点执行完成
+    NodeCompleted {
+        node_id: String,
+        span_id: SpanId,
+        duration: Duration,
+    },
+    /// 节点执行失败
+    NodeFailed {
+        node_id: String,
+        error: String,
+    },
+    /// 状态变更
+    StateChanged {
+        node_id: String,
+        delta: lellm_runtime::StateDelta,
+    },
+    /// 扩展事件 — 具体节点类型通过此变体注入内部事件。
+    ///
+    /// 例如 AgentFlowNode 将 AgentEvent 序列化为 Value 后注入。
+    Extension {
+        node_id: String,
+        payload: serde_json::Value,
+    },
 }
 
 // ─── BarrierDecision ──────────────────────────────────────────
@@ -91,11 +118,11 @@ pub enum GraphEvent {
         success: bool,
         duration: Duration,
     },
-    /// 节点内部事件（通过 NodeEvent 中间层）
+    /// 节点内部事件（通过 FlowEvent 中间层）
     Node {
         span_id: SpanId,
         node_name: String,
-        event: NodeEvent,
+        event: FlowEvent,
     },
     /// Barrier 暂停 — 等待外部审批信号。
     ///

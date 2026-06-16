@@ -492,51 +492,12 @@ impl GraphBuilder {
             }
         }
 
-        // 4. 语义检查：多条件边 Warning
-        let mut cond_count: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for edge in &self.edges {
-            if edge.is_conditional() {
-                *cond_count.entry(edge.from.clone()).or_insert(0) += 1;
-            }
-        }
-        for (node, count) in &cond_count {
-            if *count > 1 {
-                errors.push(BuildError::Warning {
-                    message: format!(
-                        "node '{}' has {} conditional edges. \
-                         Evaluated in registration order (first match wins).",
-                        node, count
-                    ),
-                });
-            }
-        }
-
-        // 4.5 语义检查：end 节点有出边 → Warning
-        let end_outgoing: Vec<&str> = self
-            .edges
-            .iter()
-            .filter(|e| e.from == end)
-            .map(|e| e.to.as_str())
-            .collect();
-        if !end_outgoing.is_empty() {
-            errors.push(BuildError::Warning {
-                message: format!(
-                    "end node '{}' has {} outgoing edge(s) to: [{}]. \
-                     These edges are unreachable — execution stops at the end node.",
-                    end,
-                    end_outgoing.len(),
-                    end_outgoing.join(", ")
-                ),
-            });
-        }
-
-        // 5. 有致命错误则返回
-        if errors.has_fatal() {
+        // 4. 有错误则返回（build() 是纯函数，不产生 Warning）
+        if !errors.is_empty() {
             return Err(errors);
         }
 
-        // 6. 构建 Graph
+        // 5. 构建 Graph
         let graph = Graph {
             name: self.name,
             nodes: self.nodes,
@@ -545,29 +506,16 @@ impl GraphBuilder {
             end,
         };
 
-        // 7. 结构验证（validate 检查 start/end 节点存在性等）
+        // 6. 结构验证（validate 检查 start/end 节点存在性等）
         if let Err(e) = graph.validate() {
-            errors.push(BuildError::InvalidEdgeDefinition {
-                from: "unknown".into(),
-                to: "unknown".into(),
+            return Err(BuildErrors(vec![BuildError::InvalidEdgeDefinition {
+                from: "graph".to_string(),
+                to: "graph".to_string(),
                 reason: e.to_string(),
-            });
-            return Err(errors);
+            }]));
         }
 
-        // 8. 有 Warning 也返回 errors（但 graph 构建成功）
-        //    调用方通过 Ok(graph) 获取 graph，通过 errors 获取 warnings
-        if errors.is_empty() {
-            Ok(graph)
-        } else {
-            // 用一个 trick：Warning 不阻止成功，但需要通知调用方
-            // 改为 Ok((graph, warnings)) 语义更清晰
-            // 但为了向后兼容，先保持 Ok(graph)，Warning 通过日志输出
-            for w in errors.warnings() {
-                tracing::warn!("{}", w);
-            }
-            Ok(graph)
-        }
+        Ok(graph)
     }
 
     pub fn name(&self) -> &str {

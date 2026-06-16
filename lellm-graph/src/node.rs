@@ -1,23 +1,23 @@
 //! 节点核心类型与模块。
 //!
-//! - `GraphNode` trait, `NextStep` 枚举
-//! - `NodeKind` 节点类型枚举
-//! - `TaskNode`, `ConditionNode`, `BarrierNode`
-//! - 重新导出 `llm_node`, `tool_node`, `barrier_node` 模块
+//! - `FlowNode` trait — trait-based 节点，Graph 不知道具体节点类型
+//! - `NextStep` 枚举，`StreamNodeResult` 枚举
+//! - `NodeKind` 节点类型枚举（Task, Condition, Barrier）
+//! - `TaskNode`, `ConditionNode`
+//!
+//! AgentNode → AgentFlowNode（由 lellm-agent 提供，实现 FlowNode trait）
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::error::{GraphError, ObservedError};
-use crate::event::{BarrierId, GraphEvent, SpanId};
-use crate::state::State;
+use crate::event::{BarrierId, GraphEvent};
+use crate::state::{State, SpanId};
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
 pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
-pub use crate::llm_node::{AgentNode, LLMNode};
-pub use crate::tool_node::ToolNode;
 
 // ─── 核心类型 ──────────────────────────────────────────────────
 
@@ -35,16 +35,18 @@ pub enum NextStep {
 /// 节点流式执行结果。
 #[derive(Debug)]
 pub enum StreamNodeResult {
-    /// 节点正常完成
-    Done {
+    /// 节点正常完成（统一 Done + Observed）
+    Continue {
         /// 下一步
         next: NextStep,
-        /// 执行实例 ID（由调用方传入）
+        /// 执行实例 ID
         span_id: SpanId,
+        /// 可选的观测错误（不影响 control flow）
+        observed: Option<ObservedError>,
     },
     /// Barrier 暂停，等待外部决策
-    BarrierPaused {
-        /// Barrier 审批请求 ID（由 executor 生成）
+    Pause {
+        /// Barrier 审批请求 ID
         barrier_id: BarrierId,
         /// 节点名称
         node_name: String,
@@ -53,26 +55,26 @@ pub enum StreamNodeResult {
         /// 超时时间（None = 无限等待）
         timeout: Option<std::time::Duration>,
         /// 超时默认行为
-        default_action: crate::barrier_node::BarrierDefaultAction,
+        default_action: BarrierDefaultAction,
     },
-    /// 观测错误 — 仅事件，不影响 control flow。
+    /// 节点主动声明走备用路径（控制流，非错误）。
     ///
-    /// 节点通过此变体声明式地报告非致命异常，executor 负责：
-    /// 1. 发送 `GraphEvent::ObservedError` 事件
-    /// 2. 按 `next` 继续推进控制流
-    Observed {
-        /// 观测错误
-        error: ObservedError,
-        /// 下一步
-        next: NextStep,
-        /// 执行实例 ID
-        span_id: SpanId,
+    /// 与 `GraphError::Terminal` 不同：Fallback 是节点主动声明的降级策略，
+    /// executor 根据 fallback 边路由到备用节点。
+    Fallback {
+        /// 降级原因
+        reason: String,
+        /// 节点名称
+        node_name: String,
     },
 }
 
-/// 节点执行 trait。
+/// 节点执行 trait — trait-based 设计。
+///
+/// Graph 只知道 `dyn FlowNode`，不知道 `AgentNode`、`ToolNode` 等具体类型。
+/// `AgentFlowNode` 由 `lellm-agent` crate 提供。
 #[async_trait]
-pub trait GraphNode: Send + Sync {
+pub trait FlowNode: Send + Sync {
     /// 执行节点逻辑（阻塞模式）。
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError>;
 
@@ -81,9 +83,8 @@ pub trait GraphNode: Send + Sync {
     /// - `sink` — 事件输出 channel
     /// - `span_id` — 执行实例 ID（由 executor 生成）
     ///
-    /// 默认实现直接调用 `execute`，返回 `StreamNodeResult::Done`。
-    /// AgentNode 覆写此方法以转发 AgentEvent。
-    /// BarrierNode 覆写此方法以返回 `StreamNodeResult::BarrierPaused`。
+    /// 默认实现直接调用 `execute`，返回 `StreamNodeResult::Continue`。
+    /// BarrierNode 覆写此方法以返回 `StreamNodeResult::Pause`。
     async fn execute_stream(
         &self,
         state: &mut State,
@@ -91,23 +92,31 @@ pub trait GraphNode: Send + Sync {
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
         let next = self.execute(state).await?;
-        Ok(StreamNodeResult::Done { next, span_id })
+        Ok(StreamNodeResult::Continue {
+            next,
+            span_id,
+            observed: None,
+        })
     }
 }
 
 /// 节点类型枚举。
+///
+/// 只包含 Graph 内置节点类型。Agent/LLM/Tool 节点由外部 crate 提供。
+///
+/// 注意：External 使用 Arc 以支持 Clone（Graph 需要 Clone 来构建）。
 #[derive(Clone)]
 pub enum NodeKind {
     /// 自定义逻辑
     Task(TaskNode),
-    /// Agent（包装 ToolUseLoop）
-    Agent(Box<AgentNode>),
-    /// 工具调用
-    Tool(ToolNode),
     /// 条件分支
     Condition(ConditionNode),
     /// Human-in-the-loop 审批屏障（仅流式模式）
     Barrier(BarrierNode),
+    /// 外部节点（由 lellm-agent 等 crate 提供）
+    ///
+    /// 使用 `Arc<dyn FlowNode>` 让 Graph 不知道具体节点类型，同时支持 Clone。
+    External(std::sync::Arc<dyn FlowNode>),
 }
 
 // ─── TaskNode ────────────────────────────────────────────────
@@ -140,7 +149,7 @@ impl TaskNode {
 }
 
 #[async_trait]
-impl GraphNode for TaskNode {
+impl FlowNode for TaskNode {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
         (self.func)(state)?;
         Ok(NextStep::GoToNext)
@@ -193,7 +202,7 @@ impl ConditionNodeBuilder {
 }
 
 #[async_trait]
-impl GraphNode for ConditionNode {
+impl FlowNode for ConditionNode {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
         for (target, condition) in &self.branches {
             if condition(state) {
@@ -205,17 +214,16 @@ impl GraphNode for ConditionNode {
     }
 }
 
-// ─── NodeKind GraphNode impl ─────────────────────────────────
+// ─── NodeKind FlowNode impl ──────────────────────────────────
 
 #[async_trait]
-impl GraphNode for NodeKind {
+impl FlowNode for NodeKind {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
         match self {
             Self::Task(n) => n.execute(state).await,
-            Self::Agent(n) => n.execute(state).await,
-            Self::Tool(n) => n.execute(state).await,
             Self::Condition(n) => n.execute(state).await,
             Self::Barrier(n) => n.execute(state).await,
+            Self::External(n) => n.execute(state).await,
         }
     }
 
@@ -227,10 +235,16 @@ impl GraphNode for NodeKind {
     ) -> Result<StreamNodeResult, GraphError> {
         match self {
             Self::Task(n) => n.execute_stream(state, sink, span_id).await,
-            Self::Agent(n) => n.execute_stream(state, sink, span_id).await,
-            Self::Tool(n) => n.execute_stream(state, sink, span_id).await,
             Self::Condition(n) => n.execute_stream(state, sink, span_id).await,
             Self::Barrier(n) => n.execute_stream(state, sink, span_id).await,
+            Self::External(n) => n.execute_stream(state, sink, span_id).await,
         }
     }
 }
+
+// ─── Backward Compatibility Alias ─────────────────────────────
+
+/// 向后兼容别名 — `GraphNode` → `FlowNode`。
+///
+/// v0.2 代码使用 `GraphNode`，v0.3 统一为 `FlowNode`。
+pub type GraphNode = dyn FlowNode;

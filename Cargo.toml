@@ -2,6 +2,7 @@
 members = [
     "lellm",
     "lellm-core",
+    "lellm-runtime",
     "lellm-provider",
     "lellm-agent",
     "lellm-macros",
@@ -18,6 +19,7 @@ license = "MIT"
 [workspace.dependencies]
 # Internal
 lellm-core = { path = "lellm-core", version = "0.2" }
+lellm-runtime = { path = "lellm-runtime", version = "0.2" }
 lellm-provider = { path = "lellm-provider", version = "0.2" }
 lellm-agent = { path = "lellm-agent", version = "0.2" }
 lellm-macros = { path = "lellm-macros", version = "0.2" }

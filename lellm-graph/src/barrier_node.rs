@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 
 use crate::error::{GraphError, TerminalError};
-use crate::event::{BarrierDecision, BarrierId, GraphEvent, SpanId};
-use crate::node::{GraphNode, NextStep, StreamNodeResult};
-use crate::state::State;
+use crate::event::{BarrierDecision, BarrierId, GraphEvent};
+use crate::node::{FlowNode, NextStep, StreamNodeResult};
+use crate::state::{State, SpanId};
 
 /// Barrier 超时后的默认行为。
 #[derive(Debug, Clone, Default)]
@@ -114,7 +114,7 @@ impl BarrierNode {
 }
 
 #[async_trait]
-impl GraphNode for BarrierNode {
+impl FlowNode for BarrierNode {
     /// 阻塞模式不支持 BarrierNode — 直接报错。
     async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
         Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
@@ -123,7 +123,7 @@ impl GraphNode for BarrierNode {
         ))))
     }
 
-    /// 流式执行 — 返回 BarrierPaused，由 executor 发射事件并等待决策。
+    /// 流式执行 — 返回 Pause，由 executor 发射事件并等待决策。
     async fn execute_stream(
         &self,
         _state: &mut State,
@@ -136,8 +136,8 @@ impl GraphNode for BarrierNode {
         // 这里传一个 placeholder，executor 会用 DecisionRegistry::next_id() 覆盖
         let barrier_id = BarrierId::new(&node_name, 0);
 
-        // 返回 BarrierPaused，由 executor 发射 BarrierWaiting 事件
-        Ok(StreamNodeResult::BarrierPaused {
+        // 返回 Pause，由 executor 发射 BarrierWaiting 事件
+        Ok(StreamNodeResult::Pause {
             barrier_id,
             node_name,
             span_id,
