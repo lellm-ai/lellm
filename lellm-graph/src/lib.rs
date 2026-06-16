@@ -27,7 +27,7 @@ pub use graph::{CycleAnalysis, Edge, EdgeAnalysis, Graph, GraphBuilder};
 // ─── Nodes ──────────────────────────────────────────────────────
 pub use node::{
     AgentNode, BarrierDefaultAction, BarrierNode, ConditionNode, ConditionNodeBuilder, GraphNode,
-    LLMNode, LoopNode, NextStep, NodeKind, SubGraph, TaskNode, ToolNode,
+    LLMNode, NextStep, NodeKind, TaskNode, ToolNode,
 };
 
 // ─── State ──────────────────────────────────────────────────────

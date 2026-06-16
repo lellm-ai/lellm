@@ -27,7 +27,7 @@
 | 层级 | 机制 | 作用域 | 说明 |
 |------|------|--------|------|
 | **全局** | `GraphExecutor::max_steps` | 整个图执行 | 绝对安全网，默认 50 步 |
-| **语法糖** | `LoopNode`（Builder 层展开）| 封装循环体 | Builder 展开为 ConditionNode + 边，Runtime 不感知 |
+| **语法糖** | Loop DSL（Builder 层展开）| 封装循环体 | Builder 展开为 ConditionNode + 边，Runtime 不感知 |
 
 **Step 定义：1 Step = 1 Node Entry**
 
@@ -42,15 +42,14 @@ GraphBuilder::new("retry")
     .edge("check", "output")?
     .end("output")?
 
-// LoopNode：Builder 语法糖，build() 时展开为普通节点 + 边
-LoopNode::new("loop", SubGraph { ... }, |s| !s.satisfied, max_iterations: 5)
-// 展开后 Runtime 只看到：ConditionNode + edge_if + max_iterations 条件
+// 循环通过回边表达：
+// A → B → C → B（回跳）→ C → B → ... → 输出
 ```
 
 **设计意图：**
 - 全局熔断是**底线**——任何图都不会无限执行
-- LoopNode 是 **Builder 语法糖**——`build()` 时展开为 ConditionNode + 边，Runtime 只理解回边
-- **Runtime 永远只有一种循环模型：回边**
+- **循环通过回边表达**——Runtime 只理解一种循环模型
+- 未来可通过 Loop DSL（Builder 语法糖）提供更易读的循环表达
 
 ---
 
@@ -82,7 +81,7 @@ pub enum NodeKind {
 
 > **注意：** Agent 用 `Box` 包裹，因为体积不确定（AgentNode 含 ToolUseLoop）。
 > **LLMNode 不是 NodeKind 变体** — 它通过 `llm_node` 模块导出，供手动构建 ReAct 循环使用（Level 2 逃生口）。
-> **LoopNode 不是 NodeKind 变体** — 它是 Builder 层语法糖，`build()` 时展开为 ConditionNode + 边。
+> **循环通过回边表达** — 不需要专门的 LoopNode 变体。
 
 **回调类型统一使用 `Arc<dyn Fn>`**（非 `Box<dyn Fn>`），以支持 `Graph` 的 `Clone`。
 
@@ -181,24 +180,6 @@ ConditionNode::builder("route")
     .build()
 ```
 
-### LoopNode — 循环容器（DSL 语法糖）
-
-```rust
-pub struct LoopNode {
-    pub name: String,
-    pub body: SubGraph,
-    pub continue_condition: Arc<dyn Fn(&State) -> bool + Send + Sync>,
-    pub max_iterations: usize,
-}
-```
-
-**定位：** DSL 语法糖，非必需。功能上可用 `edge_if` + `EdgePolicy::MaxVisits` 替代。
-
-- 每次执行完 body 后求值 `continue_condition`
-- 条件为 false 时退出，返回 `GoToNext`
-- 达到 `max_iterations` 时返回 `TerminalError::LoopLimitExceeded` 错误
-- 独立于全局 `max_steps`，提供局部熔断
-
 ### BarrierNode — Human-in-the-loop 审批
 
 ```rust
@@ -262,20 +243,6 @@ pub enum BarrierDefaultAction {
     Skip,    // 超时跳过（继续下一步）
 }
 ```
-
-### SubGraph — 子图
-
-```rust
-pub struct SubGraph {
-    pub nodes: Vec<Arc<dyn GraphNode>>,
-    pub edges: Vec<Edge>,
-}
-```
-
-LoopNode 的执行单元，线性执行所有节点。
-- `GoToNext` — 继续遍历下一个节点
-- `End` — 提前退出子图
-- `Goto(target)` — 报错（SubGraph 不支持按名跳转）
 
 ### GraphNode Trait
 
@@ -913,7 +880,7 @@ lellm-graph/
     ├── error.rs                  # BuildError, GraphError (三分法)
     ├── state.rs                  # State, StateExt, StateReducer, GraphResult
     ├── node.rs                   # GraphNode trait, NextStep, NodeKind, StreamNodeResult
-    │                              # TaskNode, ConditionNode, SubGraph
+    │                              # TaskNode, ConditionNode
     ├── llm_node.rs               # AgentNode, LLMNode
     ├── tool_node.rs              # ToolNode
     ├── barrier_node.rs           # BarrierNode, BarrierDecision, BarrierDefaultAction
@@ -935,14 +902,6 @@ lellm-graph/
 | 有环图熔断 | `test_cyclic_graph_steps_exceeded` | ✅ |
 | 有环图 + edge_if 退出 | `test_cyclic_graph_with_edge_if_exit` | ✅ |
 | ConditionNode 回跳 | `test_condition_node_back_jump` | ✅ |
-| LoopNode 基本 | `test_loop_node_basic` | ✅ |
-| LoopNode 超限 | `test_loop_node_limit_exceeded` | ✅ |
-| Barrier 阻塞模式报错 | `test_barrier_blocked_mode_error` | ✅ |
-| Barrier Approve | `test_barrier_approve` | ✅ |
-| Barrier Reject + 回跳 | `test_barrier_reject_with_back_jump` | ✅ |
-| Barrier Modify | `test_barrier_modify` | ✅ |
-| Barrier 超时 | `test_barrier_timeout` | ✅ |
-| Barrier Reroute | `test_barrier_reroute` | ✅ |
 | 双重 Barrier 顺序执行 | `test_double_barrier_sequential` | ✅ |
 | 执行日志 | `test_execution_log` | ✅ |
 | 缺失节点 | `test_missing_node/start/end` | ✅ |
@@ -953,17 +912,17 @@ lellm-graph/
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| P0 | 移除 EdgePolicy | 保留 EdgeAnalysis，Runtime 安全由 max_steps 负责 |
-| P0 | NodeKind 移除 Loop | LoopNode 降级为 Builder 语法糖，build() 时展开 |
-| P0 | AgentNode 显式写入 | 默认不写 State，用户显式绑定 output/messages |
-| P0 | SubGraph 支持 Goto | SubGraph 应成为真正的 Graph，支持内部路由 |
-| P0 | GraphError 移除 Observed | 可观测性移到事件系统 |
+| P0 | 移除 EdgePolicy | 保留 EdgeAnalysis，Runtime 安全由 max_steps 负责 | ✅ 已完成 |
+| P0 | NodeKind 移除 Loop | 循环通过回边表达 | ✅ 已完成 |
+| P0 | AgentNode 显式写入 | 默认不写 State，用户显式绑定 output/messages | P1 |
+| P0 | GraphError 移除 Observed | 可观测性移到事件系统 | ✅ 已完成 |
 | P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 |
 | P1 | ReducerRegistry | 并行分支的 State 合并策略 |
 | P1 | ExecutionTrace 扩展 | 元数据（iterations/tool_calls）进入 Trace 而非 State |
 | P2 | TraceId 落地 | 关联 Graph Execution 全链路 |
 | P2 | SpanId 持久化 | 关联到 ExecutionEntry，等 ParallelNode |
 | P3 | ParallelNode | 并行子图，SpanId 真正发挥价值 |
+| P3 | Loop DSL | Builder 层循环语法糖，展开为回边 + 条件节点 |
 
 ---
 
@@ -972,7 +931,7 @@ lellm-graph/
 | 版本 | 范围 | 状态 |
 |------|------|------|
 | **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 | ✅ 已完成 |
-| **v0.2.1** | Grill 重构：移除 LoopNode/EdgePolicy/Observed，AgentNode 显式写入，SubGraph 支持 Goto | 规划中 |
+| **v0.2.1** | Grill 重构：移除 LoopNode/EdgePolicy/Observed，AgentNode 显式写入 | 规划中 |
 | **v0.3** | StateKey<T> + ParallelNode + Checkpoint + Resume | 规划中 |
 | **v0.4** | Multi-Agent Orchestration + Durable Execution | 规划中 |
 
@@ -1040,15 +999,15 @@ v0.3 提供 `MemoryStore` + `FileStore`。Redis 放 v0.4+。
 
 | 议题 | 结论 | 优先级 |
 |------|------|--------|
-| LoopNode 定位 | Builder 语法糖，build() 时展开为 ConditionNode + 边，Runtime 不感知 | P0 |
-| EdgePolicy | 删除，MaxVisits 不是路由策略。保留 EdgeAnalysis + max_steps | P0 |
-| AgentNode 写入 | 改为显式声明，元数据进 ExecutionTrace 而非 State | P0 |
-| SubGraph | 应支持 Goto，成为真正的 Graph（支持内部路由和循环）| P0 |
-| GraphError Observed | 移到事件系统（GraphEvent::Warning），GraphError 只保留 Terminal + Recoverable | P0 |
+| LoopNode 定位 | 已删除。循环通过回边表达，Runtime 不需要专门的 Loop 节点 | ✅ 已完成 |
+| EdgePolicy | 已删除。保留 EdgeAnalysis + max_steps | ✅ 已完成 |
+| AgentNode 写入 | P1。改为显式声明，元数据进 ExecutionTrace 而非 State | P1 |
+| SubGraph | 已删除。SubGraph 仅被 LoopNode 使用，一并清理 | ✅ 已完成 |
+| GraphError Observed | 已完成。移到事件系统，GraphError 只保留 Terminal + Recoverable | ✅ 已完成 |
 | BarrierNode 仅流式 | 正确设计决策。Barrier = suspension point，v0.3 引入 Checkpoint/Resume | 确认 |
 | StateKey<T> | P1 最高。v0.2 常量化 + namespace，v0.3 StateKey，v0.4+ TypedStateSchema | P1 |
 | TraceId/SpanId | 部分实现，P2。SpanId 在 ParallelNode 中才真正有价值 | P2 |
 
-> **系统级定性：** LeLLM Graph 的 Runtime Core 应该只理解一种循环模型（回边），
-> 一种安全机制（max_steps），一种错误分类（Terminal / Recoverable）。
-> 高级语法（LoopNode）、策略（EdgePolicy）、可观测性（Observed）都应该在各自的层次处理。
+> **系统级定性：** LeLLM Graph 的 Runtime Core 只理解一种循环模型（回边）、
+> 一种安全机制（max_steps）、一种错误分类（Terminal / Recoverable）。
+> 高级语法（Loop DSL）、策略、可观测性都应该在各自的层次处理。

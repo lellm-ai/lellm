@@ -2,7 +2,7 @@
 //!
 //! - `GraphNode` trait, `NextStep` 枚举
 //! - `NodeKind` 节点类型枚举
-//! - `TaskNode`, `ConditionNode`, `LoopNode`, `SubGraph`, `BarrierNode`
+//! - `TaskNode`, `ConditionNode`, `BarrierNode`
 //! - 重新导出 `llm_node`, `tool_node`, `barrier_node` 模块
 
 use std::sync::Arc;
@@ -11,7 +11,6 @@ use async_trait::async_trait;
 
 use crate::error::{GraphError, ObservedError, TerminalError};
 use crate::event::{BarrierId, GraphEvent, SpanId};
-use crate::graph::Edge;
 use crate::state::State;
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
@@ -224,118 +223,6 @@ impl GraphNode for ConditionNode {
         Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
             node: self.name.clone(),
             source: "no matching branch and no otherwise target".into(),
-        }))
-    }
-}
-
-// ─── SubGraph ────────────────────────────────────────────────
-
-/// 子图（LoopNode 的执行单元）。
-///
-/// **注意：** SubGraph 内的节点不支持按名跳转（`NextStep::Goto`），
-/// 因为节点没有名字。需要条件回跳请使用外层 Graph 的 `edge_if`。
-#[derive(Default)]
-pub struct SubGraph {
-    pub nodes: Vec<Arc<dyn GraphNode>>,
-    pub edges: Vec<Edge>,
-}
-
-impl SubGraph {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 线性执行子图内所有节点，尊重 `NextStep` 语义。
-    ///
-    /// - `GoToNext` — 继续遍历下一个节点
-    /// - `End` — 提前退出子图（后续节点不再执行）
-    /// - `Goto(target)` — 报错（SubGraph 不支持按名跳转）
-    pub async fn execute(&self, state: &mut State) -> Result<(), GraphError> {
-        for node in &self.nodes {
-            match node.execute(state).await? {
-                NextStep::GoToNext => {
-                    // 继续线性遍历
-                }
-                NextStep::End => {
-                    // 提前退出子图
-                    break;
-                }
-                NextStep::Goto(target) => {
-                    return Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
-                        "SubGraph does not support Goto(\"{}\"). Use Graph::edge_if for conditional jumps.",
-                        target
-                    ))));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-// ─── LoopNode ────────────────────────────────────────────────
-
-/// 循环容器 — 可选的高级语法糖。
-///
-/// **推荐使用 `edge_if` 实现简单回跳。** LoopNode 适用于需要独立迭代计数
-/// 和独立熔断保护的封装场景（例如并行子任务中的局部循环）。
-///
-/// ```rust,ignore
-/// // 推荐：直接用有环图 + edge_if（更直观）
-/// GraphBuilder::new("retry")
-///     .edge_if("check", "agent", |s| !s.satisfied)  // 回跳
-///     .edge("check", "output")                       // 通过
-///
-/// // LoopNode：需要独立 max_iterations 时使用
-/// LoopNode::new("loop", SubGraph { ... }, |s| !s.satisfied, max_iterations: 5)
-/// ```
-pub struct LoopNode {
-    pub name: String,
-    pub body: SubGraph,
-    pub continue_condition: Arc<dyn Fn(&State) -> bool + Send + Sync>,
-    pub max_iterations: usize,
-}
-
-impl LoopNode {
-    pub fn new(
-        name: impl Into<String>,
-        body: SubGraph,
-        continue_condition: impl Fn(&State) -> bool + Send + Sync + 'static,
-        max_iterations: usize,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            body,
-            continue_condition: Arc::new(continue_condition),
-            max_iterations,
-        }
-    }
-}
-
-#[async_trait]
-impl GraphNode for LoopNode {
-    async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
-        for i in 0..self.max_iterations {
-            tracing::debug!(
-                loop_name = %self.name,
-                iteration = i + 1,
-                max = self.max_iterations,
-                "executing loop body"
-            );
-
-            self.body.execute(state).await?;
-
-            if !(self.continue_condition)(state) {
-                tracing::debug!(
-                    loop_name = %self.name,
-                    iterations = i + 1,
-                    "loop condition met, exiting"
-                );
-                return Ok(NextStep::GoToNext);
-            }
-        }
-
-        Err(GraphError::Terminal(TerminalError::LoopLimitExceeded {
-            limit: self.max_iterations,
         }))
     }
 }
