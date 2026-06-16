@@ -254,6 +254,6 @@ ChatRequest → LLM(Provider) → ToolCall → ToolExecution → ToolResult → 
 | **v0.1** | core + provider + agent + macros + MCP (Tools only) |
 | **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 |
 | **v0.2.1** | Grill 重构：删除 LoopNode/EdgePolicy/Observed/EventLevel，AgentNode 显式写入，Builder 简化，Graph Clone，TraceId，StateKey，LLMNode tools |
-| **v0.3** | ParallelNode + Checkpoint + 持久化 |
-| **v0.4** | Multi-Agent Orchestration + MCP Server + Resources |
+| **v0.3** | Crate 重构(runtime/graph 解耦) + StateDelta + Reducer + ParallelNode + Checkpoint + Resume + AgentHook + Executor 重构 | [v03-architecture-evolution.md](./v03-architecture-evolution.md) |
+| **v0.4** | Multi-Agent Orchestration + Durable Execution + Redis Store |
 | **v0.5** | Sampling + Agent↔Agent via MCP |
