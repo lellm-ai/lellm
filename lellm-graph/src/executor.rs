@@ -253,6 +253,7 @@ impl GraphExecutor {
                 match result {
                     Ok(StreamNodeResult::Done { next, span_id: _ }) => {
                         execution_log.push(ExecutionEntry {
+                            step,
                             node_name: node_name.clone(),
                             start_time: node_start,
                             end_time: node_end,
@@ -293,6 +294,7 @@ impl GraphExecutor {
                         span_id: _,
                     }) => {
                         execution_log.push(ExecutionEntry {
+                            step,
                             node_name: node_name.clone(),
                             start_time: node_start,
                             end_time: node_end,
@@ -393,6 +395,7 @@ impl GraphExecutor {
                         };
 
                         execution_log.push(ExecutionEntry {
+                            step,
                             node_name: barrier_name.clone(),
                             start_time: node_start,
                             end_time: Instant::now(),
@@ -429,6 +432,7 @@ impl GraphExecutor {
 
                     Err(e) => {
                         execution_log.push(ExecutionEntry {
+                            step,
                             node_name: node_name.clone(),
                             start_time: node_start,
                             end_time: node_end,

@@ -262,6 +262,8 @@ pub struct GraphResult {
 /// 单个节点执行记录。
 #[derive(Debug, Clone)]
 pub struct ExecutionEntry {
+    /// 全局步数（第几步）
+    pub step: usize,
     /// 节点名称
     pub node_name: String,
     /// 开始时间
