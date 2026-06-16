@@ -8,6 +8,7 @@ pub mod error;
 pub mod event;
 pub mod executor;
 pub mod graph;
+pub mod hook;
 pub mod node;
 pub mod state;
 pub mod statekey;
@@ -46,3 +47,6 @@ pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS};
 
 // ─── Executor ───────────────────────────────────────────────────
 pub use executor::GraphExecutor;
+
+// ─── Hooks ──────────────────────────────────────────────────────
+pub use hook::{AgentHook, NoOpHook, TracingHook};
