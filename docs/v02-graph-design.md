@@ -160,7 +160,7 @@ pub struct ToolNode {
 }
 ```
 
-读取 State 中最后一条 Assistant 消息的 `tool_calls`，执行所有工具调用，将 `ToolResult` 消息追加到消息列表。
+读取 State 中最后一条 Assistant 消息的 `tool_calls`，执行所有工具调用，将 `ToolResult` 消息**追加**到消息列表（不重写整个列表）。
 
 Builder 方法：`ToolNode::all(executor)` — 包含所有注册工具；`ToolNode::new(name, executor)` — 指定名称；`with_messages_key()`。
 
