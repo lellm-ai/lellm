@@ -606,14 +606,13 @@ impl GraphExecutor {
         }
     }
 
-    /// 查找下一个节点。
+    /// 查找下一个节点（三类边 + 有序路由）。
     ///
-    /// 优先级：
-    /// 1. 匹配 condition 的非 fallback 边
-    /// 2. 无条件非 fallback 边
-    /// 3. 匹配 condition 的 fallback 边
-    /// 4. 无条件 fallback 边
-    /// 5. 无匹配 → Unrouted TerminalError
+    /// 路由规则（first match wins）：
+    /// 1. 条件边 — 按注册顺序求值，第一条命中即停止（if/else-if 语义）
+    /// 2. 普通边 — 无条件非 fallback，取第一条
+    /// 3. Fallback 边 — 无条件 fallback，取第一条
+    /// 4. 无匹配 → Unrouted TerminalError
     fn find_next_node(graph: &Graph, current: &str, state: &State) -> Result<String, GraphError> {
         let edges = graph.edges_from(current);
 
@@ -624,32 +623,23 @@ impl GraphExecutor {
             ))));
         }
 
-        // 1. 匹配 condition 的非 fallback 边
+        // 1. 条件边 — 按注册顺序求值，first match wins
         for edge in &edges {
-            if !edge.fallback && edge.condition.as_ref().is_some_and(|c| c(state)) {
+            if edge.is_conditional() && edge.condition.as_ref().is_some_and(|c| c(state)) {
                 return Ok(edge.to.clone());
             }
         }
 
-        // 2. 无条件非 fallback 边
+        // 2. 普通边 — 无条件非 fallback，取第一条
         for edge in &edges {
-            if !edge.fallback && edge.condition.is_none() {
+            if edge.is_normal() {
                 return Ok(edge.to.clone());
             }
         }
 
-        // 3. 匹配 condition 的 fallback 边
+        // 3. Fallback 边 — 无条件 fallback，取第一条
         for edge in &edges {
-            if edge.fallback
-                && (edge.condition.is_none() || edge.condition.as_ref().is_some_and(|c| c(state)))
-            {
-                return Ok(edge.to.clone());
-            }
-        }
-
-        // 4. 无条件 fallback 边
-        for edge in &edges {
-            if edge.fallback && edge.condition.is_none() {
+            if edge.fallback {
                 return Ok(edge.to.clone());
             }
         }

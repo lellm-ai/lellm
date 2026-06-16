@@ -1,9 +1,9 @@
 //! Graph 和 GraphBuilder。
 //!
-//! Edge 语义：
-//! - `condition` — 业务路由条件（必须满足）
-//! - `analysis` — 分析用约束（不参与 runtime 决策）
-//! - `fallback` — 兜底边，无匹配时优先尝试
+//! Edge 三类边模型：
+//! - **条件边** (`edge_if`) — `if/else-if` 规则链，按注册顺序求值，first match wins
+//! - **普通边** (`edge`) — 无条件非 fallback，条件边无命中时生效
+//! - **Fallback 边** (`edge_fallback`) — 最后兜底
 //!
 //! 运行时安全由 `GraphExecutor::max_steps` 统一负责。
 
@@ -21,16 +21,33 @@ use crate::state::State;
 /// Arc 包装以支持 Graph Clone（条件回调不可 Clone）。
 pub type EdgeCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
 
-/// 边（Edge）。
+/// 边（Edge）— 三类边模型。
+///
+/// 一个节点的出边分为三类，按固定顺序求值：
+/// 1. **条件边** — `condition` 非 None，`fallback` = false。按注册顺序求值，first match wins。
+/// 2. **普通边** — `condition` = None，`fallback` = false。条件边无命中时生效。
+/// 3. **Fallback 边** — `fallback` = true。最后兜底。
 pub struct Edge {
     pub from: String,
     pub to: String,
-    /// 业务路由条件（必须满足）
+    /// 路由条件。Some = 条件边；None = 普通边或 fallback 边。
     pub condition: Option<EdgeCondition>,
     /// 分析用约束（不参与 runtime 决策）
     pub analysis: Option<EdgeAnalysis>,
-    /// 兜底边标记
+    /// 是否为 fallback 边（最后兜底）
     pub fallback: bool,
+}
+
+impl Edge {
+    /// 判断是否为条件边。
+    pub fn is_conditional(&self) -> bool {
+        self.condition.is_some() && !self.fallback
+    }
+
+    /// 判断是否为普通边（无条件非 fallback）。
+    pub fn is_normal(&self) -> bool {
+        self.condition.is_none() && !self.fallback
+    }
 }
 
 /// 分析用约束 — 仅用于 `analyze_cycles()` 静态分析。
@@ -407,10 +424,38 @@ impl GraphBuilder {
             },
         })?;
 
+        // 语义检查：多条件边 Warning
+        Self::warn_multiple_conditional_edges(&graph);
+
         Ok(graph)
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// 语义检查：同一节点有多条条件边时，输出 Warning。
+    ///
+    /// 条件边按注册顺序求值（first match wins），此警告提醒用户注意顺序。
+    fn warn_multiple_conditional_edges(graph: &Graph) {
+        // 统计每个节点的出边中条件边的数量
+        let mut cond_count: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for edge in &graph.edges {
+            if edge.is_conditional() {
+                *cond_count.entry(edge.from.clone()).or_insert(0) += 1;
+            }
+        }
+        for (node, count) in &cond_count {
+            if *count > 1 {
+                tracing::warn!(
+                    node = %node,
+                    conditional_edges = count,
+                    "node has multiple conditional edges. \
+                     Conditional edges are evaluated in registration order (first match wins). \
+                     If this is not intended, consider using a single ConditionNode instead."
+                );
+            }
+        }
     }
 }

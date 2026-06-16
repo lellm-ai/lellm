@@ -591,23 +591,37 @@ loop {
 | `GoToNext` | `find_next_node()` 按优先级查找下一个节点 |
 | `End` | 返回 `TerminalError::InvalidGraph("unexpected End")` |
 
-### find_next_node 优先级
+### find_next_node — 三类边 + 有序路由规则
 
-```rust
-// 1. 匹配 condition 的非 fallback 边
-for edge in &edges { if !fallback && condition(state) → return edge.to }
+一个节点的出边分为三类，按固定顺序求值：
 
-// 2. 无条件非 fallback 边
-for edge in &edges { if !fallback && condition.is_none() → return edge.to }
+| 类别 | API | 语义 | 数量 |
+|------|-----|------|------|
+| **条件边** | `edge_if(from, to, cond)` | `if/else-if` 规则链，按注册顺序求值 | 0~N 条 |
+| **普通边** | `edge(from, to)` | 无条件兜底（非 fallback） | 0~N 条 |
+| **Fallback 边** | `edge_fallback(from, to)` | 最后兜底 | 0~N 条 |
 
-// 3. 匹配 condition 的 fallback 边
-for edge in &edges { if fallback && (condition.is_none() || condition(state)) → return edge.to }
+**路由规则（first match wins）：**
 
-// 4. 无条件 fallback 边
-for edge in &edges { if fallback && condition.is_none() → return edge.to }
-
-// 5. 都不匹配 → Unrouted TerminalError（附带所有条件的评估结果）
 ```
+1. 条件边 — 按注册顺序求值，第一条命中即停止（if/else-if 语义）
+   ↓ 无命中
+2. 普通边 — 无条件非 fallback，取第一条
+   ↓ 无普通边
+3. Fallback 边 — 无条件 fallback，取第一条
+   ↓ 无匹配
+4. Unrouted TerminalError（附带所有条件的评估结果）
+```
+
+**关键语义：**
+
+- 条件边是**有序规则链**（registration order = priority），不是平级集合
+- 多个条件边都匹配时，只有第一条生效
+- 普通边与条件边互斥：有条件边命中时，普通边不会走到
+- Fallback 边是最后的安全网，无条件匹配
+- **不允许** `edge_fallback_if`（带条件的 fallback）——当前 API 无此方法
+
+**警告：** `validate()` 在检测到同一节点有多条条件边时，输出 Warning（非 Error）提醒用户注意顺序。
 
 ### EdgeVisits — 边级循环预算
 
