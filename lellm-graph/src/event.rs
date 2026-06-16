@@ -44,14 +44,6 @@ impl BarrierId {
 pub enum NodeEvent {
     /// Agent 节点内部事件（来自 ToolUseLoop）
     Agent(lellm_agent::AgentEvent),
-    /// Barrier 节点内部事件（预留）
-    Barrier(BarrierInnerEvent),
-}
-
-/// Barrier 节点内部事件（预留扩展）。
-#[derive(Debug, Clone)]
-pub enum BarrierInnerEvent {
-    StateChange { from: String, to: String },
 }
 
 // ─── BarrierDecision ──────────────────────────────────────────

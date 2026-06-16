@@ -18,8 +18,8 @@ pub use error::{BuildError, GraphError, ObservedError, RecoverableError, Termina
 
 // ─── Events ─────────────────────────────────────────────────────
 pub use event::{
-    BarrierDecision, BarrierId, BarrierInnerEvent, GraphEvent, GraphExecution, GraphHandle,
-    GraphStream, NodeEvent, SpanId, TraceId,
+    BarrierDecision, BarrierId, GraphEvent, GraphExecution, GraphHandle, GraphStream, NodeEvent,
+    SpanId, TraceId,
 };
 
 // ─── Graph ──────────────────────────────────────────────────────
