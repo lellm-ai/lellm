@@ -901,24 +901,27 @@ lellm-graph/
 
 ## [S10] 待实现
 
+### v0.2 修复（代码未实现）
+
 | 优先级 | 功能 | 说明 | 状态 |
 |--------|------|------|------|
-| P0 | 移除 EdgePolicy | 保留 EdgeAnalysis，Runtime 安全由 max_steps 负责 | ✅ |
-| P0 | NodeKind 移除 Loop | 循环通过回边表达 | ✅ |
-| P0 | AgentNode 显式写入 | 默认不写 State，用户显式绑定 output/messages | ✅ |
-| P0 | GraphError 移除 Observed | 可观测性移到事件系统 | ✅ |
-| P0 | Builder API 简化 | 方法返回 &mut Self，验证推迟到 build() | ✅ |
-| P0 | ToolNode 追加模式 | 只追加 ToolResult，不重写整个 messages | ✅ |
-| P0 | ConditionNode otherwise_target | 统一到 edge_fallback | ✅ |
-| P1 | `StateKey<T>` | 编译期 key 常量，消除字符串魔法值 | ✅ |
-| P1 | Graph Clone + name | 支持测试复用和热更新 | ✅ |
-| P1 | TraceId 落地 | 关联 Graph Execution 全链路 | ✅ |
-| P1 | LLMNode tools | 支持手动 ReAct 循环 | ✅ |
-| P2 | SpanId 持久化 | 关联到 ExecutionEntry，等 ParallelNode | |
-| P2 | ReducerRegistry | 并行分支的 State 合并策略 | |
-| P2 | ExecutionTrace 扩展 | 元数据（iterations/tool_calls）进入 Trace 而非 State | |
-| P3 | ParallelNode | 并行子图，SpanId 真正发挥价值 | |
-| P3 | Loop DSL | Builder 层循环语法糖，展开为回边 + 条件节点 | |
+| P0 | Consumer Drop = Cancel | `send` 失败立即终止，不再继续执行 | 待实现 |
+| P2 | End Node 出边诊断 | end 节点有出边 → GraphDiagnostics Warning | 待实现 |
+
+### v0.3 规划（详见 [v03-architecture-evolution.md](./v03-architecture-evolution.md)）
+
+| 优先级 | 功能 | 说明 | 状态 |
+|--------|------|------|------|
+| P0 | Crate 架构重构 | lellm-runtime + lellm-graph 解耦 agent | 设计已确认 |
+| P1 | StateDelta | 节点输出 patch 而非突变 state | 设计已确认 |
+| P1 | ReducerRegistry | 并行分支的 State 合并策略 | 设计已确认 |
+| P1 | 删除 RecoverableError | Fallback 改为 StreamNodeResult 控制流 | 设计已确认 |
+| P1 | Builder/Analyze 分离 | build() 纯函数，analyze() 返回 Diagnostics | 设计已确认 |
+| P2 | ParallelNode | 并行子图，Delta 汇总后统一 Apply | 设计已确认 |
+| P2 | Checkpoint + Resume | 完整物化快照 + 执行游标 | 设计已确认 |
+| P2 | AgentHook | 同步可观测性扩展点 | 设计已确认 |
+| P2 | Executor 重构 | handle_continue / handle_barrier / handle_error | 设计已确认 |
+| P3 | Loop DSL | Builder 层循环语法糖 | 规划中 |
 
 ---
 
@@ -928,8 +931,8 @@ lellm-graph/
 |------|------|------|
 | **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 | ✅ |
 | **v0.2.1** | Grill 重构：删除 LoopNode/EdgePolicy/Observed/EventLevel，AgentNode 显式写入，Builder 简化，Graph Clone，TraceId，StateKey，LLMNode tools | ✅ |
-| **v0.3** | ParallelNode + Checkpoint + Resume + ReducerRegistry | 规划中 |
-| **v0.4** | Multi-Agent Orchestration + Durable Execution | 规划中 |
+| **v0.3** | Crate 重构(runtime/graph 解耦) + StateDelta + Reducer + ParallelNode + Checkpoint + Resume + AgentHook + Executor 重构 | [详见 v03-architecture-evolution.md](./v03-architecture-evolution.md) |
+| **v0.4** | lellm-runtime + Multi-Agent Orchestration + Durable Execution + Redis Store | 规划中 |
 
 > **注意：** 原始路线图的 v0.3"StateGraph（任意环）"已被 v0.2 路线 B 覆盖——有环图已是 v0.2 的核心特性。
 
@@ -947,70 +950,56 @@ lellm-graph/
 
 ## [S13] Checkpoint + Resume + Fork（v0.3 预留）
 
-### Checkpoint 内容
+**完整设计详见 [v03-architecture-evolution.md §四](./v03-architecture-evolution.md#四checkpoint--resume--executiontrace)。**
 
-```rust
-struct Checkpoint {
-    checkpoint_id: CheckpointId,
-    trace_id: TraceId,
-    span_id: SpanId,
-    step: u32,
-    state: State,          // 完整快照
-    current_node: NodeId,
-    metadata: CheckpointMetadata,
-}
-```
-
-- 保存完整 State（非 Delta）
-- `graph_hash` 确保图结构可校验
-
-### Resume 语义
-
-- **新 trace_id，关联原 trace_id**（`original_trace_id` + `resumed_from` + `resume_count`）
-- **图可以变**，校验 `graph_hash`，变了就 warn
-- **Step 计数器从 checkpoint 继续累加**，不重置（防止无限 resume 绕过 max_steps）
-
-### Fork
-
-- 深拷贝 State，共享 Graph
-- 可并发执行（独立 executor + stream + handle）
-- Fork trace 关联 parent trace
-
-### 存储层抽象
-
-```rust
-trait CheckpointStore {
-    async fn save(&self, cp: &Checkpoint) -> Result<CheckpointId>;
-    async fn load(&self, id: CheckpointId) -> Result<Checkpoint>;
-    async fn list(&self, trace_id: TraceId) -> Result<Vec<Checkpoint>>;
-    async fn delete(&self, id: CheckpointId) -> Result<()>;
-}
-```
-
-v0.3 提供 `MemoryStore` + `FileStore`。Redis 放 v0.4+。
+核心要点：
+- Checkpoint 保存**完整物化 State**（非 Delta），Delta 只存在于 ExecutionTrace
+- Resume 校验 `graph_hash`（Strict 默认 / Force 可选）+ `current_node` 存在性
+- Checkpoint 与 Reducer 完全解耦
+- ExecutionTrace 负责审计/调试/回放，Checkpoint 负责恢复
 
 ---
 
 ## [S14] Grill 结论 — 架构决策总览
 
+### v0.2 已确认
+
 | 议题 | 结论 | 状态 |
 |------|------|------|
-| LoopNode 定位 | 已删除。循环通过回边表达，Runtime 不需要专门的 Loop 节点 | ✅ |
-| EdgePolicy | 已删除。保留 EdgeAnalysis + max_steps | ✅ |
-| AgentNode 写入 | 改为显式声明（with_output/with_messages），元数据进 ExecutionTrace | ✅ |
-| SubGraph | 已删除。SubGraph 仅被 LoopNode 使用，一并清理 | ✅ |
-| GraphError Observed | 移到事件系统，GraphError 只保留 Terminal + Recoverable | ✅ |
-| BarrierNode 仅流式 | 正确设计决策。Barrier = suspension point，v0.3 引入 Checkpoint/Resume | ✅ 确认 |
-| StateKey<T> | 编译期类型安全，消除字符串魔法值 | ✅ |
-| TraceId | 贯穿执行生命周期，GraphResult + GraphEvent 全链路 | ✅ |
-| Graph Clone | 所有节点 + Graph 实现 Clone，支持测试复用和热更新 | ✅ |
-| Builder API | 返回 &mut Self，验证推迟到 build()，PendingEdge 链式 API | ✅ |
-| ToolNode | 只追加 ToolResult，不重写整个 messages | ✅ |
-| ConditionNode otherwise_target | 统一到 edge_fallback | ✅ |
-| EventLevel | 删除。消费者按变体类型过滤 | ✅ |
-| BarrierInnerEvent | 删除。NodeEvent 只保留 Agent | ✅ |
-| LLMNode tools | 支持手动 ReAct 循环 | ✅ |
+| LoopNode 定位 | 已删除。循环通过回边表达 | ✅ |
+| EdgePolicy | 已删除。max_steps 负责运行时安全 | ✅ |
+| AgentNode 写入 | 显式声明（with_output/with_messages） | ✅ |
+| SubGraph | 已删除 | ✅ |
+| GraphError Observed | 移到事件系统 | ✅ |
+| BarrierNode 仅流式 | Barrier = suspension point | ✅ |
+| StateKey<T> | 编译期类型安全 | ✅ |
+| TraceId | 贯穿执行全链路 | ✅ |
+| Graph Clone | 支持测试复用 | ✅ |
+| Builder API | &mut Self + PendingEdge 链式 | ✅ |
+| ToolNode | 追加模式 | ✅ |
+| ConditionNode otherwise | 统一到 edge_fallback | ✅ |
+| EventLevel | 删除 | ✅ |
+| BarrierInnerEvent | 删除 | ✅ |
+| LLMNode tools | 支持手动 ReAct | ✅ |
 
-> **系统级定性：** LeLLM Graph 的 Runtime Core 只理解一种循环模型（回边）、
-> 一种安全机制（max_steps）、一种错误分类（Terminal / Recoverable）。
-> 高级语法（Loop DSL）、策略、可观测性都应该在各自的层次处理。
+### v0.3 新增决策（2026-06-16 grill）
+
+| 议题 | 结论 | 详见 |
+|------|------|------|
+| Crate 解耦 | lellm-runtime + lellm-graph 分离 agent 依赖 | [§一](./v03-architecture-evolution.md#一crate-架构重构) |
+| StateDelta | 节点输出 patch，不直接修改 State | [§二](./v03-architecture-evolution.md#二statedelta--reducer-状态系统) |
+| Parallel 合并 | Delta Merge，冲突默认报错 | [§三](./v03-architecture-evolution.md#三parallelnode-状态合并策略) |
+| Checkpoint | 完整物化快照 + ExecutionTrace 审计 | [§四](./v03-architecture-evolution.md#四checkpoint--resume--executiontrace) |
+| 删除 RecoverableError | Fallback 改为控制流（StreamNodeResult） | [§五](./v03-architecture-evolution.md#五错误模型重构) |
+| Consumer Drop | send 失败 = 立即取消执行 | [§六](./v03-architecture-evolution.md#六executor-语义修复) |
+| End Node | 执行后终止，Goto 返回 InvalidGraph | [§六](./v03-architecture-evolution.md#六executor-语义修复) |
+| Build/Analyze 分离 | build() 纯函数，analyze() 返回 Diagnostics | [§七](./v03-architecture-evolution.md#七builder-验证与分析分离) |
+| AgentHook | 同步只读扩展点，禁止修改 ToolCall | [§八](./v03-architecture-evolution.md#八agenthook-可观测性扩展点) |
+| Event 解耦 | FlowEvent 不知 Agent，Extension 注入 | [§九](./v03-architecture-evolution.md#九event-体系解耦) |
+| Executor 重构 | handle_continue / handle_barrier / handle_error | [§十](./v03-architecture-evolution.md#十executor-重构) |
+
+> **系统级定性（v0.2）：** LeLLM Graph 的 Runtime Core 只理解一种循环模型（回边）、
+> 一种安全机制（max_steps）、一种错误分类（Terminal）。
+>
+> **系统级定性（v0.3）：** lellm-graph 是通用工作流引擎，绝不依赖 agent/provider/core。
+> State Merge 是前置条件，ParallelNode 不是。Checkpoint 负责恢复，ExecutionTrace 负责审计。
