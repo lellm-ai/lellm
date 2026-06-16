@@ -9,43 +9,11 @@
 
 use std::time::Duration;
 
-use uuid::Uuid;
-
 use crate::error::{GraphError, ObservedError};
 use crate::state::{GraphResult, State};
 
-// ─── TraceId / SpanId ─────────────────────────────────────────
-
-/// 一次 Graph Execution 的唯一标识。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TraceId(Uuid);
-
-impl TraceId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
-    }
-}
-
-/// 一次 Node Execution 的唯一标识。
-///
-/// 同一节点可能被多次执行（回跳循环），每次进入生成新 SpanId。
-/// TraceId → SpanId 形成树状结构，便于分层查询。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpanId(Uuid);
-
-impl SpanId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
-    }
-}
+// Re-export for backward compatibility — TraceId/SpanId 定义在 state.rs
+pub use crate::state::{SpanId, TraceId};
 
 // ─── BarrierId ────────────────────────────────────────────────
 
@@ -129,15 +97,19 @@ pub enum BarrierDecision {
 /// - 终态事件后不再发送任何事件
 #[derive(Debug)]
 pub enum GraphEvent {
+    /// Graph 执行开始（恰好一次）
+    GraphStart { trace_id: TraceId },
     /// 节点开始执行
     NodeStart {
         node_name: String,
+        trace_id: TraceId,
         span_id: SpanId,
         step: usize,
     },
     /// 节点执行完成
     NodeEnd {
         node_name: String,
+        trace_id: TraceId,
         span_id: SpanId,
         success: bool,
         duration: Duration,

@@ -19,7 +19,7 @@ use crate::event::{
 };
 use crate::graph::Graph;
 use crate::node::{GraphNode, NextStep, NodeKind, StreamNodeResult};
-use crate::state::{ExecutionEntry, GraphResult, State};
+use crate::state::{ExecutionEntry, GraphResult, State, TraceId};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -180,11 +180,16 @@ impl GraphExecutor {
             let mut current = graph.start_node().to_string();
             let mut step: usize = 0;
 
+            let trace_id = TraceId::new();
+
             let send = |event: GraphEvent| async {
                 if event_tx.send(event).await.is_err() {
                     tracing::warn!("graph event consumer dropped");
                 }
             };
+
+            // 发射 GraphStart 事件
+            let _ = send(GraphEvent::GraphStart { trace_id }).await;
 
             let mut completed = false;
 
@@ -234,6 +239,7 @@ impl GraphExecutor {
 
                 let _ = send(GraphEvent::NodeStart {
                     node_name: node_name.clone(),
+                    trace_id,
                     span_id,
                     step,
                 })
@@ -255,6 +261,7 @@ impl GraphExecutor {
 
                         let _ = send(GraphEvent::NodeEnd {
                             node_name: node_name.clone(),
+                            trace_id,
                             span_id,
                             success: true,
                             duration,
@@ -294,6 +301,7 @@ impl GraphExecutor {
 
                         let _ = send(GraphEvent::NodeEnd {
                             node_name: node_name.clone(),
+                            trace_id,
                             span_id,
                             success: true,
                             duration,
@@ -393,6 +401,7 @@ impl GraphExecutor {
 
                         let _ = send(GraphEvent::NodeEnd {
                             node_name: barrier_name.clone(),
+                            trace_id,
                             span_id,
                             success: true,
                             duration: Instant::now().duration_since(node_start),
@@ -428,6 +437,7 @@ impl GraphExecutor {
 
                         let _ = send(GraphEvent::NodeEnd {
                             node_name: node_name.clone(),
+                            trace_id,
                             span_id,
                             success: false,
                             duration,
@@ -492,6 +502,7 @@ impl GraphExecutor {
             if completed {
                 let _ = send(GraphEvent::GraphComplete {
                     result: GraphResult {
+                        trace_id,
                         state,
                         execution_log,
                         duration: start_time.elapsed(),
@@ -650,7 +661,7 @@ impl GraphExecutor {
             .map(|e| crate::error::ConditionEval {
                 edge: format!("{}→{}", e.from, e.to),
                 condition: e.condition.as_ref().map(|_| "condition".to_string()),
-                matched: e.condition.as_ref().map_or(false, |c| c(state)),
+                matched: e.condition.as_ref().is_some_and(|c| c(state)),
             })
             .collect();
 

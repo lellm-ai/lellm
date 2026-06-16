@@ -1139,3 +1139,83 @@ async fn test_statekey_in_graph_execution() {
         "done".to_string()
     );
 }
+
+// ─── TraceId 完整落地测试 ───────────────────────────────────────
+
+/// TraceId 贯穿整个执行流 — GraphStart → NodeStart/End → GraphComplete
+#[tokio::test]
+async fn test_trace_id_full_lifecycle() {
+    let graph = build_graph("trace_lifecycle", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge("a", "b");
+        let _ = g.end("b");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution { mut stream, handle: _handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+
+    let mut trace_id_from_start = None;
+    let mut trace_ids_from_nodes = Vec::new();
+    let mut node_count = 0;
+
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::GraphStart { trace_id } => {
+                trace_id_from_start = Some(trace_id);
+            }
+            GraphEvent::NodeStart { trace_id, .. } => {
+                trace_ids_from_nodes.push(trace_id);
+                node_count += 1;
+            }
+            GraphEvent::NodeEnd { trace_id, .. } => {
+                trace_ids_from_nodes.push(trace_id);
+            }
+            GraphEvent::GraphComplete { result } => {
+                // GraphResult 中的 trace_id 应该与 GraphStart 一致
+                assert_eq!(result.trace_id, trace_id_from_start.unwrap());
+                break;
+            }
+            GraphEvent::GraphError { error, .. } => {
+                panic!("unexpected error: {error}");
+            }
+            _ => {}
+        }
+    }
+
+    // 所有 NodeStart/NodeEnd 的 trace_id 与 GraphStart 一致
+    let start_trace = trace_id_from_start.unwrap();
+    for node_trace in trace_ids_from_nodes {
+        assert_eq!(node_trace, start_trace, "all node events should share the same trace_id");
+    }
+
+    // 至少有两个节点，每个有 start + end
+    assert!(node_count >= 2);
+}
+
+/// 阻塞模式 execute() 也返回 trace_id
+#[tokio::test]
+async fn test_trace_id_blocking_mode() {
+    let graph = build_graph("trace_blocking", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.end("a");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let result = GraphExecutor::default()
+        .execute(Arc::new(graph), HashMap::new())
+        .await
+        .expect("execution should succeed");
+
+    // trace_id 应该被正确设置（不是全零）
+    let trace_str = result.trace_id.to_string();
+    assert!(!trace_str.is_empty(), "trace_id should not be empty");
+    // UUID v4 格式：8-4-4-4-12
+    assert_eq!(trace_str.matches('-').count(), 4, "trace_id should be UUID format");
+}

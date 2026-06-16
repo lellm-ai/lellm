@@ -5,8 +5,55 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use uuid::Uuid;
+
 /// Graph 共享状态。
 pub type State = HashMap<String, serde_json::Value>;
+
+// ─── TraceId / SpanId ─────────────────────────────────────────
+
+/// 一次 Graph Execution 的唯一标识。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraceId(Uuid);
+
+impl Default for TraceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TraceId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn to_string(&self) -> String {
+        self.0.to_string()
+    }
+}
+
+/// 一次 Node Execution 的唯一标识。
+///
+/// 同一节点可能被多次执行（回跳循环），每次进入生成新 SpanId。
+/// TraceId → SpanId 形成树状结构，便于分层查询。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpanId(Uuid);
+
+impl Default for SpanId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpanId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+
+    pub fn to_string(&self) -> String {
+        self.0.to_string()
+    }
+}
 
 /// State 操作错误。
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +249,8 @@ pub fn array_reducer() -> StateReducer {
 /// Graph 执行结果。
 #[derive(Debug)]
 pub struct GraphResult {
+    /// 执行追踪 ID（关联本次执行的所有 SpanId）
+    pub trace_id: TraceId,
     /// 最终状态
     pub state: State,
     /// 执行日志
