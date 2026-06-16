@@ -27,6 +27,7 @@ pub type EdgeCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
 /// 1. **条件边** — `condition` 非 None，`fallback` = false。按注册顺序求值，first match wins。
 /// 2. **普通边** — `condition` = None，`fallback` = false。条件边无命中时生效。
 /// 3. **Fallback 边** — `fallback` = true。最后兜底。
+#[derive(Clone)]
 pub struct Edge {
     pub from: String,
     pub to: String,
@@ -50,6 +51,18 @@ impl Edge {
     }
 }
 
+impl std::fmt::Debug for Edge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Edge")
+            .field("from", &self.from)
+            .field("to", &self.to)
+            .field("has_condition", &self.condition.is_some())
+            .field("analysis", &self.analysis)
+            .field("fallback", &self.fallback)
+            .finish()
+    }
+}
+
 /// 分析用约束 — 仅用于 `analyze_cycles()` 静态分析。
 ///
 /// 不参与执行控制。运行时安全由 `GraphExecutor::max_steps` 负责。
@@ -62,6 +75,7 @@ pub struct EdgeAnalysis {
 // ─── Graph ─────────────────────────────────────────────────────
 
 /// 图（Graph）— 允许有环，循环保护由 GraphExecutor::max_steps 运行时熔断提供。
+#[derive(Clone)]
 pub struct Graph {
     pub(crate) nodes: IndexMap<String, NodeKind>,
     pub(crate) edges: Vec<Edge>,
@@ -298,8 +312,9 @@ impl<'a> PendingEdge<'a> {
     /// 仅用于 `analyze_cycles()` 静态诊断，不参与运行时路由。
     /// 返回 `&mut GraphBuilder` 以便继续链式调用。
     pub fn max_visits(self, n: usize) -> &'a mut GraphBuilder {
-        self.builder.edges[self.edge_index].analysis =
-            Some(EdgeAnalysis { max_visits: Some(n) });
+        self.builder.edges[self.edge_index].analysis = Some(EdgeAnalysis {
+            max_visits: Some(n),
+        });
         self.builder
     }
 }

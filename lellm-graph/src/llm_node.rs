@@ -22,6 +22,7 @@ use crate::state::State;
 /// ```
 ///
 /// 执行元数据（iterations、tool_calls、stop_reason）进入 `ExecutionTrace`，不写入 State。
+#[derive(Clone)]
 pub struct AgentNode {
     pub name: String,
     pub agent: lellm_agent::ToolUseLoop,
@@ -232,6 +233,7 @@ impl GraphNode for AgentNode {
 ///     .end("end")
 ///     .build();
 /// ```
+#[derive(Clone)]
 pub struct LLMNode {
     pub name: String,
     model: lellm_agent::ResolvedModel,

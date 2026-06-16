@@ -20,6 +20,7 @@ use crate::state::State;
 /// `RetryPolicy` 自动重试、`FallbackStrategy` 容错等保护。
 ///
 /// 除非你有明确理由需要手动控制每轮 LLM 调用，否则请使用 [`AgentNode`](crate::AgentNode)。
+#[derive(Clone)]
 pub struct ToolNode {
     pub name: String,
     executor: lellm_agent::ToolExecutor,

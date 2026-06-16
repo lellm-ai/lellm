@@ -30,6 +30,7 @@ pub enum BarrierDefaultAction {
 /// 3. executor 的 `wait_barrier_decision()` 接收决策，调用 `apply_decision()` 应用
 ///
 /// **阻塞模式不支持。** 调用 `execute()` 直接报错，引导使用 `execute_stream()`。
+#[derive(Debug, Clone)]
 pub struct BarrierNode {
     pub name: String,
     /// 超时时间（None = 无限等待）

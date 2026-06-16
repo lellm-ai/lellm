@@ -96,6 +96,7 @@ pub trait GraphNode: Send + Sync {
 }
 
 /// 节点类型枚举。
+#[derive(Clone)]
 pub enum NodeKind {
     /// 自定义逻辑
     Task(TaskNode),
@@ -120,6 +121,7 @@ pub type TaskFn = Arc<dyn Fn(&mut State) -> Result<(), GraphError> + Send + Sync
 pub type BranchCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
 
 /// 自定义逻辑节点。
+#[derive(Clone)]
 pub struct TaskNode {
     pub name: String,
     pub func: TaskFn,
@@ -151,6 +153,7 @@ impl GraphNode for TaskNode {
 ///
 /// 按声明顺序求值分支条件，返回第一个匹配分支的 `NextStep::Goto(target)`。
 /// 无匹配时返回 `NextStep::GoToNext`，由 Graph 层的 `edge_fallback` 处理兜底路由。
+#[derive(Clone)]
 pub struct ConditionNode {
     pub name: String,
     pub branches: Vec<(String, BranchCondition)>,
