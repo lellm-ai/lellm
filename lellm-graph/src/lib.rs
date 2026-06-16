@@ -14,7 +14,9 @@ pub mod statekey;
 pub mod tool_node;
 
 // ─── Error Types ────────────────────────────────────────────────
-pub use error::{BuildError, GraphError, ObservedError, RecoverableError, TerminalError};
+pub use error::{
+    BuildError, BuildErrors, GraphError, ObservedError, RecoverableError, TerminalError,
+};
 
 // ─── Events ─────────────────────────────────────────────────────
 pub use event::{

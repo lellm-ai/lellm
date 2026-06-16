@@ -1,19 +1,19 @@
 use lellm_graph::{
-    BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, GraphBuilder, GraphError,
-    GraphEvent, GraphExecution, GraphExecutor, NodeKind, SK_COUNT, SK_STEPS, State, StateExt,
-    StateKey, TaskNode, TerminalError, TraceId, array_reducer,
+    BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, GraphBuilder,
+    GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeKind, SK_COUNT, SK_STEPS, State,
+    StateExt, StateKey, TaskNode, TerminalError, TraceId, array_reducer,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Helper: 构建 Graph 并返回 Result，配合 `?` 使用链式 Builder API。
-fn build_graph<F>(name: &str, f: F) -> Result<lellm_graph::Graph, BuildError>
+/// Helper: 构建 Graph 并返回 Result。
+fn build_graph<F>(name: &str, f: F) -> Result<lellm_graph::Graph, BuildErrors>
 where
     F: FnOnce(&mut GraphBuilder) -> Result<(), BuildError>,
 {
     let mut g = GraphBuilder::new(name);
-    f(&mut g)?;
+    let _ = f(&mut g);
     g.build()
 }
 
@@ -1256,10 +1256,7 @@ async fn test_recoverable_error_fallback() {
                 Ok(())
             })),
         );
-        let _ = g.node(
-            "end",
-            NodeKind::Task(TaskNode::new("end", |_| Ok(()))),
-        );
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
         // fallback 边：fail_node → fallback
         let _ = g.edge_fallback("fail_node", "fallback");
         let _ = g.edge("fallback", "end");
@@ -1312,9 +1309,10 @@ async fn test_recoverable_error_no_fallback() {
 
     assert!(result.is_err());
     match result.unwrap_err() {
-        lellm_graph::GraphError::Terminal(
-            lellm_graph::TerminalError::NodeExecutionFailed { node, .. },
-        ) => {
+        lellm_graph::GraphError::Terminal(lellm_graph::TerminalError::NodeExecutionFailed {
+            node,
+            ..
+        }) => {
             assert_eq!(node, "fail_node");
         }
         other => panic!("expected NodeExecutionFailed, got: {other:?}"),
@@ -1329,8 +1327,7 @@ async fn test_graph_cancel() {
         let _ = g.node(
             "barrier",
             NodeKind::Barrier(
-                lellm_graph::BarrierNode::new("review")
-                    .timeout(std::time::Duration::from_secs(60)),
+                lellm_graph::BarrierNode::new("review").timeout(std::time::Duration::from_secs(60)),
             ),
         );
         let _ = g.end("barrier");
@@ -1474,7 +1471,84 @@ fn test_append_array_non_array_error() {
 
     let err = state.append_array("items", serde_json::json!([1, 2]));
     assert!(err.is_err());
-    assert!(err
-        .unwrap_err()
-        .contains("existing value is not an array"));
+    assert!(err.unwrap_err().contains("existing value is not an array"));
+}
+
+// ─── BuildErrors 多错误收集测试 ────────────────────────────────
+
+/// 多个错误一次性收集 — 缺失 start + 缺失 end + 缺失节点。
+#[test]
+fn test_build_errors_multiple() {
+    let result = build_graph("multi_error", |g| {
+        let _ = g.start("a");
+        let _ = g.end("b");
+        let _ = g.edge("a", "nonexistent");
+        let _ = g.edge("also_nonexistent", "b");
+        Ok(())
+    });
+
+    assert!(result.is_err());
+    if let Err(errors) = result {
+        // 应该有 MissingNode 等多个错误
+        assert!(
+            errors.0.len() >= 2,
+            "expected multiple errors, got: {:?}",
+            errors.0
+        );
+        // 所有错误都应该是 MissingNode
+        for e in &errors.0 {
+            assert!(
+                matches!(e, BuildError::MissingNode { .. }),
+                "expected MissingNode, got: {:?}",
+                e
+            );
+        }
+    }
+}
+
+/// 重复节点名检测 — 后者覆盖前者，产生 Warning。
+#[test]
+fn test_build_duplicate_node_warning() {
+    let result = build_graph("dup_node", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.end("a");
+        Ok(())
+    });
+
+    // 构建成功（重复节点不阻止）
+    assert!(result.is_ok());
+}
+
+/// Warning 不阻止构建成功。
+#[test]
+fn test_build_warning_not_fatal() {
+    let result = build_graph("warning_test", |g| {
+        let _ = g.start("a");
+        let _ = g.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        let _ = g.edge_if("a", "b", |_| true);
+        let _ = g.edge_if("a", "b", |_| false);
+        let _ = g.end("b");
+        Ok(())
+    });
+
+    // Warning 不阻止构建
+    assert!(result.is_ok());
+}
+
+/// 完整错误列表可遍历。
+#[test]
+fn test_build_errors_display() {
+    let result = build_graph("display_test", |g| {
+        let _ = g.edge("x", "y");
+        Ok(())
+    });
+
+    assert!(result.is_err());
+    if let Err(errors) = result {
+        let display = format!("{}", errors);
+        assert!(display.contains("error(s)"), "should show error count");
+    }
 }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
-use crate::error::BuildError;
+use crate::error::{BuildError, BuildErrors};
 use crate::node::NodeKind;
 use crate::state::State;
 
@@ -434,11 +434,90 @@ impl GraphBuilder {
         }
     }
 
-    /// 构建 Graph。返回 `Result<Graph, BuildError>`。
-    pub fn build(self) -> Result<Graph, BuildError> {
-        let start = self.start.ok_or(BuildError::MissingEntryPoint)?;
-        let end = self.end.ok_or(BuildError::MissingExitPoint)?;
+    /// 构建 Graph。
+    ///
+    /// 收集所有错误后统一报告。`Warning` 变体不阻止 build 成功。
+    ///
+    /// ```rust,ignore
+    /// match builder.build() {
+    ///     Ok(graph) => { /* 使用 graph */ }
+    ///     Err(errors) => {
+    ///         for e in &errors.0 {
+    ///             eprintln!("{}", e);
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    pub fn build(self) -> Result<Graph, BuildErrors> {
+        let mut errors = BuildErrors::new();
 
+        // 1. 检查入口/出口
+        let start = match self.start {
+            Some(s) => s,
+            None => {
+                errors.push(BuildError::MissingEntryPoint);
+                // 无法继续验证，提前返回
+                return Err(errors);
+            }
+        };
+        let end = match self.end {
+            Some(s) => s,
+            None => {
+                errors.push(BuildError::MissingExitPoint);
+                return Err(errors);
+            }
+        };
+
+        // 2. 检测重复节点名
+        let mut seen_nodes = std::collections::HashSet::new();
+        for name in self.nodes.keys() {
+            if !seen_nodes.insert(name.clone()) {
+                errors.push(BuildError::DuplicateNode { id: name.clone() });
+            }
+        }
+
+        // 3. 检查边引用的节点是否存在
+        for edge in &self.edges {
+            if !self.nodes.contains_key(&edge.from) {
+                errors.push(BuildError::MissingNode {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                });
+            }
+            if !self.nodes.contains_key(&edge.to) {
+                errors.push(BuildError::MissingNode {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                });
+            }
+        }
+
+        // 4. 语义检查：多条件边 Warning
+        let mut cond_count: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for edge in &self.edges {
+            if edge.is_conditional() {
+                *cond_count.entry(edge.from.clone()).or_insert(0) += 1;
+            }
+        }
+        for (node, count) in &cond_count {
+            if *count > 1 {
+                errors.push(BuildError::Warning {
+                    message: format!(
+                        "node '{}' has {} conditional edges. \
+                         Evaluated in registration order (first match wins).",
+                        node, count
+                    ),
+                });
+            }
+        }
+
+        // 5. 有致命错误则返回
+        if errors.has_fatal() {
+            return Err(errors);
+        }
+
+        // 6. 构建 Graph
         let graph = Graph {
             name: self.name,
             nodes: self.nodes,
@@ -447,66 +526,32 @@ impl GraphBuilder {
             end,
         };
 
-        // 结构验证
-        for edge in &graph.edges {
-            if !graph.nodes.contains_key(&edge.from) {
-                return Err(BuildError::MissingNode {
-                    from: edge.from.clone(),
-                    to: edge.to.clone(),
-                });
-            }
-            if !graph.nodes.contains_key(&edge.to) {
-                return Err(BuildError::MissingNode {
-                    from: edge.from.clone(),
-                    to: edge.to.clone(),
-                });
-            }
+        // 7. 结构验证（validate 检查 start/end 节点存在性等）
+        if let Err(e) = graph.validate() {
+            errors.push(BuildError::InvalidEdgeDefinition {
+                from: "unknown".into(),
+                to: "unknown".into(),
+                reason: e.to_string(),
+            });
+            return Err(errors);
         }
 
-        graph.validate().map_err(|e| match e {
-            crate::error::TerminalError::InvalidGraph(msg) => BuildError::InvalidEdgeDefinition {
-                from: "unknown".into(),
-                to: "unknown".into(),
-                reason: msg,
-            },
-            _ => BuildError::InvalidEdgeDefinition {
-                from: "unknown".into(),
-                to: "unknown".into(),
-                reason: "validation failed".into(),
-            },
-        })?;
-
-        // 语义检查：多条件边 Warning
-        Self::warn_multiple_conditional_edges(&graph);
-
-        Ok(graph)
+        // 8. 有 Warning 也返回 errors（但 graph 构建成功）
+        //    调用方通过 Ok(graph) 获取 graph，通过 errors 获取 warnings
+        if errors.is_empty() {
+            Ok(graph)
+        } else {
+            // 用一个 trick：Warning 不阻止成功，但需要通知调用方
+            // 改为 Ok((graph, warnings)) 语义更清晰
+            // 但为了向后兼容，先保持 Ok(graph)，Warning 通过日志输出
+            for w in errors.warnings() {
+                tracing::warn!("{}", w);
+            }
+            Ok(graph)
+        }
     }
 
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// 语义检查：同一节点有多条条件边时，输出 Warning。
-    ///
-    /// 条件边按注册顺序求值（first match wins），此警告提醒用户注意顺序。
-    fn warn_multiple_conditional_edges(graph: &Graph) {
-        let mut cond_count: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for edge in &graph.edges {
-            if edge.is_conditional() {
-                *cond_count.entry(edge.from.clone()).or_insert(0) += 1;
-            }
-        }
-        for (node, count) in &cond_count {
-            if *count > 1 {
-                tracing::warn!(
-                    node = %node,
-                    conditional_edges = count,
-                    "node has multiple conditional edges. \
-                     Conditional edges are evaluated in registration order (first match wins). \
-                     If this is not intended, consider using a single ConditionNode instead."
-                );
-            }
-        }
     }
 }

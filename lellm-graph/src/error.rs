@@ -14,9 +14,11 @@ use std::fmt;
 /// 构建时结构校验错误。
 ///
 /// 仅验证图的结构性正确性，不检测循环、业务逻辑漏洞、运行时 unreachable。
+///
+/// `Warning` 变体不阻止 build 成功，仅作为诊断信息返回。
 #[derive(Debug, Clone)]
 pub enum BuildError {
-    /// 节点 ID 重复
+    /// 节点 ID 重复（后者覆盖前者）
     DuplicateNode { id: String },
     /// 边引用了不存在的节点
     MissingNode { from: String, to: String },
@@ -30,6 +32,8 @@ pub enum BuildError {
         to: String,
         reason: String,
     },
+    /// 非致命警告（build 仍成功，但有潜在问题）
+    Warning { message: String },
 }
 
 impl fmt::Display for BuildError {
@@ -48,11 +52,77 @@ impl fmt::Display for BuildError {
             Self::InvalidEdgeDefinition { from, to, reason } => {
                 write!(f, "invalid edge {}→{}: {}", from, to, reason)
             }
+            Self::Warning { message } => write!(f, "warning: {}", message),
         }
     }
 }
 
+impl BuildError {
+    /// 是否为非致命警告。
+    pub fn is_warning(&self) -> bool {
+        matches!(self, Self::Warning { .. })
+    }
+}
+
+/// 构建错误集合 — 支持多错误收集。
+///
+/// `errors` 中可能包含 `Warning`（非致命）和其他致命错误。
+/// `has_fatal()` 判断是否存在致命错误，`build()` 应在有致命错误时失败。
+#[derive(Debug, Clone)]
+pub struct BuildErrors(pub Vec<BuildError>);
+
+impl BuildErrors {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub fn push(&mut self, e: BuildError) {
+        self.0.push(e);
+    }
+
+    /// 是否包含致命错误（非 Warning）。
+    pub fn has_fatal(&self) -> bool {
+        self.0.iter().any(|e| !e.is_warning())
+    }
+
+    /// 提取所有致命错误（过滤掉 Warning）。
+    pub fn into_errors(self) -> Vec<BuildError> {
+        self.0.into_iter().filter(|e| !e.is_warning()).collect()
+    }
+
+    /// 提取所有 Warning。
+    pub fn warnings(&self) -> Vec<&BuildError> {
+        self.0.iter().filter(|e| e.is_warning()).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Display for BuildErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let fatal: Vec<_> = self.0.iter().filter(|e| !e.is_warning()).collect();
+        let warnings: Vec<_> = self.0.iter().filter(|e| e.is_warning()).collect();
+
+        if !fatal.is_empty() {
+            writeln!(f, "{} error(s):", fatal.len())?;
+            for e in &fatal {
+                writeln!(f, "  - {}", e)?;
+            }
+        }
+        if !warnings.is_empty() {
+            writeln!(f, "{} warning(s):", warnings.len())?;
+            for e in &warnings {
+                writeln!(f, "  - {}", e)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl std::error::Error for BuildError {}
+impl std::error::Error for BuildErrors {}
 
 // ─── GraphError ──────────────────────────────────────────────
 

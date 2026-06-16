@@ -859,7 +859,7 @@ let graph = g.build()?;
 | 方法 | 返回 | 说明 |
 |------|------|------|
 | `.max_visits(n)` | `&mut GraphBuilder` | 附加循环分析约束（仅诊断）|
-| `build()` | `self -> Result<Graph, BuildError>` | 构建并验证 |
+| `build()` | `self -> Result<Graph, BuildErrors>` | 构建并验证（收集所有错误）|
 
 **设计原则：**
 - 所有验证返回 `Result`，不允许 panic
