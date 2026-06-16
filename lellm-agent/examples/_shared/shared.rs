@@ -10,6 +10,13 @@ pub struct RoundState {
     pub step_start: Option<std::time::Instant>,
 }
 
+/// 工具执行的中间状态
+#[derive(Debug)]
+struct ToolTiming {
+    start: std::time::Instant,
+    name: String,
+}
+
 /// 观测并打印 ReAct 循环事件
 pub async fn observe_react_loop(
     mut stream: AgentStream,
@@ -22,6 +29,9 @@ pub async fn observe_react_loop(
     let mut iteration: usize = 0;
     let mut round = RoundState::default();
     let mut step_times: Vec<(usize, f64)> = Vec::new();
+    let mut tool_timings: std::collections::HashMap<String, ToolTiming> =
+        std::collections::HashMap::new();
+    let mut tool_times: Vec<(String, f64)> = Vec::new();
 
     while let Some(event) = stream.recv().await {
         match event {
@@ -69,12 +79,40 @@ pub async fn observe_react_loop(
                 }
             }
 
-            AgentEvent::ToolStart { .. } => {}
+            AgentEvent::ToolStart {
+                tool_call_id,
+                name,
+            } => {
+                tool_timings.insert(
+                    tool_call_id,
+                    ToolTiming {
+                        start: std::time::Instant::now(),
+                        name,
+                    },
+                );
+            }
 
-            AgentEvent::ToolEnd { result, .. } => {
+            AgentEvent::ToolEnd {
+                tool_call_id,
+                result,
+            } => {
+                let timing = tool_timings.remove(&tool_call_id);
+                let tool_name = timing
+                    .as_ref()
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                let elapsed = timing
+                    .map(|t| t.start.elapsed().as_secs_f64())
+                    .unwrap_or(0.0);
+
                 println!(
                     "=============================== 工具观察 ================================"
                 );
+                println!(
+                    "🔧 {}  (耗时: {:.2}s)",
+                    tool_name, elapsed
+                );
+                tool_times.push((tool_name, elapsed));
                 match result {
                     Ok(ref output) => {
                         if let Some(s) = output.as_str() {
@@ -146,8 +184,14 @@ pub async fn observe_react_loop(
                 println!();
                 println!("--- 耗时明细 ---");
                 for (i, t) in &step_times {
-                    println!("  第 {} 轮: {:.2}s", i, t);
+                    println!("  第 {} 轮 LLM: {:.2}s", i, t);
                 }
+                println!();
+                println!("--- 工具耗时明细 ---");
+                for (name, t) in &tool_times {
+                    println!("  🔧 {}: {:.2}s", name, t);
+                }
+                println!();
                 println!("总耗时: {:.2}s", total.as_secs_f64());
                 return Ok(());
             }

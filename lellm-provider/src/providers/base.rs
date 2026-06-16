@@ -268,6 +268,14 @@ impl<C: ProviderExtension> CodecProvider<C> {
 impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.validate_request(request)?;
+
+        let body_json = serde_json::to_string_pretty(request)
+            .unwrap_or_else(|_| "<serialize error>".to_string());
+        tracing::trace!(
+            request_body = %body_json,
+            ">>> LLM ChatRequest (call)"
+        );
+
         let http_req = self.codec.encode(request, false)?;
 
         let resp = match tokio::time::timeout(self.config.timeout, self.send(http_req)).await {
@@ -288,6 +296,14 @@ impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
 
     async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         self.validate_request(request)?;
+
+        let body_json = serde_json::to_string_pretty(request)
+            .unwrap_or_else(|_| "<serialize error>".to_string());
+        tracing::trace!(
+            request_body = %body_json,
+            ">>> LLM ChatRequest (stream)"
+        );
+
         let http_req = self.codec.encode(request, true)?;
 
         let resp = self

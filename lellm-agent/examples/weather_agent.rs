@@ -125,13 +125,9 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
     ]
 }
 
-// ─── Agent 工厂 ─────────────────────────────────────────────────
+// ─── 系统 Prompt ────────────────────────────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
-    // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
-    let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
-
-    let prompt = r#"你是天气查询助手。
+const SYSTEM_PROMPT: &str = r#"你是天气查询助手。
 
 流程：
 1. 提取用户输入中的所有地址
@@ -163,12 +159,18 @@ wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
 
 最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释"#;
 
+// ─── Agent 工厂 ─────────────────────────────────────────────────
+
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
+    // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
+    let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
+
     AgentBuilder::new(ResolvedModel {
         provider: shared_provider.clone(),
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
-    .system_prompt(prompt.to_string())
+    .system_prompt(SYSTEM_PROMPT.to_string())
     .tools(register_weather_tools(Some(shared_provider)))
     .max_iterations(10)
     .max_output_tokens(8000)
@@ -183,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lellm_agent=debug,lellm_provider=debug,info".into()),
+                .unwrap_or_else(|_| "lellm_agent=trace,lellm_provider=trace,info".into()),
         )
         .try_init();
 
@@ -197,6 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(addr) => format!("帮我查一下{addr}的天气"),
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
+
+    // 打印调试信息
+    println!("=== 系统 Prompt ===");
+    println!("{}", SYSTEM_PROMPT);
+    println!();
 
     let stream = agent.execute_stream(vec![Message::User {
         content: text_block(question.clone()),
