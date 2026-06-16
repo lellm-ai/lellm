@@ -12,21 +12,25 @@ use crate::state::State;
 
 /// Agent 节点（包装 ToolUseLoop）。
 ///
-/// 执行后将以下字段写回 State（默认 key 可通过 builder 自定义）：
-/// - `{prefix}.messages` — 完整对话历史（含工具调用与结果）
-/// - `{prefix}.output` — 最终回复纯文本
-/// - `{prefix}.iterations` — LLM 调用轮次
-/// - `{prefix}.tool_calls` — 工具调用总数
-/// - `{prefix}.stop_reason` — 停止原因（"Complete" / "MaxIterations" / …）
+/// **显式声明写入：** AgentNode 默认不写入任何 State。
+/// 用户通过 builder 方法显式绑定输出 key：
+///
+/// ```rust,ignore
+/// AgentNode::new("planner", agent)
+///     .with_output("planner.output")        // 业务结果
+///     .with_messages("planner.messages")     // 对话历史
+/// ```
+///
+/// 执行元数据（iterations、tool_calls、stop_reason）进入 `ExecutionTrace`，不写入 State。
 pub struct AgentNode {
     pub name: String,
     pub agent: lellm_agent::ToolUseLoop,
-    /// State 中的 key 前缀，默认 "agent"
-    pub prefix: String,
-    /// 是否写回完整 messages（默认 true）
-    pub write_messages: bool,
-    /// 是否写回执行统计（默认 true）
-    pub write_stats: bool,
+    /// 业务结果写入 State 的 key（None = 不写入）
+    pub output_key: Option<String>,
+    /// 对话历史写入 State 的 key（None = 不写入）
+    pub messages_key: Option<String>,
+    /// 输入消息读取的 State key（默认 "messages"）
+    input_key: String,
 }
 
 impl AgentNode {
@@ -34,113 +38,79 @@ impl AgentNode {
         Self {
             name: name.into(),
             agent,
-            prefix: "agent".into(),
-            write_messages: true,
-            write_stats: true,
+            output_key: None,
+            messages_key: None,
+            input_key: "messages".into(),
         }
     }
 
-    /// 设置 State key 前缀（默认 "agent"）。
+    /// 绑定业务结果写入 State 的 key。
     ///
-    /// 写入的 key 为：`{prefix}.messages`、`{prefix}.output` 等。
-    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.prefix = prefix.into();
+    /// 写入内容为 LLM 最终回复的纯文本。
+    pub fn with_output(mut self, key: impl Into<String>) -> Self {
+        self.output_key = Some(key.into());
         self
     }
 
-    /// 控制是否将完整对话历史写回 State（默认 true）。
-    pub fn with_write_messages(mut self, enabled: bool) -> Self {
-        self.write_messages = enabled;
+    /// 绑定对话历史写入 State 的 key。
+    ///
+    /// 写入内容为完整的 Message 数组（含工具调用与结果）。
+    pub fn with_messages(mut self, key: impl Into<String>) -> Self {
+        self.messages_key = Some(key.into());
         self
     }
 
-    /// 控制是否写入 iterations / tool_calls / stop_reason（默认 true）。
-    pub fn with_write_stats(mut self, enabled: bool) -> Self {
-        self.write_stats = enabled;
+    /// 设置输入消息读取的 State key（默认 "messages"）。
+    pub fn with_input_key(mut self, key: impl Into<String>) -> Self {
+        self.input_key = key.into();
         self
-    }
-}
-
-/// 将 StopReason 序列化为简短字符串。
-fn stop_reason_str(reason: &lellm_agent::StopReason) -> &'static str {
-    match reason {
-        lellm_agent::StopReason::Complete => "Complete",
-        lellm_agent::StopReason::MaxIterationsReached => "MaxIterations",
-        lellm_agent::StopReason::Cancelled => "Cancelled",
-        lellm_agent::StopReason::OutputBudgetExceeded => "OutputBudget",
-        lellm_agent::StopReason::ReasoningBudgetExceeded => "ReasoningBudget",
     }
 }
 
 /// 从 ToolUseResult 写入 State 的公共逻辑。
+///
+/// 只写入用户显式绑定的 key（output_key / messages_key）。
+/// 执行元数据（iterations、tool_calls、stop_reason）不写入 State。
 fn write_agent_result(node: &AgentNode, result: &lellm_agent::ToolUseResult, state: &mut State) {
-    // 提取纯文本输出
-    let text: String = result
-        .response
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            lellm_core::ContentBlock::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    // 业务结果 — 纯文本输出
+    if let Some(ref key) = node.output_key {
+        let text: String = result
+            .response
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                lellm_core::ContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
 
-    if !text.is_empty() {
-        state.insert(
-            format!("{}.output", node.prefix),
-            serde_json::Value::String(text),
-        );
+        if !text.is_empty() {
+            state.insert(key.clone(), serde_json::Value::String(text));
+        }
     }
 
-    // 写回完整对话历史
-    if node.write_messages {
+    // 对话历史
+    if let Some(ref key) = node.messages_key {
         state.insert(
-            format!("{}.messages", node.prefix),
+            key.clone(),
             serde_json::to_value(&result.messages).unwrap_or(serde_json::Value::Null),
-        );
-    }
-
-    // 写回执行统计
-    if node.write_stats {
-        state.insert(
-            format!("{}.iterations", node.prefix),
-            serde_json::json!(result.iterations),
-        );
-        state.insert(
-            format!("{}.tool_calls", node.prefix),
-            serde_json::json!(result.tool_calls_executed),
-        );
-        state.insert(
-            format!("{}.stop_reason", node.prefix),
-            serde_json::json!(stop_reason_str(&result.stop_reason)),
         );
     }
 }
 
 /// 从 State 读取输入消息。
-fn read_messages(state: &State, prefix: &str) -> Vec<lellm_core::Message> {
-    let input_key = format!("{}.messages", prefix);
-    let messages = state
-        .get(&input_key)
+fn read_messages(state: &State, input_key: &str) -> Vec<lellm_core::Message> {
+    state
+        .get(input_key)
         .and_then(|v| serde_json::from_value::<Vec<lellm_core::Message>>(v.clone()).ok())
-        .unwrap_or_default();
-
-    // 兼容旧 key "messages"
-    if messages.is_empty() {
-        state
-            .get("messages")
-            .and_then(|v| serde_json::from_value::<Vec<lellm_core::Message>>(v.clone()).ok())
-            .unwrap_or_default()
-    } else {
-        messages
-    }
+        .unwrap_or_default()
 }
 
 #[async_trait]
 impl GraphNode for AgentNode {
     async fn execute(&self, state: &mut State) -> Result<NextStep, GraphError> {
-        let messages = read_messages(state, &self.prefix);
+        let messages = read_messages(state, &self.input_key);
 
         let result = self.agent.execute(messages).await.map_err(|e| {
             GraphError::Terminal(TerminalError::NodeExecutionFailed {
@@ -160,7 +130,7 @@ impl GraphNode for AgentNode {
         sink: &mpsc::Sender<GraphEvent>,
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
-        let messages = read_messages(state, &self.prefix);
+        let messages = read_messages(state, &self.input_key);
         let node_name = self.name.clone();
 
         // 使用 ToolUseLoop 的流式执行

@@ -107,7 +107,10 @@ pub struct AgentNode {
     pub agent: lellm_agent::ToolUseLoop,
     /// 业务结果写入 State 的 key（None = 不写入）
     pub output_key: Option<String>,
+    /// 对话历史写入 State 的 key（None = 不写入）
     pub messages_key: Option<String>,
+    /// 输入消息读取的 State key（默认 "messages"）
+    input_key: String,
 }
 ```
 
@@ -117,6 +120,7 @@ pub struct AgentNode {
 AgentNode::new("planner", agent)
     .with_output("planner.output")        // 业务结果
     .with_messages("planner.messages")     // 对话历史
+    .with_input_key("input.messages")      // 输入 key（可选）
 ```
 
 **执行元数据**（iterations、tool_calls、stop_reason）进入 `ExecutionTrace`，不写入 State。

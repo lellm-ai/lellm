@@ -221,46 +221,30 @@ async fn main() {
         })),
     );
     // Agent 节点：执行完整的 ReAct 循环
-    // P0: AgentNode 自动写回 messages、output、iterations、tool_calls、stop_reason
+    // P0: 显式声明写入 — 默认不写任何 State，用户显式绑定
     let _ = g.node(
         "agent",
         NodeKind::Agent(Box::new(
-            lellm_graph::AgentNode::new("agent", agent).with_prefix("calc"), // key 前缀改为 "calc"
+            lellm_graph::AgentNode::new("agent", agent)
+                .with_output("calc.output")
+                .with_messages("calc.messages")
+                .with_input_key("calc.messages"),
         )),
     );
-    // 后处理：读取 AgentNode 写回的完整状态
+    // 后处理：读取 AgentNode 显式写回的状态
     let _ = g.node(
         "summary",
         NodeKind::Task(TaskNode::new("summary", |state| {
             println!("\n=== Graph 执行结果 ===");
 
-            // P0: 读取最终输出
+            // 读取最终输出
             let output = state
                 .get("calc.output")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(no output)");
             println!("最终输出: {}", output);
 
-            // P0: 读取执行统计
-            let iterations = state
-                .get("calc.iterations")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            println!("LLM 调用轮次: {}", iterations);
-
-            let tool_calls = state
-                .get("calc.tool_calls")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            println!("工具调用次数: {}", tool_calls);
-
-            let stop_reason = state
-                .get("calc.stop_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            println!("停止原因: {}", stop_reason);
-
-            // P0: 读取完整对话历史
+            // 读取完整对话历史
             if let Some(msgs) = state.get("calc.messages") {
                 let count = if let Some(arr) = msgs.as_array() {
                     arr.len()
@@ -269,6 +253,9 @@ async fn main() {
                 };
                 println!("对话消息数: {}", count);
             }
+
+            // 执行元数据（iterations, tool_calls, stop_reason）不写入 State
+            // 如需获取，应通过 ExecutionTrace 或流式事件
             Ok(())
         })),
     );
