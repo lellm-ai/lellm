@@ -346,27 +346,19 @@ impl GraphBuilder {
         }
     }
 
-    pub fn start(&mut self, node: impl Into<String>) -> Result<&mut Self, BuildError> {
+    pub fn start(&mut self, node: impl Into<String>) -> &mut Self {
         self.start = Some(node.into());
-        Ok(self)
+        self
     }
 
-    pub fn end(&mut self, node: impl Into<String>) -> Result<&mut Self, BuildError> {
+    pub fn end(&mut self, node: impl Into<String>) -> &mut Self {
         self.end = Some(node.into());
-        Ok(self)
+        self
     }
 
-    pub fn node(
-        &mut self,
-        name: impl Into<String>,
-        kind: NodeKind,
-    ) -> Result<&mut Self, BuildError> {
-        let name = name.into();
-        if self.nodes.contains_key(&name) {
-            return Err(BuildError::DuplicateNode { id: name });
-        }
-        self.nodes.insert(name, kind);
-        Ok(self)
+    pub fn node(&mut self, name: impl Into<String>, kind: NodeKind) -> &mut Self {
+        self.nodes.insert(name.into(), kind);
+        self
     }
 
     /// 添加边（无条件普通边）。
@@ -405,7 +397,7 @@ impl GraphBuilder {
         from: impl Into<String>,
         to: impl Into<String>,
         condition: impl Fn(&State) -> bool + Send + Sync + 'static,
-    ) -> Result<PendingEdge<'_>, BuildError> {
+    ) -> PendingEdge<'_> {
         let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
@@ -414,10 +406,10 @@ impl GraphBuilder {
             analysis: None,
             fallback: false,
         });
-        Ok(PendingEdge {
+        PendingEdge {
             builder: self,
             edge_index,
-        })
+        }
     }
 
     /// 添加 fallback 边（无条件兜底）。

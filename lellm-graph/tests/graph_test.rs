@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, GraphBuilder, GraphError,
-    GraphEvent, GraphExecution, GraphExecutor, NodeKind, State, StateExt, StateKey, TaskNode,
-    TerminalError, TraceId, array_reducer, SK_COUNT, SK_STEPS,
+    GraphEvent, GraphExecution, GraphExecutor, NodeKind, SK_COUNT, SK_STEPS, State, StateExt,
+    StateKey, TaskNode, TerminalError, TraceId, array_reducer,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -766,7 +766,7 @@ async fn test_edge_analysis_no_runtime_interference() {
         let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
         let _ = g.edge("a", "b");
         // 条件回跳 + max_visits 分析约束（不参与 runtime）
-        let _ = g.edge_if("b", "a", |_| true)?.max_visits(5);
+        let _ = g.edge_if("b", "a", |_| true).max_visits(5);
         let _ = g.edge("b", "end");
         let _ = g.end("end");
         Ok(())
@@ -1024,7 +1024,10 @@ fn test_statekey_type_mismatch() {
 
     // require_sk 返回 Deserialize 错误（不是 MissingKey）
     let err = state.require_sk::<String>(&SK_COUNT_AS_STRING);
-    assert!(matches!(err, Err(lellm_graph::StateError::Deserialize(_, _))));
+    assert!(matches!(
+        err,
+        Err(lellm_graph::StateError::Deserialize(_, _))
+    ));
 }
 
 /// StateKey MissingKey — key 不存在时 require_sk 返回错误。
@@ -1134,10 +1137,7 @@ async fn test_statekey_in_graph_execution() {
         .expect("execution should succeed");
 
     assert_eq!(result.state.get_sk(&SK_COUNT).unwrap(), 3u64);
-    assert_eq!(
-        result.state.get_sk(&SK_RESULT).unwrap(),
-        "done".to_string()
-    );
+    assert_eq!(result.state.get_sk(&SK_RESULT).unwrap(), "done".to_string());
 }
 
 // ─── TraceId 完整落地测试 ───────────────────────────────────────
@@ -1155,8 +1155,10 @@ async fn test_trace_id_full_lifecycle() {
     })
     .expect("build should succeed");
 
-    let GraphExecution { mut stream, handle: _handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+    let GraphExecution {
+        mut stream,
+        handle: _handle,
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
 
     let mut trace_id_from_start = None;
     let mut trace_ids_from_nodes = Vec::new();
@@ -1190,7 +1192,10 @@ async fn test_trace_id_full_lifecycle() {
     // 所有 NodeStart/NodeEnd 的 trace_id 与 GraphStart 一致
     let start_trace = trace_id_from_start.unwrap();
     for node_trace in trace_ids_from_nodes {
-        assert_eq!(node_trace, start_trace, "all node events should share the same trace_id");
+        assert_eq!(
+            node_trace, start_trace,
+            "all node events should share the same trace_id"
+        );
     }
 
     // 至少有两个节点，每个有 start + end
@@ -1217,5 +1222,9 @@ async fn test_trace_id_blocking_mode() {
     let trace_str = result.trace_id.to_string();
     assert!(!trace_str.is_empty(), "trace_id should not be empty");
     // UUID v4 格式：8-4-4-4-12
-    assert_eq!(trace_str.matches('-').count(), 4, "trace_id should be UUID format");
+    assert_eq!(
+        trace_str.matches('-').count(),
+        4,
+        "trace_id should be UUID format"
+    );
 }
