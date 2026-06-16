@@ -131,13 +131,22 @@ pub struct LLMNode {
     pub name: String,
     model: lellm_agent::ResolvedModel,
     system_prompt: Option<String>,
-    messages_key: String,  // 默认 "messages"
+    messages_key: String,
+    tools: Option<Vec<ToolDefinition>>,
 }
 ```
 
 与 `AgentNode`（完整 ReAct 循环）不同，`LLMNode` 仅执行一次 LLM 调用，将响应追加到消息列表。
 
 **用途：** 配合 `ToolNode` + `ConditionNode` 手动构建 ReAct 循环。
+
+```rust
+let tools = tool_executor.definitions();
+LLMNode::new("llm", model)
+    .with_tools(tools)                    // 传入工具定义，LLM 才能返回 tool_calls
+    .with_system_prompt("你是一个助手")
+    .with_messages_key("planner.messages")
+```
 
 **警告：** 使用 LLMNode 手动构建循环时，会失去 `AgentNode` 提供的保护（ParallelSafety、RetryPolicy、FallbackStrategy、预算保险丝、Context Compaction）。除非有明确理由，否则请使用 `AgentNode`。
 

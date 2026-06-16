@@ -214,9 +214,12 @@ impl GraphNode for AgentNode {
 ///
 /// ```rust,ignore
 /// // 手动 ReAct 循环：
+/// let tools = tool_executor.definitions();
 /// GraphBuilder::new("react")
 ///     .start("llm")
-///     .node("llm", NodeKind::Llm(LLMNode::new("llm", model)))
+///     .node("llm", NodeKind::Llm(
+///         LLMNode::new("llm", model).with_tools(tools)
+///     ))
 ///     .node("tools", NodeKind::Tool(ToolNode::all(tool_executor)))
 ///     .node("route", NodeKind::Condition(
 ///         ConditionNode::builder("route")
@@ -234,6 +237,7 @@ pub struct LLMNode {
     model: lellm_agent::ResolvedModel,
     system_prompt: Option<String>,
     messages_key: String,
+    tools: Option<Vec<lellm_core::ToolDefinition>>,
 }
 
 impl LLMNode {
@@ -243,6 +247,7 @@ impl LLMNode {
             model,
             system_prompt: None,
             messages_key: "messages".into(),
+            tools: None,
         }
     }
 
@@ -255,6 +260,12 @@ impl LLMNode {
     /// 设置 State 中消息的 key（默认 "messages"）。
     pub fn with_messages_key(mut self, key: impl Into<String>) -> Self {
         self.messages_key = key.into();
+        self
+    }
+
+    /// 设置可用工具定义。LLM 将看到这些工具并可能返回 tool_calls。
+    pub fn with_tools(mut self, tools: Vec<lellm_core::ToolDefinition>) -> Self {
+        self.tools = Some(tools);
         self
     }
 }
@@ -284,6 +295,7 @@ impl GraphNode for LLMNode {
         let request = lellm_core::ChatRequest {
             model: self.model.model.clone(),
             messages: messages.clone(),
+            tools: self.tools.clone(),
             ..Default::default()
         };
 
