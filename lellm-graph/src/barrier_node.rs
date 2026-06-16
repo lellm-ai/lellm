@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::error::{GraphError, TerminalError};
 use crate::event::{BarrierDecision, BarrierId, GraphEvent};
 use crate::node::{FlowNode, NextStep, StreamNodeResult};
-use crate::state::{State, SpanId};
+use crate::state::{SpanId, State};
 
 /// Barrier 超时后的默认行为。
 #[derive(Debug, Clone, Default)]

@@ -8,6 +8,7 @@ pub mod config;
 pub mod context;
 pub mod event;
 pub mod fallback;
+pub mod flow_node;
 pub(crate) mod iteration;
 #[cfg(feature = "v02-preview")]
 pub mod loop_detector;
@@ -47,3 +48,6 @@ pub use signal_voter::{NegativeSignal, SignalVoter};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};
+
+// FlowNode 适配
+pub use flow_node::AgentFlowNode;

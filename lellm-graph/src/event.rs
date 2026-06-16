@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 use crate::error::{GraphError, ObservedError};
-pub use crate::state::{SpanId, TraceId};
 use crate::state::{GraphResult, State};
+pub use crate::state::{SpanId, TraceId};
 
 // ─── BarrierId ────────────────────────────────────────────────
 
@@ -44,10 +44,7 @@ impl BarrierId {
 #[derive(Debug)]
 pub enum FlowEvent {
     /// 节点开始执行
-    NodeStarted {
-        node_id: String,
-        span_id: SpanId,
-    },
+    NodeStarted { node_id: String, span_id: SpanId },
     /// 节点执行完成
     NodeCompleted {
         node_id: String,
@@ -55,10 +52,7 @@ pub enum FlowEvent {
         duration: Duration,
     },
     /// 节点执行失败
-    NodeFailed {
-        node_id: String,
-        error: String,
-    },
+    NodeFailed { node_id: String, error: String },
     /// 状态变更
     StateChanged {
         node_id: String,

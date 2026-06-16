@@ -33,10 +33,7 @@ pub enum BuildError {
         reason: String,
     },
     /// Fallback 边配置无效（如指向自身 = retry，不是 fallback）
-    InvalidFallback {
-        node: String,
-        reason: String,
-    },
+    InvalidFallback { node: String, reason: String },
 }
 
 impl fmt::Display for BuildError {
@@ -165,7 +162,11 @@ pub struct Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}] ({}): {}", self.severity, self.category, self.message)
+        write!(
+            f,
+            "[{}] ({}): {}",
+            self.severity, self.category, self.message
+        )
     }
 }
 

@@ -12,13 +12,13 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::barrier_node::BarrierDefaultAction;
-use crate::error::{GraphError, TerminalError};
+use crate::error::{GraphError, ObservedError, TerminalError};
 use crate::event::{
     BarrierDecision, BarrierDecisionMessage, BarrierId, GraphEvent, GraphExecution, GraphHandle,
 };
 use crate::graph::Graph;
 use crate::node::{FlowNode, NextStep, NodeKind, StreamNodeResult};
-use crate::state::{ExecutionEntry, GraphResult, State, SpanId, TraceId};
+use crate::state::{ExecutionEntry, GraphResult, SpanId, State, TraceId};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -84,6 +84,19 @@ impl DecisionRegistry {
             }
         }
     }
+}
+
+// ─── StepOutcome ──────────────────────────────────────────────
+
+/// 节点执行后的下一步操作。
+#[derive(Debug)]
+enum StepOutcome {
+    /// 继续执行，跳转到指定节点
+    Continue(String),
+    /// 正常结束（到达 end 节点），由外层发送 GraphComplete
+    Break,
+    /// 错误已发送（GraphError），直接返回
+    ErrorSent,
 }
 
 // ─── GraphExecutor ────────────────────────────────────────────
@@ -166,444 +179,15 @@ impl GraphExecutor {
     ) -> GraphExecution {
         let executor = self.clone();
         let (event_tx, event_rx) = mpsc::channel(32);
-        let (decision_tx, mut decision_rx) = mpsc::channel(16);
-        let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
+        let (decision_tx, decision_rx) = mpsc::channel(16);
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
 
         let handle = GraphHandle::new(decision_tx, cancel_tx);
 
         tokio::spawn(async move {
-            let start_time = Instant::now();
-            let mut state = initial_state;
-            let mut execution_log = Vec::new();
-            let mut decision_registry = DecisionRegistry::new();
-
-            let mut current = graph.start_node().to_string();
-            let mut step: usize = 0;
-
-            let trace_id = TraceId::default();
-
-            // 发射 GraphStart 事件
-            if executor
-                .send(&event_tx, GraphEvent::GraphStart { trace_id })
-                .await
-            {
-                return;
-            }
-
-            let mut completed = false;
-
-            loop {
-                // ⚡ 取消信号检测
-                if cancel_rx.try_recv().is_ok() {
-                    if executor
-                        .send(
-                            &event_tx,
-                            GraphEvent::GraphError {
-                                error: GraphError::Terminal(TerminalError::BarrierCancelled {
-                                    node: "execution cancelled by handle".into(),
-                                }),
-                                state: state.clone(),
-                            },
-                        )
-                        .await
-                    {
-                        return;
-                    }
-                    break;
-                }
-
-                step += 1;
-
-                // ⚡ 运行时熔断
-                if step > executor.max_steps {
-                    if executor
-                        .send(
-                            &event_tx,
-                            GraphEvent::GraphError {
-                                error: GraphError::Terminal(TerminalError::StepsExceeded {
-                                    limit: executor.max_steps,
-                                }),
-                                state: state.clone(),
-                            },
-                        )
-                        .await
-                    {
-                        return;
-                    }
-                    break;
-                }
-
-                let node = match graph.nodes.get(&current) {
-                    Some(n) => n,
-                    None => {
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::GraphError {
-                                    error: GraphError::Terminal(TerminalError::NodeNotFound(
-                                        current.clone(),
-                                    )),
-                                    state: state.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-                        break;
-                    }
-                };
-
-                let node_name = current.clone();
-                let span_id = SpanId::new();
-
-                if executor
-                    .send(
-                        &event_tx,
-                        GraphEvent::NodeStart {
-                            node_name: node_name.clone(),
-                            trace_id,
-                            span_id,
-                            step,
-                        },
-                    )
-                    .await
-                {
-                    return;
-                }
-
-                let node_start = Instant::now();
-                let result = node.execute_stream(&mut state, &event_tx, span_id).await;
-                let node_end = Instant::now();
-                let duration = node_end.duration_since(node_start);
-
-                match result {
-                    Ok(StreamNodeResult::Continue { next, span_id: _, observed }) => {
-                        execution_log.push(ExecutionEntry {
-                            step,
-                            node_name: node_name.clone(),
-                            start_time: node_start,
-                            end_time: node_end,
-                            success: true,
-                        });
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::NodeEnd {
-                                    node_name: node_name.clone(),
-                                    trace_id,
-                                    span_id,
-                                    success: true,
-                                    duration,
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        // 如果有观测错误，发送 ObservedError 事件
-                        if let Some(error) = observed {
-                            if executor
-                                .send(
-                                    &event_tx,
-                                    GraphEvent::ObservedError {
-                                        error,
-                                        node_name: node_name.clone(),
-                                    },
-                                )
-                                .await
-                            {
-                                return;
-                            }
-                        }
-
-                        // 🛑 end 节点检查
-                        if current == graph.end_node() {
-                            completed = true;
-                            break;
-                        }
-
-                        match executor.resolve_next(&graph, &current, &mut state, next) {
-                            Ok(target) => current = target,
-                            Err(e) => {
-                                if executor
-                                    .send(
-                                        &event_tx,
-                                        GraphEvent::GraphError {
-                                            error: e,
-                                            state: state.clone(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    return;
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    Ok(StreamNodeResult::Pause {
-                        barrier_id: _,
-                        node_name: barrier_name,
-                        span_id: _,
-                        timeout,
-                        default_action,
-                    }) => {
-                        let barrier_id = decision_registry.next_id(&barrier_name);
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::BarrierWaiting {
-                                    barrier_id: barrier_id.clone(),
-                                    node_name: barrier_name.clone(),
-                                    span_id,
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        let decision = executor
-                            .wait_barrier_decision(
-                                &mut decision_rx,
-                                &mut decision_registry,
-                                &barrier_id,
-                                timeout,
-                                &default_action,
-                                &mut cancel_rx,
-                            )
-                            .await;
-
-                        if cancel_rx.try_recv().is_ok() {
-                            if executor
-                                .send(
-                                    &event_tx,
-                                    GraphEvent::GraphError {
-                                        error: GraphError::Terminal(
-                                            TerminalError::BarrierCancelled {
-                                                node: barrier_name.clone(),
-                                            },
-                                        ),
-                                        state: state.clone(),
-                                    },
-                                )
-                                .await
-                            {
-                                return;
-                            }
-                            break;
-                        }
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::BarrierResolved {
-                                    barrier_id: barrier_id.clone(),
-                                    decision: decision.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        let next = match node {
-                            NodeKind::Barrier(b) => match b.apply_decision(decision, &mut state) {
-                                Ok(ns) => ns,
-                                Err(e) => {
-                                    if executor
-                                        .send(
-                                            &event_tx,
-                                            GraphEvent::GraphError {
-                                                error: e,
-                                                state: state.clone(),
-                                            },
-                                        )
-                                        .await
-                                    {
-                                        return;
-                                    }
-                                    break;
-                                }
-                            },
-                            _ => {
-                                if executor.send(&event_tx, GraphEvent::GraphError {
-                                        error: GraphError::Terminal(TerminalError::InvalidGraph(
-                                            format!(
-                                                "expected BarrierNode but got unexpected node type for BarrierPaused"
-                                            ),
-                                        )),
-                                        state: state.clone(),
-                                    }).await { return; }
-                                break;
-                            }
-                        };
-
-                        execution_log.push(ExecutionEntry {
-                            step,
-                            node_name: barrier_name.clone(),
-                            start_time: node_start,
-                            end_time: Instant::now(),
-                            success: true,
-                        });
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::NodeEnd {
-                                    node_name: barrier_name.clone(),
-                                    trace_id,
-                                    span_id,
-                                    success: true,
-                                    duration: Instant::now().duration_since(node_start),
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        // 🛑 end 节点检查
-                        if current == graph.end_node() {
-                            completed = true;
-                            break;
-                        }
-
-                        match executor.resolve_next(&graph, &current, &mut state, next) {
-                            Ok(target) => current = target,
-                            Err(e) => {
-                                if executor
-                                    .send(
-                                        &event_tx,
-                                        GraphEvent::GraphError {
-                                            error: e,
-                                            state: state.clone(),
-                                        },
-                                    )
-                                    .await
-                                {
-                                    return;
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    Ok(StreamNodeResult::Fallback { reason, node_name: fallback_node }) => {
-                        // Fallback 是控制流 — 节点主动声明降级
-                        // 查找 fallback 边，路由到备用节点
-                        execution_log.push(ExecutionEntry {
-                            step,
-                            node_name: fallback_node.clone(),
-                            start_time: node_start,
-                            end_time: node_end,
-                            success: false,
-                        });
-
-                        if let Some(fallback_target) = graph.find_fallback_edge(&current) {
-                            if executor
-                                .send(
-                                    &event_tx,
-                                    GraphEvent::ObservedError {
-                                        error: crate::error::ObservedError::Degraded {
-                                            node: fallback_node.clone(),
-                                            message: format!("fallback to '{}': {}", fallback_target, reason),
-                                        },
-                                        node_name: fallback_node.clone(),
-                                    },
-                                )
-                                .await
-                            {
-                                return;
-                            }
-                            current = fallback_target;
-                        } else {
-                            // 无 fallback 边 → 终止
-                            if executor
-                                .send(
-                                    &event_tx,
-                                    GraphEvent::GraphError {
-                                        error: GraphError::Terminal(
-                                            TerminalError::NodeExecutionFailed {
-                                                node: fallback_node.clone(),
-                                                source: format!("fallback with no fallback edge: {}", reason).into(),
-                                            },
-                                        ),
-                                        state: state.clone(),
-                                    },
-                                )
-                                .await
-                            {
-                                return;
-                            }
-                            break;
-                        }
-                    }
-
-                    Err(e) => {
-                        execution_log.push(ExecutionEntry {
-                            step,
-                            node_name: node_name.clone(),
-                            start_time: node_start,
-                            end_time: node_end,
-                            success: false,
-                        });
-
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::NodeEnd {
-                                    node_name: node_name.clone(),
-                                    trace_id,
-                                    span_id,
-                                    success: false,
-                                    duration,
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-
-                        // 错误处理：Terminal → 终止执行
-                        if executor
-                            .send(
-                                &event_tx,
-                                GraphEvent::GraphError {
-                                    error: e,
-                                    state: state.clone(),
-                                },
-                            )
-                            .await
-                        {
-                            return;
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // 正常结束 → GraphComplete
-            if completed {
-                let _ = executor
-                    .send(
-                        &event_tx,
-                        GraphEvent::GraphComplete {
-                            result: GraphResult {
-                                trace_id,
-                                state,
-                                execution_log,
-                                duration: start_time.elapsed(),
-                            },
-                        },
-                    )
-                    .await;
-            }
+            executor
+                .run_loop(graph, initial_state, event_tx, decision_rx, cancel_rx)
+                .await;
         });
 
         GraphExecution {
@@ -611,6 +195,655 @@ impl GraphExecutor {
             handle,
         }
     }
+
+    /// 主执行循环。
+    async fn run_loop(
+        &self,
+        graph: std::sync::Arc<Graph>,
+        initial_state: State,
+        event_tx: mpsc::Sender<GraphEvent>,
+        mut decision_rx: mpsc::Receiver<BarrierDecisionMessage>,
+        mut cancel_rx: mpsc::Receiver<()>,
+    ) {
+        let start_time = Instant::now();
+        let mut state = initial_state;
+        let mut execution_log = Vec::new();
+        let mut decision_registry = DecisionRegistry::new();
+
+        let mut current = graph.start_node().to_string();
+        let mut step: usize = 0;
+        let trace_id = TraceId::default();
+
+        // 发射 GraphStart 事件
+        if self
+            .send(&event_tx, GraphEvent::GraphStart { trace_id })
+            .await
+        {
+            return;
+        }
+
+        loop {
+            // ⚡ 取消信号检测
+            if cancel_rx.try_recv().is_ok() {
+                self.send_graph_error(
+                    &event_tx,
+                    GraphError::Terminal(TerminalError::BarrierCancelled {
+                        node: "execution cancelled by handle".into(),
+                    }),
+                    &state,
+                    &execution_log,
+                    start_time,
+                    trace_id,
+                )
+                .await;
+                return;
+            }
+
+            step += 1;
+
+            // ⚡ 运行时熔断
+            if step > self.max_steps {
+                self.send_graph_error(
+                    &event_tx,
+                    GraphError::Terminal(TerminalError::StepsExceeded {
+                        limit: self.max_steps,
+                    }),
+                    &state,
+                    &execution_log,
+                    start_time,
+                    trace_id,
+                )
+                .await;
+                return;
+            }
+
+            // 查找节点
+            let node = match graph.nodes.get(&current) {
+                Some(n) => n,
+                None => {
+                    self.send_graph_error(
+                        &event_tx,
+                        GraphError::Terminal(TerminalError::NodeNotFound(current.clone())),
+                        &state,
+                        &execution_log,
+                        start_time,
+                        trace_id,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            let node_name = current.clone();
+            let span_id = SpanId::new();
+
+            if self
+                .send(
+                    &event_tx,
+                    GraphEvent::NodeStart {
+                        node_name: node_name.clone(),
+                        trace_id,
+                        span_id,
+                        step,
+                    },
+                )
+                .await
+            {
+                return;
+            }
+
+            let node_start = Instant::now();
+            let result = node.execute_stream(&mut state, &event_tx, span_id).await;
+            let node_end = Instant::now();
+            let duration = node_end.duration_since(node_start);
+
+            match result {
+                Ok(StreamNodeResult::Continue {
+                    next,
+                    span_id,
+                    observed,
+                }) => {
+                    let outcome = self
+                        .handle_continue(
+                            &event_tx,
+                            &graph,
+                            &current,
+                            &mut state,
+                            &mut execution_log,
+                            next,
+                            span_id,
+                            observed,
+                            step,
+                            &node_name,
+                            node_start,
+                            node_end,
+                            duration,
+                            trace_id,
+                        )
+                        .await;
+
+                    match outcome {
+                        StepOutcome::Continue(target) => {
+                            current = target;
+                        }
+                        StepOutcome::Break => {
+                            // 正常结束（到达 end 节点）
+                            self.send_graph_complete(
+                                &event_tx,
+                                &state,
+                                &execution_log,
+                                start_time,
+                                trace_id,
+                            )
+                            .await;
+                            return;
+                        }
+                        StepOutcome::ErrorSent => {
+                            return;
+                        }
+                    }
+                }
+
+                Ok(StreamNodeResult::Pause {
+                    node_name: barrier_name,
+                    span_id,
+                    timeout,
+                    default_action,
+                    ..
+                }) => {
+                    let outcome = self
+                        .handle_barrier(
+                            &event_tx,
+                            &graph,
+                            &mut decision_rx,
+                            &mut decision_registry,
+                            &mut cancel_rx,
+                            node,
+                            &current,
+                            &mut state,
+                            &mut execution_log,
+                            &barrier_name,
+                            span_id,
+                            timeout,
+                            default_action,
+                            step,
+                            node_start,
+                            trace_id,
+                        )
+                        .await;
+
+                    match outcome {
+                        StepOutcome::Continue(target) => {
+                            current = target;
+                        }
+                        StepOutcome::Break => {
+                            // 正常结束（到达 end 节点）
+                            self.send_graph_complete(
+                                &event_tx,
+                                &state,
+                                &execution_log,
+                                start_time,
+                                trace_id,
+                            )
+                            .await;
+                            return;
+                        }
+                        StepOutcome::ErrorSent => {
+                            return;
+                        }
+                    }
+                }
+
+                Ok(StreamNodeResult::Fallback {
+                    reason,
+                    node_name: fallback_node,
+                }) => {
+                    let outcome = self
+                        .handle_fallback(
+                            &event_tx,
+                            &graph,
+                            &current,
+                            &mut state,
+                            &mut execution_log,
+                            &fallback_node,
+                            &reason,
+                            step,
+                            node_start,
+                            node_end,
+                            trace_id,
+                        )
+                        .await;
+
+                    match outcome {
+                        StepOutcome::Continue(target) => {
+                            current = target;
+                        }
+                        StepOutcome::ErrorSent => {
+                            return;
+                        }
+                        StepOutcome::Break => {
+                            // handle_fallback 不会返回 Break
+                            unreachable!("handle_fallback only returns Continue or ErrorSent");
+                        }
+                    }
+                }
+
+                Err(e) => {
+                    self.handle_error(
+                        &event_tx,
+                        &mut execution_log,
+                        &node_name,
+                        node_start,
+                        node_end,
+                        span_id,
+                        step,
+                        trace_id,
+                        e,
+                        &state,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// 处理节点正常完成（`StreamNodeResult::Continue`）。
+    ///
+    /// 发送 NodeEnd 事件，记录执行日志，解析下一步路由。
+    async fn handle_continue(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        graph: &Graph,
+        current: &str,
+        state: &mut State,
+        execution_log: &mut Vec<ExecutionEntry>,
+        next: NextStep,
+        span_id: SpanId,
+        observed: Option<ObservedError>,
+        step: usize,
+        node_name: &str,
+        node_start: Instant,
+        node_end: Instant,
+        duration: std::time::Duration,
+        trace_id: TraceId,
+    ) -> StepOutcome {
+        // 记录执行日志
+        execution_log.push(ExecutionEntry {
+            step,
+            node_name: node_name.to_string(),
+            start_time: node_start,
+            end_time: node_end,
+            success: true,
+        });
+
+        // 发送 NodeEnd 事件
+        if self
+            .send(
+                event_tx,
+                GraphEvent::NodeEnd {
+                    node_name: node_name.to_string(),
+                    trace_id,
+                    span_id,
+                    success: true,
+                    duration,
+                },
+            )
+            .await
+        {
+            return StepOutcome::Break;
+        }
+
+        // 如果有观测错误，发送 ObservedError 事件
+        if let Some(error) = observed {
+            if self
+                .send(
+                    event_tx,
+                    GraphEvent::ObservedError {
+                        error,
+                        node_name: node_name.to_string(),
+                    },
+                )
+                .await
+            {
+                return StepOutcome::Break;
+            }
+        }
+
+        // 🛑 end 节点检查
+        if current == graph.end_node() {
+            return StepOutcome::Break;
+        }
+
+        // 解析下一步路由
+        match self.resolve_next(graph, current, state, next) {
+            Ok(target) => StepOutcome::Continue(target),
+            Err(e) => {
+                self.send_graph_error(event_tx, e, state, execution_log, Instant::now(), trace_id)
+                    .await;
+                StepOutcome::ErrorSent
+            }
+        }
+    }
+
+    /// 处理 Barrier 暂停（`StreamNodeResult::Pause`）。
+    ///
+    /// 发射 BarrierWaiting 事件，等待外部决策，应用决策结果。
+    async fn handle_barrier(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        graph: &Graph,
+        decision_rx: &mut mpsc::Receiver<BarrierDecisionMessage>,
+        decision_registry: &mut DecisionRegistry,
+        cancel_rx: &mut mpsc::Receiver<()>,
+        node: &NodeKind,
+        current: &str,
+        state: &mut State,
+        execution_log: &mut Vec<ExecutionEntry>,
+        barrier_name: &str,
+        span_id: SpanId,
+        timeout: Option<std::time::Duration>,
+        default_action: BarrierDefaultAction,
+        step: usize,
+        node_start: Instant,
+        trace_id: TraceId,
+    ) -> StepOutcome {
+        let barrier_id = decision_registry.next_id(barrier_name);
+
+        // 发射 BarrierWaiting 事件
+        if self
+            .send(
+                event_tx,
+                GraphEvent::BarrierWaiting {
+                    barrier_id: barrier_id.clone(),
+                    node_name: barrier_name.to_string(),
+                    span_id,
+                },
+            )
+            .await
+        {
+            return StepOutcome::Break;
+        }
+
+        // 等待决策
+        let decision = self
+            .wait_barrier_decision(
+                decision_rx,
+                decision_registry,
+                &barrier_id,
+                timeout,
+                &default_action,
+                cancel_rx,
+            )
+            .await;
+
+        // 检查取消信号
+        if cancel_rx.try_recv().is_ok() {
+            self.send_graph_error(
+                event_tx,
+                GraphError::Terminal(TerminalError::BarrierCancelled {
+                    node: barrier_name.to_string(),
+                }),
+                state,
+                execution_log,
+                node_start,
+                trace_id,
+            )
+            .await;
+            return StepOutcome::ErrorSent;
+        }
+
+        // 发射 BarrierResolved 事件
+        if self
+            .send(
+                event_tx,
+                GraphEvent::BarrierResolved {
+                    barrier_id: barrier_id.clone(),
+                    decision: decision.clone(),
+                },
+            )
+            .await
+        {
+            return StepOutcome::Break;
+        }
+
+        // 应用决策
+        let next = match node {
+            NodeKind::Barrier(b) => match b.apply_decision(decision, state) {
+                Ok(ns) => ns,
+                Err(e) => {
+                    self.send_graph_error(event_tx, e, state, execution_log, node_start, trace_id)
+                        .await;
+                    return StepOutcome::ErrorSent;
+                }
+            },
+            _ => {
+                self.send_graph_error(
+                    event_tx,
+                    GraphError::Terminal(TerminalError::InvalidGraph(
+                        "expected BarrierNode but got unexpected node type for BarrierPaused"
+                            .to_string(),
+                    )),
+                    state,
+                    execution_log,
+                    node_start,
+                    trace_id,
+                )
+                .await;
+                return StepOutcome::ErrorSent;
+            }
+        };
+
+        // 记录执行日志
+        let end_time = Instant::now();
+        execution_log.push(ExecutionEntry {
+            step,
+            node_name: barrier_name.to_string(),
+            start_time: node_start,
+            end_time,
+            success: true,
+        });
+
+        // 发送 NodeEnd 事件
+        if self
+            .send(
+                event_tx,
+                GraphEvent::NodeEnd {
+                    node_name: barrier_name.to_string(),
+                    trace_id,
+                    span_id,
+                    success: true,
+                    duration: end_time.duration_since(node_start),
+                },
+            )
+            .await
+        {
+            return StepOutcome::Break;
+        }
+
+        // 🛑 end 节点检查
+        if current == graph.end_node() {
+            return StepOutcome::Break;
+        }
+
+        // 解析下一步路由
+        match self.resolve_next(graph, current, state, next) {
+            Ok(target) => StepOutcome::Continue(target),
+            Err(e) => {
+                self.send_graph_error(event_tx, e, state, execution_log, end_time, trace_id)
+                    .await;
+                StepOutcome::ErrorSent
+            }
+        }
+    }
+
+    // ─── handle_fallback ──────────────────────────────────────
+
+    /// 处理节点 Fallback（`StreamNodeResult::Fallback`）。
+    ///
+    /// Fallback 是控制流 — 节点主动声明降级策略。
+    async fn handle_fallback(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        graph: &Graph,
+        current: &str,
+        state: &mut State,
+        execution_log: &mut Vec<ExecutionEntry>,
+        fallback_node: &str,
+        reason: &str,
+        step: usize,
+        node_start: Instant,
+        node_end: Instant,
+        trace_id: TraceId,
+    ) -> StepOutcome {
+        // 记录执行日志
+        execution_log.push(ExecutionEntry {
+            step,
+            node_name: fallback_node.to_string(),
+            start_time: node_start,
+            end_time: node_end,
+            success: false,
+        });
+
+        // 查找 fallback 边
+        if let Some(fallback_target) = graph.find_fallback_edge(current) {
+            // 发送降级 ObservedError 事件
+            if self
+                .send(
+                    event_tx,
+                    GraphEvent::ObservedError {
+                        error: ObservedError::Degraded {
+                            node: fallback_node.to_string(),
+                            message: format!("fallback to '{}': {}", fallback_target, reason),
+                        },
+                        node_name: fallback_node.to_string(),
+                    },
+                )
+                .await
+            {
+                return StepOutcome::ErrorSent;
+            }
+            StepOutcome::Continue(fallback_target)
+        } else {
+            // 无 fallback 边 → 终止
+            self.send_graph_error(
+                event_tx,
+                GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                    node: fallback_node.to_string(),
+                    source: format!("fallback with no fallback edge: {}", reason).into(),
+                }),
+                state,
+                execution_log,
+                node_end,
+                trace_id,
+            )
+            .await;
+            StepOutcome::ErrorSent
+        }
+    }
+
+    // ─── handle_error ─────────────────────────────────────────
+
+    /// 处理节点执行错误。
+    async fn handle_error(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        execution_log: &mut Vec<ExecutionEntry>,
+        node_name: &str,
+        node_start: Instant,
+        node_end: Instant,
+        span_id: SpanId,
+        step: usize,
+        trace_id: TraceId,
+        error: GraphError,
+        state: &State,
+    ) {
+        let duration = node_end.duration_since(node_start);
+
+        // 记录执行日志
+        execution_log.push(ExecutionEntry {
+            step,
+            node_name: node_name.to_string(),
+            start_time: node_start,
+            end_time: node_end,
+            success: false,
+        });
+
+        // 发送 NodeEnd (failure) 事件
+        if self
+            .send(
+                event_tx,
+                GraphEvent::NodeEnd {
+                    node_name: node_name.to_string(),
+                    trace_id,
+                    span_id,
+                    success: false,
+                    duration,
+                },
+            )
+            .await
+        {
+            return;
+        }
+
+        // 发送 GraphError 事件
+        self.send_graph_error(event_tx, error, state, execution_log, node_end, trace_id)
+            .await;
+    }
+
+    // ─── 辅助方法 ──────────────────────────────────────────────
+
+    /// 发送事件，返回 `true` 表示 consumer 已断开（应终止执行）。
+    async fn send(&self, event_tx: &mpsc::Sender<GraphEvent>, event: GraphEvent) -> bool {
+        event_tx.send(event).await.is_err()
+    }
+
+    /// 发送 GraphError 事件（携带 state 快照）。
+    async fn send_graph_error(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        error: GraphError,
+        state: &State,
+        _execution_log: &Vec<ExecutionEntry>,
+        _start_time: Instant,
+        _trace_id: TraceId,
+    ) {
+        let _ = self
+            .send(
+                event_tx,
+                GraphEvent::GraphError {
+                    error,
+                    state: state.clone(),
+                },
+            )
+            .await;
+    }
+
+    /// 发送 GraphComplete 事件。
+    async fn send_graph_complete(
+        &self,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        state: &State,
+        execution_log: &[ExecutionEntry],
+        start_time: Instant,
+        trace_id: TraceId,
+    ) {
+        let _ = self
+            .send(
+                event_tx,
+                GraphEvent::GraphComplete {
+                    result: GraphResult {
+                        trace_id,
+                        state: state.clone(),
+                        execution_log: execution_log.to_vec(),
+                        duration: start_time.elapsed(),
+                    },
+                },
+            )
+            .await;
+    }
+
+    // ─── 等待 Barrier 决策 ─────────────────────────────────────
 
     /// 等待 Barrier 决策（支持取消信号）。
     async fn wait_barrier_decision(
@@ -695,7 +928,6 @@ impl GraphExecutor {
     ) -> Result<String, GraphError> {
         match next {
             NextStep::Goto(target) => {
-                // 验证边存在
                 graph.find_edge(current, &target).ok_or_else(|| {
                     GraphError::Terminal(TerminalError::MissingEdge {
                         from: current.to_string(),
@@ -712,12 +944,6 @@ impl GraphExecutor {
     }
 
     /// 查找下一个节点（三类边 + 有序路由）。
-    ///
-    /// 路由规则（first match wins）：
-    /// 1. 条件边 — 按注册顺序求值，第一条命中即停止（if/else-if 语义）
-    /// 2. 普通边 — 无条件非 fallback，取第一条
-    /// 3. Fallback 边 — 无条件 fallback，取第一条
-    /// 4. 无匹配 → Unrouted TerminalError
     fn find_next_node(graph: &Graph, current: &str, state: &State) -> Result<String, GraphError> {
         let edges = graph.edges_from(current);
 
@@ -763,12 +989,5 @@ impl GraphExecutor {
             node: current.to_string(),
             attempted_conditions: attempted,
         }))
-    }
-
-    /// 发送事件，返回 `true` 表示 consumer 已断开（应终止执行）。
-    ///
-    /// Consumer Drop = Cancel：一旦 `send` 失败，立即终止执行，不再继续。
-    async fn send(&self, event_tx: &mpsc::Sender<GraphEvent>, event: GraphEvent) -> bool {
-        event_tx.send(event).await.is_err()
     }
 }

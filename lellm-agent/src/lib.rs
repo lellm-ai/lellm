@@ -10,13 +10,13 @@ pub use schemars;
 pub use serde;
 
 pub use runtime::{
-    AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, BatchExecutionResult, CompactionResult,
-    CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback, FallbackAction,
-    FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult, LocalCompactor,
-    ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy, StaticCatalog, StopReason, ToolArgs,
-    ToolCatalog, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration,
-    ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult,
-    estimate_message, estimate_tokens, execute_batch_with,
+    AgentBuilder, AgentEvent, AgentFlowNode, AgentStream, BackoffStrategy, BatchExecutionResult,
+    CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback,
+    FallbackAction, FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult,
+    LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy, StaticCatalog,
+    StopReason, ToolArgs, ToolCatalog, ToolCategory, ToolError, ToolErrorKind, ToolExecutor,
+    ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop,
+    ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
 };
 #[cfg(feature = "v02-preview")]
 pub use runtime::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};

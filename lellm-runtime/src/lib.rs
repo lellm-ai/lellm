@@ -11,7 +11,7 @@ pub mod state;
 pub mod statekey;
 
 // ─── State ──────────────────────────────────────────────────────
-pub use state::{State, StateError, StateExt, StateReducer, SpanId, array_reducer};
+pub use state::{SpanId, State, StateError, StateExt, StateReducer, array_reducer};
 
 // ─── Delta + Reducer ────────────────────────────────────────────
 pub use delta::{DeltaOp, Reducer, ReducerRegistry, StateDelta};
@@ -21,6 +21,6 @@ pub use statekey::{StateKey, StateKeyExt};
 
 // ─── Checkpoint + Trace ─────────────────────────────────────────
 pub use checkpoint::{
-    BarrierDecision, Checkpoint, CheckpointId, ExecutionEntry, ExecutionTrace,
-    GraphHashMode, GraphResult, NodeId, TraceId,
+    BarrierDecision, Checkpoint, CheckpointId, ExecutionEntry, ExecutionTrace, GraphHashMode,
+    GraphResult, NodeId, TraceId,
 };

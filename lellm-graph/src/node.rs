@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::error::{GraphError, ObservedError};
 use crate::event::{BarrierId, GraphEvent};
-use crate::state::{State, SpanId};
+use crate::state::{SpanId, State};
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 

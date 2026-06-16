@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, GraphBuilder,
     GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeKind, SK_COUNT, SK_STEPS, State,
-    StateExt, StateKey, TaskNode, TerminalError, TraceId, array_reducer,
+    StateExt, StateKey, TaskNode, TerminalError, TraceId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -741,7 +741,7 @@ fn test_state_ext_reduce() {
     let mut state = State::new();
     state.insert("items".into(), serde_json::json!([1, 2]));
     state
-        .reduce("items", serde_json::json!([3, 4]), &array_reducer())
+        .append_array("items", serde_json::json!([3, 4]))
         .unwrap();
 
     let items = state.get("items").unwrap();
@@ -1017,7 +1017,8 @@ fn test_statekey_type_mismatch() {
     state.set_sk(&SK_COUNT, 42u64);
 
     // 定义一个与 SK_COUNT 同 key 但不同类型的 StateKey
-    const SK_COUNT_AS_STRING: StateKey<String> = StateKey::new("count");
+    const SK_COUNT_AS_STRING: StateKey<String> =
+        StateKey::new("count", lellm_graph::Reducer::Replace);
 
     // 期望 String，但实际存储的是 u64 → 反序列化失败 → None
     assert_eq!(state.get_sk::<String>(&SK_COUNT_AS_STRING), None);
@@ -1080,7 +1081,7 @@ async fn test_statekey_in_graph_execution() {
     use lellm_graph::StateKeyExt;
 
     // 自定义 StateKey
-    const SK_RESULT: StateKey<String> = StateKey::new("result");
+    const SK_RESULT: StateKey<String> = StateKey::new("result", lellm_graph::Reducer::Replace);
 
     let graph = build_graph("statekey_graph", |g| {
         let _ = g.start("set");
@@ -1231,92 +1232,152 @@ async fn test_trace_id_blocking_mode() {
 
 // ─── 测试覆盖缺口补充 ─────────────────────────────────────────
 
-/// Recoverable 错误 + fallback 边路由 — 核心容错路径。
+/// Fallback 控制流 + fallback 边路由 — v03 核心容错路径。
+///
+/// v03 移除了 RecoverableError，fallback 改为 `StreamNodeResult::Fallback` 控制流。
+/// 节点通过返回 Fallback 主动声明降级策略，executor 根据 fallback 边路由。
 #[tokio::test]
-async fn test_recoverable_error_fallback() {
-    let graph = build_graph("recoverable_fallback", |g| {
-        let _ = g.start("fail_node");
+async fn test_fallback_control_flow() {
+    use async_trait::async_trait;
+    use lellm_graph::node::StreamNodeResult;
+    use lellm_graph::{FlowNode, NextStep};
+    use std::sync::Arc;
+
+    // 自定义节点 — 总是返回 Fallback
+    struct FallbackNode;
+
+    #[async_trait]
+    impl FlowNode for FallbackNode {
+        async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
+            // 阻塞模式不支持 Fallback，直接报错
+            Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                node: "fallback_node".into(),
+                source: "fallback only in stream mode".into(),
+            }))
+        }
+
+        async fn execute_stream(
+            &self,
+            _state: &mut State,
+            _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
+            _span_id: lellm_graph::SpanId,
+        ) -> Result<StreamNodeResult, GraphError> {
+            Ok(StreamNodeResult::Fallback {
+                reason: "temporary failure, try fallback".into(),
+                node_name: "fallback_node".into(),
+            })
+        }
+    }
+
+    let graph = build_graph("fallback_flow", |g| {
+        let _ = g.start("fallback_node");
+        let _ = g.node("fallback_node", NodeKind::External(Arc::new(FallbackNode)));
         let _ = g.node(
-            "fail_node",
-            NodeKind::Task(TaskNode::new("fail_node", |_| {
-                Err(lellm_graph::GraphError::Recoverable(
-                    lellm_graph::RecoverableError::Retryable {
-                        node: "fail_node".into(),
-                        attempt: 1,
-                        max_attempts: 3,
-                        reason: "temporary failure".into(),
-                    },
-                ))
-            })),
-        );
-        let _ = g.node(
-            "fallback",
-            NodeKind::Task(TaskNode::new("fallback", |state| {
+            "fallback_target",
+            NodeKind::Task(TaskNode::new("fallback_target", |state| {
                 state.insert("recovered".into(), serde_json::json!(true));
                 Ok(())
             })),
         );
         let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
-        // fallback 边：fail_node → fallback
-        let _ = g.edge_fallback("fail_node", "fallback");
-        let _ = g.edge("fallback", "end");
+        // fallback 边：fallback_node → fallback_target
+        let _ = g.edge_fallback("fallback_node", "fallback_target");
+        let _ = g.edge("fallback_target", "end");
         let _ = g.end("end");
         Ok(())
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
-        .await
-        .expect("execution should succeed via fallback");
+    // Fallback 需要流式模式（TaskNode 的阻塞模式不支持 Fallback）
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+    drop(handle);
 
-    // 应该通过 fallback 边路由到 fallback 节点
-    assert_eq!(
-        result.state.get("recovered").unwrap(),
-        &serde_json::json!(true)
-    );
-    // fail_node 执行失败，fallback 和 end 成功
-    assert_eq!(result.execution_log.len(), 3);
+    let mut completed = false;
+    while let Some(event) = stream.recv().await {
+        match &event {
+            GraphEvent::GraphComplete { result } => {
+                // 应该通过 fallback 边路由到 fallback_target 节点
+                assert_eq!(
+                    result.state.get("recovered").unwrap(),
+                    &serde_json::json!(true)
+                );
+                completed = true;
+            }
+            GraphEvent::GraphError { error, .. } => {
+                panic!("unexpected error: {}", error);
+            }
+            _ => {}
+        }
+    }
+    assert!(completed, "should receive GraphComplete");
 }
 
-/// Recoverable 错误无 fallback 边 → TerminalError。
+/// Fallback 无 fallback 边 → GraphError 终止。
 #[tokio::test]
-async fn test_recoverable_error_no_fallback() {
+async fn test_fallback_no_edge() {
+    use async_trait::async_trait;
+    use lellm_graph::node::StreamNodeResult;
+    use lellm_graph::{FlowNode, NextStep};
+    use std::sync::Arc;
+
+    struct FallbackNode;
+
+    #[async_trait]
+    impl FlowNode for FallbackNode {
+        async fn execute(&self, _state: &mut State) -> Result<NextStep, GraphError> {
+            Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                node: "fallback_node".into(),
+                source: "fallback only in stream mode".into(),
+            }))
+        }
+
+        async fn execute_stream(
+            &self,
+            _state: &mut State,
+            _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
+            _span_id: lellm_graph::SpanId,
+        ) -> Result<StreamNodeResult, GraphError> {
+            Ok(StreamNodeResult::Fallback {
+                reason: "no fallback available".into(),
+                node_name: "fallback_node".into(),
+            })
+        }
+    }
+
     let graph = build_graph("no_fallback", |g| {
-        let _ = g.start("fail_node");
-        let _ = g.node(
-            "fail_node",
-            NodeKind::Task(TaskNode::new("fail_node", |_| {
-                Err(lellm_graph::GraphError::Recoverable(
-                    lellm_graph::RecoverableError::Retryable {
-                        node: "fail_node".into(),
-                        attempt: 1,
-                        max_attempts: 3,
-                        reason: "failure".into(),
-                    },
-                ))
-            })),
-        );
-        // 不添加 fallback 边
-        let _ = g.end("fail_node");
+        let _ = g.start("fallback_node");
+        let _ = g.node("fallback_node", NodeKind::External(Arc::new(FallbackNode)));
+        let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+        // 没有 fallback 边，只有普通边（不会被 Fallback 命中）
+        let _ = g.edge("fallback_node", "end");
+        let _ = g.end("end");
         Ok(())
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
-        .await;
+    let GraphExecution { mut stream, handle } =
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+    drop(handle);
 
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        lellm_graph::GraphError::Terminal(lellm_graph::TerminalError::NodeExecutionFailed {
-            node,
-            ..
-        }) => {
-            assert_eq!(node, "fail_node");
+    let mut has_error = false;
+    while let Some(event) = stream.recv().await {
+        match &event {
+            GraphEvent::GraphError { error, .. } => {
+                assert!(
+                    format!("{}", error).contains("fallback"),
+                    "error should mention fallback: {}",
+                    error
+                );
+                has_error = true;
+            }
+            GraphEvent::GraphComplete { .. } => {
+                panic!("should not complete when fallback has no edge");
+            }
+            _ => {}
         }
-        other => panic!("expected NodeExecutionFailed, got: {other:?}"),
     }
+    assert!(has_error, "should receive GraphError");
 }
 
 /// GraphHandle::cancel() — 取消正在执行的 Graph。

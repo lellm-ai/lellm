@@ -199,8 +199,12 @@ pub type StateReducer = Box<dyn Fn(&Value, &Value) -> Result<Value, String> + Se
 
 /// 内置 Reducer：数组追加（类似 LangGraph 的 `operator.add` for lists）。
 pub fn array_reducer(existing: &Value, new: &Value) -> Result<Value, String> {
-    let base = existing.as_array().ok_or("array_reducer: existing is not an array")?;
-    let items = new.as_array().ok_or("array_reducer: new value is not an array")?;
+    let base = existing
+        .as_array()
+        .ok_or("array_reducer: existing is not an array")?;
+    let items = new
+        .as_array()
+        .ok_or("array_reducer: new value is not an array")?;
     let mut merged = base.clone();
     merged.extend(items.iter().cloned());
     Ok(Value::Array(merged))

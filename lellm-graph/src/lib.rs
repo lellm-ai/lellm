@@ -14,8 +14,8 @@ pub mod statekey;
 
 // ─── Re-export from lellm-runtime ─────────────────────────────
 pub use lellm_runtime::{
-    DeltaOp, Reducer, ReducerRegistry, State, StateDelta, StateError, StateExt, StateKey,
-    StateKeyExt, StateReducer, SpanId, TraceId, array_reducer,
+    DeltaOp, Reducer, ReducerRegistry, SpanId, State, StateDelta, StateError, StateExt, StateKey,
+    StateKeyExt, StateReducer, TraceId, array_reducer,
 };
 
 // ─── Error Types ────────────────────────────────────────────────
@@ -35,7 +35,7 @@ pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
 // ─── Nodes ──────────────────────────────────────────────────────
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
-    FlowNode, NextStep, NodeKind, TaskNode, TaskFn,
+    FlowNode, NextStep, NodeKind, TaskFn, TaskNode,
 };
 
 // ─── State (graph-specific) ─────────────────────────────────────

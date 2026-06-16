@@ -142,15 +142,20 @@ impl std::fmt::Display for Reducer {
 pub struct ReducerRegistry {
     reducers: std::collections::HashMap<String, Reducer>,
     /// 运行时注册的自定义闭包 Reducer（优先级高于内置 Reducer）
-    custom_reducers:
-        std::collections::HashMap<String, Box<dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync>>,
+    custom_reducers: std::collections::HashMap<
+        String,
+        Box<dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync>,
+    >,
 }
 
 impl std::fmt::Debug for ReducerRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReducerRegistry")
             .field("reducers", &self.reducers)
-            .field("custom_reducers", &format!("{} entries", self.custom_reducers.len()))
+            .field(
+                "custom_reducers",
+                &format!("{} entries", self.custom_reducers.len()),
+            )
             .finish()
     }
 }
@@ -179,9 +184,7 @@ impl ReducerRegistry {
     /// 注意：如果 key 有自定义闭包 Reducer，此方法返回 `Custom` 不会被命中——
     /// 调用方应优先调用 `apply_custom()` 检查闭包。
     pub fn get(&self, key: &str) -> &Reducer {
-        self.reducers
-            .get(key)
-            .unwrap_or(&Reducer::Error)
+        self.reducers.get(key).unwrap_or(&Reducer::Error)
     }
 
     /// 应用自定义闭包 Reducer（如果已注册）。
@@ -218,10 +221,9 @@ impl ReducerRegistry {
                 state.remove(&delta.key);
             }
             DeltaOp::Append => {
-                let items = delta
-                    .value
-                    .as_array()
-                    .ok_or_else(|| StateError::DeltaApply(delta.key.clone(), "append expects array".into()))?;
+                let items = delta.value.as_array().ok_or_else(|| {
+                    StateError::DeltaApply(delta.key.clone(), "append expects array".into())
+                })?;
 
                 if let Some(existing) = state.get(&delta.key) {
                     match existing.as_array() {
@@ -242,10 +244,9 @@ impl ReducerRegistry {
                 }
             }
             DeltaOp::MergeObject => {
-                let patch = delta
-                    .value
-                    .as_object()
-                    .ok_or_else(|| StateError::DeltaApply(delta.key.clone(), "merge_object expects object".into()))?;
+                let patch = delta.value.as_object().ok_or_else(|| {
+                    StateError::DeltaApply(delta.key.clone(), "merge_object expects object".into())
+                })?;
 
                 if let Some(existing) = state.get_mut(&delta.key) {
                     if let Some(obj) = existing.as_object_mut() {
@@ -269,7 +270,10 @@ impl ReducerRegistry {
 
                 if let Some(existing) = state.get(&delta.key) {
                     let old_num = existing.as_f64().ok_or_else(|| {
-                        StateError::DeltaApply(delta.key.clone(), "existing value is not a number".into())
+                        StateError::DeltaApply(
+                            delta.key.clone(),
+                            "existing value is not a number".into(),
+                        )
                     })?;
 
                     let result = match delta.op {
@@ -311,10 +315,8 @@ impl ReducerRegistry {
                 // 多个 writer 写入同一 key
                 match reducer {
                     Reducer::Error => {
-                        let writers: Vec<String> = key_deltas
-                            .iter()
-                            .filter_map(|d| d.writer.clone())
-                            .collect();
+                        let writers: Vec<String> =
+                            key_deltas.iter().filter_map(|d| d.writer.clone()).collect();
                         return Err(StateError::StateConflict {
                             key: key.to_string(),
                             writers,
@@ -357,15 +359,10 @@ impl ReducerRegistry {
                         state.insert(key.to_string(), Value::Object(merged));
                     }
                     Reducer::Sum | Reducer::Max | Reducer::Min => {
-                        let existing_val = state
-                            .get(key)
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(0.0);
+                        let existing_val = state.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-                        let values: Vec<f64> = key_deltas
-                            .iter()
-                            .filter_map(|d| d.value.as_f64())
-                            .collect();
+                        let values: Vec<f64> =
+                            key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
 
                         let result = if values.is_empty() {
                             existing_val
@@ -373,8 +370,18 @@ impl ReducerRegistry {
                             let sum: f64 = values.iter().sum();
                             match reducer {
                                 Reducer::Sum => existing_val + sum,
-                                Reducer::Max => existing_val.max(*values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap()),
-                                Reducer::Min => existing_val.min(*values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap()),
+                                Reducer::Max => existing_val.max(
+                                    *values
+                                        .iter()
+                                        .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                        .unwrap(),
+                                ),
+                                Reducer::Min => existing_val.min(
+                                    *values
+                                        .iter()
+                                        .min_by(|a, b| a.partial_cmp(b).unwrap())
+                                        .unwrap(),
+                                ),
                                 _ => unreachable!(),
                             }
                         };
@@ -382,14 +389,10 @@ impl ReducerRegistry {
                     }
                     Reducer::Custom(f) => {
                         // 依次 apply 自定义 reducer
-                        let mut current = state
-                            .get(key)
-                            .cloned()
-                            .unwrap_or(Value::Null);
+                        let mut current = state.get(key).cloned().unwrap_or(Value::Null);
                         for d in key_deltas {
-                            current = f(&current, &d.value).map_err(|e| {
-                                StateError::ReducerConflict(key.to_string(), e)
-                            })?;
+                            current = f(&current, &d.value)
+                                .map_err(|e| StateError::ReducerConflict(key.to_string(), e))?;
                         }
                         state.insert(key.to_string(), current);
                     }
