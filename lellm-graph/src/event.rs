@@ -58,6 +58,26 @@ pub enum FlowEvent {
         node_id: String,
         delta: lellm_runtime::StateDelta,
     },
+    /// 并行节点开始执行
+    ParallelStarted {
+        node_id: String,
+        branch_count: usize,
+        span_id: SpanId,
+    },
+    /// 并行节点执行完成
+    ParallelCompleted {
+        node_id: String,
+        span_id: SpanId,
+        duration: Duration,
+    },
+    /// 并行分支执行完成
+    BranchCompleted {
+        branch_name: String,
+        node_id: String,
+        span_id: SpanId,
+        success: bool,
+        duration: Duration,
+    },
     /// 扩展事件 — 具体节点类型通过此变体注入内部事件。
     ///
     /// 例如 AgentFlowNode 将 AgentEvent 序列化为 Value 后注入。

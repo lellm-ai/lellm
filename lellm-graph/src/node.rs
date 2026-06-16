@@ -18,6 +18,7 @@ use crate::state::{SpanId, State, StateDelta};
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
 pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
+pub use crate::parallel_node::{ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder};
 
 // ─── 核心类型 ──────────────────────────────────────────────────
 
@@ -161,6 +162,8 @@ pub enum NodeKind {
     Condition(ConditionNode),
     /// Human-in-the-loop 审批屏障（仅流式模式）
     Barrier(BarrierNode),
+    /// 并行执行多个分支，合并 StateDelta
+    Parallel(ParallelNode),
     /// 外部节点（由 lellm-agent 等 crate 提供）
     ///
     /// 使用 `Arc<dyn FlowNode>` 让 Graph 不知道具体节点类型，同时支持 Clone。
@@ -276,6 +279,7 @@ impl FlowNode for NodeKind {
             Self::Task(n) => n.execute(state).await,
             Self::Condition(n) => n.execute(state).await,
             Self::Barrier(n) => n.execute(state).await,
+            Self::Parallel(n) => n.execute_sequential(state).await,
             Self::External(n) => n.execute(state).await,
         }
     }
@@ -290,6 +294,17 @@ impl FlowNode for NodeKind {
             Self::Task(n) => n.execute_stream(state, sink, span_id).await,
             Self::Condition(n) => n.execute_stream(state, sink, span_id).await,
             Self::Barrier(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Parallel(_) => {
+                // ⚠️ Parallel 节点应由 Executor::handle_parallel() 特殊处理。
+                // 此处提供串行 fallback，确保直接调用 execute_stream 也能工作。
+                let output = self.execute(state).await?;
+                Ok(StreamNodeResult::Continue {
+                    deltas: output.deltas,
+                    next: output.next,
+                    span_id,
+                    observed: None,
+                })
+            }
             Self::External(n) => n.execute_stream(state, sink, span_id).await,
         }
     }

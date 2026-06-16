@@ -18,7 +18,7 @@ use crate::event::{
     GraphHandle,
 };
 use crate::graph::Graph;
-use crate::node::{FlowNode, NextStep, NodeKind, StreamNodeResult};
+use crate::node::{FlowNode, NextStep, NodeKind, ParallelErrorStrategy, StreamNodeResult};
 use crate::state::{
     ExecutionEntry, GraphResult, ReducerRegistry, SpanId, State, StateDelta, TraceId,
 };
@@ -297,7 +297,18 @@ impl GraphExecutor {
             }
 
             let node_start = Instant::now();
-            let result = node.execute_stream(&state, &event_tx, span_id).await;
+            let result = if matches!(node, NodeKind::Parallel(_)) {
+                self.handle_parallel(
+                    node,
+                    &state,
+                    &event_tx,
+                    span_id,
+                    &node_name,
+                )
+                .await
+            } else {
+                node.execute_stream(&state, &event_tx, span_id).await
+            };
             let node_end = Instant::now();
             let duration = node_end.duration_since(node_start);
 
@@ -309,14 +320,54 @@ impl GraphExecutor {
                     observed,
                 }) => {
                     // Apply deltas to state
-                    self.apply_deltas(
-                        &event_tx,
-                        &mut reducer_registry,
-                        &mut state,
-                        &node_name,
-                        &deltas,
-                    )
-                    .await;
+                    if matches!(node, NodeKind::Parallel(_)) {
+                        // Parallel 节点 — 使用 merge_deltas 处理多 writer 冲突
+                        if let Err(e) = reducer_registry.merge_deltas(&mut state, &deltas) {
+                            // 冲突即错误 — 终止执行
+                            self.handle_error(
+                                &event_tx,
+                                &mut execution_log,
+                                &node_name,
+                                node_start,
+                                node_end,
+                                span_id,
+                                step,
+                                trace_id,
+                                GraphError::Terminal(TerminalError::StateError(format!(
+                                    "parallel merge conflict: {}",
+                                    e
+                                ))),
+                                &state,
+                            )
+                            .await;
+                            return;
+                        }
+                        // 发射 StateChanged 事件
+                        for delta in &deltas {
+                            let _ = self
+                                .send(
+                                    &event_tx,
+                                    GraphEvent::Node {
+                                        span_id: SpanId::new(),
+                                        node_name: node_name.to_string(),
+                                        event: FlowEvent::StateChanged {
+                                            node_id: node_name.to_string(),
+                                            delta: delta.clone(),
+                                        },
+                                    },
+                                )
+                                .await;
+                        }
+                    } else {
+                        self.apply_deltas(
+                            &event_tx,
+                            &mut reducer_registry,
+                            &mut state,
+                            &node_name,
+                            &deltas,
+                        )
+                        .await;
+                    }
 
                     let outcome = self
                         .handle_continue(
@@ -831,6 +882,194 @@ impl GraphExecutor {
         // 发送 GraphError 事件
         self.send_graph_error(event_tx, error, state, execution_log, node_end, trace_id)
             .await;
+    }
+
+    // ─── handle_parallel ──────────────────────────────────────
+
+    /// 处理并行节点（`NodeKind::Parallel`）。
+    ///
+    /// Fork State 快照给每个分支，并发执行，收集所有 Delta 后合并。
+    async fn handle_parallel(
+        &self,
+        node: &NodeKind,
+        state: &State,
+        event_tx: &mpsc::Sender<GraphEvent>,
+        parent_span_id: SpanId,
+        node_name: &str,
+    ) -> Result<StreamNodeResult, GraphError> {
+        let parallel = match node {
+            NodeKind::Parallel(p) => p,
+            _ => unreachable!("handle_parallel called on non-Parallel node"),
+        };
+
+        let branch_count = parallel.branch_count();
+        let error_strategy = parallel.error_strategy();
+        let display_name = parallel.label().unwrap_or(node_name).to_string();
+
+        // 发射 ParallelStarted 事件
+        if self
+            .send(
+                event_tx,
+                GraphEvent::Node {
+                    span_id: parent_span_id,
+                    node_name: node_name.to_string(),
+                    event: FlowEvent::ParallelStarted {
+                        node_id: display_name.clone(),
+                        branch_count,
+                        span_id: parent_span_id,
+                    },
+                },
+            )
+            .await
+        {
+            return Err(GraphError::Terminal(
+                TerminalError::InvalidGraph("consumer dropped during parallel execution".into()),
+            ));
+        }
+
+        let parallel_start = Instant::now();
+
+        // Fork State 快照，spawn 所有分支
+        let mut handles = Vec::with_capacity(branch_count);
+        for (branch_name, branch_node) in parallel.branches_iter() {
+            let state_copy = state.clone();
+            let branch_node = branch_node.clone();
+            let name = branch_name.to_string();
+
+            let handle = tokio::spawn(async move {
+                let branch_start = Instant::now();
+                // 分支直接调用 execute（阻塞模式），不经过 stream
+                // 因为 stream 会发射重复的 NodeStart/NodeEnd 事件
+                let result = branch_node.execute(&state_copy).await;
+                let branch_end = Instant::now();
+                (name, result, branch_end.duration_since(branch_start))
+            });
+
+            handles.push(handle);
+        }
+
+        // 收集所有结果
+        let mut all_deltas: Vec<lellm_runtime::StateDelta> = Vec::new();
+        let mut first_error: Option<GraphError> = None;
+        let mut any_failure = false;
+
+        for handle in handles {
+            let (branch_name, result, branch_duration) = match handle.await {
+                Ok(res) => res,
+                Err(join_err) => {
+                    let err = GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                        node: format!("{}/{}", display_name, "<unknown>"),
+                        source: join_err.into(),
+                    });
+                    // 发射 BranchCompleted (failure)
+                    let _ = self
+                        .send(
+                            event_tx,
+                            GraphEvent::Node {
+                                span_id: parent_span_id,
+                                node_name: node_name.to_string(),
+                                event: FlowEvent::BranchCompleted {
+                                    branch_name: "<unknown>".to_string(),
+                                    node_id: display_name.clone(),
+                                    span_id: SpanId::new(),
+                                    success: false,
+                                    duration: std::time::Duration::ZERO,
+                                },
+                            },
+                        )
+                        .await;
+
+                    if matches!(error_strategy, ParallelErrorStrategy::FailFast) {
+                        return Err(err);
+                    }
+                    first_error.get_or_insert(err);
+                    any_failure = true;
+                    continue;
+                }
+            };
+
+            match result {
+                Ok(output) => {
+                    all_deltas.extend(output.deltas);
+
+                    // 发射 BranchCompleted (success)
+                    let _ = self
+                        .send(
+                            event_tx,
+                            GraphEvent::Node {
+                                span_id: parent_span_id,
+                                node_name: node_name.to_string(),
+                                event: FlowEvent::BranchCompleted {
+                                    branch_name: branch_name.clone(),
+                                    node_id: display_name.clone(),
+                                    span_id: SpanId::new(),
+                                    success: true,
+                                    duration: branch_duration,
+                                },
+                            },
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    // 发射 BranchCompleted (failure)
+                    let _ = self
+                        .send(
+                            event_tx,
+                            GraphEvent::Node {
+                                span_id: parent_span_id,
+                                node_name: node_name.to_string(),
+                                event: FlowEvent::BranchCompleted {
+                                    branch_name: branch_name.clone(),
+                                    node_id: display_name.clone(),
+                                    span_id: SpanId::new(),
+                                    success: false,
+                                    duration: branch_duration,
+                                },
+                            },
+                        )
+                        .await;
+
+                    if matches!(error_strategy, ParallelErrorStrategy::FailFast) {
+                        return Err(e);
+                    }
+                    first_error.get_or_insert(e);
+                    any_failure = true;
+                }
+            }
+        }
+
+        // 如果有失败且为 CollectAll 模式，返回错误
+        if any_failure {
+            return Err(first_error.unwrap());
+        }
+
+        // 合并所有 Delta — 使用 merge_deltas 处理多 writer 冲突
+        // 注意：此处不直接 apply，返回给外层统一 apply
+        // merge_deltas 用于验证冲突，实际 apply 由外层 handle_continue 完成
+
+        // 发射 ParallelCompleted 事件
+        let parallel_duration = parallel_start.elapsed();
+        let _ = self
+            .send(
+                event_tx,
+                GraphEvent::Node {
+                    span_id: parent_span_id,
+                    node_name: node_name.to_string(),
+                    event: FlowEvent::ParallelCompleted {
+                        node_id: display_name,
+                        span_id: parent_span_id,
+                        duration: parallel_duration,
+                    },
+                },
+            )
+            .await;
+
+        Ok(StreamNodeResult::Continue {
+            deltas: all_deltas,
+            next: NextStep::GoToNext,
+            span_id: parent_span_id,
+            observed: None,
+        })
     }
 
     // ─── 辅助方法 ──────────────────────────────────────────────

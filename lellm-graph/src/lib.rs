@@ -10,6 +10,7 @@ pub mod executor;
 pub mod graph;
 pub mod hook;
 pub mod node;
+pub mod parallel_node;
 pub mod state;
 pub mod statekey;
 
@@ -36,7 +37,8 @@ pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
 // ─── Nodes ──────────────────────────────────────────────────────
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
-    FlowNode, NextStep, NodeKind, NodeOutput, TaskFn, TaskNode,
+    FlowNode, NextStep, NodeKind, NodeOutput, ParallelErrorStrategy, ParallelNode, TaskFn,
+    TaskNode,
 };
 
 // ─── State (graph-specific) ─────────────────────────────────────

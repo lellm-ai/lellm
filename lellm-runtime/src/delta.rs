@@ -295,6 +295,12 @@ impl ReducerRegistry {
     /// 合并多个并行分支产生的 Delta。
     ///
     /// 当同一 key 被多个 writer 写入时，根据 Reducer 策略处理冲突。
+    ///
+    /// **未注册 Reducer 的 key：** 使用 DeltaOp 作为合并策略：
+    /// - `Set` → 冲突（多 writer 覆盖）
+    /// - `Append` → 追加所有数组项
+    /// - `MergeObject` → 浅合并所有对象
+    /// - `Sum`/`Max`/`Min` → 数值运算
     pub fn merge_deltas(
         &self,
         state: &mut std::collections::HashMap<String, Value>,
@@ -309,93 +315,22 @@ impl ReducerRegistry {
 
         // 逐 key 处理
         for (key, key_deltas) in grouped {
-            let reducer = self.get(key);
-
             if key_deltas.len() > 1 {
                 // 多个 writer 写入同一 key
-                match reducer {
-                    Reducer::Error => {
-                        let writers: Vec<String> =
-                            key_deltas.iter().filter_map(|d| d.writer.clone()).collect();
-                        return Err(StateError::StateConflict {
-                            key: key.to_string(),
-                            writers,
-                        });
-                    }
-                    Reducer::Replace => {
-                        // 最后写入者胜
-                        if let Some(last) = key_deltas.last() {
-                            state.insert(key.to_string(), last.value.clone());
-                        }
-                    }
-                    Reducer::Append => {
-                        // 收集所有数组项
-                        let mut all_items = Vec::new();
-                        for d in key_deltas {
-                            if let Some(arr) = d.value.as_array() {
-                                all_items.extend(arr.iter().cloned());
-                            }
-                        }
-                        if let Some(existing) = state.get(key).and_then(|v| v.as_array()) {
-                            let mut merged = existing.clone();
-                            merged.extend(all_items);
-                            state.insert(key.to_string(), Value::Array(merged));
-                        } else if !all_items.is_empty() {
-                            state.insert(key.to_string(), Value::Array(all_items));
-                        }
-                    }
-                    Reducer::MergeObject => {
-                        let mut merged = state
-                            .get(key)
-                            .and_then(|v| v.as_object().cloned())
-                            .unwrap_or_default();
-                        for d in key_deltas {
-                            if let Some(obj) = d.value.as_object() {
-                                for (k, v) in obj {
-                                    merged.insert(k.clone(), v.clone());
-                                }
-                            }
-                        }
-                        state.insert(key.to_string(), Value::Object(merged));
-                    }
-                    Reducer::Sum | Reducer::Max | Reducer::Min => {
-                        let existing_val = state.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let reducer = self.get(key);
 
-                        let values: Vec<f64> =
-                            key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
+                // 如果未注册 Reducer（Error），使用 DeltaOp 作为合并策略
+                let effective_reducer = if matches!(reducer, Reducer::Error) {
+                    // 取第一个 delta 的 op 作为合并策略
+                    Some(key_deltas[0].op)
+                } else {
+                    None
+                };
 
-                        let result = if values.is_empty() {
-                            existing_val
-                        } else {
-                            let sum: f64 = values.iter().sum();
-                            match reducer {
-                                Reducer::Sum => existing_val + sum,
-                                Reducer::Max => existing_val.max(
-                                    *values
-                                        .iter()
-                                        .max_by(|a, b| a.partial_cmp(b).unwrap())
-                                        .unwrap(),
-                                ),
-                                Reducer::Min => existing_val.min(
-                                    *values
-                                        .iter()
-                                        .min_by(|a, b| a.partial_cmp(b).unwrap())
-                                        .unwrap(),
-                                ),
-                                _ => unreachable!(),
-                            }
-                        };
-                        state.insert(key.to_string(), Value::from(result));
-                    }
-                    Reducer::Custom(f) => {
-                        // 依次 apply 自定义 reducer
-                        let mut current = state.get(key).cloned().unwrap_or(Value::Null);
-                        for d in key_deltas {
-                            current = f(&current, &d.value)
-                                .map_err(|e| StateError::ReducerConflict(key.to_string(), e))?;
-                        }
-                        state.insert(key.to_string(), current);
-                    }
+                if let Some(op) = effective_reducer {
+                    Self::merge_by_delta_op(state, key, &key_deltas, op)?;
+                } else {
+                    Self::merge_by_reducer(state, key, &key_deltas, reducer)?;
                 }
             } else if let Some(delta) = key_deltas.first() {
                 // 单一 writer，直接 apply
@@ -404,5 +339,184 @@ impl ReducerRegistry {
         }
 
         Ok(())
+    }
+
+    /// 使用 DeltaOp 合并多 writer Delta（未注册 Reducer 时的默认行为）。
+    fn merge_by_delta_op(
+        state: &mut std::collections::HashMap<String, Value>,
+        key: &str,
+        key_deltas: &[&StateDelta],
+        op: DeltaOp,
+    ) -> Result<(), StateError> {
+        match op {
+            DeltaOp::Set => {
+                // Set 操作的多 writer → 冲突
+                let writers: Vec<String> =
+                    key_deltas.iter().filter_map(|d| d.writer.clone()).collect();
+                Err(StateError::StateConflict {
+                    key: key.to_string(),
+                    writers,
+                })
+            }
+            DeltaOp::Delete => {
+                // 多 writer 删除 → 直接删除即可（幂等）
+                state.remove(key);
+                Ok(())
+            }
+            DeltaOp::Append => {
+                let mut all_items = Vec::new();
+                for d in key_deltas {
+                    if let Some(arr) = d.value.as_array() {
+                        all_items.extend(arr.iter().cloned());
+                    }
+                }
+                if let Some(existing) = state.get(key).and_then(|v| v.as_array()) {
+                    let mut merged = existing.clone();
+                    merged.extend(all_items);
+                    state.insert(key.to_string(), Value::Array(merged));
+                } else if !all_items.is_empty() {
+                    state.insert(key.to_string(), Value::Array(all_items));
+                }
+                Ok(())
+            }
+            DeltaOp::MergeObject => {
+                let mut merged = state
+                    .get(key)
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                for d in key_deltas {
+                    if let Some(obj) = d.value.as_object() {
+                        for (k, v) in obj {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                state.insert(key.to_string(), Value::Object(merged));
+                Ok(())
+            }
+            DeltaOp::Sum | DeltaOp::Max | DeltaOp::Min => {
+                let existing_val = state.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let values: Vec<f64> =
+                    key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
+
+                let result = if values.is_empty() {
+                    existing_val
+                } else {
+                    let sum: f64 = values.iter().sum();
+                    match op {
+                        DeltaOp::Sum => existing_val + sum,
+                        DeltaOp::Max => existing_val.max(
+                            *values
+                                .iter()
+                                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                .unwrap(),
+                        ),
+                        DeltaOp::Min => existing_val.min(
+                            *values
+                                .iter()
+                                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                                .unwrap(),
+                        ),
+                        _ => unreachable!(),
+                    }
+                };
+                state.insert(key.to_string(), Value::from(result));
+                Ok(())
+            }
+        }
+    }
+
+    /// 使用注册的 Reducer 合并多 writer Delta。
+    fn merge_by_reducer(
+        state: &mut std::collections::HashMap<String, Value>,
+        key: &str,
+        key_deltas: &[&StateDelta],
+        reducer: &Reducer,
+    ) -> Result<(), StateError> {
+        match reducer {
+            Reducer::Error => {
+                let writers: Vec<String> =
+                    key_deltas.iter().filter_map(|d| d.writer.clone()).collect();
+                Err(StateError::StateConflict {
+                    key: key.to_string(),
+                    writers,
+                })
+            }
+            Reducer::Replace => {
+                if let Some(last) = key_deltas.last() {
+                    state.insert(key.to_string(), last.value.clone());
+                }
+                Ok(())
+            }
+            Reducer::Append => {
+                let mut all_items = Vec::new();
+                for d in key_deltas {
+                    if let Some(arr) = d.value.as_array() {
+                        all_items.extend(arr.iter().cloned());
+                    }
+                }
+                if let Some(existing) = state.get(key).and_then(|v| v.as_array()) {
+                    let mut merged = existing.clone();
+                    merged.extend(all_items);
+                    state.insert(key.to_string(), Value::Array(merged));
+                } else if !all_items.is_empty() {
+                    state.insert(key.to_string(), Value::Array(all_items));
+                }
+                Ok(())
+            }
+            Reducer::MergeObject => {
+                let mut merged = state
+                    .get(key)
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                for d in key_deltas {
+                    if let Some(obj) = d.value.as_object() {
+                        for (k, v) in obj {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                state.insert(key.to_string(), Value::Object(merged));
+                Ok(())
+            }
+            Reducer::Sum | Reducer::Max | Reducer::Min => {
+                let existing_val = state.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let values: Vec<f64> =
+                    key_deltas.iter().filter_map(|d| d.value.as_f64()).collect();
+
+                let result = if values.is_empty() {
+                    existing_val
+                } else {
+                    let sum: f64 = values.iter().sum();
+                    match reducer {
+                        Reducer::Sum => existing_val + sum,
+                        Reducer::Max => existing_val.max(
+                            *values
+                                .iter()
+                                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                                .unwrap(),
+                        ),
+                        Reducer::Min => existing_val.min(
+                            *values
+                                .iter()
+                                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                                .unwrap(),
+                        ),
+                        _ => unreachable!(),
+                    }
+                };
+                state.insert(key.to_string(), Value::from(result));
+                Ok(())
+            }
+            Reducer::Custom(f) => {
+                let mut current = state.get(key).cloned().unwrap_or(Value::Null);
+                for d in key_deltas {
+                    current = f(&current, &d.value)
+                        .map_err(|e| StateError::ReducerConflict(key.to_string(), e))?;
+                }
+                state.insert(key.to_string(), current);
+                Ok(())
+            }
+        }
     }
 }

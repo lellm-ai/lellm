@@ -7,7 +7,7 @@
 > **实现进度：**
 > - ✅ 一、Crate 架构重构（lellm-runtime crate 已创建）
 > - ✅ 二、StateDelta + Reducer 状态系统（DeltaOp, Reducer, ReducerRegistry 已实现）
-> - ⏳ 三、ParallelNode 状态合并策略（P2，未开始 — NodeKind 无 Parallel 变体）
+> - ✅ 三、ParallelNode 状态合并策略（已实现 — NodeKind::Parallel, ParallelNode, handle_parallel, merge_deltas DeltaOp fallback）
 > - ✅ 四、Checkpoint + Resume + ExecutionTrace（结构体已定义）
 > - ✅ 五、错误模型重构（RecoverableError 已删除，Fallback 改为控制流）
 > - ✅ 六、Executor 语义修复（handle_continue/handle_barrier/handle_fallback/handle_error 全部分裂完成）
@@ -284,8 +284,8 @@ StateConflict {
 ### v0.3 优先级
 
 1. **P0**: StateKey<T> — ✅ 已实现（`lellm-runtime/src/statekey.rs`）
-2. **P1**: StateDelta — ✅ 结构体已实现，但节点签名尚未迁移（仍为 `&mut State`）
-3. **P2**: ParallelNode + ReducerRegistry — ⏳ 未开始（`NodeKind` 无 `Parallel` 变体）
+2. **P1**: StateDelta — ✅ 已实现，节点签名已迁移至 `&State` + `Vec<StateDelta>`
+3. **P1**: ParallelNode + ReducerRegistry — ✅ 已实现（`NodeKind::Parallel`，`ParallelNode`，`handle_parallel`）
 
 **关键洞察：State Merge 是前置条件，ParallelNode 不是。**
 
@@ -293,8 +293,6 @@ StateConflict {
 
 - **`key: String` 每次分配**：`StateKey.name` 为 `&'static str`，但 `StateDelta` 存储为 `String`。
   v0.4 应改为 `Cow<'static, str>`，对已知 key 零分配。
-- **节点签名未迁移**：`FlowNode::execute()` 仍为 `fn(&mut State) -> NextStep`，未输出 `Vec<StateDelta>`。
-  StateDelta 目前仅在 `ReducerRegistry::apply_delta()` / `merge_deltas()` 中可用，未被节点生产。
 
 ---
 
