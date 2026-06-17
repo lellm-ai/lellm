@@ -12,6 +12,40 @@ use serde_json::Value;
 
 use crate::state::StateError;
 
+/// Delta 来源 — 追踪谁产生了这个修改。
+///
+/// 用于 ExecutionTrace 审计、Time Travel Debugger、Checkpoint Diff。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DeltaSource {
+    /// 节点执行产生
+    Node {
+        /// 节点名称
+        node_id: String,
+    },
+    /// Agent Hook 产生
+    Hook {
+        /// 节点名称
+        node_id: String,
+        /// Hook 名称
+        hook_name: String,
+    },
+    /// Reducer 合并产生
+    ReducerMerge,
+    /// 恢复时重放
+    ResumeReplay,
+}
+
+impl std::fmt::Display for DeltaSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeltaSource::Node { node_id } => write!(f, "node:{}", node_id),
+            DeltaSource::Hook { node_id, hook_name } => write!(f, "hook:{}:{}", node_id, hook_name),
+            DeltaSource::ReducerMerge => write!(f, "reducer_merge"),
+            DeltaSource::ResumeReplay => write!(f, "resume_replay"),
+        }
+    }
+}
+
 /// 状态增量 — 节点对 State 的修改意图。
 ///
 /// 节点输出 Delta，不直接修改 State。Executor 收集所有 Delta 后统一 apply。
@@ -23,8 +57,8 @@ pub struct StateDelta {
     pub op: DeltaOp,
     /// 新值（Delete 操作时忽略）
     pub value: Value,
-    /// 产生此 Delta 的节点名称（用于冲突诊断）
-    pub writer: Option<String>,
+    /// Delta 来源（用于审计和调试）
+    pub source: DeltaSource,
 }
 
 impl StateDelta {
@@ -34,7 +68,7 @@ impl StateDelta {
             key: Cow::Owned(key.into()),
             op: DeltaOp::Put,
             value,
-            writer: None,
+            source: DeltaSource::Node { node_id: String::new() },
         }
     }
 
@@ -44,12 +78,39 @@ impl StateDelta {
             key: Cow::Owned(key.into()),
             op: DeltaOp::Delete,
             value: Value::Null,
-            writer: None,
+            source: DeltaSource::Node { node_id: String::new() },
         }
     }
 
+    /// 创建 Put Delta（带来源）。
+    pub fn put_with_source(key: impl Into<String>, value: Value, source: DeltaSource) -> Self {
+        Self {
+            key: Cow::Owned(key.into()),
+            op: DeltaOp::Put,
+            value,
+            source,
+        }
+    }
+
+    /// 创建 Delete Delta（带来源）。
+    pub fn delete_with_source(key: impl Into<String>, source: DeltaSource) -> Self {
+        Self {
+            key: Cow::Owned(key.into()),
+            op: DeltaOp::Delete,
+            value: Value::Null,
+            source,
+        }
+    }
+
+    /// 设置来源（兼容旧接口）。
     pub fn with_writer(mut self, writer: impl Into<String>) -> Self {
-        self.writer = Some(writer.into());
+        self.source = DeltaSource::Node { node_id: writer.into() };
+        self
+    }
+
+    /// 设置来源（新接口）。
+    pub fn with_source(mut self, source: DeltaSource) -> Self {
+        self.source = source;
         self
     }
 }
@@ -242,7 +303,7 @@ impl ReducerRegistry {
         match reducer {
             Reducer::Error => {
                 let writers: Vec<String> =
-                    key_deltas.iter().filter_map(|d| d.writer.clone()).collect();
+                    key_deltas.iter().map(|d| d.source.to_string()).collect();
                 Err(StateError::StateConflict {
                     key: key.to_string(),
                     writers,

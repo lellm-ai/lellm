@@ -14,7 +14,7 @@ use crate::state::State;
 ///
 /// Checkpoint 是图级执行策略，不是节点属性。
 /// 价值公式：`Checkpoint 价值 = 重算成本 × 失败概率`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum CheckpointTrigger {
     /// Barrier 合并后 — 默认开启，并行分支合并点是天然恢复点
     BarrierResolved,
@@ -24,8 +24,22 @@ pub enum CheckpointTrigger {
     HumanDecision,
     /// 显式标注 — builder.node("agent", agent).checkpoint() 触发
     Explicit,
-    /// 自适应（v0.4）— 基于 ExecutionMetadata 动态决策
-    Adaptive,
+    /// 自适应 — 基于 ExecutionMetadata 动态决策，编译器保证 metadata 存在
+    Adaptive(ExecutionMetadata),
+}
+
+impl PartialEq for CheckpointTrigger {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::BarrierResolved, Self::BarrierResolved) => true,
+            (Self::ExecutionCompleted, Self::ExecutionCompleted) => true,
+            (Self::HumanDecision, Self::HumanDecision) => true,
+            (Self::Explicit, Self::Explicit) => true,
+            // Adaptive 只比较是否存在，不比较 metadata 内容
+            (Self::Adaptive(_), Self::Adaptive(_)) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Checkpoint 策略 — 图级执行策略，不是节点属性。
@@ -93,9 +107,9 @@ impl CheckpointPolicy {
         self.triggers.contains(&CheckpointTrigger::Explicit)
     }
 
-    /// 检查是否应该在自适应模式下保存
-    pub fn should_checkpoint_adaptive(&self) -> bool {
-        self.triggers.contains(&CheckpointTrigger::Adaptive)
+    /// 检查是否启用了自适应触发器（用于运行时判断是否需要收集 metadata）
+    pub fn has_adaptive_trigger(&self) -> bool {
+        self.triggers.iter().any(|t| matches!(t, CheckpointTrigger::Adaptive(_)))
     }
 }
 
@@ -339,11 +353,22 @@ impl Checkpoint {
 
     /// 恢复 State — 优先使用增量快照，fallback 到完整快照。
     ///
-    /// 如果有 snapshot，从 base + apply(deltas) 恢复。
+    /// 如果有 snapshot，从 base + apply(deltas) 恢复（使用 Reducer）。
     /// 否则直接使用 state 字段。
-    pub fn restore_state(&self) -> State {
+    pub fn restore_state(&self, registry: &crate::delta::ReducerRegistry) -> Result<State, crate::state::StateError> {
         if let Some(snapshot) = &self.snapshot {
-            snapshot.restore()
+            snapshot.restore(registry)
+        } else {
+            Ok(self.state.clone())
+        }
+    }
+
+    /// 恢复 State — 无 Reducer 版本（仅用于单分支场景）。
+    ///
+    /// ⚠️ **警告：** 此方法不使用 Reducer，并行场景下可能产生错误结果。
+    pub fn restore_state_simple(&self) -> State {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.restore_simple()
         } else {
             self.state.clone()
         }
@@ -370,10 +395,22 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
-    /// 从 base + deltas 恢复完整 State。
-    pub fn restore(&self) -> State {
+    /// 从 base + deltas 恢复完整 State（使用 Reducer 合并冲突）。
+    ///
+    /// **必须使用 ReducerRegistry**，否则并行场景下恢复状态会与运行时不一致。
+    pub fn restore(&self, registry: &crate::delta::ReducerRegistry) -> Result<State, crate::state::StateError> {
         let mut state = self.base_snapshot.clone();
-        // 按顺序 apply deltas（简单的 last-write-wins）
+        // 使用 ReducerRegistry 合并 deltas（与 executor 逻辑一致）
+        registry.merge_deltas(&mut state, &self.recent_deltas)?;
+        Ok(state)
+    }
+
+    /// 从 base + deltas 恢复完整 State（无 Reducer，仅用于单分支场景）。
+    ///
+    /// ⚠️ **警告：** 此方法不使用 Reducer，并行场景下可能产生错误结果。
+    /// 仅在确认无并行写入时使用。
+    pub fn restore_simple(&self) -> State {
+        let mut state = self.base_snapshot.clone();
         for delta in &self.recent_deltas {
             match delta.op {
                 crate::delta::DeltaOp::Put => {
@@ -412,7 +449,8 @@ impl StateSnapshot {
     /// 将当前恢复结果作为新 base，清空 deltas。
     pub fn compact(&mut self, threshold: usize) {
         if self.recent_deltas.len() > threshold {
-            let restored = self.restore();
+            // compact 时使用 simple 版本（不需要 Reducer，因为只是重新生成 base）
+            let restored = self.restore_simple();
             self.base_snapshot = restored;
             self.recent_deltas.clear();
         }

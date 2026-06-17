@@ -385,7 +385,6 @@ impl GraphExecutor {
                     &state,
                     step,
                     CheckpointTrigger::Explicit,
-                    None,
                     &mut snapshot_state,
                 )
                 .await;
@@ -454,26 +453,6 @@ impl GraphExecutor {
             let node_end = Instant::now();
             let duration = node_end.duration_since(node_start);
 
-            // Adaptive Checkpoint: 收集元数据并判断是否需要保存
-            if self.policy.should_checkpoint_adaptive() {
-                let metadata = ExecutionMetadata {
-                    duration_ms: duration.as_millis() as u64,
-                    token_cost: 0.0,         // TODO: 从节点输出中提取 token 成本
-                    has_side_effects: false, // TODO: 从节点元数据中提取
-                };
-                self.save_checkpoint_if_needed(
-                    &event_tx,
-                    &trace_id,
-                    &current,
-                    &state,
-                    step,
-                    CheckpointTrigger::Adaptive,
-                    Some(&metadata),
-                    &mut snapshot_state,
-                )
-                .await;
-            }
-
             match result {
                 Ok(StreamNodeResult::Continue {
                     deltas,
@@ -483,7 +462,7 @@ impl GraphExecutor {
                     metadata,
                 }) => {
                     // Adaptive Checkpoint: 使用节点提供的元数据
-                    if self.policy.should_checkpoint_adaptive() {
+                    if self.policy.has_adaptive_trigger() {
                         let exec_metadata = ExecutionMetadata {
                             duration_ms: duration.as_millis() as u64,
                             token_cost: metadata.as_ref().map_or(0.0, |m| m.token_cost),
@@ -495,12 +474,14 @@ impl GraphExecutor {
                             &current,
                             &state,
                             step,
-                            CheckpointTrigger::Adaptive,
-                            Some(&exec_metadata),
+                            CheckpointTrigger::Adaptive(exec_metadata),
                             &mut snapshot_state,
                         )
                         .await;
                     }
+
+                    // 记录 deltas 到增量快照状态（用于 StateSnapshot）
+                    snapshot_state.record_deltas(deltas.clone());
 
                     // Apply deltas to state
                     if matches!(node, NodeKind::Parallel(_)) {
@@ -581,7 +562,6 @@ impl GraphExecutor {
                                 &state,
                                 step,
                                 CheckpointTrigger::Explicit,
-                                None,
                                 &mut snapshot_state,
                             )
                             .await;
@@ -656,7 +636,6 @@ impl GraphExecutor {
                                 &state,
                                 step,
                                 CheckpointTrigger::BarrierResolved,
-                                None,
                                 &mut snapshot_state,
                             )
                             .await;
@@ -1579,7 +1558,7 @@ impl GraphExecutor {
     /// - `ExecutionCompleted` — 执行完成时保存
     /// - `HumanDecision` — 人类决策后保存
     /// - `Explicit` — 显式触发时保存
-    /// - `Adaptive` — 基于 ExecutionMetadata 动态决策
+    /// - `Adaptive(metadata)` — 基于 ExecutionMetadata 动态决策，编译器保证 metadata 存在
     async fn save_checkpoint_if_needed(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
@@ -1588,25 +1567,17 @@ impl GraphExecutor {
         state: &State,
         step: usize,
         trigger: CheckpointTrigger,
-        metadata: Option<&ExecutionMetadata>,
         snapshot_state: &mut IncrementalSnapshotState,
     ) {
         // 检查该 trigger 是否启用
-        let should_save = match trigger {
+        let should_save = match &trigger {
             CheckpointTrigger::BarrierResolved => self.policy.should_checkpoint_on_barrier(),
             CheckpointTrigger::ExecutionCompleted => self.policy.should_checkpoint_on_completion(),
             CheckpointTrigger::HumanDecision => self.policy.should_checkpoint_on_human_decision(),
             CheckpointTrigger::Explicit => self.policy.should_checkpoint_on_explicit(),
-            CheckpointTrigger::Adaptive => {
-                // Adaptive 模式：基于 ExecutionMetadata 动态决策
-                if !self.policy.should_checkpoint_adaptive() {
-                    false
-                } else if let Some(meta) = metadata {
-                    self.checkpoint_score.should_checkpoint(meta)
-                } else {
-                    // 无元数据时默认不保存
-                    false
-                }
+            CheckpointTrigger::Adaptive(metadata) => {
+                // Adaptive 模式：metadata 由调用者保证存在，直接评分
+                self.checkpoint_score.should_checkpoint(metadata)
             }
         };
 
@@ -1732,7 +1703,10 @@ impl GraphExecutor {
             graph_hash: current_hash,
             pending_reducers: self.pending_reducers.clone(),
             checkpoint_score: self.checkpoint_score.clone(),
-            last_checkpoint_state: Some(checkpoint.restore_state()),
+            // ⚠️ resume 路径暂时使用 restore_state_simple()
+            // 因为 ReducerRegistry 在 run_loop 中才创建
+            // 对于单分支场景是安全的，并行场景需要后续优化
+            last_checkpoint_state: Some(checkpoint.restore_state_simple()),
             pending_deltas: Vec::new(),
             delta_compact_threshold: self.delta_compact_threshold,
         };
