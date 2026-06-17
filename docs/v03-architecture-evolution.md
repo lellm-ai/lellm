@@ -1,21 +1,28 @@
 # LeLLM v0.3 架构演进
 
-> 版本：v0.3 规划 | 日期：2026-06-16 | 状态：Phase 1~4 已实现 ✅
+> 版本：v0.3/v0.4 规划 | 日期：2026-06-17 | 状态：Phase 1~4 + v0.4 部分已实现 ✅
 >
-> **原则：** 本文档记录所有 v0.3 设计决策，与 v0.2 代码严格区分。
+> **原则：** 本文档记录所有 v0.3/v0.4 设计决策，与 v0.2 代码严格区分。
 >
-> **实现进度：**
+> **v0.3 实现进度：**
 > - ✅ 一、Crate 架构重构（lellm-runtime crate 已创建）
-> - ✅ 二、StateDelta + Reducer 状态系统（DeltaOp, Reducer, ReducerRegistry 已实现）
-> - ✅ 三、ParallelNode 状态合并策略（已实现 — NodeKind::Parallel, ParallelNode, handle_parallel, merge_deltas DeltaOp fallback）
+> - ✅ 二、StateDelta + Reducer 状态系统（DeltaOp 简化为 Put/Delete，Reducer 负责合并）
+> - ✅ 三、ParallelNode 状态合并策略（已实现 — NodeKind::Parallel, ParallelNode, handle_parallel）
 > - ✅ 四、Checkpoint + Resume + ExecutionTrace（结构体已定义）
 > - ✅ 五、错误模型重构（RecoverableError 已删除，Fallback 改为控制流）
 > - ✅ 六、Executor 语义修复（handle_continue/handle_barrier/handle_fallback/handle_error 全部分裂完成）
 > - ✅ 七、Builder 验证与分析分离（build() 纯函数化，GraphDiagnostics 已定义，Graph::analyze() 已实现）
-> - ✅ 八、AgentHook 可观测性扩展点（已实现，v0.3 短期妥协 &mut State）
-> - ✅ 九、Event 体系解耦（FlowEvent 替代 NodeEvent::Agent）
-> - ✅ 十、Executor 重构（Done+Observed 合并为 Continue，handle_continue/handle_barrier/handle_fallback/handle_error 全部分裂）
+> - ✅ 八、AgentHook 可观测性扩展点（Agent-level hook 返回 Vec<StateDelta>）
+> - ✅ 九、Event 体系解耦（FlowEvent::Custom(Box\<dyn Any\>) 替代 Extension）
+> - ✅ 十、Executor 重构（Done+Observed 合并为 Continue）
 > - ✅ 十一、删除清单（RecoverableError, BuildError::Warning 已删除）
+>
+> **v0.4 实现进度：**
+> - ✅ 十二、StateKey 便捷构造器（append/sum/replace/merge_object/max/min/error）
+> - ✅ 十三、Agent-level Hook（before_agent/after_agent 返回 Vec<StateDelta>）
+> - ✅ 十四、lellm-events crate（事件协议独立，AgentEvent/FlowEvent/GraphEvent/TraceId/SpanId）
+> - ⏳ 十五、Adaptive Checkpoint（ExecutionMetadata + 动态决策）
+> - ⏳ 十六、StateSnapshot 增量 Checkpoint（base + recent_deltas）
 
 ---
 

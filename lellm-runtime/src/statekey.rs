@@ -43,6 +43,49 @@ impl<T> StateKey<T> {
         }
     }
 
+    /// 便捷构造 — 数组追加（Reducer::Append）。
+    ///
+    /// ```rust,ignore
+    /// pub static MESSAGES: StateKey<Vec<Message>> = StateKey::append("messages");
+    /// ```
+    pub const fn append(name: &'static str) -> Self {
+        Self::new(name, Reducer::Append)
+    }
+
+    /// 便捷构造 — 数值求和（Reducer::Sum）。
+    ///
+    /// ```rust,ignore
+    /// pub static SCORE: StateKey<i32> = StateKey::sum("score");
+    /// ```
+    pub const fn sum(name: &'static str) -> Self {
+        Self::new(name, Reducer::Sum)
+    }
+
+    /// 便捷构造 — 最后写入者胜（Reducer::Replace）。
+    pub const fn replace(name: &'static str) -> Self {
+        Self::new(name, Reducer::Replace)
+    }
+
+    /// 便捷构造 — 对象浅合并（Reducer::MergeObject）。
+    pub const fn merge_object(name: &'static str) -> Self {
+        Self::new(name, Reducer::MergeObject)
+    }
+
+    /// 便捷构造 — 取最大值（Reducer::Max）。
+    pub const fn max(name: &'static str) -> Self {
+        Self::new(name, Reducer::Max)
+    }
+
+    /// 便捷构造 — 取最小值（Reducer::Min）。
+    pub const fn min(name: &'static str) -> Self {
+        Self::new(name, Reducer::Min)
+    }
+
+    /// 便捷构造 — 冲突即报错（Reducer::Error，默认）。
+    pub const fn error(name: &'static str) -> Self {
+        Self::new(name, Reducer::Error)
+    }
+
     /// 获取 key 的字符串名称。
     pub fn name(&self) -> &str {
         self.name

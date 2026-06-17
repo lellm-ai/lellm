@@ -8,6 +8,7 @@ members = [
     "lellm-macros",
     "lellm-mcp",
     "lellm-graph",
+    "lellm-events",
 ]
 resolver = "2"
 
@@ -25,6 +26,7 @@ lellm-agent = { path = "lellm-agent", version = "0.2" }
 lellm-macros = { path = "lellm-macros", version = "0.2" }
 lellm-mcp = { path = "lellm-mcp", version = "0.2" }
 lellm-graph = { path = "lellm-graph", version = "0.2" }
+lellm-events = { path = "lellm-events", version = "0.2" }
 
 # Common
 async-trait = "0.1"

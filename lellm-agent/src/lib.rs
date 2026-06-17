@@ -3,12 +3,14 @@
 //! 提供完整的 Agent 运行时能力：工具系统、Agent Loop、
 //! 循环检测、重试策略、Fallback 降级等。
 
+pub mod hook;
 pub mod runtime;
 
 // Re-export schemars & serde so derive(Tool) / #[tool] macros can reference them.
 pub use schemars;
 pub use serde;
 
+pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentFlowNode, AgentStream, BackoffStrategy, BatchExecutionResult,
     CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback,
