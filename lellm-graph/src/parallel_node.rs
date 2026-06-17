@@ -122,6 +122,7 @@ impl ParallelNode {
         Ok(NodeOutput {
             deltas: all_deltas,
             next: NextStep::GoToNext,
+            metadata: None,
         })
     }
 

@@ -21,7 +21,7 @@
 > - ✅ 十二、StateKey 便捷构造器（append/sum/replace/merge_object/max/min/error）
 > - ✅ 十三、Agent-level Hook（before_agent/after_agent 返回 Vec<StateDelta>）
 > - ✅ 十四、lellm-events crate（事件协议独立，AgentEvent/FlowEvent/GraphEvent/TraceId/SpanId）
-> - ✅ 十五、Adaptive Checkpoint（ExecutionMetadata + CheckpointScore 动态决策）
+> - ✅ 十五、Adaptive Checkpoint（ExecutionMetadata + CheckpointScore + NodeMetadata）
 > - ✅ 十六、StateSnapshot 增量 Checkpoint（base + recent_deltas + compact）
 
 ---

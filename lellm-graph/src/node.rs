@@ -43,6 +43,17 @@ pub struct NodeOutput {
     pub deltas: Vec<StateDelta>,
     /// 下一步路由
     pub next: NextStep,
+    /// 节点元数据（可选 — 用于 Adaptive Checkpoint 等）
+    pub metadata: Option<NodeMetadata>,
+}
+
+/// 节点执行元数据 — 提供给 Executor 的额外信息。
+#[derive(Debug, Clone, Default)]
+pub struct NodeMetadata {
+    /// Token 消耗成本（0.0 表示无 LLM 调用）
+    pub token_cost: f64,
+    /// 是否有外部副作用（如部署、发送消息）
+    pub has_side_effects: bool,
 }
 
 impl NodeOutput {
@@ -51,6 +62,7 @@ impl NodeOutput {
         Self {
             deltas: Vec::new(),
             next,
+            metadata: None,
         }
     }
 
@@ -63,6 +75,24 @@ impl NodeOutput {
     /// 追加多个 Delta。
     pub fn with_deltas(mut self, deltas: Vec<StateDelta>) -> Self {
         self.deltas.extend(deltas);
+        self
+    }
+
+    /// 设置节点元数据。
+    pub fn with_metadata(mut self, metadata: NodeMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// 设置 token 成本。
+    pub fn with_token_cost(mut self, cost: f64) -> Self {
+        self.metadata.get_or_insert_with(Default::default).token_cost = cost;
+        self
+    }
+
+    /// 标记有副作用。
+    pub fn with_side_effects(mut self) -> Self {
+        self.metadata.get_or_insert_with(Default::default).has_side_effects = true;
         self
     }
 }
@@ -80,6 +110,8 @@ pub enum StreamNodeResult {
         span_id: SpanId,
         /// 可选的观测错误（不影响 control flow）
         observed: Option<ObservedError>,
+        /// 节点元数据（可选 — 用于 Adaptive Checkpoint 等）
+        metadata: Option<NodeMetadata>,
     },
     /// Barrier 暂停，等待外部决策
     Pause {
@@ -145,6 +177,7 @@ pub trait FlowNode: Send + Sync {
             next: output.next,
             span_id,
             observed: None,
+            metadata: output.metadata,
         })
     }
 }
@@ -208,6 +241,7 @@ impl FlowNode for TaskNode {
         Ok(NodeOutput {
             deltas,
             next: NextStep::GoToNext,
+            metadata: None,
         })
     }
 }
@@ -303,6 +337,7 @@ impl FlowNode for NodeKind {
                     next: output.next,
                     span_id,
                     observed: None,
+                    metadata: output.metadata,
                 })
             }
             Self::External(n) => n.execute_stream(state, sink, span_id).await,

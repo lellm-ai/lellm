@@ -182,6 +182,7 @@ impl FlowNode for AgentFlowNode {
         Ok(NodeOutput {
             deltas,
             next: NextStep::GoToNext,
+            metadata: None,
         })
     }
 
@@ -313,6 +314,7 @@ impl FlowNode for AgentFlowNode {
                 next: NextStep::GoToNext,
                 span_id,
                 observed: None,
+                metadata: None,
             });
         }
 

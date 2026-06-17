@@ -480,7 +480,28 @@ impl GraphExecutor {
                     next,
                     span_id,
                     observed,
+                    metadata,
                 }) => {
+                    // Adaptive Checkpoint: 使用节点提供的元数据
+                    if self.policy.should_checkpoint_adaptive() {
+                        let exec_metadata = ExecutionMetadata {
+                            duration_ms: duration.as_millis() as u64,
+                            token_cost: metadata.as_ref().map_or(0.0, |m| m.token_cost),
+                            has_side_effects: metadata.as_ref().map_or(false, |m| m.has_side_effects),
+                        };
+                        self.save_checkpoint_if_needed(
+                            &event_tx,
+                            &trace_id,
+                            &current,
+                            &state,
+                            step,
+                            CheckpointTrigger::Adaptive,
+                            Some(&exec_metadata),
+                            &mut snapshot_state,
+                        )
+                        .await;
+                    }
+
                     // Apply deltas to state
                     if matches!(node, NodeKind::Parallel(_)) {
                         // Parallel 节点 — 使用 merge_deltas 处理多 writer 冲突
@@ -1257,6 +1278,7 @@ impl GraphExecutor {
             next: NextStep::GoToNext,
             span_id: parent_span_id,
             observed: None,
+            metadata: None,
         })
     }
 
