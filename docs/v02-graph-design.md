@@ -1,8 +1,9 @@
 # LeLLM v0.2 Graph/Node/Edge 编排层设计
 
-> 版本：v0.2 | 日期：2026-06-16 | 状态：代码已实现，文档同步代码
+> 版本：v0.2/v0.3 | 日期：2026-06-17 | 状态：代码已实现，文档同步代码
 >
 > **原则：** 本文档以实际代码为准。
+> **v0.3/v0.4 新增内容详见 [v03-architecture-evolution.md](./v03-architecture-evolution.md)**
 
 ---
 
@@ -16,8 +17,8 @@
 |------|------|
 | 图类型 | **允许有环**，A→B→C→A 完全合法 |
 | 循环保护 | **两层体系**（详见下文）|
-| 控制流 | Sequence, Condition (edge_if), Parallel (未实现) |
-| Node 种类 | 5 种：Task, Agent, Tool, Condition, Barrier（LLMNode 非 NodeKind 变体）|
+| 控制流 | Sequence, Condition (edge_if), Parallel ✅ |
+| Node 种类 | 6 种：Task, Agent, Tool, Condition, Barrier, Parallel（LLMNode 非 NodeKind 变体）|
 | 数据传递 | 共享 State（`HashMap<String, Value>`）+ Reducer 合并机制 |
 | 执行模式 | 宏观串行，节点依次执行 |
 | 流式支持 | `execute_stream()` 返回 `GraphExecution`（stream + handle），实时发射 `GraphEvent` |
@@ -59,13 +60,13 @@ GraphBuilder::new("retry")
 |------|------|------|------|
 | Level 1（默认） | `AgentNode` — 黑盒 ReAct | 90% 用户 | v0.2 |
 | Level 2（逃生口） | `LLMNode` + `ToolNode` — 手动搭建 ReAct | 高级用户 | v0.2 |
-| Level 3（干预） | `AgentHook` — before_tool / after_tool / after_iteration | 需要轻量干预的用户 | v0.3+ |
+| Level 3（干预） | `AgentHook` — before_agent / after_agent 返回 StateDelta | 需要轻量干预的用户 | v0.4 ✅ |
 
 **核心原则：**
 - Graph 不负责表达 Agent 内部 ReAct
 - `AgentNode` 是 Graph 中的原子执行单元
 - 需要细粒度控制 → `LLMNode` + `ToolNode`
-- 需要轻量干预 → `AgentHook`（v0.3+）
+- 需要轻量干预 → `AgentHook`（v0.4 ✅ 已实现）
 
 ### NodeKind 枚举
 
@@ -76,6 +77,7 @@ pub enum NodeKind {
     Tool(ToolNode),                    // 工具调用
     Condition(ConditionNode),          // 条件分支
     Barrier(BarrierNode),              // Human-in-the-loop 审批
+    Parallel(ParallelNode),            // 并行执行多个分支 ✅ v0.3
 }
 ```
 
