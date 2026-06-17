@@ -180,6 +180,20 @@ pub trait FlowNode: Send + Sync {
             metadata: output.metadata,
         })
     }
+
+    /// 节点元数据提示 — 静态声明节点的执行特征。
+    ///
+    /// 用于 Adaptive Checkpoint 的默认值。
+    /// NodeOutput.metadata 会覆盖此值。
+    ///
+    /// **四层优先级：**
+    /// 1. `NodeOutput.metadata` — 运行时实际值（最高优先级）
+    /// 2. `metadata_hint()` — 节点静态声明
+    /// 3. `NodeKind` 推断 — Executor 根据类型推断
+    /// 4. `NodeMetadata::default()` — 兜底值
+    fn metadata_hint(&self) -> NodeMetadata {
+        NodeMetadata::default()
+    }
 }
 
 /// 节点类型枚举。
@@ -244,6 +258,14 @@ impl FlowNode for TaskNode {
             metadata: None,
         })
     }
+
+    fn metadata_hint(&self) -> NodeMetadata {
+        // TaskNode 默认轻量级（纯 CPU 计算）
+        NodeMetadata {
+            token_cost: 0.0,
+            has_side_effects: false,
+        }
+    }
 }
 
 // ─── ConditionNode ───────────────────────────────────────────
@@ -301,6 +323,14 @@ impl FlowNode for ConditionNode {
         }
         // 无匹配 → GoToNext，由 Graph 层 edge_fallback 处理兜底
         Ok(NodeOutput::new(NextStep::GoToNext))
+    }
+
+    fn metadata_hint(&self) -> NodeMetadata {
+        // ConditionNode 是纯逻辑判断，轻量级
+        NodeMetadata {
+            token_cost: 0.0,
+            has_side_effects: false,
+        }
     }
 }
 

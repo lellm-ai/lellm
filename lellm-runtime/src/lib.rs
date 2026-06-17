@@ -8,11 +8,15 @@
 pub mod checkpoint;
 pub mod delta;
 pub mod state;
+pub mod state_manager;
 pub mod statekey;
 pub mod store;
 
 // ─── State ──────────────────────────────────────────────
 pub use state::{SpanId, State, StateError, StateExt, StateReducer, array_reducer};
+
+// ─── StateManager ───────────────────────────────────────
+pub use state_manager::StateManager;
 
 // ─── Delta + Reducer ────────────────────────────────────
 pub use delta::{DeltaOp, Reducer, ReducerRegistry, StateDelta};

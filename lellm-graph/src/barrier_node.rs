@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::error::{GraphError, TerminalError};
 use crate::event::{BarrierDecision, BarrierId, GraphEvent};
-use crate::node::{FlowNode, NextStep, NodeOutput, StreamNodeResult};
+use crate::node::{FlowNode, NextStep, NodeMetadata, NodeOutput, StreamNodeResult};
 use crate::state::{SpanId, State, StateDelta};
 
 /// Barrier 超时后的默认行为。
@@ -145,5 +145,13 @@ impl FlowNode for BarrierNode {
             timeout: self.timeout,
             default_action: self.default_action.clone(),
         })
+    }
+
+    fn metadata_hint(&self) -> NodeMetadata {
+        // BarrierNode 是 Human-in-the-loop，权重高
+        NodeMetadata {
+            token_cost: 0.0,
+            has_side_effects: true, // 审批后可能触发外部操作
+        }
     }
 }
