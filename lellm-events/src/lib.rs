@@ -7,51 +7,9 @@ use std::time::Duration;
 
 use lellm_runtime::StateDelta;
 
-// ─── TraceId / SpanId ────────────────────────────────────────
-
-/// Trace ID — 唯一标识一次完整的图执行。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct TraceId(pub uuid::Uuid);
-
-impl Default for TraceId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TraceId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
-impl std::fmt::Display for TraceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Span ID — 标识一次节点执行的唯一 ID。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct SpanId(pub uuid::Uuid);
-
-impl Default for SpanId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SpanId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
-impl std::fmt::Display for SpanId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+// ─── Re-export TraceId / SpanId ──────────────────────────────
+// TraceId 和 SpanId 定义在 lellm-core，这里 re-export 方便使用。
+pub use lellm_core::{SpanId, TraceId};
 
 // ─── AgentEvent ──────────────────────────────────────────────
 
@@ -137,10 +95,7 @@ pub enum FlowEvent {
     /// 节点执行失败
     NodeFailed { node_id: String, error: String },
     /// 状态变更
-    StateChanged {
-        node_id: String,
-        delta: StateDelta,
-    },
+    StateChanged { node_id: String, delta: StateDelta },
     /// 并行节点开始执行
     ParallelStarted {
         node_id: String,
@@ -231,7 +186,10 @@ pub enum GraphEvent {
     /// Graph 执行完成（恰好一次）
     GraphComplete { result: GraphCompleteResult },
     /// Graph 执行出错（恰好一次）
-    GraphError { error: GraphError, state: StateSnapshot },
+    GraphError {
+        error: GraphError,
+        state: StateSnapshot,
+    },
 }
 
 // ─── BarrierId / BarrierDecision ─────────────────────────────
@@ -278,20 +236,11 @@ pub enum BarrierDecision {
 #[derive(Debug, Clone)]
 pub enum ObservedError {
     /// 节点执行降级（如 fallback 路径）
-    Degraded {
-        node: String,
-        reason: String,
-    },
+    Degraded { node: String, reason: String },
     /// 工具调用失败但被忽略
-    ToolIgnored {
-        tool: String,
-        error: String,
-    },
+    ToolIgnored { tool: String, error: String },
     /// 自定义观测错误
-    Custom {
-        kind: String,
-        detail: String,
-    },
+    Custom { kind: String, detail: String },
 }
 
 impl std::fmt::Display for ObservedError {
@@ -369,9 +318,7 @@ pub fn agent_event_to_flow_event(node_id: &str, event: AgentEvent) -> FlowEvent 
 /// 从 FlowEvent 中提取 AgentEvent（如果存在）。
 pub fn extract_agent_event(event: &FlowEvent) -> Option<&AgentEvent> {
     match event {
-        FlowEvent::Custom { payload, .. } => {
-            payload.downcast_ref::<AgentEvent>()
-        }
+        FlowEvent::Custom { payload, .. } => payload.downcast_ref::<AgentEvent>(),
         _ => None,
     }
 }

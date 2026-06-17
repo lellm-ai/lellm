@@ -10,27 +10,8 @@ use serde_json::Value;
 /// Graph 共享状态。
 pub type State = HashMap<String, Value>;
 
-/// 执行实例 ID（单次节点执行的生命周期标识）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SpanId(pub uuid::Uuid);
-
-impl Default for SpanId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SpanId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
-impl std::fmt::Display for SpanId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Span ID — 从 lellm-core 导入。
+pub use lellm_core::SpanId;
 
 // ─── StateError ─────────────────────────────────────────────────
 

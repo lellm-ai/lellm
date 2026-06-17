@@ -285,8 +285,11 @@ impl FlowNode for AgentFlowNode {
                 result: result.clone(),
                 events,
             };
-            let after_deltas: Vec<StateDelta> =
-                self.hooks.iter().flat_map(|h| h.after_agent(&snapshot)).collect();
+            let after_deltas: Vec<StateDelta> = self
+                .hooks
+                .iter()
+                .flat_map(|h| h.after_agent(&snapshot))
+                .collect();
 
             let mut deltas = self.collect_deltas(&result);
             deltas.extend(hook_deltas);

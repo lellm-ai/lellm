@@ -11,102 +11,12 @@ use std::time::Duration;
 
 use crate::error::{GraphError, ObservedError};
 use crate::state::{GraphResult, State};
-pub use crate::state::{SpanId, TraceId};
+pub use lellm_core::{SpanId, TraceId};
 pub use lellm_runtime::CheckpointId;
 
-// ─── BarrierId ────────────────────────────────────────────────
-
-/// Barrier 审批请求的唯一标识。
-///
-/// 由 `(node_id, occurrence)` 组成，支持通配决策。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BarrierId {
-    /// 用户定义的 Barrier 节点名（可预测）
-    pub node_id: String,
-    /// 第几次到达（1-based）
-    pub occurrence: u32,
-}
-
-impl BarrierId {
-    pub fn new(node_id: impl Into<String>, occurrence: u32) -> Self {
-        Self {
-            node_id: node_id.into(),
-            occurrence,
-        }
-    }
-}
-
-// ─── FlowEvent ────────────────────────────────────────────────
-
-/// 节点内部事件 — 解耦的通用事件中间层。
-///
-/// Graph 不知道 `AgentEvent`、`ToolCall`、`ToolResult`。
-/// 具体节点（如 AgentFlowNode）通过 `Custom` 变体注入内部事件，
-/// 使用 `Box<dyn Any>` 保证类型安全的向下转换。
-#[derive(Debug)]
-pub enum FlowEvent {
-    /// 节点开始执行
-    NodeStarted { node_id: String, span_id: SpanId },
-    /// 节点执行完成
-    NodeCompleted {
-        node_id: String,
-        span_id: SpanId,
-        duration: Duration,
-    },
-    /// 节点执行失败
-    NodeFailed { node_id: String, error: String },
-    /// 状态变更
-    StateChanged {
-        node_id: String,
-        delta: lellm_runtime::StateDelta,
-    },
-    /// 并行节点开始执行
-    ParallelStarted {
-        node_id: String,
-        branch_count: usize,
-        span_id: SpanId,
-    },
-    /// 并行节点执行完成
-    ParallelCompleted {
-        node_id: String,
-        span_id: SpanId,
-        duration: Duration,
-    },
-    /// 并行分支执行完成
-    BranchCompleted {
-        branch_name: String,
-        node_id: String,
-        span_id: SpanId,
-        success: bool,
-        duration: Duration,
-    },
-    /// 自定义事件 — 具体节点类型通过此变体注入内部事件。
-    ///
-    /// 使用 `Box<dyn Any>` 保证类型安全：消费者通过 `downcast_ref::<T>()`
-    /// 获取具体类型，无需 serde_json::Value 字符串匹配。
-    Custom {
-        node_id: String,
-        payload: Box<dyn std::any::Any + Send + Sync>,
-    },
-}
-
-// ─── BarrierDecision ──────────────────────────────────────────
-
-/// Barrier 审批决策。
-#[derive(Debug, Clone)]
-pub enum BarrierDecision {
-    /// 通过 — 节点继续执行下一步
-    Approve,
-    /// 拒绝 — 写入拒绝原因到 State，由 edge_if 决定是否回跳
-    Reject { reason: String },
-    /// 修改 State 中的指定 key，然后继续
-    Modify {
-        key: String,
-        value: serde_json::Value,
-    },
-    /// 跳转到指定节点（覆盖默认流转）
-    Reroute { target: String },
-}
+// ─── Re-export from lellm-events ──────────────────────────────
+// FlowEvent 和 BarrierId/BarrierDecision 从 lellm-events 导入。
+pub use lellm_events::{BarrierDecision, BarrierId, FlowEvent};
 
 // ─── GraphEvent ───────────────────────────────────────────────
 

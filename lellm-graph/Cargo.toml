@@ -8,6 +8,8 @@ documentation = "https://docs.rs/lellm-graph"
 repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
+lellm-core.workspace = true
+lellm-events.workspace = true
 lellm-runtime.workspace = true
 async-trait.workspace = true
 indexmap.workspace = true

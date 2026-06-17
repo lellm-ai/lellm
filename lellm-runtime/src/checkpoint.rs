@@ -511,27 +511,8 @@ pub enum GraphHashMode {
 
 // ─── ExecutionTrace ─────────────────────────────────────────────
 
-/// Trace ID — 唯一标识一次完整的图执行。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TraceId(pub uuid::Uuid);
-
-impl Default for TraceId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TraceId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
-impl std::fmt::Display for TraceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Trace ID — 从 lellm-core 导入。
+pub use lellm_core::TraceId;
 
 /// 节点执行记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
