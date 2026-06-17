@@ -18,8 +18,9 @@ pub mod statekey;
 pub use lellm_runtime::{
     Checkpoint, CheckpointId, CheckpointPolicy, CheckpointScore, CheckpointStore,
     CheckpointStoreError, CheckpointTrigger, DeltaOp, ExecutionMetadata, ExecutionTrace,
-    GraphHashMode, InMemoryCheckpointStore, Reducer, ReducerRegistry, SpanId, State, StateDelta,
-    StateError, StateExt, StateKey, StateKeyExt, StateReducer, TraceId, array_reducer,
+    GraphHashMode, IncrementalSnapshotState, InMemoryCheckpointStore, Reducer, ReducerRegistry,
+    SpanId, State, StateDelta, StateError, StateExt, StateKey, StateKeyExt, StateReducer,
+    StateSnapshot, TraceId, array_reducer,
 };
 
 // ─── Error Types ────────────────────────────────────────────────

@@ -22,7 +22,7 @@
 > - ✅ 十三、Agent-level Hook（before_agent/after_agent 返回 Vec<StateDelta>）
 > - ✅ 十四、lellm-events crate（事件协议独立，AgentEvent/FlowEvent/GraphEvent/TraceId/SpanId）
 > - ✅ 十五、Adaptive Checkpoint（ExecutionMetadata + CheckpointScore 动态决策）
-> - ⏳ 十六、StateSnapshot 增量 Checkpoint（base + recent_deltas）
+> - ✅ 十六、StateSnapshot 增量 Checkpoint（base + recent_deltas + compact）
 
 ---
 

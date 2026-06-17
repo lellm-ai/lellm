@@ -25,7 +25,7 @@ use crate::state::{
 
 use lellm_runtime::checkpoint::{
     Checkpoint, CheckpointPolicy, CheckpointScore, CheckpointStore, CheckpointTrigger,
-    ExecutionMetadata,
+    ExecutionMetadata, IncrementalSnapshotState,
 };
 
 // ─── DecisionRegistry ─────────────────────────────────────────
@@ -126,6 +126,12 @@ pub struct GraphExecutor {
     pending_reducers: Vec<(String, lellm_runtime::Reducer)>,
     /// Adaptive Checkpoint 评分器。
     checkpoint_score: CheckpointScore,
+    /// 增量快照：上次 checkpoint 的完整 State（base）。
+    last_checkpoint_state: Option<State>,
+    /// 增量快照：上次 checkpoint 以来的 deltas。
+    pending_deltas: Vec<StateDelta>,
+    /// 增量快照：delta 累积阈值（超过此值重新生成 base）。
+    delta_compact_threshold: usize,
 }
 
 impl Clone for GraphExecutor {
@@ -137,6 +143,9 @@ impl Clone for GraphExecutor {
             graph_hash: self.graph_hash.clone(),
             pending_reducers: self.pending_reducers.clone(),
             checkpoint_score: self.checkpoint_score.clone(),
+            last_checkpoint_state: self.last_checkpoint_state.clone(),
+            pending_deltas: self.pending_deltas.clone(),
+            delta_compact_threshold: self.delta_compact_threshold,
         }
     }
 }
@@ -161,6 +170,9 @@ impl Default for GraphExecutor {
             graph_hash: String::new(),
             pending_reducers: Vec::new(),
             checkpoint_score: CheckpointScore::default(),
+            last_checkpoint_state: None,
+            pending_deltas: Vec::new(),
+            delta_compact_threshold: 20,
         }
     }
 }
@@ -175,6 +187,9 @@ impl GraphExecutor {
             graph_hash: String::new(),
             pending_reducers: Vec::new(),
             checkpoint_score: CheckpointScore::default(),
+            last_checkpoint_state: None,
+            pending_deltas: Vec::new(),
+            delta_compact_threshold: 20,
         }
     }
 
@@ -192,6 +207,9 @@ impl GraphExecutor {
             graph_hash: graph.hash(),
             pending_reducers: Vec::new(),
             checkpoint_score: CheckpointScore::default(),
+            last_checkpoint_state: None,
+            pending_deltas: Vec::new(),
+            delta_compact_threshold: 20,
         }
     }
 
@@ -322,6 +340,7 @@ impl GraphExecutor {
         let mut execution_log = Vec::new();
         let mut decision_registry = DecisionRegistry::new();
         let mut reducer_registry = ReducerRegistry::new();
+        let mut snapshot_state = IncrementalSnapshotState::new(self.delta_compact_threshold);
 
         // 应用待注册的 Reducer
         for (key, reducer) in &self.pending_reducers {
@@ -367,6 +386,7 @@ impl GraphExecutor {
                     step,
                     CheckpointTrigger::Explicit,
                     None,
+                    &mut snapshot_state,
                 )
                 .await;
             }
@@ -449,6 +469,7 @@ impl GraphExecutor {
                     step,
                     CheckpointTrigger::Adaptive,
                     Some(&metadata),
+                    &mut snapshot_state,
                 )
                 .await;
             }
@@ -540,6 +561,7 @@ impl GraphExecutor {
                                 step,
                                 CheckpointTrigger::Explicit,
                                 None,
+                                &mut snapshot_state,
                             )
                             .await;
                             current = target;
@@ -552,6 +574,7 @@ impl GraphExecutor {
                                 &execution_log,
                                 start_time,
                                 trace_id,
+                                &mut snapshot_state,
                             )
                             .await;
                             return;
@@ -613,6 +636,7 @@ impl GraphExecutor {
                                 step,
                                 CheckpointTrigger::BarrierResolved,
                                 None,
+                                &mut snapshot_state,
                             )
                             .await;
                             current = target;
@@ -625,6 +649,7 @@ impl GraphExecutor {
                                 &execution_log,
                                 start_time,
                                 trace_id,
+                                &mut snapshot_state,
                             )
                             .await;
                             return;
@@ -1308,11 +1333,35 @@ impl GraphExecutor {
         execution_log: &[ExecutionEntry],
         start_time: Instant,
         trace_id: TraceId,
+        snapshot_state: &mut IncrementalSnapshotState,
     ) {
         // 💾 Checkpoint: ExecutionCompleted 模式下保存最终状态
         if self.policy.should_checkpoint_on_completion() {
             if let Some(store) = &self.store {
-                let ck = Checkpoint::new(trace_id, &self.graph_hash, "__complete__", state.clone());
+                // 生成增量快照
+                let (base, deltas, current) = snapshot_state.snapshot(state);
+                let ck = if let Some(base_state) = base {
+                    Checkpoint::with_snapshot(
+                        trace_id,
+                        &self.graph_hash,
+                        "__complete__",
+                        current,
+                        base_state,
+                        deltas,
+                    )
+                } else if !deltas.is_empty() {
+                    Checkpoint::with_snapshot(
+                        trace_id,
+                        &self.graph_hash,
+                        "__complete__",
+                        current.clone(),
+                        current,
+                        deltas,
+                    )
+                } else {
+                    Checkpoint::new(trace_id, &self.graph_hash, "__complete__", state.clone())
+                };
+
                 match store.save(&ck).await {
                     Ok(()) => {
                         let _ = self
@@ -1518,6 +1567,7 @@ impl GraphExecutor {
         step: usize,
         trigger: CheckpointTrigger,
         metadata: Option<&ExecutionMetadata>,
+        snapshot_state: &mut IncrementalSnapshotState,
     ) {
         // 检查该 trigger 是否启用
         let should_save = match trigger {
@@ -1547,10 +1597,39 @@ impl GraphExecutor {
             None => return,
         };
 
-        let ck = Checkpoint::new(*trace_id, &self.graph_hash, next_node, state.clone());
+        // 生成增量快照
+        let (base, deltas, current) = snapshot_state.snapshot(state);
+        let ck = if let Some(base_state) = base {
+            // 有 base — 创建增量快照
+            Checkpoint::with_snapshot(
+                *trace_id,
+                &self.graph_hash,
+                next_node,
+                current,
+                base_state,
+                deltas,
+            )
+        } else if !deltas.is_empty() {
+            // 有 deltas 但无 base — 使用当前 State 作为 base
+            Checkpoint::with_snapshot(
+                *trace_id,
+                &self.graph_hash,
+                next_node,
+                current.clone(),
+                current,
+                deltas,
+            )
+        } else {
+            // 无 base 无 deltas — 全量快照
+            Checkpoint::new(*trace_id, &self.graph_hash, next_node, state.clone())
+        };
 
         match store.save(&ck).await {
             Ok(()) => {
+                // 更新 snapshot state 的 base
+                snapshot_state.base_state = Some(state.clone());
+                snapshot_state.clear_pending();
+
                 let _ = self
                     .send(
                         event_tx,
@@ -1631,6 +1710,9 @@ impl GraphExecutor {
             graph_hash: current_hash,
             pending_reducers: self.pending_reducers.clone(),
             checkpoint_score: self.checkpoint_score.clone(),
+            last_checkpoint_state: Some(checkpoint.restore_state()),
+            pending_deltas: Vec::new(),
+            delta_compact_threshold: self.delta_compact_threshold,
         };
 
         // 从 Checkpoint 的 current_node 继续

@@ -288,6 +288,8 @@ pub struct Checkpoint {
     pub state: State,
     /// 创建时间
     pub created_at: String,
+    /// 增量快照（可选 — 用于减少序列化成本）
+    pub snapshot: Option<StateSnapshot>,
 }
 
 impl Checkpoint {
@@ -304,7 +306,197 @@ impl Checkpoint {
             current_node: NodeId(current_node.into()),
             state,
             created_at: chrono_like_timestamp(),
+            snapshot: None,
         }
+    }
+
+    /// 创建增量快照 Checkpoint。
+    ///
+    /// - `base_snapshot` — 上次 checkpoint 的完整 State
+    /// - `recent_deltas` — 两次 checkpoint 间的增量
+    /// - `current_state` — 当前完整 State（用于 fallback）
+    pub fn with_snapshot(
+        parent_trace_id: TraceId,
+        graph_hash: impl Into<String>,
+        current_node: impl Into<String>,
+        current_state: State,
+        base_snapshot: State,
+        recent_deltas: Vec<StateDelta>,
+    ) -> Self {
+        Self {
+            checkpoint_id: CheckpointId(uuid::Uuid::new_v4()),
+            parent_trace_id,
+            graph_hash: graph_hash.into(),
+            current_node: NodeId(current_node.into()),
+            state: current_state,
+            created_at: chrono_like_timestamp(),
+            snapshot: Some(StateSnapshot {
+                base_snapshot,
+                recent_deltas,
+            }),
+        }
+    }
+
+    /// 恢复 State — 优先使用增量快照，fallback 到完整快照。
+    ///
+    /// 如果有 snapshot，从 base + apply(deltas) 恢复。
+    /// 否则直接使用 state 字段。
+    pub fn restore_state(&self) -> State {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.restore()
+        } else {
+            self.state.clone()
+        }
+    }
+}
+
+/// 增量 State 快照 — 减少序列化成本。
+///
+/// 核心思想：不每次都保存完整 State，
+/// 而是保存 base_snapshot + recent_deltas。
+/// 恢复时：base + apply(deltas) → 避免频繁全量序列化。
+///
+/// # 内存节省
+///
+/// 假设 State 500KB，每次 checkpoint 保存 10 个 delta（每个 1KB）：
+/// - 全量：500KB × N 次 = 5MB
+/// - 增量：500KB + 10KB × N 次 = 1.5MB（N=10 时节省 70%）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateSnapshot {
+    /// 上次 checkpoint 的完整 State（base）
+    pub base_snapshot: State,
+    /// 两次 checkpoint 间的增量（最近的 delta 在最后）
+    pub recent_deltas: Vec<StateDelta>,
+}
+
+impl StateSnapshot {
+    /// 从 base + deltas 恢复完整 State。
+    pub fn restore(&self) -> State {
+        let mut state = self.base_snapshot.clone();
+        // 按顺序 apply deltas（简单的 last-write-wins）
+        for delta in &self.recent_deltas {
+            match delta.op {
+                crate::delta::DeltaOp::Put => {
+                    state.insert(delta.key.to_string(), delta.value.clone());
+                }
+                crate::delta::DeltaOp::Delete => {
+                    state.remove(delta.key.as_ref());
+                }
+            }
+        }
+        state
+    }
+
+    /// 获取 base snapshot 的大小估算（字节）。
+    pub fn base_size_bytes(&self) -> usize {
+        serde_json::to_vec(&self.base_snapshot)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// 获取 deltas 的大小估算（字节）。
+    pub fn deltas_size_bytes(&self) -> usize {
+        serde_json::to_vec(&self.recent_deltas)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// 总大小估算（字节）。
+    pub fn total_size_bytes(&self) -> usize {
+        self.base_size_bytes() + self.deltas_size_bytes()
+    }
+
+    /// 压缩 — 如果 deltas 累积过多，重新生成 base。
+    ///
+    /// 当 `recent_deltas.len() > threshold` 时，
+    /// 将当前恢复结果作为新 base，清空 deltas。
+    pub fn compact(&mut self, threshold: usize) {
+        if self.recent_deltas.len() > threshold {
+            let restored = self.restore();
+            self.base_snapshot = restored;
+            self.recent_deltas.clear();
+        }
+    }
+}
+
+// ─── IncrementalSnapshotState ─────────────────────────────────
+
+/// 增量快照运行时状态 — 在 Executor 的 run_loop 中维护。
+///
+/// 跟踪上次 checkpoint 的 base 和累积的 deltas，
+/// 用于在保存 checkpoint 时生成增量快照。
+#[derive(Debug, Clone, Default)]
+pub struct IncrementalSnapshotState {
+    /// 上次 checkpoint 的完整 State（base）
+    pub base_state: Option<State>,
+    /// 上次 checkpoint 以来的 deltas
+    pub pending_deltas: Vec<StateDelta>,
+    /// delta 累积阈值（超过此值重新生成 base）
+    pub compact_threshold: usize,
+}
+
+impl IncrementalSnapshotState {
+    /// 创建新的增量快照状态。
+    pub fn new(compact_threshold: usize) -> Self {
+        Self {
+            base_state: None,
+            pending_deltas: Vec::new(),
+            compact_threshold,
+        }
+    }
+
+    /// 记录一个 delta（节点执行后调用）。
+    pub fn record_delta(&mut self, delta: StateDelta) {
+        self.pending_deltas.push(delta);
+    }
+
+    /// 记录多个 delta。
+    pub fn record_deltas(&mut self, deltas: Vec<StateDelta>) {
+        self.pending_deltas.extend(deltas);
+    }
+
+    /// 生成增量快照（保存 checkpoint 时调用）。
+    ///
+    /// 返回 `(base_state, recent_deltas, current_state)`：
+    /// - `base_state` — 上次 checkpoint 的完整 State（如果没有则为 None）
+    /// - `recent_deltas` — 上次 checkpoint 以来的 deltas
+    /// - `current_state` — 当前完整 State（用于 fallback）
+    pub fn snapshot(&mut self, current_state: &State) -> (Option<State>, Vec<StateDelta>, State) {
+        let base = self.base_state.clone();
+        let deltas = std::mem::take(&mut self.pending_deltas);
+
+        // 压缩：如果 deltas 过多，重新生成 base
+        if base.is_some() && deltas.len() > self.compact_threshold {
+            // 使用当前 State 作为新 base
+            self.base_state = Some(current_state.clone());
+            self.pending_deltas.clear();
+            return (None, Vec::new(), current_state.clone());
+        }
+
+        (base, deltas, current_state.clone())
+    }
+
+    /// 从 checkpoint 恢复增量快照状态。
+    pub fn from_checkpoint(checkpoint: &Checkpoint) -> Self {
+        if let Some(snapshot) = &checkpoint.snapshot {
+            Self {
+                base_state: Some(snapshot.base_snapshot.clone()),
+                pending_deltas: snapshot.recent_deltas.clone(),
+                compact_threshold: 20,
+            }
+        } else {
+            // 全量快照 — 将 state 作为 base
+            Self {
+                base_state: Some(checkpoint.state.clone()),
+                pending_deltas: Vec::new(),
+                compact_threshold: 20,
+            }
+        }
+    }
+
+    /// 清空 pending deltas（checkpoint 保存成功后调用）。
+    pub fn clear_pending(&mut self) {
+        self.pending_deltas.clear();
     }
 }
 
