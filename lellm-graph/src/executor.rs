@@ -23,7 +23,7 @@ use crate::state::{
     ExecutionEntry, GraphResult, ReducerRegistry, SpanId, State, StateDelta, TraceId,
 };
 
-use lellm_runtime::checkpoint::{Checkpoint, CheckpointPolicy, CheckpointStore};
+use lellm_runtime::checkpoint::{Checkpoint, CheckpointPolicy, CheckpointStore, CheckpointTrigger};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -119,6 +119,8 @@ pub struct GraphExecutor {
     policy: CheckpointPolicy,
     /// 图结构指纹（用于恢复时校验）。
     graph_hash: String,
+    /// 待注册的 Reducer（在 run_loop 中应用到 ReducerRegistry）。
+    pending_reducers: Vec<(String, lellm_runtime::Reducer)>,
 }
 
 impl Clone for GraphExecutor {
@@ -126,8 +128,9 @@ impl Clone for GraphExecutor {
         Self {
             max_steps: self.max_steps,
             store: self.store.clone(),
-            policy: self.policy,
+            policy: self.policy.clone(),
             graph_hash: self.graph_hash.clone(),
+            pending_reducers: self.pending_reducers.clone(),
         }
     }
 }
@@ -148,8 +151,9 @@ impl Default for GraphExecutor {
         Self {
             max_steps: 50,
             store: None,
-            policy: CheckpointPolicy::EveryNode,
+            policy: CheckpointPolicy::default(),
             graph_hash: String::new(),
+            pending_reducers: Vec::new(),
         }
     }
 }
@@ -162,6 +166,7 @@ impl GraphExecutor {
             store: None,
             policy: CheckpointPolicy::default(),
             graph_hash: String::new(),
+            pending_reducers: Vec::new(),
         }
     }
 
@@ -177,6 +182,7 @@ impl GraphExecutor {
             store: Some(store),
             policy,
             graph_hash: graph.hash(),
+            pending_reducers: Vec::new(),
         }
     }
 
@@ -188,6 +194,13 @@ impl GraphExecutor {
     /// 设置 Checkpoint 频率策略。
     pub fn set_policy(&mut self, policy: CheckpointPolicy) {
         self.policy = policy;
+    }
+
+    /// 注册 key 的 Reducer（用于 ParallelNode 合并策略）。
+    pub fn register_reducer(&mut self, key: &str, reducer: lellm_runtime::Reducer) {
+        // ReducerRegistry 在 run_loop 中创建，这里存储待注册的 reducers
+        // 通过一个新字段传递
+        self.pending_reducers.push((key.to_string(), reducer));
     }
 
     /// 设置图结构指纹。
@@ -295,11 +308,14 @@ impl GraphExecutor {
         let mut decision_registry = DecisionRegistry::new();
         let mut reducer_registry = ReducerRegistry::new();
 
+        // 应用待注册的 Reducer
+        for (key, reducer) in &self.pending_reducers {
+            reducer_registry.register(key, *reducer);
+        }
+
         let mut current = graph.start_node().to_string();
         let mut step: usize = 0;
         let trace_id = TraceId::default();
-        // Manual checkpoint pending flag
-        let mut manual_checkpoint_pending = false;
 
         // 发射 GraphStart 事件
         if self
@@ -326,9 +342,17 @@ impl GraphExecutor {
                 return;
             }
 
-            // ⚡ Manual checkpoint 信号检测
+            // ⚡ Manual checkpoint 信号检测 — 立即保存
             if checkpoint_rx.try_recv().is_ok() {
-                manual_checkpoint_pending = true;
+                self.save_checkpoint_if_needed(
+                    &event_tx,
+                    &trace_id,
+                    &current,
+                    &state,
+                    step,
+                    CheckpointTrigger::Explicit,
+                )
+                .await;
             }
 
             step += 1;
@@ -472,18 +496,16 @@ impl GraphExecutor {
 
                     match outcome {
                         StepOutcome::Continue(target) => {
-                            // 💾 Checkpoint: EveryNode 或 Manual 模式下保存
+                            // 💾 Checkpoint: Explicit 模式下保存（节点标注了 .checkpoint()）
                             self.save_checkpoint_if_needed(
                                 &event_tx,
                                 &trace_id,
                                 &target,
                                 &state,
                                 step,
-                                manual_checkpoint_pending,
-                                CheckpointPolicy::EveryNode,
+                                CheckpointTrigger::Explicit,
                             )
                             .await;
-                            manual_checkpoint_pending = false;
                             current = target;
                         }
                         StepOutcome::Break => {
@@ -546,18 +568,16 @@ impl GraphExecutor {
 
                     match outcome {
                         StepOutcome::Continue(target) => {
-                            // 💾 Checkpoint: BarrierOnly 或 Manual 模式下保存
+                            // 💾 Checkpoint: BarrierResolved 模式下保存
                             self.save_checkpoint_if_needed(
                                 &event_tx,
                                 &trace_id,
                                 &target,
                                 &state,
                                 step,
-                                manual_checkpoint_pending,
-                                CheckpointPolicy::BarrierOnly,
+                                CheckpointTrigger::BarrierResolved,
                             )
                             .await;
-                            manual_checkpoint_pending = false;
                             current = target;
                         }
                         StepOutcome::Break => {
@@ -1252,6 +1272,34 @@ impl GraphExecutor {
         start_time: Instant,
         trace_id: TraceId,
     ) {
+        // 💾 Checkpoint: ExecutionCompleted 模式下保存最终状态
+        if self.policy.should_checkpoint_on_completion() {
+            if let Some(store) = &self.store {
+                let ck = Checkpoint::new(trace_id, &self.graph_hash, "__complete__", state.clone());
+                match store.save(&ck).await {
+                    Ok(()) => {
+                        let _ = self
+                            .send(
+                                event_tx,
+                                GraphEvent::CheckpointSaved {
+                                    checkpoint_id: ck.checkpoint_id.clone(),
+                                    node_name: "__complete__".to_string(),
+                                    step: execution_log.len(),
+                                },
+                            )
+                            .await;
+                        tracing::debug!(
+                            checkpoint = %ck.checkpoint_id,
+                            "final checkpoint saved on completion"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "final checkpoint save failed");
+                    }
+                }
+            }
+        }
+
         let _ = self
             .send(
                 event_tx,
@@ -1429,14 +1477,15 @@ impl GraphExecutor {
         next_node: &str,
         state: &State,
         step: usize,
-        manual_pending: bool,
-        caller_policy: CheckpointPolicy,
+        trigger: CheckpointTrigger,
     ) {
-        // 检查是否需要保存
-        let should_save = match self.policy {
-            CheckpointPolicy::EveryNode => caller_policy == CheckpointPolicy::EveryNode,
-            CheckpointPolicy::BarrierOnly => caller_policy == CheckpointPolicy::BarrierOnly,
-            CheckpointPolicy::Manual => manual_pending,
+        // 检查该 trigger 是否启用
+        let should_save = match trigger {
+            CheckpointTrigger::BarrierResolved => self.policy.should_checkpoint_on_barrier(),
+            CheckpointTrigger::ExecutionCompleted => self.policy.should_checkpoint_on_completion(),
+            CheckpointTrigger::HumanDecision => self.policy.should_checkpoint_on_human_decision(),
+            CheckpointTrigger::Explicit => self.policy.should_checkpoint_on_explicit(),
+            CheckpointTrigger::Adaptive => false, // v0.4
         };
 
         if !should_save {
@@ -1528,8 +1577,9 @@ impl GraphExecutor {
         let executor = Self {
             max_steps: self.max_steps,
             store: self.store.clone(),
-            policy: self.policy,
+            policy: self.policy.clone(),
             graph_hash: current_hash,
+            pending_reducers: self.pending_reducers.clone(),
         };
 
         // 从 Checkpoint 的 current_node 继续

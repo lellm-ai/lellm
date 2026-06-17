@@ -254,7 +254,7 @@ async fn main() {
     let _ = g.node(
         "init",
         NodeKind::Task(TaskNode::new("init", |_state| {
-            Ok(vec![StateDelta::set(
+            Ok(vec![StateDelta::put(
                 "calc.messages",
                 serde_json::json!(vec![Message::User {
                     content: lellm_core::text_block("3加4等于多少，然后再乘以2。".to_string(),),

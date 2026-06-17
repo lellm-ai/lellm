@@ -87,7 +87,7 @@ impl BarrierNode {
             BarrierDecision::Approve => {
                 tracing::info!(barrier = %self.name, "approved");
                 let deltas = vec![
-                    StateDelta::set(&self.approve_key, serde_json::json!(true)),
+                    StateDelta::put(&self.approve_key, serde_json::json!(true)),
                     StateDelta::delete(&self.reject_key),
                 ];
                 (NextStep::GoToNext, deltas)
@@ -95,14 +95,14 @@ impl BarrierNode {
             BarrierDecision::Reject { reason } => {
                 tracing::warn!(barrier = %self.name, reason = %reason, "rejected");
                 let deltas = vec![
-                    StateDelta::set(&self.reject_key, serde_json::json!(reason)),
+                    StateDelta::put(&self.reject_key, serde_json::json!(reason)),
                     StateDelta::delete(&self.approve_key),
                 ];
                 (NextStep::GoToNext, deltas)
             }
             BarrierDecision::Modify { key, value } => {
                 tracing::info!(barrier = %self.name, key = %key, "state modified");
-                let deltas = vec![StateDelta::set(key, value)];
+                let deltas = vec![StateDelta::put(key, value)];
                 (NextStep::GoToNext, deltas)
             }
             BarrierDecision::Reroute { target } => {

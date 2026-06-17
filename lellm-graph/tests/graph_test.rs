@@ -25,19 +25,19 @@ async fn test_linear_pipeline() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |_state| {
-                Ok(vec![StateDelta::set("step", serde_json::json!("a"))])
+                Ok(vec![StateDelta::put("step", serde_json::json!("a"))])
             })),
         );
         let _ = g.node(
             "b",
             NodeKind::Task(TaskNode::new("b", |_state| {
-                Ok(vec![StateDelta::set("step", serde_json::json!("b"))])
+                Ok(vec![StateDelta::put("step", serde_json::json!("b"))])
             })),
         );
         let _ = g.node(
             "c",
             NodeKind::Task(TaskNode::new("c", |_state| {
-                Ok(vec![StateDelta::set("step", serde_json::json!("c"))])
+                Ok(vec![StateDelta::put("step", serde_json::json!("c"))])
             })),
         );
         let _ = g.edge("a", "b");
@@ -75,13 +75,13 @@ async fn test_condition_branching() {
         let _ = g.node(
             "yes",
             NodeKind::Task(TaskNode::new("yes", |_state| {
-                Ok(vec![StateDelta::set("result", serde_json::json!("yes"))])
+                Ok(vec![StateDelta::put("result", serde_json::json!("yes"))])
             })),
         );
         let _ = g.node(
             "no",
             NodeKind::Task(TaskNode::new("no", |_state| {
-                Ok(vec![StateDelta::set("result", serde_json::json!("no"))])
+                Ok(vec![StateDelta::put("result", serde_json::json!("no"))])
             })),
         );
         let _ = g.edge("check", "yes");
@@ -168,7 +168,7 @@ async fn test_cyclic_graph_steps_exceeded() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
@@ -202,7 +202,7 @@ async fn test_cyclic_graph_with_edge_if_exit() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
@@ -238,7 +238,7 @@ async fn test_condition_node_back_jump() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node(
@@ -407,7 +407,7 @@ async fn test_barrier_reject_with_back_jump() {
             "task",
             NodeKind::Task(TaskNode::new("task", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node("review", NodeKind::Barrier(BarrierNode::new("review")));
@@ -561,13 +561,13 @@ async fn test_barrier_reroute() {
         let _ = g.node(
             "path_a",
             NodeKind::Task(TaskNode::new("path_a", |_state| {
-                Ok(vec![StateDelta::set("path", serde_json::json!("A"))])
+                Ok(vec![StateDelta::put("path", serde_json::json!("A"))])
             })),
         );
         let _ = g.node(
             "path_b",
             NodeKind::Task(TaskNode::new("path_b", |_state| {
-                Ok(vec![StateDelta::set("path", serde_json::json!("B"))])
+                Ok(vec![StateDelta::put("path", serde_json::json!("B"))])
             })),
         );
         let _ = g.edge("barrier", "path_a");
@@ -615,7 +615,7 @@ async fn test_double_barrier_sequential() {
         let _ = g.node(
             "before_a",
             NodeKind::Task(TaskNode::new("before_a", |_state| {
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "steps",
                     serde_json::json!(Vec::<String>::new()),
                 )])
@@ -630,7 +630,7 @@ async fn test_double_barrier_sequential() {
             NodeKind::Task(TaskNode::new("between", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("passed_a".into());
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "steps",
                     serde_json::to_value(steps).unwrap(),
                 )])
@@ -645,7 +645,7 @@ async fn test_double_barrier_sequential() {
             NodeKind::Task(TaskNode::new("after_b", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("passed_b".into());
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "steps",
                     serde_json::to_value(steps).unwrap(),
                 )])
@@ -769,7 +769,7 @@ async fn test_edge_analysis_no_runtime_interference() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
@@ -934,7 +934,7 @@ async fn test_goto_edge_with_analysis() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node(
@@ -1098,8 +1098,8 @@ async fn test_statekey_in_graph_execution() {
             "set",
             NodeKind::Task(TaskNode::new("set", |_state| {
                 Ok(vec![
-                    StateDelta::set("count", serde_json::json!(0u64)),
-                    StateDelta::set("result", serde_json::json!("pending")),
+                    StateDelta::put("count", serde_json::json!(0u64)),
+                    StateDelta::put("result", serde_json::json!("pending")),
                 ])
             })),
         );
@@ -1107,9 +1107,9 @@ async fn test_statekey_in_graph_execution() {
             "increment",
             NodeKind::Task(TaskNode::new("increment", |state| {
                 let count = state.get_sk(&SK_COUNT).unwrap_or(0);
-                let mut deltas = vec![StateDelta::set("count", serde_json::json!(count + 1))];
+                let mut deltas = vec![StateDelta::put("count", serde_json::json!(count + 1))];
                 if count + 1 >= 3 {
-                    deltas.push(StateDelta::set("result", serde_json::json!("done")));
+                    deltas.push(StateDelta::put("result", serde_json::json!("done")));
                 }
                 Ok(deltas)
             })),
@@ -1286,7 +1286,7 @@ async fn test_fallback_control_flow() {
         let _ = g.node(
             "fallback_target",
             NodeKind::Task(TaskNode::new("fallback_target", |_state| {
-                Ok(vec![StateDelta::set("recovered", serde_json::json!(true))])
+                Ok(vec![StateDelta::put("recovered", serde_json::json!(true))])
             })),
         );
         let _ = g.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(vec![]))));
@@ -1462,7 +1462,7 @@ async fn test_decide_wildcard() {
         let _ = g.node(
             "before",
             NodeKind::Task(TaskNode::new("before", |_state| {
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "steps",
                     serde_json::json!(Vec::<String>::new()),
                 )])
@@ -1477,7 +1477,7 @@ async fn test_decide_wildcard() {
             NodeKind::Task(TaskNode::new("between", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("step1".into());
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "steps",
                     serde_json::to_value(steps).unwrap(),
                 )])
@@ -1493,7 +1493,7 @@ async fn test_decide_wildcard() {
             NodeKind::Task(TaskNode::new("done", |state| {
                 let mut steps: Vec<String> = state.get_json("steps").unwrap_or_default();
                 steps.push("step2".into());
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "steps",
                     serde_json::to_value(steps).unwrap(),
                 )])
@@ -1643,7 +1643,7 @@ async fn test_consumer_drop_cancels_execution() {
             "a",
             NodeKind::Task(TaskNode::new("a", |state| {
                 let count = state.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                Ok(vec![StateDelta::set("count", serde_json::json!(count + 1))])
+                Ok(vec![StateDelta::put("count", serde_json::json!(count + 1))])
             })),
         );
         let _ = g.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(vec![]))));
@@ -1741,13 +1741,13 @@ async fn test_end_node_stops_execution() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |_state| {
-                Ok(vec![StateDelta::set("visited_a", serde_json::json!(true))])
+                Ok(vec![StateDelta::put("visited_a", serde_json::json!(true))])
             })),
         );
         let _ = g.node(
             "end",
             NodeKind::Task(TaskNode::new("end", |_state| {
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "visited_end",
                     serde_json::json!(true),
                 )])
@@ -1756,7 +1756,7 @@ async fn test_end_node_stops_execution() {
         let _ = g.node(
             "unreachable",
             NodeKind::Task(TaskNode::new("unreachable", |_state| {
-                Ok(vec![StateDelta::set(
+                Ok(vec![StateDelta::put(
                     "visited_unreachable",
                     serde_json::json!(true),
                 )])

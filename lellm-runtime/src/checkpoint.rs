@@ -10,16 +10,88 @@ use crate::state::State;
 
 // ─── CheckpointPolicy ──────────────────────────────────────────
 
-/// Checkpoint 存储频率策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CheckpointPolicy {
-    /// 每节点执行后保存（默认）
-    #[default]
-    EveryNode,
-    /// 仅在 Barrier 节点决策后保存
-    BarrierOnly,
-    /// 手动控制 — 调用方显式调用 save()
-    Manual,
+/// Checkpoint 触发时机。
+///
+/// Checkpoint 是图级执行策略，不是节点属性。
+/// 价值公式：`Checkpoint 价值 = 重算成本 × 失败概率`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointTrigger {
+    /// Barrier 合并后 — 默认开启，并行分支合并点是天然恢复点
+    BarrierResolved,
+    /// 执行完成时 — 默认开启，最终结果 = 最后一个 Checkpoint
+    ExecutionCompleted,
+    /// 人类决策后 — 强烈建议，审批后立即存，避免恢复时重复请求审批
+    HumanDecision,
+    /// 显式标注 — builder.node("agent", agent).checkpoint() 触发
+    Explicit,
+    /// 自适应（v0.4）— 基于 ExecutionMetadata 动态决策
+    Adaptive,
+}
+
+/// Checkpoint 策略 — 图级执行策略，不是节点属性。
+///
+/// 决定何时自动保存 Checkpoint。
+#[derive(Debug, Clone)]
+pub struct CheckpointPolicy {
+    /// 启用的触发器列表
+    pub triggers: Vec<CheckpointTrigger>,
+}
+
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        Self::conservative()
+    }
+}
+
+impl CheckpointPolicy {
+    /// 保守策略：BarrierResolved + ExecutionCompleted + HumanDecision
+    pub fn conservative() -> Self {
+        Self {
+            triggers: vec![
+                CheckpointTrigger::BarrierResolved,
+                CheckpointTrigger::ExecutionCompleted,
+                CheckpointTrigger::HumanDecision,
+            ],
+        }
+    }
+
+    /// 最小策略：仅 BarrierResolved + ExecutionCompleted
+    pub fn minimal() -> Self {
+        Self {
+            triggers: vec![
+                CheckpointTrigger::BarrierResolved,
+                CheckpointTrigger::ExecutionCompleted,
+            ],
+        }
+    }
+
+    /// 手动策略：仅显式触发
+    pub fn manual() -> Self {
+        Self {
+            triggers: vec![CheckpointTrigger::Explicit],
+        }
+    }
+
+    /// 检查是否应该在 BarrierResolved 时保存
+    pub fn should_checkpoint_on_barrier(&self) -> bool {
+        self.triggers.contains(&CheckpointTrigger::BarrierResolved)
+    }
+
+    /// 检查是否应该在 ExecutionCompleted 时保存
+    pub fn should_checkpoint_on_completion(&self) -> bool {
+        self.triggers
+            .contains(&CheckpointTrigger::ExecutionCompleted)
+    }
+
+    /// 检查是否应该在 HumanDecision 时保存
+    pub fn should_checkpoint_on_human_decision(&self) -> bool {
+        self.triggers.contains(&CheckpointTrigger::HumanDecision)
+    }
+
+    /// 检查是否应该在显式触发时保存
+    pub fn should_checkpoint_on_explicit(&self) -> bool {
+        self.triggers.contains(&CheckpointTrigger::Explicit)
+    }
 }
 
 // ─── CheckpointStoreError ──────────────────────────────────────

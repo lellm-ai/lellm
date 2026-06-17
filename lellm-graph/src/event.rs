@@ -41,7 +41,8 @@ impl BarrierId {
 /// 节点内部事件 — 解耦的通用事件中间层。
 ///
 /// Graph 不知道 `AgentEvent`、`ToolCall`、`ToolResult`。
-/// 具体节点（如 AgentFlowNode）通过 `Extension` 变体注入内部事件。
+/// 具体节点（如 AgentFlowNode）通过 `Custom` 变体注入内部事件，
+/// 使用 `Box<dyn Any>` 保证类型安全的向下转换。
 #[derive(Debug)]
 pub enum FlowEvent {
     /// 节点开始执行
@@ -79,12 +80,13 @@ pub enum FlowEvent {
         success: bool,
         duration: Duration,
     },
-    /// 扩展事件 — 具体节点类型通过此变体注入内部事件。
+    /// 自定义事件 — 具体节点类型通过此变体注入内部事件。
     ///
-    /// 例如 AgentFlowNode 将 AgentEvent 序列化为 Value 后注入。
-    Extension {
+    /// 使用 `Box<dyn Any>` 保证类型安全：消费者通过 `downcast_ref::<T>()`
+    /// 获取具体类型，无需 serde_json::Value 字符串匹配。
+    Custom {
         node_id: String,
-        payload: serde_json::Value,
+        payload: Box<dyn std::any::Any + Send + Sync>,
     },
 }
 
@@ -159,8 +161,8 @@ pub enum GraphEvent {
     },
     /// Checkpoint 已保存。
     ///
-    /// 当 `CheckpointPolicy::EveryNode` 或 `BarrierOnly` 自动保存时发射。
-    /// `Manual` 模式下通过 `GraphHandle::checkpoint()` 触发。
+    /// 当 CheckpointPolicy 的 trigger 匹配时自动保存。
+    /// `Explicit` 模式下通过 `GraphHandle::checkpoint()` 触发。
     CheckpointSaved {
         /// Checkpoint ID
         checkpoint_id: CheckpointId,
@@ -297,10 +299,10 @@ impl GraphHandle {
 
     /// 手动触发 Checkpoint 保存。
     ///
-    /// 在 `CheckpointPolicy::Manual` 模式下，executor 不会自动保存，
+    /// 在 `Explicit` 模式下，executor 不会自动保存，
     /// 调用此方法可让 executor 在当前步骤后保存一个 Checkpoint。
     ///
-    /// 在 `EveryNode` / `BarrierOnly` 模式下调用无副作用（已被自动保存覆盖）。
+    /// 在 `BarrierResolved` / `ExecutionCompleted` 模式下调用无副作用（已被自动保存覆盖）。
     /// 多次调用安全（idempotent）。
     pub async fn checkpoint(&self) -> Result<(), GraphError> {
         self.checkpoint_tx.send(()).await.map_err(|_| {

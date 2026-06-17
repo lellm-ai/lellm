@@ -99,16 +99,16 @@ impl AgentFlowNode {
             .collect();
 
         vec![
-            StateDelta::set(&self.message_key, serde_json::json!(messages)),
-            StateDelta::set(
+            StateDelta::put(&self.message_key, serde_json::json!(messages)),
+            StateDelta::put(
                 format!("{}_stop_reason", self.name),
                 serde_json::json!(format!("{:?}", result.stop_reason)),
             ),
-            StateDelta::set(
+            StateDelta::put(
                 format!("{}_iterations", self.name),
                 serde_json::json!(result.iterations),
             ),
-            StateDelta::set(
+            StateDelta::put(
                 format!("{}_tool_calls", self.name),
                 serde_json::json!(result.tool_calls_executed),
             ),
@@ -190,14 +190,13 @@ impl FlowNode for AgentFlowNode {
 
             // 转发事件（如果启用）
             if self.stream_events {
-                let payload = agent_event_to_json(&agent_event);
                 let _ = sink
                     .send(GraphEvent::Node {
                         span_id,
                         node_name: self.name.clone(),
-                        event: FlowEvent::Extension {
+                        event: FlowEvent::Custom {
                             node_id: self.name.clone(),
-                            payload,
+                            payload: Box::new(agent_event.clone()),
                         },
                     })
                     .await;
@@ -211,7 +210,7 @@ impl FlowNode for AgentFlowNode {
                     }
                     AgentEvent::LoopError { error, .. } => {
                         // 错误信息转为 Delta
-                        error_delta = Some(StateDelta::set(
+                        error_delta = Some(StateDelta::put(
                             format!("{}_error", self.name),
                             serde_json::json!(error.to_string()),
                         ));
@@ -261,70 +260,5 @@ impl FlowNode for AgentFlowNode {
             reason: "agent stream ended without terminal event".into(),
             node_name: self.name.clone(),
         })
-    }
-}
-
-/// 将 AgentEvent 序列化为 JSON payload。
-fn agent_event_to_json(event: &AgentEvent) -> serde_json::Value {
-    serde_json::json!({
-        "type": match event {
-            AgentEvent::Provider(_) => "provider",
-            AgentEvent::ToolStart { .. } => "tool_start",
-            AgentEvent::ToolEnd { .. } => "tool_end",
-            AgentEvent::Retry { .. } => "retry",
-            AgentEvent::ContextCompacted { .. } => "context_compacted",
-            AgentEvent::LoopEnd { .. } => "loop_end",
-            AgentEvent::LoopError { .. } => "loop_error",
-        },
-        "event": event_to_detail(event),
-    })
-}
-
-/// 提取事件的详细数据。
-fn event_to_detail(event: &AgentEvent) -> serde_json::Value {
-    match event {
-        AgentEvent::ToolStart { tool_call_id, name } => serde_json::json!({
-            "tool_call_id": tool_call_id,
-            "name": name,
-        }),
-        AgentEvent::ToolEnd {
-            tool_call_id,
-            result,
-        } => serde_json::json!({
-            "tool_call_id": tool_call_id,
-            "success": result.is_ok(),
-        }),
-        AgentEvent::Retry {
-            tool_call_id,
-            attempt,
-            max_attempts,
-            reason,
-        } => serde_json::json!({
-            "tool_call_id": tool_call_id,
-            "attempt": attempt,
-            "max_attempts": max_attempts,
-            "reason": reason,
-        }),
-        AgentEvent::ContextCompacted {
-            before_tokens,
-            after_tokens,
-            removed_messages,
-        } => serde_json::json!({
-            "before_tokens": before_tokens,
-            "after_tokens": after_tokens,
-            "removed_messages": removed_messages,
-        }),
-        AgentEvent::LoopEnd { result } => serde_json::json!({
-            "stop_reason": format!("{:?}", result.stop_reason),
-            "iterations": result.iterations,
-            "tool_calls_executed": result.tool_calls_executed,
-        }),
-        AgentEvent::LoopError { error, iterations } => serde_json::json!({
-            "error": error.to_string(),
-            "iterations": iterations,
-        }),
-        AgentEvent::Provider(_) => serde_json::json!({
-            "type": "provider_event",
-        }),
     }
 }

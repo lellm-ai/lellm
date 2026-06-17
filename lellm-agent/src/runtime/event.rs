@@ -6,7 +6,7 @@
 /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
 /// - 异常结束：`LoopError` 恰好一次，然后 channel 关闭
 /// - 终态事件后不再发送任何事件
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     /// Provider 层事件
     Provider(lellm_provider::ProviderEvent),
