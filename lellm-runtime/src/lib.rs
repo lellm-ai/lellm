@@ -22,9 +22,9 @@ pub use statekey::{StateKey, StateKeyExt};
 
 // ─── Checkpoint + Trace ─────────────────────────────────
 pub use checkpoint::{
-    BarrierDecision, Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore,
-    CheckpointStoreError, CheckpointTrigger, ExecutionEntry, ExecutionTrace, GraphHashMode,
-    GraphResult, NodeId, TraceId,
+    BarrierDecision, Checkpoint, CheckpointId, CheckpointPolicy, CheckpointScore, CheckpointStore,
+    CheckpointStoreError, CheckpointTrigger, ExecutionEntry, ExecutionMetadata, ExecutionTrace,
+    GraphHashMode, GraphResult, NodeId, TraceId,
 };
 
 // ─── Storage ────────────────────────────────────────────

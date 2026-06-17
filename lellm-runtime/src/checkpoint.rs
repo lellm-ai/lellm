@@ -92,6 +92,108 @@ impl CheckpointPolicy {
     pub fn should_checkpoint_on_explicit(&self) -> bool {
         self.triggers.contains(&CheckpointTrigger::Explicit)
     }
+
+    /// 检查是否应该在自适应模式下保存
+    pub fn should_checkpoint_adaptive(&self) -> bool {
+        self.triggers.contains(&CheckpointTrigger::Adaptive)
+    }
+}
+
+// ─── ExecutionMetadata ────────────────────────────────────────
+
+/// 节点执行元数据 — 用于 Adaptive Checkpoint 决策。
+///
+/// 每个节点执行完成后收集此元数据，
+/// 用于计算 CheckpointScore 决定是否保存。
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionMetadata {
+    /// 执行耗时（毫秒）
+    pub duration_ms: u64,
+    /// Token 消耗成本（0.0 表示无 LLM 调用）
+    pub token_cost: f64,
+    /// 是否有外部副作用（如部署、发送消息）
+    pub has_side_effects: bool,
+}
+
+impl ExecutionMetadata {
+    /// TaskNode 等轻量节点的默认元数据。
+    pub fn lightweight() -> Self {
+        Self {
+            duration_ms: 2,
+            token_cost: 0.0,
+            has_side_effects: false,
+        }
+    }
+
+    /// AgentNode 等重量级节点的默认元数据。
+    pub fn heavy() -> Self {
+        Self {
+            duration_ms: 90_000, // 90 秒
+            token_cost: 0.01,    // 约 1 万 token
+            has_side_effects: false,
+        }
+    }
+
+    /// 有副作用的节点（如部署）的默认元数据。
+    pub fn with_side_effects() -> Self {
+        Self {
+            duration_ms: 0,
+            token_cost: 0.0,
+            has_side_effects: true,
+        }
+    }
+}
+
+/// Checkpoint 评分 — 基于 ExecutionMetadata 动态决策。
+///
+/// 评分公式：
+/// ```text
+/// score = duration_weight * duration_ms
+///       + token_weight * token_cost
+///       + side_effect_weight * has_side_effects
+/// ```
+///
+/// score >= threshold → 保存 Checkpoint
+#[derive(Debug, Clone)]
+pub struct CheckpointScore {
+    /// 执行耗时的权重（默认 1.0）
+    pub duration_weight: f64,
+    /// Token 成本的权重（默认 1000.0 — 1 万 token ≈ 1 分钟）
+    pub token_weight: f64,
+    /// 副作用的权重（默认 10000.0 — 一定保存）
+    pub side_effect_weight: f64,
+    /// 保存阈值（默认 100.0 — 约 100ms 或 100 token）
+    pub threshold: f64,
+}
+
+impl Default for CheckpointScore {
+    fn default() -> Self {
+        Self {
+            duration_weight: 1.0,
+            token_weight: 1000.0,
+            side_effect_weight: 10000.0,
+            threshold: 100.0,
+        }
+    }
+}
+
+impl CheckpointScore {
+    /// 计算 Checkpoint 评分。
+    ///
+    /// score >= threshold → 应该保存
+    pub fn calculate(&self, metadata: &ExecutionMetadata) -> f64 {
+        let mut score = self.duration_weight * metadata.duration_ms as f64;
+        score += self.token_weight * metadata.token_cost;
+        if metadata.has_side_effects {
+            score += self.side_effect_weight;
+        }
+        score
+    }
+
+    /// 判断是否应该保存 Checkpoint。
+    pub fn should_checkpoint(&self, metadata: &ExecutionMetadata) -> bool {
+        self.calculate(metadata) >= self.threshold
+    }
 }
 
 // ─── CheckpointStoreError ──────────────────────────────────────

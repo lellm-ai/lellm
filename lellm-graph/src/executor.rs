@@ -23,7 +23,10 @@ use crate::state::{
     ExecutionEntry, GraphResult, ReducerRegistry, SpanId, State, StateDelta, TraceId,
 };
 
-use lellm_runtime::checkpoint::{Checkpoint, CheckpointPolicy, CheckpointStore, CheckpointTrigger};
+use lellm_runtime::checkpoint::{
+    Checkpoint, CheckpointPolicy, CheckpointScore, CheckpointStore, CheckpointTrigger,
+    ExecutionMetadata,
+};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -121,6 +124,8 @@ pub struct GraphExecutor {
     graph_hash: String,
     /// 待注册的 Reducer（在 run_loop 中应用到 ReducerRegistry）。
     pending_reducers: Vec<(String, lellm_runtime::Reducer)>,
+    /// Adaptive Checkpoint 评分器。
+    checkpoint_score: CheckpointScore,
 }
 
 impl Clone for GraphExecutor {
@@ -131,6 +136,7 @@ impl Clone for GraphExecutor {
             policy: self.policy.clone(),
             graph_hash: self.graph_hash.clone(),
             pending_reducers: self.pending_reducers.clone(),
+            checkpoint_score: self.checkpoint_score.clone(),
         }
     }
 }
@@ -154,6 +160,7 @@ impl Default for GraphExecutor {
             policy: CheckpointPolicy::default(),
             graph_hash: String::new(),
             pending_reducers: Vec::new(),
+            checkpoint_score: CheckpointScore::default(),
         }
     }
 }
@@ -167,6 +174,7 @@ impl GraphExecutor {
             policy: CheckpointPolicy::default(),
             graph_hash: String::new(),
             pending_reducers: Vec::new(),
+            checkpoint_score: CheckpointScore::default(),
         }
     }
 
@@ -183,6 +191,7 @@ impl GraphExecutor {
             policy,
             graph_hash: graph.hash(),
             pending_reducers: Vec::new(),
+            checkpoint_score: CheckpointScore::default(),
         }
     }
 
@@ -201,6 +210,12 @@ impl GraphExecutor {
         // ReducerRegistry 在 run_loop 中创建，这里存储待注册的 reducers
         // 通过一个新字段传递
         self.pending_reducers.push((key.to_string(), reducer));
+    }
+
+    /// 设置 Adaptive Checkpoint 评分器。
+    pub fn set_checkpoint_score(mut self, score: CheckpointScore) -> Self {
+        self.checkpoint_score = score;
+        self
     }
 
     /// 设置图结构指纹。
@@ -351,6 +366,7 @@ impl GraphExecutor {
                     &state,
                     step,
                     CheckpointTrigger::Explicit,
+                    None,
                 )
                 .await;
             }
@@ -417,6 +433,25 @@ impl GraphExecutor {
             };
             let node_end = Instant::now();
             let duration = node_end.duration_since(node_start);
+
+            // Adaptive Checkpoint: 收集元数据并判断是否需要保存
+            if self.policy.should_checkpoint_adaptive() {
+                let metadata = ExecutionMetadata {
+                    duration_ms: duration.as_millis() as u64,
+                    token_cost: 0.0,         // TODO: 从节点输出中提取 token 成本
+                    has_side_effects: false, // TODO: 从节点元数据中提取
+                };
+                self.save_checkpoint_if_needed(
+                    &event_tx,
+                    &trace_id,
+                    &current,
+                    &state,
+                    step,
+                    CheckpointTrigger::Adaptive,
+                    Some(&metadata),
+                )
+                .await;
+            }
 
             match result {
                 Ok(StreamNodeResult::Continue {
@@ -504,6 +539,7 @@ impl GraphExecutor {
                                 &state,
                                 step,
                                 CheckpointTrigger::Explicit,
+                                None,
                             )
                             .await;
                             current = target;
@@ -576,6 +612,7 @@ impl GraphExecutor {
                                 &state,
                                 step,
                                 CheckpointTrigger::BarrierResolved,
+                                None,
                             )
                             .await;
                             current = target;
@@ -1467,9 +1504,11 @@ impl GraphExecutor {
 
     /// 根据策略判断是否需要保存 Checkpoint，如需则保存。
     ///
-    /// - `EveryNode` — 每次调用都保存
-    /// - `BarrierOnly` — 仅在 Barrier 分支调用时保存
-    /// - `Manual` — 仅在 `manual_pending` 为 true 时保存
+    /// - `BarrierResolved` — Barrier 合并后保存
+    /// - `ExecutionCompleted` — 执行完成时保存
+    /// - `HumanDecision` — 人类决策后保存
+    /// - `Explicit` — 显式触发时保存
+    /// - `Adaptive` — 基于 ExecutionMetadata 动态决策
     async fn save_checkpoint_if_needed(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
@@ -1478,6 +1517,7 @@ impl GraphExecutor {
         state: &State,
         step: usize,
         trigger: CheckpointTrigger,
+        metadata: Option<&ExecutionMetadata>,
     ) {
         // 检查该 trigger 是否启用
         let should_save = match trigger {
@@ -1485,7 +1525,17 @@ impl GraphExecutor {
             CheckpointTrigger::ExecutionCompleted => self.policy.should_checkpoint_on_completion(),
             CheckpointTrigger::HumanDecision => self.policy.should_checkpoint_on_human_decision(),
             CheckpointTrigger::Explicit => self.policy.should_checkpoint_on_explicit(),
-            CheckpointTrigger::Adaptive => false, // v0.4
+            CheckpointTrigger::Adaptive => {
+                // Adaptive 模式：基于 ExecutionMetadata 动态决策
+                if !self.policy.should_checkpoint_adaptive() {
+                    false
+                } else if let Some(meta) = metadata {
+                    self.checkpoint_score.should_checkpoint(meta)
+                } else {
+                    // 无元数据时默认不保存
+                    false
+                }
+            }
         };
 
         if !should_save {
@@ -1580,6 +1630,7 @@ impl GraphExecutor {
             policy: self.policy.clone(),
             graph_hash: current_hash,
             pending_reducers: self.pending_reducers.clone(),
+            checkpoint_score: self.checkpoint_score.clone(),
         };
 
         // 从 Checkpoint 的 current_node 继续

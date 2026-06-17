@@ -16,10 +16,10 @@ pub mod statekey;
 
 // ─── Re-export from lellm-runtime ─────────────────────────────
 pub use lellm_runtime::{
-    Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore, CheckpointStoreError,
-    CheckpointTrigger, DeltaOp, ExecutionTrace, GraphHashMode, InMemoryCheckpointStore, Reducer,
-    ReducerRegistry, SpanId, State, StateDelta, StateError, StateExt, StateKey, StateKeyExt,
-    StateReducer, TraceId, array_reducer,
+    Checkpoint, CheckpointId, CheckpointPolicy, CheckpointScore, CheckpointStore,
+    CheckpointStoreError, CheckpointTrigger, DeltaOp, ExecutionMetadata, ExecutionTrace,
+    GraphHashMode, InMemoryCheckpointStore, Reducer, ReducerRegistry, SpanId, State, StateDelta,
+    StateError, StateExt, StateKey, StateKeyExt, StateReducer, TraceId, array_reducer,
 };
 
 // ─── Error Types ────────────────────────────────────────────────
