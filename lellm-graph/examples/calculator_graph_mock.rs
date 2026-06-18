@@ -1,4 +1,15 @@
-//! Calculator Graph (Mock) — 使用模拟 Provider 的入门示例
+//! Calculator Graph (Mock) — LangGraph Tutorial 的 LeLLM 对照实现
+//!
+//! 对照 LangGraph 官方教程：
+//!   https://langchain-ai.github.io/langgraph/tutorials/quickstart/
+//!
+//! LangGraph 用 3 个节点手动构建 Agent Loop：
+//!   llm_node → tool_node → condition → (llm_node | END)
+//!
+//! LeLLM 的设计哲学不同：
+//! - `ToolUseLoop` 内部完成 LLM ↔ Tools 的 ReAct 循环
+//! - `AgentFlowNode` 包装 ToolUseLoop，作为 Graph 的一个节点
+//! - Graph 层负责宏观编排（预处理 → Agent → 后处理）
 //!
 //! ```text
 //! cargo run -p lellm-graph --example calculator_graph_mock
