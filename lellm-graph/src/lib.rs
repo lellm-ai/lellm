@@ -1,57 +1,72 @@
-//! lellm-graph — Graph/Node/Edge 编排层。
+//! lellm-graph — Graph/Node/Edge 编排层 + 状态管理 + Checkpoint。
 //!
 //! 通用工作流引擎（类似 LangGraph / Temporal / Prefect）。
-//! 依赖 `lellm-runtime`，不依赖 agent/provider/core。
+//! 吸收了原 lellm-runtime，包含 State/StateDelta/Checkpoint 等基础设施。
+//! 依赖 `lellm-core`，不依赖 agent/provider。
 
 pub mod barrier_node;
+pub mod checkpoint;
+pub mod delta;
 pub mod error;
 pub mod event;
 pub mod executor;
 pub mod graph;
 pub mod hook;
+pub mod ids;
 pub mod node;
 pub mod parallel_node;
 pub mod state;
 pub mod statekey;
+pub mod store;
 
-// ─── Re-export from lellm-runtime ─────────────────────────────
-pub use lellm_runtime::{
-    Checkpoint, CheckpointId, CheckpointPolicy, CheckpointScore, CheckpointStore,
-    CheckpointStoreError, CheckpointTrigger, DeltaOp, ExecutionMetadata, ExecutionTrace,
-    GraphHashMode, IncrementalSnapshotState, InMemoryCheckpointStore, Reducer, ReducerRegistry,
-    SpanId, State, StateDelta, StateError, StateExt, StateKey, StateKeyExt, StateReducer,
-    StateSnapshot, TraceId, array_reducer,
+// ─── IDs ─────────────────────────────────────────────────────
+pub use ids::{SpanId, TraceId};
+
+// ─── State ───────────────────────────────────────────────────
+pub use state::{
+    ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer,
+    array_reducer,
 };
 
-// ─── Error Types ────────────────────────────────────────────────
+// ─── Delta + Reducer ─────────────────────────────────────────
+pub use delta::{DeltaOp, DeltaSource, Reducer, ReducerRegistry, StateDelta};
+
+// ─── StateKey ────────────────────────────────────────────────
+pub use statekey::{StateKey, StateKeyExt, SK_COUNT, SK_MESSAGES, SK_STEPS};
+
+// ─── Checkpoint ──────────────────────────────────────────────
+pub use checkpoint::{
+    BarrierDecisionRecord, Checkpoint, CheckpointId, CheckpointPolicy, CheckpointScore,
+    CheckpointStore, CheckpointStoreError, CheckpointTrigger, ExecutionMetadata, ExecutionTrace,
+    GraphHashMode, IncrementalSnapshotState, NodeId, StateSnapshot,
+};
+
+// ─── Store ───────────────────────────────────────────────────
+pub use store::InMemoryCheckpointStore;
+
+// ─── Error Types ─────────────────────────────────────────────
 pub use error::{
     BuildError, BuildErrors, Diagnostic, DiagnosticCategory, DiagnosticSeverity, GraphDiagnostics,
     GraphError, ObservedError, TerminalError,
 };
 
-// ─── Events ─────────────────────────────────────────────────────
+// ─── Events ──────────────────────────────────────────────────
 pub use event::{
     BarrierDecision, BarrierId, FlowEvent, GraphEvent, GraphExecution, GraphHandle, GraphStream,
 };
 
-// ─── Graph ──────────────────────────────────────────────────────
+// ─── Graph ───────────────────────────────────────────────────
 pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
 
-// ─── Nodes ──────────────────────────────────────────────────────
+// ─── Nodes ───────────────────────────────────────────────────
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
     FlowNode, NextStep, NodeKind, NodeOutput, ParallelErrorStrategy, ParallelNode, TaskFn,
     TaskNode,
 };
 
-// ─── State (graph-specific) ─────────────────────────────────────
-pub use state::{ExecutionEntry, GraphResult};
-
-// ─── StateKey (built-in constants) ──────────────────────────────
-pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS};
-
-// ─── Executor ───────────────────────────────────────────────────
+// ─── Executor ────────────────────────────────────────────────
 pub use executor::GraphExecutor;
 
-// ─── Hooks ──────────────────────────────────────────────────────
+// ─── Hooks ───────────────────────────────────────────────────
 pub use hook::{AgentHook, NoOpHook, TracingHook};

@@ -19,14 +19,13 @@ use crate::event::{
 };
 use crate::graph::Graph;
 use crate::node::{FlowNode, NextStep, NodeKind, ParallelErrorStrategy, StreamNodeResult};
-use crate::state::{
-    ExecutionEntry, GraphResult, ReducerRegistry, SpanId, State, StateDelta, TraceId,
-};
-
-use lellm_runtime::checkpoint::{
+use crate::checkpoint::{
     Checkpoint, CheckpointPolicy, CheckpointScore, CheckpointStore, CheckpointTrigger,
     ExecutionMetadata, IncrementalSnapshotState,
 };
+use crate::delta::{Reducer, ReducerRegistry, StateDelta};
+use crate::ids::{SpanId, TraceId};
+use crate::state::{ExecutionEntry, GraphResult, State};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -123,7 +122,7 @@ pub struct GraphExecutor {
     /// 图结构指纹（用于恢复时校验）。
     graph_hash: String,
     /// 待注册的 Reducer（在 run_loop 中应用到 ReducerRegistry）。
-    pending_reducers: Vec<(String, lellm_runtime::Reducer)>,
+    pending_reducers: Vec<(String, Reducer)>,
     /// Adaptive Checkpoint 评分器。
     checkpoint_score: CheckpointScore,
     /// 增量快照：上次 checkpoint 的完整 State（base）。
@@ -224,7 +223,7 @@ impl GraphExecutor {
     }
 
     /// 注册 key 的 Reducer（用于 ParallelNode 合并策略）。
-    pub fn register_reducer(&mut self, key: &str, reducer: lellm_runtime::Reducer) {
+    pub fn register_reducer(&mut self, key: &str, reducer: Reducer) {
         // ReducerRegistry 在 run_loop 中创建，这里存储待注册的 reducers
         // 通过一个新字段传递
         self.pending_reducers.push((key.to_string(), reducer));
@@ -508,6 +507,7 @@ impl GraphExecutor {
                         }
                         // 发射 StateChanged 事件
                         for delta in &deltas {
+                            let d: StateDelta = delta.clone();
                             let _ = self
                                 .send(
                                     &event_tx,
@@ -516,7 +516,7 @@ impl GraphExecutor {
                                         node_name: node_name.to_string(),
                                         event: FlowEvent::StateChanged {
                                             node_id: node_name.to_string(),
-                                            delta: delta.clone(),
+                                            delta: d,
                                         },
                                     },
                                 )
@@ -1137,7 +1137,7 @@ impl GraphExecutor {
         }
 
         // 收集所有结果
-        let mut all_deltas: Vec<lellm_runtime::StateDelta> = Vec::new();
+        let mut all_deltas: Vec<StateDelta> = Vec::new();
         let mut first_error: Option<GraphError> = None;
         let mut any_failure = false;
 
@@ -1663,7 +1663,7 @@ impl GraphExecutor {
     pub async fn resume_from(
         &self,
         store: &dyn CheckpointStore,
-        trace_id: &lellm_runtime::TraceId,
+        trace_id: &TraceId,
         graph: &std::sync::Arc<Graph>,
     ) -> Result<GraphExecution, GraphError> {
         // 加载最新 Checkpoint
