@@ -20,8 +20,6 @@ pub use runtime::{
     ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop,
     ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
 };
-#[cfg(feature = "v02-preview")]
-pub use runtime::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};
 
 // ─── 糖衣 API（第三层原型） ───
 

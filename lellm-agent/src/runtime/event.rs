@@ -52,7 +52,6 @@ pub enum StopReason {
     OutputBudgetExceeded,
     /// 推理预算超限（thinking token 超过限制）
     ReasoningBudgetExceeded,
-    // NOTE: LoopDetected 将在 v0.2 LoopDetector 实现时加回
 }
 
 /// Agent 层流式事件通道类型别名
