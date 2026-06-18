@@ -145,7 +145,10 @@ pub enum GraphEvent {
     /// Graph 执行完成（恰好一次）
     GraphComplete { result: GraphResult },
     /// Graph 执行出错（恰好一次）
-    GraphError { error: GraphError, state: crate::state::State },
+    GraphError {
+        error: GraphError,
+        state: crate::state::State,
+    },
 }
 
 /// Graph 事件通道类型别名

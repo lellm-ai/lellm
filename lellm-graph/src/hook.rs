@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use crate::error::ObservedError;
 use crate::event::{BarrierDecision, BarrierId};
-use crate::node::NextStep;
 use crate::ids::{SpanId, TraceId};
+use crate::node::NextStep;
 use crate::state::State;
 
 /// Graph 执行 Hook — 可观测性扩展点。

@@ -191,11 +191,7 @@ pub trait CheckpointStore: Send + Sync {
     ) -> Result<Option<Checkpoint>, CheckpointStoreError>;
     async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError>;
     async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError>;
-    async fn prune(
-        &self,
-        trace_id: &TraceId,
-        keep: usize,
-    ) -> Result<usize, CheckpointStoreError>;
+    async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError>;
 }
 
 // ─── Checkpoint ─────────────────────────────────────────────────
@@ -300,10 +296,7 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
-    pub fn restore(
-        &self,
-        registry: &ReducerRegistry,
-    ) -> Result<State, crate::state::StateError> {
+    pub fn restore(&self, registry: &ReducerRegistry) -> Result<State, crate::state::StateError> {
         let mut state = self.base_snapshot.clone();
         registry.merge_deltas(&mut state, &self.recent_deltas)?;
         Ok(state)
@@ -376,10 +369,7 @@ impl IncrementalSnapshotState {
         self.pending_deltas.extend(deltas);
     }
 
-    pub fn snapshot(
-        &mut self,
-        current_state: &State,
-    ) -> (Option<State>, Vec<StateDelta>, State) {
+    pub fn snapshot(&mut self, current_state: &State) -> (Option<State>, Vec<StateDelta>, State) {
         let base = self.base_state.clone();
         let deltas = std::mem::take(&mut self.pending_deltas);
 

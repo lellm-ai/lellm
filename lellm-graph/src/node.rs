@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::delta::StateDelta;
 use crate::error::{GraphError, ObservedError};
 use crate::event::{BarrierId, GraphEvent};
-use crate::delta::StateDelta;
 use crate::ids::SpanId;
 use crate::state::State;
 
@@ -88,13 +88,17 @@ impl NodeOutput {
 
     /// 设置 token 成本。
     pub fn with_token_cost(mut self, cost: f64) -> Self {
-        self.metadata.get_or_insert_with(Default::default).token_cost = cost;
+        self.metadata
+            .get_or_insert_with(Default::default)
+            .token_cost = cost;
         self
     }
 
     /// 标记有副作用。
     pub fn with_side_effects(mut self) -> Self {
-        self.metadata.get_or_insert_with(Default::default).has_side_effects = true;
+        self.metadata
+            .get_or_insert_with(Default::default)
+            .has_side_effects = true;
         self
     }
 }

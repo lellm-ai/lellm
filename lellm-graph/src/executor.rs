@@ -12,19 +12,19 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::barrier_node::BarrierDefaultAction;
+use crate::checkpoint::{
+    Checkpoint, CheckpointPolicy, CheckpointScore, CheckpointStore, CheckpointTrigger,
+    ExecutionMetadata, IncrementalSnapshotState,
+};
+use crate::delta::{Reducer, ReducerRegistry, StateDelta};
 use crate::error::{GraphError, ObservedError, TerminalError};
 use crate::event::{
     BarrierDecision, BarrierDecisionMessage, BarrierId, FlowEvent, GraphEvent, GraphExecution,
     GraphHandle,
 };
 use crate::graph::Graph;
-use crate::node::{FlowNode, NextStep, NodeKind, ParallelErrorStrategy, StreamNodeResult};
-use crate::checkpoint::{
-    Checkpoint, CheckpointPolicy, CheckpointScore, CheckpointStore, CheckpointTrigger,
-    ExecutionMetadata, IncrementalSnapshotState,
-};
-use crate::delta::{Reducer, ReducerRegistry, StateDelta};
 use crate::ids::{SpanId, TraceId};
+use crate::node::{FlowNode, NextStep, NodeKind, ParallelErrorStrategy, StreamNodeResult};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
 // ─── DecisionRegistry ─────────────────────────────────────────
@@ -465,7 +465,9 @@ impl GraphExecutor {
                         let exec_metadata = ExecutionMetadata {
                             duration_ms: duration.as_millis() as u64,
                             token_cost: metadata.as_ref().map_or(0.0, |m| m.token_cost),
-                            has_side_effects: metadata.as_ref().map_or(false, |m| m.has_side_effects),
+                            has_side_effects: metadata
+                                .as_ref()
+                                .map_or(false, |m| m.has_side_effects),
                         };
                         self.save_checkpoint_if_needed(
                             &event_tx,

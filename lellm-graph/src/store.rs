@@ -117,11 +117,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
         }
     }
 
-    async fn prune(
-        &self,
-        trace_id: &TraceId,
-        keep: usize,
-    ) -> Result<usize, CheckpointStoreError> {
+    async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError> {
         let to_delete: Vec<CheckpointId> = {
             let mut index = self
                 .index

@@ -24,15 +24,14 @@ pub use ids::{SpanId, TraceId};
 
 // ─── State ───────────────────────────────────────────────────
 pub use state::{
-    ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer,
-    array_reducer,
+    ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer, array_reducer,
 };
 
 // ─── Delta + Reducer ─────────────────────────────────────────
 pub use delta::{DeltaOp, DeltaSource, Reducer, ReducerRegistry, StateDelta};
 
 // ─── StateKey ────────────────────────────────────────────────
-pub use statekey::{StateKey, StateKeyExt, SK_COUNT, SK_MESSAGES, SK_STEPS};
+pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS, StateKey, StateKeyExt};
 
 // ─── Checkpoint ──────────────────────────────────────────────
 pub use checkpoint::{

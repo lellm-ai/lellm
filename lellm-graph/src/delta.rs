@@ -180,8 +180,7 @@ impl ReducerRegistry {
         key: &str,
         f: impl Fn(&Value, &Value) -> Result<Value, String> + Send + Sync + 'static,
     ) {
-        self.custom_reducers
-            .insert(key.to_string(), Box::new(f));
+        self.custom_reducers.insert(key.to_string(), Box::new(f));
     }
 
     pub fn get(&self, key: &str) -> &Reducer {
