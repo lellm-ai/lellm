@@ -18,7 +18,7 @@ use lellm_agent::{
     AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
 };
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::LlmProvider;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;

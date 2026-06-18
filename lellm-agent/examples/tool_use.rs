@@ -30,7 +30,7 @@ use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{AgentBuilder, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 

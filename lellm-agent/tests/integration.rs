@@ -5,7 +5,7 @@ use lellm_agent::{
     ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 

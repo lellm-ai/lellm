@@ -21,7 +21,7 @@ use lellm_agent::{
     AgentBuilder, ToolArgs, ToolCategory, ToolRegistration, ToolResult, ToolUseLoop,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition};
-use lellm_macros::{Tool, tool};
+use lellm_derive::{Tool, tool};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 

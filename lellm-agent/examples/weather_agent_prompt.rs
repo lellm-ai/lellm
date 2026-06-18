@@ -12,7 +12,7 @@ mod shared;
 
 use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;

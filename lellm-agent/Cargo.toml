@@ -30,7 +30,7 @@ v02-preview = []
 
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
-lellm-macros = { path = "../lellm-macros" }
+lellm-derive = { path = "../lellm-derive" }
 reqwest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yunli = "0.1"

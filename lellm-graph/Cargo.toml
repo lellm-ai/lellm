@@ -20,7 +20,7 @@ uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 lellm-provider.workspace = true
-lellm-macros.workspace = true
+lellm-derive.workspace = true
 lellm-agent.workspace = true
 lellm-core.workspace = true
 schemars.workspace = true

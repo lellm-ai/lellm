@@ -26,7 +26,7 @@ pub use lellm_provider as provider;
 pub use lellm_agent as agent;
 
 #[cfg(feature = "macros")]
-pub use lellm_macros as macros;
+pub use lellm_derive as macros;
 
 #[cfg(feature = "mcp")]
 pub use lellm_mcp as mcp;

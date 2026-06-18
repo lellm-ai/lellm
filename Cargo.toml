@@ -4,7 +4,7 @@ members = [
     "lellm-core",
     "lellm-provider",
     "lellm-agent",
-    "lellm-macros",
+    "lellm-derive",
     "lellm-mcp",
     "lellm-graph",
 ]
@@ -20,7 +20,7 @@ license = "MIT"
 lellm-core = { path = "lellm-core", version = "0.2" }
 lellm-provider = { path = "lellm-provider", version = "0.2" }
 lellm-agent = { path = "lellm-agent", version = "0.2" }
-lellm-macros = { path = "lellm-macros", version = "0.2" }
+lellm-derive = { path = "lellm-derive", version = "0.2" }
 lellm-mcp = { path = "lellm-mcp", version = "0.2" }
 lellm-graph = { path = "lellm-graph", version = "0.2" }
 
