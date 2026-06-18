@@ -1,170 +1,66 @@
-//! Calculator Graph — LeLLM 入门示例
+//! Calculator Graph — 使用真实 LLM Provider 的示例
 //!
-//! 展示 Graph + Agent 的基本用法：
-//! - 定义工具
-//! - 构建 Agent（内含 ReAct 循环）
-//! - 构建 Graph（预处理 → Agent → 后处理）
+//! 使用 OpenAI 兼容的 LLaMA Provider，展示 Graph + Agent 的完整流程。
 //!
-//! 运行：`cargo run -p lellm-graph --example calculator_graph`
+//! ```text
+//! OPENAI_API_KEY=sk-xxx cargo run -p lellm-graph --example calculator_graph
+//! # 或使用自定义 base_url:
+//! OPENAI_API_BASE=http://localhost:11434/v1 OPENAI_API_KEY=ollama cargo run -p lellm-graph --example calculator_graph
+//! ```
 
-use futures_util::stream;
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
-use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel, ToolUseLoop};
-use lellm_core::{
-    ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TokenUsage, ToolCall,
-};
+use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel};
+use lellm_core::{Message, text_block};
 use lellm_derive::Tool;
 use lellm_graph::{GraphBuilder, GraphExecutor, NodeKind, StateDelta, TaskNode};
-use lellm_provider::{ProviderEvent, ProviderStream};
+use lellm_provider::providers::base::CodecProvider;
+use lellm_provider::providers::openai_compat::OpenAICompatCodec;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-// ─── 1. 定义工具 ─────────────────────────────────────────────
+// ─── 工具定义 ───────────────────────────────────────────────
 
 #[derive(Deserialize, JsonSchema, Tool)]
-#[tool(name = "add", description = "Add two numbers")]
+#[tool(name = "add", description = "将两个数字相加")]
 struct AddArgs {
+    /// 第一个数字
     a: f64,
+    /// 第二个数字
     b: f64,
 }
 
 #[derive(Deserialize, JsonSchema, Tool)]
-#[tool(name = "multiply", description = "Multiply two numbers")]
+#[tool(name = "multiply", description = "将两个数字相乘")]
 struct MultiplyArgs {
+    /// 第一个数字
     a: f64,
+    /// 第二个数字
     b: f64,
 }
 
-// ─── 2. 模拟 Provider ────────────────────────────────────────
+// ─── 构建 Graph ─────────────────────────────────────────────
 
-/// 模拟多轮 ReAct 循环的 Provider。
-///
-/// 第 1 轮 → tool_call(add(3, 4))
-/// 第 2 轮 → tool_call(multiply(7, 2))
-/// 第 3 轮 → 最终答案
-struct MockProvider {
-    responses: Vec<ChatResponse>,
-    round: Mutex<usize>,
-}
-
-impl MockProvider {
-    fn new(responses: Vec<ChatResponse>) -> Self {
-        Self {
-            responses,
-            round: Mutex::new(0),
-        }
-    }
-
-    fn next_response(&self) -> ChatResponse {
-        let mut r = self.round.lock().unwrap();
-        let idx = *r;
-        *r += 1;
-        self.responses
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| {
-                ChatResponse::new(
-                    vec![ContentBlock::text("Done.".into())],
-                    TokenUsage::default(),
-                    serde_json::json!(null),
-                )
-            })
-    }
-}
-
-#[::async_trait::async_trait]
-impl lellm_provider::LlmProvider for MockProvider {
-    async fn call(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        Ok(self.next_response())
-    }
-
-    async fn stream(&self, _req: &ChatRequest) -> Result<ProviderStream, LlmError> {
-        let resp = self.next_response();
-        let tool_calls: Vec<ToolCall> = resp.tool_calls().cloned().collect();
-        let text: String = resp
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text(t) => Some(t.text.clone()),
-                _ => None,
-            })
-            .collect();
-
-        let events = vec![
-            Ok(ProviderEvent::Start {
-                model: "mock".into(),
-            }),
-            Ok(ProviderEvent::Token { token: text }),
-            Ok(ProviderEvent::ResponseComplete {
-                tool_calls,
-                usage: Some(resp.usage),
-            }),
-        ];
-        Ok(Box::pin(stream::iter(events)))
-    }
-
-    fn provider_id(&self) -> &str {
-        "mock"
-    }
-}
-
-// ─── 3. 构建 Agent ───────────────────────────────────────────
-
-fn build_agent() -> ToolUseLoop {
-    // 模拟 3 轮 ReAct 循环
-    let responses = vec![
-        // 第 1 轮：调用 add(3, 4)
-        ChatResponse::new(
-            vec![ContentBlock::ToolCall(ToolCall {
-                id: "c1".into(),
-                name: "add".into(),
-                arguments: serde_json::json!({"a": 3.0, "b": 4.0}),
-            })],
-            TokenUsage::default(),
-            serde_json::json!(null),
-        ),
-        // 第 2 轮：调用 multiply(7, 2)
-        ChatResponse::new(
-            vec![ContentBlock::ToolCall(ToolCall {
-                id: "c2".into(),
-                name: "multiply".into(),
-                arguments: serde_json::json!({"a": 7.0, "b": 2.0}),
-            })],
-            TokenUsage::default(),
-            serde_json::json!(null),
-        ),
-        // 第 3 轮：返回最终答案
-        ChatResponse::new(
-            vec![ContentBlock::text("3 + 4 = 7，7 × 2 = 14。答案是 14。".into())],
-            TokenUsage {
-                prompt_tokens: 300,
-                completion_tokens: 40,
-                total_tokens: 340,
-            },
-            serde_json::json!(null),
-        ),
-    ];
+fn build_graph() -> lellm_graph::Graph {
+    // 创建 Provider（从环境变量读取 API Key）
+    let provider = CodecProvider::load(OpenAICompatCodec::llama())
+        .expect("请设置 OPENAI_API_KEY 环境变量");
 
     let model = ResolvedModel {
-        provider: Arc::new(MockProvider::new(responses)),
-        model: "mock".into(),
-        context_window: None,
+        provider: Arc::new(provider),
+        model: "llama3.2".into(),
+        context_window: Some(8192),
     };
 
-    AgentBuilder::new(model)
-        .system_prompt("你是一个数学助手。".into())
+    let agent = AgentBuilder::new(model)
+        .system_prompt("你是一个数学助手。当用户问数学问题时，使用工具计算。".into())
         .tools([
             AddArgs::safe(|args| async move { Ok(serde_json::json!(args.a + args.b)) }),
             MultiplyArgs::safe(|args| async move { Ok(serde_json::json!(args.a * args.b)) }),
         ])
         .max_iterations(10)
-        .build()
-}
+        .build();
 
-// ─── 4. 构建 Graph ───────────────────────────────────────────
-
-fn build_graph(agent: ToolUseLoop) -> lellm_graph::Graph {
     let mut g = GraphBuilder::new("calculator");
 
     g.start("init");
@@ -176,7 +72,7 @@ fn build_graph(agent: ToolUseLoop) -> lellm_graph::Graph {
             Ok(vec![StateDelta::put(
                 "messages",
                 serde_json::json!([Message::User {
-                    content: lellm_core::text_block("3加4等于多少，然后再乘以2。".into()),
+                    content: text_block("3加4等于多少，然后再乘以2。".into()),
                 }]),
             )])
         })),
@@ -226,16 +122,19 @@ fn build_graph(agent: ToolUseLoop) -> lellm_graph::Graph {
     g.build().expect("Graph 构建失败")
 }
 
-// ─── 5. 执行 ─────────────────────────────────────────────────
-
 #[tokio::main]
 async fn main() {
-    let agent = build_agent();
-    let graph = build_graph(agent);
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lellm_agent=trace,lellm_provider=trace,info".into()),
+        )
+        .try_init();
 
-    println!("=== LeLLM Calculator Graph ===\n");
+    let graph = build_graph();
+
+    println!("=== Calculator Graph (LLaMA) ===\n");
     println!("节点: {:?}", graph.node_names());
-    println!("起始: {}", graph.start_node());
 
     let result = GraphExecutor::default()
         .execute(Arc::new(graph), HashMap::new())
