@@ -1,6 +1,7 @@
 # LeLLM v0.3 架构演进
 
 > 版本：v0.3 | 日期：2026-06-18 | 状态：已完成 ✅
+> 后续演进：[v04-architecture-evolution.md](./v04-architecture-evolution.md)
 >
 > 本文档记录 v0.3 所有设计决策和实现细节。
 
@@ -350,8 +351,11 @@ agent.tools(tools).build();
 
 ### 未来规划
 
+详见 [v04-architecture-evolution.md](./v04-architecture-evolution.md)。
+
 | 版本 | 范围 |
 |------|------|
-| v0.4 | Agent 内部基于 Graph（ReAct 循环 = 有环图）|
-| v0.5 | Multi-Agent Orchestration + Durable Execution |
-| v0.6 | Sampling + Agent↔Agent via MCP |
+| v0.3 收尾 | 消灭 LoopState → 统一 StateKey（方案 B+）→ 单一事实来源 |
+| v0.4 | ReAct = 有环图 + Typed State + Effect 事件溯源 + Workflow\<S\> |
+| v0.5 | Multi-Agent Orchestration + Durable Execution + Agent↔Agent via MCP |
+| v0.6 | Sampling |
