@@ -2,13 +2,11 @@
 members = [
     "lellm",
     "lellm-core",
-    "lellm-runtime",
     "lellm-provider",
     "lellm-agent",
     "lellm-macros",
     "lellm-mcp",
     "lellm-graph",
-    "lellm-events",
 ]
 resolver = "2"
 
@@ -20,13 +18,11 @@ license = "MIT"
 [workspace.dependencies]
 # Internal
 lellm-core = { path = "lellm-core", version = "0.2" }
-lellm-runtime = { path = "lellm-runtime", version = "0.2" }
 lellm-provider = { path = "lellm-provider", version = "0.2" }
 lellm-agent = { path = "lellm-agent", version = "0.2" }
 lellm-macros = { path = "lellm-macros", version = "0.2" }
 lellm-mcp = { path = "lellm-mcp", version = "0.2" }
 lellm-graph = { path = "lellm-graph", version = "0.2" }
-lellm-events = { path = "lellm-events", version = "0.2" }
 
 # Common
 async-trait = "0.1"

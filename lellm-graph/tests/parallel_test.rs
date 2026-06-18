@@ -219,7 +219,7 @@ async fn test_parallel_append_delta_merge() {
 
     let mut executor = GraphExecutor::default();
     // 注册 Append reducer，允许并行分支追加到 "items"
-    executor.register_reducer("items", lellm_runtime::Reducer::Append);
+    executor.register_reducer("items", lellm_graph::Reducer::Append);
     let result = executor
         .execute(Arc::new(graph), initial_state)
         .await

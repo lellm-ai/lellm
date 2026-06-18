@@ -9,10 +9,8 @@ repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 lellm-core = { workspace = true, features = ["anyhow"] }
-lellm-events.workspace = true
-lellm-provider.workspace = true
 lellm-graph.workspace = true
-lellm-runtime.workspace = true
+lellm-provider.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
