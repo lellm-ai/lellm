@@ -467,7 +467,7 @@ impl GraphExecutor {
                             token_cost: metadata.as_ref().map_or(0.0, |m| m.token_cost),
                             has_side_effects: metadata
                                 .as_ref()
-                                .map_or(false, |m| m.has_side_effects),
+                                .is_some_and(|m| m.has_side_effects),
                         };
                         self.save_checkpoint_if_needed(
                             &event_tx,
@@ -730,6 +730,7 @@ impl GraphExecutor {
     /// 处理节点正常完成（`StreamNodeResult::Continue`）。
     ///
     /// 发送 NodeEnd 事件，记录执行日志，解析下一步路由。
+    #[allow(clippy::too_many_arguments)]
     async fn handle_continue(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
@@ -774,8 +775,8 @@ impl GraphExecutor {
         }
 
         // 如果有观测错误，发送 ObservedError 事件
-        if let Some(error) = observed {
-            if self
+        if let Some(error) = observed
+            && self
                 .send(
                     event_tx,
                     GraphEvent::ObservedError {
@@ -784,9 +785,8 @@ impl GraphExecutor {
                     },
                 )
                 .await
-            {
-                return StepOutcome::Break;
-            }
+        {
+            return StepOutcome::Break;
         }
 
         // 🛑 end 节点检查
@@ -808,6 +808,7 @@ impl GraphExecutor {
     /// 处理 Barrier 暂停（`StreamNodeResult::Pause`）。
     ///
     /// 发射 BarrierWaiting 事件，等待外部决策，应用决策结果。
+    #[allow(clippy::too_many_arguments)]
     async fn handle_barrier(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
@@ -965,6 +966,7 @@ impl GraphExecutor {
     /// 处理节点 Fallback（`StreamNodeResult::Fallback`）。
     ///
     /// Fallback 是控制流 — 节点主动声明降级策略。
+    #[allow(clippy::too_many_arguments)]
     async fn handle_fallback(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
@@ -1028,6 +1030,7 @@ impl GraphExecutor {
     // ─── handle_error ─────────────────────────────────────────
 
     /// 处理节点执行错误。
+    #[allow(clippy::too_many_arguments)]
     async fn handle_error(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
@@ -1339,52 +1342,52 @@ impl GraphExecutor {
         snapshot_state: &mut IncrementalSnapshotState,
     ) {
         // 💾 Checkpoint: ExecutionCompleted 模式下保存最终状态
-        if self.policy.should_checkpoint_on_completion() {
-            if let Some(store) = &self.store {
-                // 生成增量快照
-                let (base, deltas, current) = snapshot_state.snapshot(state);
-                let ck = if let Some(base_state) = base {
-                    Checkpoint::with_snapshot(
-                        trace_id,
-                        &self.graph_hash,
-                        "__complete__",
-                        current,
-                        base_state,
-                        deltas,
-                    )
-                } else if !deltas.is_empty() {
-                    Checkpoint::with_snapshot(
-                        trace_id,
-                        &self.graph_hash,
-                        "__complete__",
-                        current.clone(),
-                        current,
-                        deltas,
-                    )
-                } else {
-                    Checkpoint::new(trace_id, &self.graph_hash, "__complete__", state.clone())
-                };
+        if self.policy.should_checkpoint_on_completion()
+            && let Some(store) = &self.store
+        {
+            // 生成增量快照
+            let (base, deltas, current) = snapshot_state.snapshot(state);
+            let ck = if let Some(base_state) = base {
+                Checkpoint::with_snapshot(
+                    trace_id,
+                    &self.graph_hash,
+                    "__complete__",
+                    current,
+                    base_state,
+                    deltas,
+                )
+            } else if !deltas.is_empty() {
+                Checkpoint::with_snapshot(
+                    trace_id,
+                    &self.graph_hash,
+                    "__complete__",
+                    current.clone(),
+                    current,
+                    deltas,
+                )
+            } else {
+                Checkpoint::new(trace_id, &self.graph_hash, "__complete__", state.clone())
+            };
 
-                match store.save(&ck).await {
-                    Ok(()) => {
-                        let _ = self
-                            .send(
-                                event_tx,
-                                GraphEvent::CheckpointSaved {
-                                    checkpoint_id: ck.checkpoint_id.clone(),
-                                    node_name: "__complete__".to_string(),
-                                    step: execution_log.len(),
-                                },
-                            )
-                            .await;
-                        tracing::debug!(
-                            checkpoint = %ck.checkpoint_id,
-                            "final checkpoint saved on completion"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "final checkpoint save failed");
-                    }
+            match store.save(&ck).await {
+                Ok(()) => {
+                    let _ = self
+                        .send(
+                            event_tx,
+                            GraphEvent::CheckpointSaved {
+                                checkpoint_id: ck.checkpoint_id.clone(),
+                                node_name: "__complete__".to_string(),
+                                step: execution_log.len(),
+                            },
+                        )
+                        .await;
+                    tracing::debug!(
+                        checkpoint = %ck.checkpoint_id,
+                        "final checkpoint saved on completion"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "final checkpoint save failed");
                 }
             }
         }
@@ -1561,6 +1564,7 @@ impl GraphExecutor {
     /// - `HumanDecision` — 人类决策后保存
     /// - `Explicit` — 显式触发时保存
     /// - `Adaptive(metadata)` — 基于 ExecutionMetadata 动态决策，编译器保证 metadata 存在
+    #[allow(clippy::too_many_arguments)]
     async fn save_checkpoint_if_needed(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,

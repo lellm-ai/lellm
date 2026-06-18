@@ -21,14 +21,14 @@ pub enum CheckpointTrigger {
 
 impl PartialEq for CheckpointTrigger {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::BarrierResolved, Self::BarrierResolved) => true,
-            (Self::ExecutionCompleted, Self::ExecutionCompleted) => true,
-            (Self::HumanDecision, Self::HumanDecision) => true,
-            (Self::Explicit, Self::Explicit) => true,
-            (Self::Adaptive(_), Self::Adaptive(_)) => true,
-            _ => false,
-        }
+        matches!(
+            (self, other),
+            (Self::BarrierResolved, Self::BarrierResolved)
+                | (Self::ExecutionCompleted, Self::ExecutionCompleted)
+                | (Self::HumanDecision, Self::HumanDecision)
+                | (Self::Explicit, Self::Explicit)
+                | (Self::Adaptive(_), Self::Adaptive(_))
+        )
     }
 }
 

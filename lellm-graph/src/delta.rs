@@ -144,14 +144,14 @@ impl std::fmt::Display for Reducer {
     }
 }
 
+/// 自定义 Reducer 闭包类型。
+type CustomReducerFn = Box<dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync>;
+
 /// Reducer 注册表 — 管理每个 key 的合并策略。
 #[derive(Default)]
 pub struct ReducerRegistry {
     reducers: std::collections::HashMap<String, Reducer>,
-    custom_reducers: std::collections::HashMap<
-        String,
-        Box<dyn Fn(&Value, &Value) -> Result<Value, String> + Send + Sync>,
-    >,
+    custom_reducers: std::collections::HashMap<String, CustomReducerFn>,
 }
 
 impl std::fmt::Debug for ReducerRegistry {
