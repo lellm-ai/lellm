@@ -153,6 +153,7 @@ pub struct CatalogConflict {
 }
 
 /// 组合目录构建器
+#[derive(Default)]
 pub struct CompositeCatalogBuilder {
     sources: Vec<(String, std::sync::Arc<dyn ToolCatalog>)>,
     conflict_policy: ConflictPolicy,
@@ -161,10 +162,7 @@ pub struct CompositeCatalogBuilder {
 impl CompositeCatalogBuilder {
     /// 创建新的构建器
     pub fn new() -> Self {
-        Self {
-            sources: Vec::new(),
-            conflict_policy: ConflictPolicy::default(),
-        }
+        Self::default()
     }
 
     /// 设置冲突策略

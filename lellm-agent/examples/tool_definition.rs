@@ -21,7 +21,7 @@ use lellm_agent::{
     AgentBuilder, ToolArgs, ToolCategory, ToolRegistration, ToolResult, ToolUseLoop,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition};
-use lellm_macros::{Tool, tool};
+use lellm_derive::{Tool, tool};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -216,10 +216,14 @@ async fn main() {
     let agent = create_agent(all_tools);
 
     println!("\n=== 执行 Agent ===");
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = lellm_agent::initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("搜索一下 Rust 编程语言。".to_string()),
-        }])
+        }],
+        "messages",
+    );
+    let result = agent
+        .execute(&mut state, "messages")
         .await
         .expect("Agent 执行失败");
 

@@ -8,7 +8,7 @@ Rust 类型安全的 LLM 应用框架。
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.1.2-green)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.0-green)](./CHANGELOG.md)
 
 ```bash
 cargo add lellm
@@ -188,16 +188,16 @@ LeLLM 不试图替代 Python。它服务于已经选择了 Rust 的团队。
 ```toml
 [dependencies]
 # 仅协议对象（零运行时依赖）
-lellm = { version = "0.1", features = ["core"] }
+lellm = { version = "0.2", features = ["core"] }
 
 # 协议 + Provider 适配层
-lellm = { version = "0.1", features = ["provider"] }
+lellm = { version = "0.2", features = ["provider"] }
 
 # 协议 + Provider + Agent 运行时
-lellm = { version = "0.1", features = ["agent"] }
+lellm = { version = "0.2", features = ["agent"] }
 
 # 全部启用
-lellm = { version = "0.1", features = ["full"] }
+lellm = { version = "0.2", features = ["full"] }
 ```
 
 ### 初始化 Provider
@@ -371,7 +371,9 @@ lellm/
 ├── lellm-core/          # 协议对象（Message, ChatRequest, LlmError 等）
 ├── lellm-provider/      # Provider 适配层
 ├── lellm-agent/         # Agent 运行时（ToolUseLoop, Executor 等）
-└── lellm-macros/        # 派生宏 + 属性宏
+├── lellm-macros/        # 派生宏 + 属性宏
+├── lellm-mcp/           # MCP（Model Context Protocol）客户端/服务端
+└── lellm-graph/         # Graph 编排（Node, Edge, Barrier, Multi-Agent）
 ```
 
 ---
@@ -381,7 +383,7 @@ lellm/
 | 版本 | 范围 | 状态 |
 |---|---|---|
 | **v0.1** | Provider 抽象、流式执行、工具执行、预算控制、上下文压缩 | ✅ 已完成 |
-| **v0.2** | Graph 编排、Provider 扩展 API、内存架构、更多 Provider 兼容 | 🚧 进行中 |
+| **v0.2** | Graph 编排、Provider 扩展 API、内存架构、更多 Provider 兼容 | ✅ 已完成 |
 | **v0.3+** | 分布式执行、可视化可观测、多 Agent 协调 | 🔜 计划中 |
 
 ---

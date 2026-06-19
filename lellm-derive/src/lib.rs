@@ -1,4 +1,4 @@
-//! lellm-macros — 派生宏与属性宏。
+//! lellm-derive — 派生宏与属性宏。
 //!
 //! # 三级 API
 //!
@@ -6,7 +6,7 @@
 //!
 //! ```ignore
 //! use lellm_agent::ToolResult;
-//! use lellm_macros::tool;
+//! use lellm_derive::tool;
 //!
 //! #[tool(name = "search", description = "搜索互联网信息")]
 //! async fn search(query: String, limit: Option<u32>) -> ToolResult {
@@ -31,7 +31,7 @@
 //!
 //! ```ignore
 //! use lellm_agent::ToolResult;
-//! use lellm_macros::Tool;
+//! use lellm_derive::Tool;
 //!
 //! #[derive(Tool, JsonSchema)]
 //! #[tool(name = "search", description = "搜索互联网信息")]

@@ -38,23 +38,21 @@ pub(crate) fn parse_tool_meta_tokens(args: &TokenStream2) -> ToolMeta {
         if let proc_macro2::TokenTree::Ident(ident) = &tokens[i] {
             let ident_name = ident.to_string();
             // Look for = sign
-            if i + 1 < tokens.len() {
-                if let proc_macro2::TokenTree::Punct(p) = &tokens[i + 1] {
-                    if p.as_char() == '=' {
-                        // Look for string literal
-                        if i + 2 < tokens.len() {
-                            if let proc_macro2::TokenTree::Literal(lit) = &tokens[i + 2] {
-                                let lit_str = lit.to_string();
-                                // Strip quotes
-                                let val =
-                                    lit_str.trim_matches(|c| c == '"' || c == '\'').to_string();
-                                if ident_name == "name" {
-                                    name = val;
-                                } else if ident_name == "description" {
-                                    description = val;
-                                }
-                            }
-                        }
+            if i + 1 < tokens.len()
+                && let proc_macro2::TokenTree::Punct(p) = &tokens[i + 1]
+                && p.as_char() == '='
+            {
+                // Look for string literal
+                if i + 2 < tokens.len()
+                    && let proc_macro2::TokenTree::Literal(lit) = &tokens[i + 2]
+                {
+                    let lit_str = lit.to_string();
+                    // Strip quotes
+                    let val = lit_str.trim_matches(|c| c == '"' || c == '\'').to_string();
+                    if ident_name == "name" {
+                        name = val;
+                    } else if ident_name == "description" {
+                        description = val;
                     }
                 }
             }
@@ -97,17 +95,15 @@ pub(crate) fn extract_helper_meta(attrs: &[Attribute]) -> ToolMeta {
 pub(crate) fn extract_doc_from_attrs(attrs: &[Attribute]) -> Option<String> {
     let mut docs = Vec::new();
     for attr in attrs {
-        if attr.path().is_ident("doc") {
-            if let Meta::NameValue(nv) = &attr.meta {
-                if let Expr::Lit(el) = &nv.value {
-                    if let Lit::Str(s) = &el.lit {
-                        for line in s.value().lines() {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty() {
-                                docs.push(trimmed.to_string());
-                            }
-                        }
-                    }
+        if attr.path().is_ident("doc")
+            && let Meta::NameValue(nv) = &attr.meta
+            && let Expr::Lit(el) = &nv.value
+            && let Lit::Str(s) = &el.lit
+        {
+            for line in s.value().lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    docs.push(trimmed.to_string());
                 }
             }
         }

@@ -78,15 +78,15 @@ ContextBudget.max_tokens → 输入上下文上限（已有）
 
 ```rust
 pub struct ToolRegistration {
-    pub definition: ToolDefinition,  // JSON Schema
-    pub safety: ParallelSafety,      // 并行安全分级
-    pub category: Option<ToolCategory>,
-    pub func: ToolFn,                // 执行函数
+    pub(crate) definition: ToolDefinition,  // JSON Schema
+    pub(crate) safety: ParallelSafety,      // 并行安全分级
+    pub(crate) category: Option<ToolCategory>,
+    pub(crate) func: ToolFn,                // 执行函数
 }
 
 #[derive(Clone)]
 pub struct ToolExecutor {
-    tools: Arc<HashMap<String, ToolRegistration>>,
+    catalog: Arc<dyn ToolCatalog>,
     retry_policy: RetryPolicy,
 }
 ```
@@ -97,10 +97,10 @@ pub struct ToolExecutor {
 
 ```rust
 pub struct ToolRegistration {
-    pub definition: ToolDefinition,
-    pub safety: ParallelSafety,
-    pub category: Option<ToolCategory>,
-    pub func: ToolFn,
+    pub(crate) definition: ToolDefinition,
+    pub(crate) safety: ParallelSafety,
+    pub(crate) category: Option<ToolCategory>,
+    pub(crate) func: ToolFn,
 }
 
 impl ToolRegistration {
@@ -271,6 +271,7 @@ pub enum StopReason {
     MaxIterationsReached,  // 达到最大轮次
     Cancelled,             // 外部取消（消费者断开、task 终止等）
     OutputBudgetExceeded,  // 输出预算超限（单轮或总输出 token 超过限制）
+    ReasoningBudgetExceeded,  // 推理预算超限（thinking tokens 超过限制）
 }
 ```
 

@@ -30,7 +30,7 @@ use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{AgentBuilder, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 
@@ -203,10 +203,14 @@ async fn main() {
 
     println!("=== ReAct 工具调用循环 ===\n");
 
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = lellm_agent::initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("找出当前最受欢迎的无线耳机并检查其库存".to_string()),
-        }])
+        }],
+        "messages",
+    );
+    let result = agent
+        .execute(&mut state, "messages")
         .await
         .expect("Agent 执行失败");
 

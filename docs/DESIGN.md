@@ -17,6 +17,8 @@
 - `provider`（默认）— re-export core + provider
 - `agent` — re-export core + agent（传递依赖 provider）
 - `macros` — re-export macros
+- `mcp` — re-export MCP client
+- `graph` — re-export graph orchestration
 - `full` — 以上全部
 
 ## 1. MaxIterationsReached — Ok 还是 Err？
@@ -138,6 +140,8 @@ pub struct Capabilities {
     pub supports_image_input: bool,
     pub supports_reasoning: bool,
     pub supports_tool_call: bool,
+    pub supports_prefill: bool,
+    pub supports_stream_thinking: bool,
 }
 ```
 
@@ -340,6 +344,7 @@ ChatCodec 的 `decode_sse()` 方法接收 `SseFrame`，返回 `StreamParseResult
 
 **`StreamEvent` — stream 模块对外的数据契约：**
 ```rust
+// pub(crate) — stream/ 模块是 pub(crate)，不对外暴露
 pub(crate) enum StreamEvent {
     Start { model: String },
     Token { token: String },                        // 可丢弃
@@ -351,6 +356,7 @@ pub(crate) enum StreamEvent {
 
 **`EventSink` — 解耦输出端：**
 ```rust
+// pub(crate) — stream/ 模块是 pub(crate)，不对外暴露
 pub trait EventSink {
     async fn emit(&mut self, event: StreamEvent) -> bool;  // false = 消费者断开
     fn is_closed(&self) -> bool { false }                  // 快速探测
@@ -440,6 +446,8 @@ pub enum ToolErrorKind {
     RateLimited,
     LoopDetected,
     Internal,
+    ToolUnavailable,
+    External { source: &'static str },
 }
 ```
 
@@ -471,7 +479,9 @@ async fn execute(&self, call: &ToolCall) -> ToolResult {
 | PermissionDenied | ❌ | 直接返回 |
 | InvalidInput | ❌ | 直接返回 |
 | LoopDetected | ❌ | 直接返回 |
-| Internal | ⚠️ | 视情况 |
+| Internal | ❌ | 不可重试 |
+| ToolUnavailable | ✅ | 固定间隔 |
+| External | ❌ | 直接返回 |
 
 **RetryPolicy 负责：** 是否重试、退避间隔、最大次数。
 **FallbackStrategy 负责：** Retry 耗尽后，换条路走（Abort / SwitchProvider / AskUser）。
@@ -594,15 +604,15 @@ LoopEnd
 **校验方式：**
 ```rust
 impl Message {
-    pub fn validate(&self) -> Result<(), LellmError> {
+    pub fn validate(&self) -> Result<(), ParseError> {
         match self {
             Message::ToolResult { content, .. } => {
                 for block in content {
                     match block {
                         ContentBlock::ToolCall(_) | ContentBlock::Thinking(_) => {
-                            return Err(LellmError::Parse(ParseError {
+                            return Err(ParseError {
                                 detail: "ToolResult must not contain ToolCall or Thinking blocks".into(),
-                            }));
+                            });
                         }
                         _ => {}
                     }
@@ -956,6 +966,52 @@ Provider 层是无脑管道，永远转发所有协议事件。
 - `stream_thinking` 过滤：`lellm-provider/.../stream_processor.rs` — `process_stream()` 中根据标志决定是否发射 `ThinkingDelta`
 - Codec 映射：各 Codec 的 `encode()` 中
 
+## 13.1 CacheControl — Prompt Cache 控制原语
+
+> **v2026-06-15 新增：** Provider 无关的缓存控制标记。
+
+**背景：** Prompt Caching 是 LLM Provider 的重要成本优化手段。Anthropic 显式标记，OpenAI 隐式前缀缓存，Google 不支持。缓存断点的**放置位置**是业务层决策，但**信号载体**必须在 Core 类型上表达。
+
+### CacheControl 枚举
+
+```rust
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CacheControl {
+    /// 缓存断点 — 标记此处为缓存边界
+    Breakpoint,
+}
+```
+
+### TextBlock 扩展
+
+```rust
+pub struct TextBlock {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+```
+
+### ToolDefinition 扩展
+
+```rust
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+```
+
+### Provider Codec 映射
+
+| Provider | `CacheControl::Breakpoint` 映射 |
+|---|---|
+| `AnthropicCodec` | ContentBlock: `{"cache_control": {"type": "ephemeral"}}` |
+| `AnthropicCodec` | Tool: 在该工具后插入只含 `cache_control` 的 JSON 对象 |
+| `OpenAICompatCodec` | ignore（OpenAI 隐式前缀缓存） |
+
 ## 14. RequestOptions — Agent 层生成参数覆盖
 
 > **v2026-06-10 新增：** 独立于 ChatRequest 的 Agent 层参数覆盖。
@@ -1085,7 +1141,9 @@ core = ["dep:lellm-core"]
 provider = ["dep:lellm-core", "dep:lellm-provider"]
 agent = ["dep:lellm-core", "dep:lellm-agent"]
 macros = ["dep:lellm-macros"]
-full = ["provider", "agent", "macros"]
+mcp = ["dep:lellm-mcp"]
+graph = ["dep:lellm-graph"]
+full = ["provider", "agent", "macros", "mcp", "graph"]
 ```
 
 **用户体验：** `cargo add lellm` 即可获得 core + provider。需要 Agent 运行时加 `--features agent`。

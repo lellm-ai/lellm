@@ -3,23 +3,24 @@
 //! 提供完整的 Agent 运行时能力：工具系统、Agent Loop、
 //! 循环检测、重试策略、Fallback 降级等。
 
+pub mod hook;
 pub mod runtime;
 
 // Re-export schemars & serde so derive(Tool) / #[tool] macros can reference them.
 pub use schemars;
 pub use serde;
 
+pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
 pub use runtime::{
-    AgentBuilder, AgentEvent, AgentStream, BackoffStrategy, BatchExecutionResult, CompactionResult,
-    CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback, FallbackAction,
-    FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult, LocalCompactor,
-    ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy, StaticCatalog, StopReason, ToolArgs,
-    ToolCatalog, ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolRegistration,
-    ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult,
-    estimate_message, estimate_tokens, execute_batch_with,
+    AgentBuilder, AgentEvent, AgentFlowNode, AgentState, AgentStream, BackoffStrategy,
+    BatchExecutionResult, CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor,
+    DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy, IntoToolError,
+    IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy,
+    StaticCatalog, StopReason, ToolArgs, ToolCatalog, ToolCategory, ToolError, ToolErrorKind,
+    ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
+    ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
+    initial_state,
 };
-#[cfg(feature = "v02-preview")]
-pub use runtime::{LoopDetector, LoopIntervention, NegativeSignal, SignalVoter};
 
 // ─── 糖衣 API（第三层原型） ───
 

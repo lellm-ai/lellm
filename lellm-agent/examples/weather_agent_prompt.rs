@@ -12,7 +12,7 @@ mod shared;
 
 use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
@@ -155,8 +155,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
 
-    let stream = agent.execute_stream(vec![Message::User {
-        content: text_block(question.clone()),
-    }]);
+    let state = lellm_agent::initial_state(
+        vec![Message::User {
+            content: text_block(question.clone()),
+        }],
+        "messages",
+    );
+    let stream = agent.execute_stream(state, "messages");
     shared::observe_react_loop(stream, &question).await
 }

@@ -80,7 +80,7 @@ impl Default for DefaultFallback {
 #[async_trait]
 impl FallbackStrategy for DefaultFallback {
     async fn handle(&self, ctx: &FallbackContext) -> FallbackAction {
-        if Self::is_retriable(&ctx.error) && ctx.attempt < self.max_retries {
+        if Self::is_retriable(ctx.error) && ctx.attempt < self.max_retries {
             FallbackAction::Retry
         } else {
             FallbackAction::Abort

@@ -3,9 +3,10 @@ use lellm_agent::serde::Deserialize;
 use lellm_agent::{
     AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety, StaticCatalog,
     ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
+    initial_state,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
-use lellm_macros::Tool;
+use lellm_derive::Tool;
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -28,10 +29,11 @@ async fn test_tool_use_loop_no_tool_calls() {
         content: lellm_core::text_block("test".to_string()),
     }];
 
+    let mut state = initial_state(messages, "messages");
     let result = AgentBuilder::new(model)
         .max_iterations(5)
         .build()
-        .execute(messages)
+        .execute(&mut state, "messages")
         .await
         .unwrap();
 
@@ -281,12 +283,13 @@ async fn test_builder_basic_build() {
 
     let agent = AgentBuilder::new(model).build();
 
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("hello".to_string()),
-        }])
-        .await
-        .unwrap();
+        }],
+        "messages",
+    );
+    let result = agent.execute(&mut state, "messages").await.unwrap();
 
     assert_eq!(result.iterations, 1);
     assert!(result.is_success());
@@ -311,12 +314,13 @@ async fn test_builder_with_config() {
         .max_iterations(20)
         .build();
 
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("hello".to_string()),
-        }])
-        .await
-        .unwrap();
+        }],
+        "messages",
+    );
+    let result = agent.execute(&mut state, "messages").await.unwrap();
 
     assert!(result.is_success());
 }
@@ -407,12 +411,13 @@ async fn test_create_agent() {
     };
 
     let agent = lellm_agent::create_agent(model);
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("hello".to_string()),
-        }])
-        .await
-        .unwrap();
+        }],
+        "messages",
+    );
+    let result = agent.execute(&mut state, "messages").await.unwrap();
 
     assert!(result.is_success());
 }
@@ -469,12 +474,13 @@ async fn test_create_agent_with_system() {
 
     let agent = lellm_agent::create_agent_with_system(model, "你是助手".to_string());
 
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("hi".to_string()),
-        }])
-        .await
-        .unwrap();
+        }],
+        "messages",
+    );
+    let result = agent.execute(&mut state, "messages").await.unwrap();
 
     assert!(result.is_success());
 }

@@ -9,6 +9,7 @@ repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 lellm-core = { workspace = true, features = ["anyhow"] }
+lellm-graph.workspace = true
 lellm-provider.workspace = true
 async-trait.workspace = true
 serde.workspace = true
@@ -24,12 +25,10 @@ indexmap.workspace = true
 
 [features]
 default = []
-# v0.2 预览功能 — LoopDetector, SignalVoter
-v02-preview = []
 
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
-lellm-macros = { path = "../lellm-macros" }
+lellm-derive = { path = "../lellm-derive" }
 reqwest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yunli = "0.1"

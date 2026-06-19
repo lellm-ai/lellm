@@ -6,7 +6,7 @@
 /// - 正常结束：`LoopEnd` 恰好一次，然后 channel 关闭
 /// - 异常结束：`LoopError` 恰好一次，然后 channel 关闭
 /// - 终态事件后不再发送任何事件
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     /// Provider 层事件
     Provider(lellm_provider::ProviderEvent),
@@ -52,7 +52,6 @@ pub enum StopReason {
     OutputBudgetExceeded,
     /// 推理预算超限（thinking token 超过限制）
     ReasoningBudgetExceeded,
-    // NOTE: LoopDetected 将在 v0.2 LoopDetector 实现时加回
 }
 
 /// Agent 层流式事件通道类型别名

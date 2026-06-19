@@ -9,7 +9,6 @@ repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 lellm-core.workspace = true
-lellm-agent = { workspace = true, optional = true }
 
 async-trait.workspace = true
 indexmap.workspace = true
@@ -23,6 +22,5 @@ tracing.workspace = true
 thiserror.workspace = true
 
 [features]
-default = ["stdio", "bridge"]
+default = ["stdio"]
 stdio = []
-bridge = ["lellm-agent"]

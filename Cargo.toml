@@ -4,23 +4,25 @@ members = [
     "lellm-core",
     "lellm-provider",
     "lellm-agent",
-    "lellm-macros",
+    "lellm-derive",
     "lellm-mcp",
+    "lellm-graph",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.3"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 # Internal
-lellm-core = { path = "lellm-core", version = "0.1" }
-lellm-provider = { path = "lellm-provider", version = "0.1" }
-lellm-agent = { path = "lellm-agent", version = "0.1" }
-lellm-macros = { path = "lellm-macros", version = "0.1" }
-lellm-mcp = { path = "lellm-mcp", version = "0.1" }
+lellm-core = { path = "lellm-core", version = "0.3" }
+lellm-provider = { path = "lellm-provider", version = "0.3" }
+lellm-agent = { path = "lellm-agent", version = "0.3" }
+lellm-derive = { path = "lellm-derive", version = "0.3" }
+lellm-mcp = { path = "lellm-mcp", version = "0.3" }
+lellm-graph = { path = "lellm-graph", version = "0.3" }
 
 # Common
 async-trait = "0.1"
@@ -38,3 +40,5 @@ url = "2"
 schemars = "1"
 indexmap = "2"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }

@@ -1,10 +1,10 @@
 [package]
-name = "lellm-macros"
+name = "lellm-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Derive macros for LeLLM — ToolSchema, ParallelSafety"
-documentation = "https://docs.rs/lellm-macros"
+documentation = "https://docs.rs/lellm-derive"
 repository = "https://github.com/lellm-ai/lellm"
 
 [lib]

@@ -6,7 +6,7 @@
 //!
 //! # 示例
 //! ```ignore
-//! use lellm_macros::ToolDefinition;
+//! use lellm_derive::ToolDefinition;
 //!
 //! #[derive(ToolDefinition)]
 //! #[tool(name = "search", description = "搜索互联网信息")]
