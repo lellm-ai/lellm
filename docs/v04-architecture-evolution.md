@@ -3,7 +3,7 @@
 > 版本：v0.4 | 日期：2026-06-19 | 状态：规划中
 >
 > 本文档记录 v0.4 的设计决策和演进路线。
-> v0.3 收尾（消灭 LoopState + 统一 StateKey）详见 [v03-architecture-evolution.md](./v03-architecture-evolution.md) 第九节。
+> v0.3 收尾（消灭 LoopState + 统一 StateKey）详见 [v03-architecture-evolution.md](./v03-architecture-evolution.md) v0.3.1 节。
 
 ## 目录
 
