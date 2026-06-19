@@ -393,6 +393,8 @@ pub struct AgentExecutionContext {
 - `SK_STOP_REASON` 不引入（属于 Control Plane）
 - `SK_TOOL_CALL_HISTORY` 不引入（v04 审计需求）
 - `compact()` 不改成 Graph Node（v04 Agent = Internal Graph）
+- **不统一流式/非流式路径** — execute() 和 execute_stream() 保留两个入口，execute_iteration() + EventSink 留给 v04
+- **不引入 StreamAggregationContext** — 流式聚合逻辑保持现状，v04 统一执行模型时再拆分
 
 ### 实现路径
 
@@ -613,6 +615,9 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 
 ##### 待做清单
 
+- [ ] 统一 execute() / execute_stream() 为 `execute_iteration(state, ctx, sink)`
+- [ ] 引入 `EventSink` trait — 非流式用 NullEventSink，流式用 ChannelEventSink
+- [ ] 拆分 `StreamAggregationContext` — 流式聚合缓冲区，不属于 State
 - [ ] 设计 `LLMNode` — 执行单次 LLM 调用，写入 messages 和 tool_calls 到 State
 - [ ] 设计 `ToolNode` — 读取 tool_calls，执行工具，写入 results 到 State
 - [ ] 设计 `ConditionNode` — 检查 tool_calls 是否为空，路由到 ToolNode 或 End
@@ -620,7 +625,6 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 - [ ] `AgentFlowNode` 简化为 SubGraph 包装器
 - [ ] `compact()` 变成 Graph 中的 BudgetGuardNode + CompactNode
 - [ ] 引入 `SK_TOOL_CALL_HISTORY`（审计历史）
-- [ ] 验证流式输出与现有 `AgentStream` 兼容
 
 #### v0.4+ 终局：Typed State + Effect 事件溯源
 
