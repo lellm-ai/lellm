@@ -465,9 +465,7 @@ impl GraphExecutor {
                         let exec_metadata = ExecutionMetadata {
                             duration_ms: duration.as_millis() as u64,
                             token_cost: metadata.as_ref().map_or(0.0, |m| m.token_cost),
-                            has_side_effects: metadata
-                                .as_ref()
-                                .is_some_and(|m| m.has_side_effects),
+                            has_side_effects: metadata.as_ref().is_some_and(|m| m.has_side_effects),
                         };
                         self.save_checkpoint_if_needed(
                             &event_tx,

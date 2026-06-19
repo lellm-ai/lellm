@@ -54,8 +54,8 @@ struct MultiplyArgs {
 
 fn build_graph() -> lellm_graph::Graph {
     // 创建 Provider（从环境变量读取 API Key）
-    let provider = CodecProvider::load(OpenAICompatCodec::llama())
-        .expect("请设置 OPENAI_API_KEY 环境变量");
+    let provider =
+        CodecProvider::load(OpenAICompatCodec::llama()).expect("请设置 OPENAI_API_KEY 环境变量");
 
     let model = ResolvedModel {
         provider: Arc::new(provider),
@@ -155,7 +155,12 @@ async fn main() {
     println!("\n=== 执行日志 ===");
     for (i, e) in result.execution_log.iter().enumerate() {
         let icon = if e.success { "✅" } else { "❌" };
-        println!("  [{}] {} {icon} {}ms", i + 1, e.node_name, e.elapsed().as_millis());
+        println!(
+            "  [{}] {} {icon} {}ms",
+            i + 1,
+            e.node_name,
+            e.elapsed().as_millis()
+        );
     }
     println!("总耗时: {}ms", result.duration.as_millis());
 
