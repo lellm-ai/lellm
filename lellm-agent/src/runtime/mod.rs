@@ -36,7 +36,7 @@ pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStr
 pub use lellm_provider::ResolvedModel;
 pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
-pub use runtime::{LoopState, ResolvedRound, ToolUseLoop, ToolUseResult};
+pub use runtime::{ResolvedRound, ToolUseLoop, ToolUseResult};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};

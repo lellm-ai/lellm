@@ -14,13 +14,17 @@
 //! ```
 
 use lellm_core::{ChatResponse, LlmError, Message};
+use lellm_graph::{
+    SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS, State,
+    StateKeyExt,
+};
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_messages_inner, empty_response};
 use super::context::{
-    CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_reasoning_block,
-    estimate_text, estimate_tokens,
+    AgentExecutionContext, CompactionResult, ContextBudget, ContextCompactor, LocalCompactor,
+    estimate_reasoning_block, estimate_text, estimate_tokens,
 };
 use super::event::{AgentEvent, AgentStream, StopReason};
 use super::fallback::{FallbackAction, FallbackContext};
@@ -49,179 +53,197 @@ impl ResolvedRound {
     }
 }
 
-// ─── 循环状态机 ───────────────────────────────────────────────
+// ─── State 辅助函数 ─────────────────────────────────────────────
 
-/// Agent Loop 共享状态 — 非流式与流式执行模式共用。
-///
-/// `Clone` 用于迭代重试时回滚状态（snapshot → restore）。
-#[derive(Debug, Clone)]
-pub struct LoopState {
-    pub messages: Vec<Message>,
-    /// 消息历史的估算 Token 数（与 messages 同步更新）
-    pub estimated_tokens: usize,
-    pub iterations: usize,
-    pub tool_calls_executed: usize,
-    /// 整个 Agent Run 的累计输出 Token 数（Text，不含 Thinking 和 Tool Call）
-    /// 用于 max_total_output_tokens 预算检查。
-    pub total_output_tokens: usize,
-    /// 整个 Agent Run 的累计推理 Token 数（Thinking，不含 Text 和 Tool Call）
-    /// 用于可观测性；单轮推理预算通过 `ChatRequest.max_reasoning_tokens` 透传给 Provider。
-    pub total_reasoning_tokens: usize,
+/// 创建初始 State，写入消息列表和计数器。
+pub(crate) fn create_initial_state(messages: &[Message]) -> State {
+    let mut state = State::new();
+    let messages_json: Vec<serde_json::Value> = messages
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    state.set_sk(&SK_MESSAGES, messages_json);
+    state.set_sk(&SK_ITERATIONS, 0u32);
+    state.set_sk(&SK_TOTAL_TOOL_CALLS, 0usize);
+    state.set_sk(&SK_OUTPUT_TOKENS, 0usize);
+    state.set_sk(&SK_REASONING_TOKENS, 0usize);
+    state
 }
 
-impl LoopState {
-    pub fn new(messages: Vec<Message>) -> Self {
-        let estimated_tokens = estimate_tokens(&messages);
-        Self {
-            messages,
-            estimated_tokens,
-            iterations: 0,
-            tool_calls_executed: 0,
-            total_output_tokens: 0,
-            total_reasoning_tokens: 0,
-        }
-    }
+/// 从 State 读取消息列表（反序列化）。
+pub(crate) fn get_messages(state: &State) -> Vec<Message> {
+    state
+        .get_sk::<Vec<serde_json::Value>>(&SK_MESSAGES)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect()
+}
 
-    /// 累计输出 Token（Text）
-    pub fn add_output_tokens(&mut self, tokens: usize) {
-        self.total_output_tokens += tokens;
-    }
+/// 从 State 读取迭代轮次。
+pub(crate) fn get_iterations(state: &State) -> u32 {
+    state.get_sk::<u32>(&SK_ITERATIONS).unwrap_or(0)
+}
 
-    /// 累计推理 Token（Thinking）
-    pub fn add_reasoning_tokens(&mut self, tokens: usize) {
-        self.total_reasoning_tokens += tokens;
-    }
+/// 从 State 读取累计工具调用数。
+pub(crate) fn get_tool_calls(state: &State) -> usize {
+    state.get_sk::<usize>(&SK_TOTAL_TOOL_CALLS).unwrap_or(0)
+}
 
-    /// 检查是否超过总输出预算
-    pub fn exceeded_total_output(&self, max: Option<u32>) -> bool {
-        match max {
-            Some(limit) => self.total_output_tokens >= limit as usize,
-            None => false,
-        }
-    }
+/// 从 State 读取累计输出 Token 数。
+pub(crate) fn get_output_tokens(state: &State) -> usize {
+    state.get_sk::<usize>(&SK_OUTPUT_TOKENS).unwrap_or(0)
+}
 
-    /// 检查是否超过总推理预算
-    pub fn exceeded_total_reasoning(&self, max: Option<u32>) -> bool {
-        match max {
-            Some(limit) => self.total_reasoning_tokens >= limit as usize,
-            None => false,
-        }
-    }
+/// 从 State 读取累计推理 Token 数。
+pub(crate) fn get_reasoning_tokens(state: &State) -> usize {
+    state.get_sk::<usize>(&SK_REASONING_TOKENS).unwrap_or(0)
+}
 
-    /// 从 ContentBlock 分离估算 Output（Text）和 Reasoning（Thinking）Token
-    pub fn add_output_from_content(&mut self, content: &[lellm_core::ContentBlock]) {
-        let mut output_tokens: usize = 0;
-        let mut reasoning_tokens: usize = 0;
-        for b in content {
-            match b {
-                lellm_core::ContentBlock::Text(t) => output_tokens += estimate_text(&t.text),
-                lellm_core::ContentBlock::Thinking(th) => {
-                    reasoning_tokens += estimate_reasoning_block(th)
+/// 追加 Assistant 响应到消息历史。
+pub(crate) fn state_push_assistant(
+    state: &mut State,
+    ctx: &mut AgentExecutionContext,
+    content: Vec<lellm_core::ContentBlock>,
+) {
+    let msg = Message::Assistant {
+        content: content.clone(),
+    };
+    let tokens = estimate_tokens(&[msg]);
+    ctx.add_tokens(tokens);
+    let mut messages_json: Vec<serde_json::Value> = state.get_sk(&SK_MESSAGES).unwrap_or_default();
+    messages_json.push(serde_json::to_value(Message::Assistant { content }).unwrap_or_default());
+    state.set_sk(&SK_MESSAGES, messages_json);
+}
+
+/// 追加工具执行结果到消息历史。
+pub(crate) fn state_push_tool_results(
+    state: &mut State,
+    ctx: &mut AgentExecutionContext,
+    results: Vec<Message>,
+    budget: &ContextBudget,
+) {
+    let results: Vec<Message> = results
+        .into_iter()
+        .map(|m| {
+            if let Message::ToolResult {
+                ref tool_call_id,
+                is_error: false,
+                ref content,
+            } = m
+            {
+                let truncated = budget.truncate_tool_result_blocks(content);
+                if truncated != *content {
+                    return Message::ToolResult {
+                        tool_call_id: tool_call_id.clone(),
+                        is_error: false,
+                        content: truncated,
+                    };
                 }
-                lellm_core::ContentBlock::Image { .. } | lellm_core::ContentBlock::ToolCall(_) => {}
             }
-        }
-        self.total_output_tokens += output_tokens;
-        self.total_reasoning_tokens += reasoning_tokens;
+            m
+        })
+        .collect();
+    let tokens = estimate_tokens(&results);
+    ctx.add_tokens(tokens);
+    let mut messages_json: Vec<serde_json::Value> = state.get_sk(&SK_MESSAGES).unwrap_or_default();
+    for msg in results {
+        messages_json.push(serde_json::to_value(msg).unwrap_or_default());
     }
+    state.set_sk(&SK_MESSAGES, messages_json);
+}
 
-    /// 追加 Assistant 响应到历史
-    pub fn push_assistant(&mut self, content: Vec<lellm_core::ContentBlock>) {
-        let msg = Message::Assistant {
-            content: content.clone(),
-        };
-        let tokens = estimate_tokens(&[msg]);
-        self.estimated_tokens += tokens;
-        self.messages.push(Message::Assistant { content });
-    }
+/// 记录本轮工具调用数量。
+pub(crate) fn state_add_tool_calls(state: &mut State, count: usize) {
+    let current = state.get_sk::<usize>(&SK_TOTAL_TOOL_CALLS).unwrap_or(0);
+    state.set_sk(&SK_TOTAL_TOOL_CALLS, current + count);
+}
 
-    /// 追加工具执行结果到历史。
-    pub fn push_tool_results(&mut self, results: Vec<Message>, budget: &ContextBudget) {
-        let results: Vec<Message> = results
-            .into_iter()
-            .map(|m| {
-                if let Message::ToolResult {
-                    ref tool_call_id,
-                    is_error: false,
-                    ref content,
-                } = m
-                {
-                    let truncated = budget.truncate_tool_result_blocks(content);
-                    if truncated != *content {
-                        return Message::ToolResult {
-                            tool_call_id: tool_call_id.clone(),
-                            is_error: false,
-                            content: truncated,
-                        };
-                    }
-                }
-                m
-            })
-            .collect();
-        let tokens = estimate_tokens(&results);
-        self.estimated_tokens += tokens;
-        self.messages.extend(results);
-    }
-
-    /// 记录本轮工具调用数量
-    pub fn add_tool_calls(&mut self, count: usize) {
-        self.tool_calls_executed += count;
-    }
-
-    /// 进入下一轮迭代
-    pub fn next_iteration(&mut self) {
-        self.iterations += 1;
-    }
-
-    /// 判断是否已达到最大轮次
-    pub fn reached_max(&self, max_iterations: usize) -> bool {
-        self.iterations >= max_iterations
-    }
-
-    /// 对消息历史执行压缩。
-    pub fn compact(
-        &mut self,
-        budget: &ContextBudget,
-        compactor: &dyn ContextCompactor,
-    ) -> Option<CompactionResult> {
-        if !budget.should_compact(self.estimated_tokens) {
-            return None;
-        }
-        let result = compactor.compact(&self.messages, budget);
-        self.messages = result.messages.clone();
-        self.estimated_tokens = result.after_tokens;
-        Some(result)
-    }
-
-    /// 构建最终执行结果
-    pub fn finish(&self, stop_reason: StopReason, response: ChatResponse) -> ToolUseResult {
-        ToolUseResult {
-            stop_reason,
-            response,
-            messages: self.messages.clone(),
-            iterations: self.iterations,
-            tool_calls_executed: self.tool_calls_executed,
+/// 从 ContentBlock 分离估算 Output 和 Reasoning Token。
+pub(crate) fn state_add_output_from_content(
+    state: &mut State,
+    ctx: &mut AgentExecutionContext,
+    content: &[lellm_core::ContentBlock],
+) {
+    let mut output_tokens: usize = 0;
+    let mut reasoning_tokens: usize = 0;
+    for b in content {
+        match b {
+            lellm_core::ContentBlock::Text(t) => output_tokens += estimate_text(&t.text),
+            lellm_core::ContentBlock::Thinking(th) => {
+                reasoning_tokens += estimate_reasoning_block(th)
+            }
+            lellm_core::ContentBlock::Image { .. } | lellm_core::ContentBlock::ToolCall(_) => {}
         }
     }
+    let current_output = state.get_sk::<usize>(&SK_OUTPUT_TOKENS).unwrap_or(0);
+    state.set_sk(&SK_OUTPUT_TOKENS, current_output + output_tokens);
+    let current_reasoning = state.get_sk::<usize>(&SK_REASONING_TOKENS).unwrap_or(0);
+    state.set_sk(&SK_REASONING_TOKENS, current_reasoning + reasoning_tokens);
+    ctx.add_tokens(output_tokens + reasoning_tokens);
+}
 
-    pub fn finish_complete(&self, response: ChatResponse) -> ToolUseResult {
-        self.finish(StopReason::Complete, response)
+/// 进入下一轮迭代。
+pub(crate) fn state_next_iteration(state: &mut State) {
+    let current = state.get_sk::<u32>(&SK_ITERATIONS).unwrap_or(0);
+    state.set_sk(&SK_ITERATIONS, current + 1);
+}
+
+/// 判断是否已达到最大轮次。
+pub(crate) fn state_reached_max(state: &State, max_iterations: usize) -> bool {
+    get_iterations(state) >= max_iterations as u32
+}
+
+/// 对消息历史执行压缩。
+pub(crate) fn state_compact(
+    state: &mut State,
+    ctx: &mut AgentExecutionContext,
+    budget: &ContextBudget,
+    compactor: &dyn ContextCompactor,
+) -> Option<CompactionResult> {
+    if !budget.should_compact(ctx.cached_token_count) {
+        return None;
     }
+    let messages = get_messages(state);
+    let result = compactor.compact(&messages, budget);
+    let messages_json: Vec<serde_json::Value> = result
+        .messages
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    state.set_sk(&SK_MESSAGES, messages_json);
+    ctx.cached_token_count = result.after_tokens;
+    Some(result)
+}
 
-    pub fn finish_max_iterations(&self, response: ChatResponse) -> ToolUseResult {
-        self.finish(StopReason::MaxIterationsReached, response)
+/// 检查是否超过总输出预算。
+pub(crate) fn state_exceeded_total_output(state: &State, max: Option<u32>) -> bool {
+    match max {
+        Some(limit) => get_output_tokens(state) >= limit as usize,
+        None => false,
     }
+}
 
-    pub fn finish_cancelled(&self, response: ChatResponse) -> ToolUseResult {
-        self.finish(StopReason::Cancelled, response)
+/// 检查是否超过总推理预算。
+pub(crate) fn state_exceeded_total_reasoning(state: &State, max: Option<u32>) -> bool {
+    match max {
+        Some(limit) => get_reasoning_tokens(state) >= limit as usize,
+        None => false,
     }
+}
 
-    pub fn finish_output_budget(&self, response: ChatResponse) -> ToolUseResult {
-        self.finish(StopReason::OutputBudgetExceeded, response)
-    }
-
-    pub fn finish_reasoning_budget(&self, response: ChatResponse) -> ToolUseResult {
-        self.finish(StopReason::ReasoningBudgetExceeded, response)
+/// 构建最终执行结果。
+pub(crate) fn build_result(
+    state: &State,
+    stop_reason: StopReason,
+    response: ChatResponse,
+) -> ToolUseResult {
+    ToolUseResult {
+        stop_reason,
+        response,
+        messages: get_messages(state),
+        iterations: get_iterations(state) as usize,
+        tool_calls_executed: get_tool_calls(state),
     }
 }
 
@@ -296,38 +318,43 @@ impl ToolUseLoop {
     /// 非流式执行
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
-        let mut state = LoopState::new(initial_messages);
+        let mut state = create_initial_state(&initial_messages);
+        let mut ctx = AgentExecutionContext::new(&initial_messages);
         let mut last_response: Option<ChatResponse> = None;
         let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
         loop {
-            if state.reached_max(self.config.max_iterations) {
-                return Ok(
-                    state.finish_max_iterations(last_response.unwrap_or_else(empty_response))
-                );
+            if state_reached_max(&state, self.config.max_iterations) {
+                return Ok(build_result(
+                    &state,
+                    StopReason::MaxIterationsReached,
+                    last_response.unwrap_or_else(empty_response),
+                ));
             }
-            state.next_iteration();
-            state.compact(&self.config.context_budget, &*compactor);
+            state_next_iteration(&mut state);
+            state_compact(
+                &mut state,
+                &mut ctx,
+                &self.config.context_budget,
+                &*compactor,
+            );
 
-            // 1.5 解析本轮工具快照（每轮一次，固定工具集）
             let round = ResolvedRound::new(self.executor.snapshot().await);
 
-            // 2. 构建请求
             let req = super::config::build_request_inner_with_round(
                 &self.model,
-                &state.messages,
+                &get_messages(&state),
                 self.config.max_output_tokens,
                 &self.config.request_options,
-                state.iterations,
+                get_iterations(&state) as usize,
                 &round.definitions,
             );
 
-            // 3. 执行 Provider
-            let iteration = state.iterations;
-            let msg_snapshot = state.messages.clone();
+            let iteration = get_iterations(&state) as usize;
+            let msg_snapshot = get_messages(&state);
             let response = execute_with_fallback(
                 &self.deps.fallback,
-                |_| true, // 非流式模式允许重试
+                |_| true,
                 || self.model.provider.call(&req),
                 iteration,
                 &msg_snapshot,
@@ -335,7 +362,6 @@ impl ToolUseLoop {
             .await?;
             last_response = Some(response.clone());
 
-            // 4. 单轮推理预算检查（非流式路径）
             if let Some(limit) = self.config.request_options.max_reasoning_tokens {
                 let round_reasoning: usize = response
                     .content
@@ -353,28 +379,39 @@ impl ToolUseLoop {
                         max_reasoning_tokens = limit,
                         "single-round reasoning budget exceeded (non-stream, soft limit)"
                     );
-                    return Ok(state.finish_reasoning_budget(response));
+                    return Ok(build_result(
+                        &state,
+                        StopReason::ReasoningBudgetExceeded,
+                        response,
+                    ));
                 }
             }
 
-            // 5. 后处理响应
-            state.add_output_from_content(&response.content);
+            state_add_output_from_content(&mut state, &mut ctx, &response.content);
 
-            if state.exceeded_total_output(self.config.max_total_output_tokens) {
-                return Ok(state.finish_output_budget(response));
+            if state_exceeded_total_output(&state, self.config.max_total_output_tokens) {
+                return Ok(build_result(
+                    &state,
+                    StopReason::OutputBudgetExceeded,
+                    response,
+                ));
             }
 
-            if state.exceeded_total_reasoning(self.config.max_total_reasoning_tokens) {
-                return Ok(state.finish_reasoning_budget(response));
+            if state_exceeded_total_reasoning(&state, self.config.max_total_reasoning_tokens) {
+                return Ok(build_result(
+                    &state,
+                    StopReason::ReasoningBudgetExceeded,
+                    response,
+                ));
             }
 
             if !response.has_tool_calls() {
-                return Ok(state.finish_complete(response));
+                return Ok(build_result(&state, StopReason::Complete, response));
             }
 
             let tool_calls: Vec<_> = response.tool_calls().cloned().collect();
-            state.push_assistant(response.content.clone());
-            state.add_tool_calls(tool_calls.len());
+            state_push_assistant(&mut state, &mut ctx, response.content.clone());
+            state_add_tool_calls(&mut state, tool_calls.len());
 
             let batch =
                 execute_batch_with(&tool_calls, &round.snapshot, &self.executor.retry_policy())
@@ -384,10 +421,15 @@ impl ToolUseLoop {
                 tracing::warn!("tool batch task panicked — error results filled in by executor");
             }
 
-            state.push_tool_results(batch.results, &self.config.context_budget);
+            state_push_tool_results(
+                &mut state,
+                &mut ctx,
+                batch.results,
+                &self.config.context_budget,
+            );
 
             tracing::debug!(
-                iteration = state.iterations,
+                iteration = get_iterations(&state),
                 tool_calls = tool_calls.len(),
                 "tool-use loop iteration"
             );
@@ -417,16 +459,19 @@ impl ToolUseLoop {
                     return;
                 }
             };
-            let mut state = LoopState::new(initial_messages);
+            let mut state = create_initial_state(&initial_messages);
+            let mut ctx = AgentExecutionContext::new(&initial_messages);
             let mut last_response: Option<ChatResponse> = None;
             let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
             loop {
-                if state.reached_max(config.max_iterations) {
+                if state_reached_max(&state, config.max_iterations) {
                     let _ = emit(
                         &tx,
                         AgentEvent::LoopEnd {
-                            result: state.finish_max_iterations(
+                            result: build_result(
+                                &state,
+                                StopReason::MaxIterationsReached,
                                 last_response.unwrap_or_else(empty_response),
                             ),
                         },
@@ -435,8 +480,10 @@ impl ToolUseLoop {
                     return;
                 }
 
-                state.next_iteration();
-                if let Some(compact_result) = state.compact(&config.context_budget, &*compactor) {
+                state_next_iteration(&mut state);
+                if let Some(compact_result) =
+                    state_compact(&mut state, &mut ctx, &config.context_budget, &*compactor)
+                {
                     let _ = emit(
                         &tx,
                         AgentEvent::ContextCompacted {
@@ -448,21 +495,21 @@ impl ToolUseLoop {
                     .await;
                 }
 
-                // 解析本轮工具快照（每轮一次，固定工具集）
                 let round = ResolvedRound::new(executor.snapshot().await);
 
                 let req = super::config::build_request_inner_with_round(
                     &model,
-                    &state.messages,
+                    &get_messages(&state),
                     config.max_output_tokens,
                     &config.request_options,
-                    state.iterations,
+                    get_iterations(&state) as usize,
                     &round.definitions,
                 );
 
                 // 内联 fallback 重试循环
-                let iteration = state.iterations;
+                let iteration = get_iterations(&state) as usize;
                 let attempt_state = state.clone();
+                let attempt_ctx = ctx.clone();
                 let mut attempt: usize = 1;
 
                 let result = loop {
@@ -471,6 +518,7 @@ impl ToolUseLoop {
                         tx.clone(),
                         executor.clone(),
                         attempt_state.clone(),
+                        attempt_ctx.clone(),
                         req.clone(),
                         config.context_budget.clone(),
                         config.max_output_tokens,
@@ -480,7 +528,7 @@ impl ToolUseLoop {
                     .await;
 
                     match iter_result.result {
-                        Ok(v) => break Ok(v),
+                        Ok((r, s)) => break Ok((r, s, iter_result.ctx)),
                         Err(ref err) => {
                             tracing::warn!(
                                 attempt = attempt,
@@ -494,15 +542,14 @@ impl ToolUseLoop {
                                 break Err(e);
                             }
 
-                            let ctx = FallbackContext {
+                            let messages = get_messages(&attempt_state);
+                            let fallback_ctx = FallbackContext {
                                 error: err,
                                 attempt,
                                 iterations: iteration,
-                                conversation: std::sync::Arc::from(
-                                    attempt_state.messages.as_slice(),
-                                ),
+                                conversation: std::sync::Arc::from(messages.as_slice()),
                             };
-                            match deps.fallback.handle(&ctx).await {
+                            match deps.fallback.handle(&fallback_ctx).await {
                                 FallbackAction::Retry => {
                                     attempt += 1;
                                 }
@@ -516,31 +563,37 @@ impl ToolUseLoop {
 
                 // 成功时合并 state
                 let result = match result {
-                    Ok((r, s)) => {
+                    Ok((r, s, updated_ctx)) => {
                         state = s;
+                        ctx = updated_ctx;
                         Ok(r)
                     }
                     Err(e) => Err(e),
                 };
 
                 // 总预算检查
-                if state.exceeded_total_output(config.max_total_output_tokens) {
+                if state_exceeded_total_output(&state, config.max_total_output_tokens) {
                     let _ = emit(
                         &tx,
                         AgentEvent::LoopEnd {
-                            result: state
-                                .finish_output_budget(last_response.unwrap_or_else(empty_response)),
+                            result: build_result(
+                                &state,
+                                StopReason::OutputBudgetExceeded,
+                                last_response.unwrap_or_else(empty_response),
+                            ),
                         },
                     )
                     .await;
                     return;
                 }
 
-                if state.exceeded_total_reasoning(config.max_total_reasoning_tokens) {
+                if state_exceeded_total_reasoning(&state, config.max_total_reasoning_tokens) {
                     let _ = emit(
                         &tx,
                         AgentEvent::LoopEnd {
-                            result: state.finish_reasoning_budget(
+                            result: build_result(
+                                &state,
+                                StopReason::ReasoningBudgetExceeded,
                                 last_response.unwrap_or_else(empty_response),
                             ),
                         },
@@ -557,7 +610,7 @@ impl ToolUseLoop {
                         let _ = emit(
                             &tx,
                             AgentEvent::LoopEnd {
-                                result: state.finish_complete(response),
+                                result: build_result(&state, StopReason::Complete, response),
                             },
                         )
                         .await;
@@ -570,7 +623,7 @@ impl ToolUseLoop {
                         let _ = emit(
                             &tx,
                             AgentEvent::LoopEnd {
-                                result: state.finish_cancelled(resp),
+                                result: build_result(&state, StopReason::Cancelled, resp),
                             },
                         )
                         .await;
@@ -578,13 +631,17 @@ impl ToolUseLoop {
                     }
                     Ok(StreamIterResult::OutputBudgetExceeded { response }) => {
                         tracing::warn!(
-                            total_output_tokens = state.total_output_tokens,
+                            total_output_tokens = get_output_tokens(&state),
                             "single-round output budget exceeded, stopping agent"
                         );
                         let _ = emit(
                             &tx,
                             AgentEvent::LoopEnd {
-                                result: state.finish_output_budget(response),
+                                result: build_result(
+                                    &state,
+                                    StopReason::OutputBudgetExceeded,
+                                    response,
+                                ),
                             },
                         )
                         .await;
@@ -592,13 +649,17 @@ impl ToolUseLoop {
                     }
                     Ok(StreamIterResult::ReasoningBudgetExceeded { response }) => {
                         tracing::warn!(
-                            total_reasoning_tokens = state.total_reasoning_tokens,
+                            total_reasoning_tokens = get_reasoning_tokens(&state),
                             "single-round reasoning budget exceeded, stopping agent"
                         );
                         let _ = emit(
                             &tx,
                             AgentEvent::LoopEnd {
-                                result: state.finish_reasoning_budget(response),
+                                result: build_result(
+                                    &state,
+                                    StopReason::ReasoningBudgetExceeded,
+                                    response,
+                                ),
                             },
                         )
                         .await;
@@ -609,7 +670,7 @@ impl ToolUseLoop {
                             &tx,
                             AgentEvent::LoopError {
                                 error: e,
-                                iterations: state.iterations,
+                                iterations: get_iterations(&state) as usize,
                             },
                         )
                         .await;

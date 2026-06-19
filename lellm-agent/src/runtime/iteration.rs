@@ -3,16 +3,19 @@
 //! 包含带 Fallback 的重试执行器、流式迭代、工具串行执行等。
 
 use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolCall, ToolError};
+use lellm_graph::State;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-use super::LoopState;
-use super::context::{ContextBudget, estimate_text};
+use super::context::{AgentExecutionContext, ContextBudget, estimate_text};
 use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::retry::RetryPolicy;
-use super::runtime::ResolvedRound;
+use super::runtime::{
+    ResolvedRound, build_result, get_iterations, state_add_output_from_content,
+    state_add_tool_calls, state_push_assistant, state_push_tool_results,
+};
 use super::tools::{ToolExecutor, ToolRegistration, ToolSnapshot};
 
 /// 工具映射类型别名
@@ -87,7 +90,7 @@ pub async fn emit(tx: &Sender<AgentEvent>, event: AgentEvent) -> bool {
 /// **事件顺序：** ToolStart 按原始顺序发出，ToolEnd 允许乱序。
 /// 消费者用 `tool_call_id` 配对 Start/End。
 ///
-/// **工具结果截断**统一在 `LoopState.push_tool_results()` 中执行，此处不截断。
+/// **工具结果截断**统一在 `state_push_tool_results()` 中执行，此处不截断。
 pub(super) async fn emit_and_execute_tools_with(
     tx: &Sender<AgentEvent>,
     snapshot: &ToolSnapshot,
@@ -332,7 +335,8 @@ pub(super) enum StreamIterResult {
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
-    state: &mut LoopState,
+    state: &mut State,
+    ctx: &mut AgentExecutionContext,
     stream: &mut lellm_provider::ProviderStream,
     text_buffer: &mut String,
     thinking_buffer: &mut String,
@@ -445,9 +449,9 @@ async fn process_stream_iteration(
             let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
 
             if !pending_tool_calls.is_empty() {
-                state.push_assistant(response.content.clone());
-                state.add_output_from_content(&response.content);
-                state.add_tool_calls(pending_tool_calls.len());
+                state_push_assistant(state, ctx, response.content.clone());
+                state_add_output_from_content(state, ctx, &response.content);
+                state_add_tool_calls(state, pending_tool_calls.len());
 
                 let results = emit_and_execute_tools_with(
                     tx,
@@ -461,22 +465,26 @@ async fn process_stream_iteration(
                         response: Some(response),
                     });
                 }
-                state.push_tool_results(results.unwrap(), budget);
+                state_push_tool_results(state, ctx, results.unwrap(), budget);
 
                 tracing::debug!(
-                    iteration = state.iterations,
+                    iteration = get_iterations(state),
                     tool_calls = pending_tool_calls.len(),
                     "tool-use stream iteration"
                 );
 
                 return Ok(StreamIterResult::Continue { response });
             } else {
-                state.add_output_from_content(&response.content);
+                state_add_output_from_content(state, ctx, &response.content);
 
                 if !emit(
                     tx,
                     AgentEvent::LoopEnd {
-                        result: state.finish_complete(response.clone()),
+                        result: build_result(
+                            state,
+                            super::event::StopReason::Complete,
+                            response.clone(),
+                        ),
                     },
                 )
                 .await
@@ -499,20 +507,22 @@ async fn process_stream_iteration(
 /// `stream_started = true` 表示 stream 已打开（可能已发出事件），
 /// 此时失败禁止 Retry（防止重复 Token）。
 pub(super) struct StreamIterationResult {
-    pub(super) result: Result<(StreamIterResult, LoopState), LlmError>,
+    pub(super) result: Result<(StreamIterResult, State), LlmError>,
+    pub(super) ctx: AgentExecutionContext,
     pub(super) stream_started: bool,
 }
 
 /// 执行单次流式迭代：打开 stream → 消费事件 → 处理工具调用。
 ///
 /// 接收 owned 参数（Arc-clone 为 O(1)），避免闭包捕获带来的变量爆炸。
-/// 返回迭代结果和更新后的 LoopState。
+/// 返回迭代结果和更新后的 State + AgentExecutionContext。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn do_stream_iteration(
     model: ResolvedModel,
     tx: Sender<AgentEvent>,
     executor: ToolExecutor,
-    state: LoopState,
+    state: State,
+    ctx: AgentExecutionContext,
     req: ChatRequest,
     budget: ContextBudget,
     max_output_tokens: u32,
@@ -527,6 +537,7 @@ pub(super) async fn do_stream_iteration(
         Err(e) => {
             return StreamIterationResult {
                 result: Err(e),
+                ctx,
                 stream_started: false,
             };
         }
@@ -536,12 +547,14 @@ pub(super) async fn do_stream_iteration(
     let mut thinking_buffer = String::new();
     let mut redacted_buffer: Option<String> = None;
     let mut attempt_state = state;
+    let mut attempt_ctx = ctx;
 
     // stream 已打开 → 事件可能已发出，失败后禁止 Retry
     let iter_result = process_stream_iteration(
         &tx,
         &executor,
         &mut attempt_state,
+        &mut attempt_ctx,
         &mut stream,
         &mut text_buffer,
         &mut thinking_buffer,
@@ -556,6 +569,7 @@ pub(super) async fn do_stream_iteration(
 
     StreamIterationResult {
         result: iter_result.map(|r| (r, attempt_state)),
+        ctx: attempt_ctx,
         stream_started: true,
     }
 }

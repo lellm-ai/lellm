@@ -145,6 +145,9 @@ pub static SK_ITERATIONS: StateKey<u32> = StateKey::replace("iterations");
 pub static SK_PENDING_TOOL_CALLS: StateKey<Vec<serde_json::Value>> =
     StateKey::replace("pending_tool_calls");
 
+/// 累计工具调用总数（整个 Agent Run）。
+pub static SK_TOTAL_TOOL_CALLS: StateKey<usize> = StateKey::sum("total_tool_calls");
+
 /// 累计输出 Token 数（Text，不含 Thinking）。
 pub static SK_OUTPUT_TOKENS: StateKey<usize> = StateKey::sum("output_tokens");
 
