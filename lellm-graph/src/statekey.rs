@@ -135,3 +135,18 @@ pub static SK_COUNT: StateKey<u64> = StateKey::new("count", Reducer::Sum);
 
 /// 执行步骤记录 — Barrier 多轮审批等场景。
 pub static SK_STEPS: StateKey<Vec<String>> = StateKey::new("steps", Reducer::Append);
+
+// ─── Agent 核心状态键（v0.3.1）─────────────────────────────────
+
+/// Agent 迭代轮次。
+pub static SK_ITERATIONS: StateKey<u32> = StateKey::replace("iterations");
+
+/// 当前轮待执行的工具调用（每轮清空，非历史累计）。
+pub static SK_PENDING_TOOL_CALLS: StateKey<Vec<serde_json::Value>> =
+    StateKey::replace("pending_tool_calls");
+
+/// 累计输出 Token 数（Text，不含 Thinking）。
+pub static SK_OUTPUT_TOKENS: StateKey<usize> = StateKey::sum("output_tokens");
+
+/// 累计推理 Token 数（Thinking，不含 Text）。
+pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::sum("reasoning_tokens");

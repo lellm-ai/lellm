@@ -31,7 +31,10 @@ pub use state::{
 pub use delta::{DeltaOp, DeltaSource, Reducer, ReducerRegistry, StateDelta};
 
 // ─── StateKey ────────────────────────────────────────────────
-pub use statekey::{SK_COUNT, SK_MESSAGES, SK_STEPS, StateKey, StateKeyExt};
+pub use statekey::{
+    SK_COUNT, SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_PENDING_TOOL_CALLS,
+    SK_REASONING_TOKENS, SK_STEPS, StateKey, StateKeyExt,
+};
 
 // ─── Checkpoint ──────────────────────────────────────────────
 pub use checkpoint::{
