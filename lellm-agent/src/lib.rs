@@ -12,13 +12,14 @@ pub use serde;
 
 pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
 pub use runtime::{
-    AgentBuilder, AgentEvent, AgentFlowNode, AgentStream, BackoffStrategy, BatchExecutionResult,
-    CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback,
-    FallbackAction, FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult,
-    LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy, StaticCatalog,
-    StopReason, ToolArgs, ToolCatalog, ToolCategory, ToolError, ToolErrorKind, ToolExecutor,
-    ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop,
-    ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
+    AgentBuilder, AgentEvent, AgentFlowNode, AgentState, AgentStream, BackoffStrategy,
+    BatchExecutionResult, CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor,
+    DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy, IntoToolError,
+    IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy,
+    StaticCatalog, StopReason, ToolArgs, ToolCatalog, ToolCategory, ToolError, ToolErrorKind,
+    ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
+    ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
+    initial_state,
 };
 
 // ─── 糖衣 API（第三层原型） ───

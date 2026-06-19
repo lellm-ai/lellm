@@ -3,12 +3,12 @@
 //! 包含带 Fallback 的重试执行器、流式迭代、工具串行执行等。
 
 use lellm_core::{ChatRequest, ChatResponse, LlmError, Message, ToolCall, ToolError};
+use lellm_graph::State;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
-use super::LoopState;
-use super::context::{ContextBudget, estimate_text};
+use super::context::{ContextBudget, estimate_reasoning_block, estimate_text};
 use super::event::AgentEvent;
 use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::retry::RetryPolicy;
@@ -332,7 +332,8 @@ pub(super) enum StreamIterResult {
 async fn process_stream_iteration(
     tx: &Sender<AgentEvent>,
     executor: &ToolExecutor,
-    state: &mut LoopState,
+    state: &mut State,
+    message_key: &str,
     stream: &mut lellm_provider::ProviderStream,
     text_buffer: &mut String,
     thinking_buffer: &mut String,
@@ -445,9 +446,72 @@ async fn process_stream_iteration(
             let response = ChatResponse::new(content, usage_val, serde_json::json!(null));
 
             if !pending_tool_calls.is_empty() {
-                state.push_assistant(response.content.clone());
-                state.add_output_from_content(&response.content);
-                state.add_tool_calls(pending_tool_calls.len());
+                // 追加 assistant 消息
+                {
+                    let assistant_msg = lellm_core::Message::Assistant {
+                        content: response.content.clone(),
+                    };
+                    let tokens = super::context::estimate_tokens(&[assistant_msg.clone()]);
+                    let cur_est: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", "estimated_tokens"),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", "estimated_tokens"),
+                        cur_est + tokens,
+                    );
+                    let mut msgs = super::state::get_messages(state, message_key);
+                    msgs.push(assistant_msg);
+                    super::state::set_messages(state, message_key, &msgs);
+                }
+                // Token 统计
+                {
+                    let mut output_add: usize = 0;
+                    let mut reasoning_add: usize = 0;
+                    for b in &response.content {
+                        match b {
+                            lellm_core::ContentBlock::Text(t) => {
+                                output_add += estimate_text(&t.text)
+                            }
+                            lellm_core::ContentBlock::Thinking(th) => {
+                                reasoning_add += estimate_reasoning_block(th)
+                            }
+                            lellm_core::ContentBlock::Image { .. }
+                            | lellm_core::ContentBlock::ToolCall(_) => {}
+                        }
+                    }
+                    let cur_o: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_OUTPUT_TOKENS),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_OUTPUT_TOKENS),
+                        cur_o + output_add,
+                    );
+                    let cur_r: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_REASONING_TOKENS),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_REASONING_TOKENS),
+                        cur_r + reasoning_add,
+                    );
+                }
+                // 记录工具调用数
+                {
+                    let cur: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_TOOL_CALLS),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_TOOL_CALLS),
+                        cur + pending_tool_calls.len(),
+                    );
+                }
 
                 let results = emit_and_execute_tools_with(
                     tx,
@@ -461,22 +525,104 @@ async fn process_stream_iteration(
                         response: Some(response),
                     });
                 }
-                state.push_tool_results(results.unwrap(), budget);
 
+                // 截断工具结果并追加
+                let raw_results = results.unwrap();
+                let truncated_results: Vec<Message> = raw_results
+                    .into_iter()
+                    .map(|m| {
+                        if let Message::ToolResult {
+                            ref tool_call_id,
+                            is_error: false,
+                            ref content,
+                        } = m
+                        {
+                            let truncated = budget.truncate_tool_result_blocks(content);
+                            if truncated != *content {
+                                return Message::ToolResult {
+                                    tool_call_id: tool_call_id.clone(),
+                                    is_error: false,
+                                    content: truncated,
+                                };
+                            }
+                        }
+                        m
+                    })
+                    .collect();
+                {
+                    let tokens = super::context::estimate_tokens(&truncated_results);
+                    let cur_est: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", "estimated_tokens"),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", "estimated_tokens"),
+                        cur_est + tokens,
+                    );
+                    let mut msgs = super::state::get_messages(state, message_key);
+                    msgs.extend(truncated_results);
+                    super::state::set_messages(state, message_key, &msgs);
+                }
+
+                let iteration: usize = super::state::get_usize(
+                    state,
+                    &super::state::agent_key("agent", super::state::SK_ITERATIONS),
+                );
                 tracing::debug!(
-                    iteration = state.iterations,
+                    iteration,
                     tool_calls = pending_tool_calls.len(),
                     "tool-use stream iteration"
                 );
 
                 return Ok(StreamIterResult::Continue { response });
             } else {
-                state.add_output_from_content(&response.content);
+                // Token 统计
+                {
+                    let mut output_add: usize = 0;
+                    let mut reasoning_add: usize = 0;
+                    for b in &response.content {
+                        match b {
+                            lellm_core::ContentBlock::Text(t) => {
+                                output_add += estimate_text(&t.text)
+                            }
+                            lellm_core::ContentBlock::Thinking(th) => {
+                                reasoning_add += super::context::estimate_reasoning_block(th)
+                            }
+                            lellm_core::ContentBlock::Image { .. }
+                            | lellm_core::ContentBlock::ToolCall(_) => {}
+                        }
+                    }
+                    let cur_o: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_OUTPUT_TOKENS),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_OUTPUT_TOKENS),
+                        cur_o + output_add,
+                    );
+                    let cur_r: usize = super::state::get_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_REASONING_TOKENS),
+                    );
+                    super::state::set_usize(
+                        state,
+                        &super::state::agent_key("agent", super::state::SK_REASONING_TOKENS),
+                        cur_r + reasoning_add,
+                    );
+                }
 
                 if !emit(
                     tx,
                     AgentEvent::LoopEnd {
-                        result: state.finish_complete(response.clone()),
+                        result: super::state::build_result_from_state(
+                            state,
+                            "agent",
+                            message_key,
+                            super::event::StopReason::Complete,
+                            response.clone(),
+                        ),
                     },
                 )
                 .await
@@ -499,20 +645,21 @@ async fn process_stream_iteration(
 /// `stream_started = true` 表示 stream 已打开（可能已发出事件），
 /// 此时失败禁止 Retry（防止重复 Token）。
 pub(super) struct StreamIterationResult {
-    pub(super) result: Result<(StreamIterResult, LoopState), LlmError>,
+    pub(super) result: Result<StreamIterResult, LlmError>,
     pub(super) stream_started: bool,
 }
 
 /// 执行单次流式迭代：打开 stream → 消费事件 → 处理工具调用。
 ///
 /// 接收 owned 参数（Arc-clone 为 O(1)），避免闭包捕获带来的变量爆炸。
-/// 返回迭代结果和更新后的 LoopState。
+/// 直接在 `state` 上修改 Agent 状态。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn do_stream_iteration(
     model: ResolvedModel,
     tx: Sender<AgentEvent>,
     executor: ToolExecutor,
-    state: LoopState,
+    state: &mut State,
+    message_key: &str,
     req: ChatRequest,
     budget: ContextBudget,
     max_output_tokens: u32,
@@ -535,13 +682,13 @@ pub(super) async fn do_stream_iteration(
     let mut text_buffer = String::new();
     let mut thinking_buffer = String::new();
     let mut redacted_buffer: Option<String> = None;
-    let mut attempt_state = state;
 
     // stream 已打开 → 事件可能已发出，失败后禁止 Retry
     let iter_result = process_stream_iteration(
         &tx,
         &executor,
-        &mut attempt_state,
+        state,
+        message_key,
         &mut stream,
         &mut text_buffer,
         &mut thinking_buffer,
@@ -555,7 +702,7 @@ pub(super) async fn do_stream_iteration(
     .await;
 
     StreamIterationResult {
-        result: iter_result.map(|r| (r, attempt_state)),
+        result: iter_result,
         stream_started: true,
     }
 }

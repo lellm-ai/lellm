@@ -73,10 +73,14 @@ async fn main() {
 
     let agent = create_agent_with_builder();
 
-    let result = agent
-        .execute(vec![Message::User {
+    let mut state = lellm_agent::initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("介绍一下 LeLLM 项目。".to_string()),
-        }])
+        }],
+        "messages",
+    );
+    let result = agent
+        .execute(&mut state, "messages")
         .await
         .expect("执行失败");
 
@@ -106,10 +110,14 @@ async fn main() {
 
     let agent2 = create_agent_simple();
 
-    let result2 = agent2
-        .execute(vec![Message::User {
+    let mut state2 = lellm_agent::initial_state(
+        vec![Message::User {
             content: lellm_core::text_block("LeLLM 是什么？".to_string()),
-        }])
+        }],
+        "messages",
+    );
+    let result2 = agent2
+        .execute(&mut state2, "messages")
         .await
         .expect("执行失败");
 
@@ -152,12 +160,16 @@ async fn main() {
     // 不设置 system_prompt，Agent 直接从用户消息推断任务
     let agent3 = AgentBuilder::new(model3).build();
 
-    let result3 = agent3
-        .execute(vec![Message::User {
+    let mut state3 = lellm_agent::initial_state(
+        vec![Message::User {
             content: lellm_core::text_block(
                 "你是一个翻译助手。请将以下句子翻译成英文：你好世界".to_string(),
             ),
-        }])
+        }],
+        "messages",
+    );
+    let result3 = agent3
+        .execute(&mut state3, "messages")
         .await
         .expect("执行失败");
 

@@ -1,6 +1,7 @@
 //! AgentFlowNode — 将 ToolUseLoop 包装为 Graph FlowNode。
 //!
-//! 在 Graph 编排中作为节点执行 Agent Loop，读写 State 中的消息。
+//! 在 Graph 编排中作为节点执行 Agent Loop，直接读写 Graph State。
+//! v0.3 收尾：不再做消息提取/序列化，直接传递 State。
 
 use async_trait::async_trait;
 
@@ -14,12 +15,12 @@ use crate::runtime::{AgentEvent, ToolUseLoop, ToolUseResult};
 /// Agent 在 Graph 中的节点包装。
 ///
 /// 将 `ToolUseLoop` 适配为 `FlowNode`，使其可以作为 Graph 的节点执行。
+/// 直接传递 Graph State，不再做序列化/反序列化。
 ///
 /// # State 约定
 ///
-/// - 输入: `state.get("messages")` → `Vec<serde_json::Value>` 或 `serde_json::Value` 数组
-/// - 输出: `state.set("messages")` → 更新后的消息列表
-/// - 自定义 key: 通过 `message_key` 配置
+/// - 输入: `state.get(message_key)` → 消息数组
+/// - 输出: `{agent_name}/iterations`, `{agent_name}/tool_calls`, 等
 ///
 /// # 示例
 ///
@@ -77,33 +78,19 @@ impl AgentFlowNode {
         self
     }
 
-    /// 从 State 中提取输入消息。
-    fn extract_messages(&self, state: &State) -> Vec<lellm_core::Message> {
-        // 尝试从 State 中读取 messages
-        // 格式: Vec<serde_json::Value>，每个 Value 是一个 Message 的 JSON 表示
+    /// 从 State 中提取输入消息数量（用于 hook）。
+    fn input_message_count(&self, state: &State) -> usize {
         if let Some(value) = state.get(&self.message_key) {
-            // 如果是数组，逐个解析
             if let Some(arr) = value.as_array() {
-                let mut messages = Vec::new();
-                for v in arr {
-                    if let Ok(msg) = serde_json::from_value::<lellm_core::Message>(v.clone()) {
-                        messages.push(msg);
-                    }
-                }
-                messages
-            } else if let Ok(msg) = serde_json::from_value::<lellm_core::Message>(value.clone()) {
-                vec![msg]
-            } else {
-                Vec::new()
+                return arr.len();
             }
-        } else {
-            Vec::new()
+            return 1;
         }
+        0
     }
 
     /// 将执行结果转换为 StateDelta 列表。
     fn collect_deltas(&self, result: &ToolUseResult) -> Vec<StateDelta> {
-        // 将最终消息列表序列化为 JSON
         let messages: Vec<serde_json::Value> = result
             .messages
             .iter()
@@ -132,21 +119,12 @@ impl AgentFlowNode {
 impl FlowNode for AgentFlowNode {
     /// 阻塞执行 — 运行完整的 Agent Loop。
     async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
-        let messages = self.extract_messages(state);
-
-        // 如果没有消息，发送一个警告但仍继续执行（agent 可能只需要 system prompt）
-        if messages.is_empty() {
-            tracing::debug!(
-                agent = %self.name,
-                "no input messages found in state key '{}'",
-                self.message_key
-            );
-        }
+        let input_count = self.input_message_count(state);
 
         // 调用 before_agent hooks
         let ctx = AgentHookContext {
             node_name: self.name.clone(),
-            input_message_count: messages.len(),
+            input_message_count: input_count,
         };
         let mut hook_deltas: Vec<StateDelta> = self
             .hooks
@@ -154,12 +132,19 @@ impl FlowNode for AgentFlowNode {
             .flat_map(|h| h.before_agent(&ctx))
             .collect();
 
-        let result = self.loop_.execute(messages).await.map_err(|e| {
-            GraphError::Terminal(TerminalError::NodeExecutionFailed {
-                node: self.name.clone(),
-                source: e.into(),
-            })
-        })?;
+        // 克隆 State 供 ToolUseLoop 修改
+        let mut agent_state = state.clone();
+
+        let result = self
+            .loop_
+            .execute(&mut agent_state, &self.message_key)
+            .await
+            .map_err(|e| {
+                GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                    node: self.name.clone(),
+                    source: e.into(),
+                })
+            })?;
 
         // 调用 after_agent hooks
         let snapshot = AgentHookSnapshot {
@@ -193,12 +178,12 @@ impl FlowNode for AgentFlowNode {
         sink: &tokio::sync::mpsc::Sender<GraphEvent>,
         span_id: SpanId,
     ) -> Result<StreamNodeResult, GraphError> {
-        let messages = self.extract_messages(state);
+        let input_count = self.input_message_count(state);
 
         // 调用 before_agent hooks
         let ctx = AgentHookContext {
             node_name: self.name.clone(),
-            input_message_count: messages.len(),
+            input_message_count: input_count,
         };
         let hook_deltas: Vec<StateDelta> = self
             .hooks
@@ -218,8 +203,11 @@ impl FlowNode for AgentFlowNode {
             })
             .await;
 
+        // 克隆 State 供 ToolUseLoop 修改
+        let agent_state = state.clone();
+
         // 启动流式 Agent Loop
-        let mut agent_stream = self.loop_.execute_stream(messages);
+        let mut agent_stream = self.loop_.execute_stream(agent_state, &self.message_key);
 
         let mut final_result: Option<ToolUseResult> = None;
         let mut error_delta: Option<StateDelta> = None;

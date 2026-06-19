@@ -63,16 +63,13 @@ impl MockProvider {
         let mut r = self.round.lock().unwrap();
         let idx = *r;
         *r += 1;
-        self.responses
-            .get(idx)
-            .cloned()
-            .unwrap_or_else(|| {
-                ChatResponse::new(
-                    vec![ContentBlock::text("Done.".into())],
-                    TokenUsage::default(),
-                    serde_json::json!(null),
-                )
-            })
+        self.responses.get(idx).cloned().unwrap_or_else(|| {
+            ChatResponse::new(
+                vec![ContentBlock::text("Done.".into())],
+                TokenUsage::default(),
+                serde_json::json!(null),
+            )
+        })
     }
 }
 
@@ -139,7 +136,9 @@ fn build_graph() -> lellm_graph::Graph {
         ),
         // 第 3 轮：返回最终答案
         ChatResponse::new(
-            vec![ContentBlock::text("3 + 4 = 7，7 × 2 = 14。答案是 14。".into())],
+            vec![ContentBlock::text(
+                "3 + 4 = 7，7 × 2 = 14。答案是 14。".into(),
+            )],
             TokenUsage {
                 prompt_tokens: 300,
                 completion_tokens: 40,
@@ -237,7 +236,12 @@ async fn main() {
     println!("\n=== 执行日志 ===");
     for (i, e) in result.execution_log.iter().enumerate() {
         let icon = if e.success { "✅" } else { "❌" };
-        println!("  [{}] {} {icon} {}ms", i + 1, e.node_name, e.elapsed().as_millis());
+        println!(
+            "  [{}] {} {icon} {}ms",
+            i + 1,
+            e.node_name,
+            e.elapsed().as_millis()
+        );
     }
     println!("总耗时: {}ms", result.duration.as_millis());
 
