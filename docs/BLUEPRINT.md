@@ -162,7 +162,7 @@ let result = agent.execute(messages).await?;
 |------|------|
 | **v0.1** | core + provider + agent + macros + MCP (Tools only) |
 | **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 |
-| **v0.3** | 6 crate 架构重构 + StateDelta + Checkpoint + ParallelNode + MCP + 消灭 LoopState |
+| **v0.3** | 6 crate 架构重构 + StateDelta + Checkpoint + ParallelNode + MCP + 消灭 LoopState + 统一 StateKey |
 | **v0.4** | ReAct = 有环图 + Typed State + Effect 事件溯源 + Workflow\<S\> |
 | **v0.5** | Multi-Agent Orchestration + Durable Execution + Agent↔Agent via MCP |
 | **v0.6** | Sampling |

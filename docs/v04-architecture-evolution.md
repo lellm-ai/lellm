@@ -1,57 +1,21 @@
 # LeLLM v0.4 架构演进
 
-> 版本：v0.4 | 日期：2026-06-18 | 状态：规划中
+> 版本：v0.4 | 日期：2026-06-19 | 状态：规划中
 >
-> 本文档记录 v0.3 → v0.4 的设计决策和演进路线。
+> 本文档记录 v0.4 的设计决策和演进路线。
+> v0.3 收尾（消灭 LoopState + 统一 StateKey）详见 [v03-architecture-evolution.md](./v03-architecture-evolution.md) 第九节。
 
 ## 目录
 
-- [一、v0.3 收尾：消灭双来源状态](#一v03-收尾消灭双来源状态)
-- [二、v0.4 核心：ReAct = 有环图](#二v04-核心理act--有环图)
-- [三、v0.4+ 终局：Typed State + Effect 事件溯源](#三v04-终局typed-state--effect-事件溯源)
-- [四、架构演进路线图](#四架构演进路线图)
-- [五、架构演进对比](#五架构演进对比)
+- [一、v0.4 核心：ReAct = 有环图](#一v04-核心react--有环图)
+- [二、v0.4+ 终局：Typed State + Effect 事件溯源](#二v04-终局typed-state--effect-事件溯源)
+- [三、架构演进路线图](#三架构演进路线图)
+- [四、架构演进对比](#四架构演进对比)
+- [五、关键设计决策](#五关键设计决策)
 
 ---
 
-## 一、v0.3 收尾：消灭双来源状态
-
-### 问题
-
-当前 `ToolUseLoop` 持有私有 `LoopState`（`Vec<Message>`, `estimated_tokens`, `iterations` 等），
-同时 Graph 层有自己的 `State = HashMap<String, Value>`。
-**双来源状态 = Bug 温床。**
-
-### 决策：方案 B+（统一状态来源）
-
-`ToolUseLoop` 不再持有任何私有状态。所有 Agent 状态全部摊在 Graph State 中：
-
-```rust
-// 核心状态键收拢，成为底层图的公共契约
-pub static SK_MESSAGES: StateKey<Vec<Message>> = StateKey::new("messages");
-pub static SK_ITERATIONS: StateKey<u32> = StateKey::new("iterations");
-pub static SK_TOOL_CALLS: StateKey<Vec<ToolCall>> = StateKey::new("tool_calls");
-pub static SK_STOP_REASON: StateKey<StopReason> = StateKey::new("stop_reason");
-pub static SK_OUTPUT_TOKENS: StateKey<usize> = StateKey::new("output_tokens");
-pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::new("reasoning_tokens");
-```
-
-### 带来的质变
-
-1. **单一事实来源（SSOT）**：外部系统通过 Checkpoint 观察 Agent 执行时，能清晰看到迭代轮次、Token 消耗等
-2. **Agent 降维成 SubGraph**：`AgentFlowNode` 不再做复杂的内部编排，它自己就是由 LLM Node + Tool Node 组合的预制子图
-3. **状态的确定性**：Checkpoint 保存的 State 与运行时看到的 State 完全一致
-
-### 待做清单
-
-- [ ] 从 `LoopState` 迁移所有字段到 Graph State keys
-- [ ] `ToolUseLoop` 删除 `LoopState`，改为读写 Graph State
-- [ ] `AgentFlowNode` 简化为 SubGraph 包装器
-- [ ] 验证 Checkpoint 能正确恢复 Agent 中间状态
-
----
-
-## 二、v0.4 核心：ReAct = 有环图
+## 一、v0.4 核心：ReAct = 有环图
 
 ### 问题
 
@@ -83,18 +47,19 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 
 ### 内部 ReAct Graph 的 State 传递
 
-**方案 B — State 承载关键数据，LoopState 被打散到 State 中：**
+基于 v03 收尾的 5 个 StateKey + 新增 v04 专用键：
 
-- `SK_MESSAGES` → 消息历史
-- `SK_ITERATIONS` → 迭代计数
-- `SK_TOOL_CALLS` → 本轮工具调用
-- `SK_OUTPUT_TOKENS` → 累计输出 Token
-- `SK_REASONING_TOKENS` → 累计推理 Token
+- `SK_MESSAGES` → 消息历史（v03 已定义）
+- `SK_ITERATIONS` → 迭代计数（v03 已定义）
+- `SK_PENDING_TOOL_CALLS` → 本轮工具调用（v03 已定义）
+- `SK_OUTPUT_TOKENS` → 累计输出 Token（v03 已定义）
+- `SK_REASONING_TOKENS` → 累计推理 Token（v03 已定义）
+- `SK_TOOL_CALL_HISTORY` → 审计历史（v04 新增）
 
 `ToolUseLoop` 在构建内部 Graph 的 `initial_state` 时，将输入数据写入 State；
 循环结束后从 State 读取回来构建 `ToolUseResult`。
 
-### 嵌套结构
+### Agent 降维成 SubGraph
 
 ```
 外部 Graph（用户编排）
@@ -109,11 +74,14 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 - [ ] 设计 `ToolNode` — 读取 tool_calls，执行工具，写入 results 到 State
 - [ ] 设计 `ConditionNode` — 检查 tool_calls 是否为空，路由到 ToolNode 或 End
 - [ ] `ToolUseLoop` 内部构建 ReAct Graph，替代 while 循环
+- [ ] `AgentFlowNode` 简化为 SubGraph 包装器
+- [ ] `compact()` 变成 Graph 中的 BudgetGuardNode + CompactNode
+- [ ] 引入 `SK_TOOL_CALL_HISTORY`（审计历史）
 - [ ] 验证流式输出与现有 `AgentStream` 兼容
 
 ---
 
-## 三、v0.4+ 终局：Typed State + Effect 事件溯源
+## 二、v0.4+ 终局：Typed State + Effect 事件溯源
 
 ### 问题
 
@@ -172,17 +140,19 @@ impl Merge for AgentState {
 
 ---
 
-## 四、架构演进路线图
+## 三、架构演进路线图
 
 ```
-  v0.3 (当前阶段: 大内聚/收拢)
-  [消灭 LoopState] ──> [统一 StateKey (方案 B+)]
-  [Agent 降维成 SubGraph] ──> [单一事实来源]
+  v0.3 (收拢: 消灭 LoopState + 统一 StateKey)
+  [SK_MESSAGES] [SK_ITERATIONS] [SK_PENDING_TOOL_CALLS]
+  [SK_OUTPUT_TOKENS] [SK_REASONING_TOKENS]
+  [AgentExecutionContext = Runtime Cache]
                                     │
                                     ▼
   v0.4 (破茧成蝶: 强类型领域)
-  [ReAct = 有环图] ──> [砸碎 HashMap] ──> [Workflow<S>]
-  [Agent 内部基于 Graph] ──> [Effect 事件溯源]
+  [ReAct = 有环图] ──> [Agent 降维成 SubGraph]
+  [砸碎 HashMap] ──> [Workflow<S>]
+  [Effect 事件溯源] ──> [SK_TOOL_CALL_HISTORY]
                                     │
                                     ▼
   v0.5 (多智能体时代)
@@ -192,7 +162,7 @@ impl Merge for AgentState {
 
 ---
 
-## 五、架构演进对比
+## 四、架构演进对比
 
 | 维度 | v0.3 务实形态 (方案 B+) | v0.4+ 终极形态 (Typed State) |
 |------|------------------------|----------------------------|
@@ -206,12 +176,11 @@ impl Merge for AgentState {
 
 ---
 
-## 六、关键设计决策
+## 五、关键设计决策
 
 | 决策 | 结论 | 理由 |
 |------|------|------|
 | v0.3 是否引入 TypedState | 否 | HashMap 骨架已铺设，v0.3 聚焦收拢 |
-| LoopState 去留 | 消灭 | 双来源 = Bug 温床 |
 | ReAct 建模粒度 | 中等（LLM + Tool + 条件边） | 可观测性与灵活性的平衡 |
 | ToolUseLoop 替换方式 | 内部替换，API 不变 | 用户无感知迁移 |
 | v0.4 TypedState 时机 | v0.4 专门 grill | 范围大，需要独立规划 |

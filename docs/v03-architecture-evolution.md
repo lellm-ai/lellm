@@ -1,6 +1,6 @@
 # LeLLM v0.3 架构演进
 
-> 版本：v0.3 | 日期：2026-06-18 | 状态：已完成 ✅
+> 版本：v0.3 | 日期：2026-06-19 | 状态：收尾中 🔄
 > 后续演进：[v04-architecture-evolution.md](./v04-architecture-evolution.md)
 >
 > 本文档记录 v0.3 所有设计决策和实现细节。
@@ -327,10 +327,223 @@ agent.tools(tools).build();
 | 循环保护 | 只靠 max_steps | 简单可靠 |
 | Feature Gate | default=provider | 按需启用 |
 | Provider 内部 | 三权分立 | 扩展性 |
+| LoopState 去留 | 消灭 | 双来源状态 = Bug 温床 |
+| StateKey 设计 | 5 个核心键 + Runtime Cache | 最小集，语义明确 |
+| StopReason 归属 | Control Plane | 不属于可持久化业务状态 |
+| compact 触发 | Runtime Cache |派生数据不进 State，用 cached_token_count 判断 |
+| SK_TOOL_CALLS 语义 | 重命名为 SK_PENDING_TOOL_CALLS | 当前轮 pending，非历史累计 |
 
 ---
 
-## 九、实施计划
+## 九、v03 收尾：消灭双来源状态
+
+### 问题
+
+当前 `ToolUseLoop` 持有私有 `LoopState`（`Vec<Message>`, `estimated_tokens`, `iterations` 等），
+同时 Graph 层有自己的 `State = HashMap<String, Value>`。
+**双来源状态 = Bug 温床。**
+
+### 三层数据模型
+
+| 层 | 职责 | 示例 |
+|---|---|---|
+| **State** | 可持久化业务状态 | SK_MESSAGES, SK_ITERATIONS |
+| **Runtime Cache** | 执行期性能优化 | cached_token_count |
+| **Control Signal** | 路由决策 | StopReason, NeedCompact |
+
+### 决策：方案 B+（统一状态来源）
+
+`ToolUseLoop` 不再持有任何私有状态。所有 Agent 状态全部摊在 Graph State 中：
+
+```rust
+// 核心状态键收拢，成为底层图的公共契约
+pub static SK_MESSAGES: StateKey<Vec<Message>> = StateKey::append("messages");
+pub static SK_ITERATIONS: StateKey<u32> = StateKey::replace("iterations");
+pub static SK_PENDING_TOOL_CALLS: StateKey<Vec<ToolCall>> = StateKey::replace("pending_tool_calls");
+pub static SK_OUTPUT_TOKENS: StateKey<usize> = StateKey::sum("output_tokens");
+pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::sum("reasoning_tokens");
+```
+
+### 从 LoopState 的映射
+
+| LoopState 字段 | 目标 | 处理 |
+|---|---|---|
+| `messages` | `SK_MESSAGES` | 直接迁移 |
+| `iterations` | `SK_ITERATIONS` | 直接迁移 |
+| `tool_calls_executed` | `SK_PENDING_TOOL_CALLS` | 语义重定义为当前轮 pending |
+| `total_output_tokens` | `SK_OUTPUT_TOKENS` | 直接迁移 |
+| `total_reasoning_tokens` | `SK_REASONING_TOKENS` | 直接迁移 |
+| `estimated_tokens` | Runtime Cache | 派生数据，不进 State |
+
+### Runtime Cache：AgentExecutionContext
+
+```rust
+pub struct AgentExecutionContext {
+    cached_token_count: usize,
+}
+```
+
+- 由 `AgentFlowNode` 持有，传给 `ToolUseLoop`
+- compact 时用缓存判断阈值，不实时计算
+- Checkpoint 不保存，Resume 时重建
+
+### 不做的事（留给 v04）
+
+- `AgentFlowNode` 不改成 SubGraph（v04 ReAct = 有环图）
+- `SK_STOP_REASON` 不引入（属于 Control Plane）
+- `SK_TOOL_CALL_HISTORY` 不引入（v04 审计需求）
+- `compact()` 不改成 Graph Node（v04 Agent = Internal Graph）
+
+### 实现路径
+
+#### Step 1：定义 Agent 层 StateKey 常量
+
+文件：`lellm-graph/src/statekey.rs`
+
+```rust
+// Agent 核心状态键（v03 收尾）
+pub static SK_MESSAGES: StateKey<Vec<serde_json::Value>> =
+    StateKey::new("messages", Reducer::Append);
+pub static SK_ITERATIONS: StateKey<u32> = StateKey::replace("iterations");
+pub static SK_PENDING_TOOL_CALLS: StateKey<Vec<serde_json::Value>> =
+    StateKey::replace("pending_tool_calls");
+pub static SK_OUTPUT_TOKENS: StateKey<usize> = StateKey::sum("output_tokens");
+pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::sum("reasoning_tokens");
+```
+
+> 注意：`SK_MESSAGES` 类型保持 `Vec<serde_json::Value>` 以兼容现有 Graph State 的 JSON 序列化。
+> `Vec<Message>` ↔ `Vec<serde_json::Value>` 的转换在 Agent 层边界处理。
+
+#### Step 2：引入 AgentExecutionContext
+
+文件：`lellm-agent/src/runtime/context.rs`（新建）
+
+```rust
+/// Agent 运行时上下文 — 不可持久化的执行期缓存。
+pub struct AgentExecutionContext {
+    /// 消息历史的估算 Token 数（LRU cache 或简单累加）
+    pub cached_token_count: usize,
+}
+
+impl AgentExecutionContext {
+    pub fn new(messages: &[Message]) -> Self {
+        Self {
+            cached_token_count: estimate_tokens(messages),
+        }
+    }
+
+    pub fn add_tokens(&mut self, tokens: usize) {
+        self.cached_token_count += tokens;
+    }
+
+    pub fn reset_after_compact(&mut self, messages: &[Message]) {
+        self.cached_token_count = estimate_tokens(messages);
+    }
+}
+```
+
+#### Step 3：删除 LoopState，ToolUseLoop 改为读写 State
+
+文件：`lellm-agent/src/runtime/runtime.rs`
+
+- 删除 `LoopState` 结构体及其 `impl` 块（第 57-226 行）
+- `ToolUseLoop::execute()` 改为接收 `State` + `AgentExecutionContext`：
+
+```rust
+pub async fn execute(
+    &self,
+    state: &mut State,
+    ctx: &mut AgentExecutionContext,
+) -> Result<ToolUseResult, LlmError> {
+    loop {
+        // 从 State 读取
+        let iterations: u32 = state.get_sk(&SK_ITERATIONS).unwrap_or(0);
+        if iterations >= self.config.max_iterations as u32 {
+            return Ok(/* finish_max_iterations */);
+        }
+        state.set_sk(&SK_ITERATIONS, iterations + 1);
+
+        // compact（用 ctx.cached_token_count 判断）
+        maybe_compact(state, ctx, &self.config.context_budget, &*compactor);
+
+        // 构建请求 — 从 State 读 messages
+        let messages = state.get_sk(&SK_MESSAGES).unwrap_or_default();
+        let req = build_request(...);
+
+        // 执行 LLM
+        let response = self.model.provider.call(&req).await?;
+
+        // 写入 State
+        // ... push assistant message, tool calls, etc.
+    }
+}
+```
+
+#### Step 4：更新 AgentFlowNode
+
+文件：`lellm-agent/src/runtime/flow_node.rs`
+
+- `extract_messages()` 改为使用 `state.get_sk(&SK_MESSAGES)`
+- `collect_deltas()` 改为写入标准 StateKey（不再用 `format!("{}_iterations", name)` 等自定义 key）
+- 执行时创建 `AgentExecutionContext` 并传给 `ToolUseLoop`
+
+```rust
+async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
+    let mut state = state.clone();
+    let mut ctx = AgentExecutionContext::new(/* 从 state 读 messages */);
+
+    let result = self.loop_.execute(&mut state, &mut ctx).await?;
+
+    // 收集 Deltas — 使用标准 StateKey
+    let deltas = vec![
+        StateDelta::put_sk(&SK_MESSAGES, /* 最终 messages */),
+        StateDelta::put_sk(&SK_ITERATIONS, result.iterations),
+        StateDelta::put_sk(&SK_OUTPUT_TOKENS, ctx.cached_output_tokens),
+        StateDelta::put_sk(&SK_REASONING_TOKENS, ctx.cached_reasoning_tokens),
+    ];
+    Ok(NodeOutput { deltas, next: NextStep::GoToNext, metadata: None })
+}
+```
+
+#### Step 5：更新 iteration.rs
+
+文件：`lellm-agent/src/runtime/iteration.rs`
+
+- `process_stream_iteration` 参数从 `&mut LoopState` 改为 `(&mut State, &mut AgentExecutionContext)`
+- `do_stream_iteration` 参数从 `LoopState` 改为 `(State, AgentExecutionContext)`
+- 所有 `state.messages` → `state.get_sk(&SK_MESSAGES)`
+- 所有 `state.iterations` → `state.get_sk(&SK_ITERATIONS)`
+- 所有 `state.estimated_tokens` → `ctx.cached_token_count`
+
+#### Step 6：更新 re-export
+
+文件：`lellm-agent/src/runtime/mod.rs`
+
+- 删除 `pub use runtime::LoopState`
+- 新增 `pub use context::AgentExecutionContext`
+
+#### Step 7：更新测试
+
+文件：`lellm-agent/tests/*.rs`, `lellm-graph/tests/graph_test.rs`
+
+- 现有 `SK_MESSAGES` 测试更新类型
+- 新增 Agent 层 StateKey 的集成测试
+- 验证 Checkpoint 能正确保存/恢复 Agent 中间状态
+
+### 待做清单
+
+- [ ] Step 1：定义 Agent 层 StateKey 常量
+- [ ] Step 2：引入 AgentExecutionContext
+- [ ] Step 3：删除 LoopState，ToolUseLoop 改为读写 State
+- [ ] Step 4：更新 AgentFlowNode
+- [ ] Step 5：更新 iteration.rs
+- [ ] Step 6：更新 re-export
+- [ ] Step 7：更新测试
+- [ ] cargo fmt + cargo test 全量验证
+
+---
+
+## 十、实施计划
 
 ### 已完成阶段
 
@@ -343,6 +556,7 @@ agent.tools(tools).build();
 | 5 | `lellm-agent` 清理 | ✅ |
 | 6 | `lellm-macros` → `lellm-derive` 更名 | ✅ |
 | 7 | `lellm` facade 重构 | ✅ |
+| 8 | v03 收尾 — 消灭 LoopState + 统一 StateKey | 🔄 |
 
 ### 测试结果
 - 223 个测试全部通过
@@ -355,7 +569,6 @@ agent.tools(tools).build();
 
 | 版本 | 范围 |
 |------|------|
-| v0.3 收尾 | 消灭 LoopState → 统一 StateKey（方案 B+）→ 单一事实来源 |
-| v0.4 | ReAct = 有环图 + Typed State + Effect 事件溯源 + Workflow\<S\> |
+| v0.4 | ReAct = 有环图 + Agent 降维成 SubGraph + Typed State + Effect 事件溯源 + Workflow\<S\> |
 | v0.5 | Multi-Agent Orchestration + Durable Execution + Agent↔Agent via MCP |
 | v0.6 | Sampling |
