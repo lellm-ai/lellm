@@ -5,12 +5,10 @@
 
 use async_trait::async_trait;
 
-use crate::delta::StateDelta;
-use crate::error::{GraphError, TerminalError};
-use crate::event::{BarrierDecision, BarrierId, GraphEvent};
-use crate::ids::SpanId;
-use crate::node::{FlowNode, NextStep, NodeMetadata, NodeOutput, StreamNodeResult};
-use crate::state::State;
+use crate::error::GraphError;
+use crate::event::{BarrierDecision, BarrierId};
+use crate::node::FlowNode;
+use crate::node_context::NodeContext;
 
 /// Barrier 超时后的默认行为。
 #[derive(Debug, Clone, Default)]
@@ -27,7 +25,7 @@ pub enum BarrierDefaultAction {
 /// Human-in-the-loop 审批节点。
 ///
 /// 执行流程：
-/// 1. 返回 `StreamNodeResult::BarrierPaused`，executor 发射 `BarrierPaused` 事件
+/// 1. 调用 ctx.pause()，executor 发射 BarrierWaiting 事件
 /// 2. 消费者通过 `GraphHandle::decide(barrier_id, decision)` 提交决策
 /// 3. executor 的 `wait_barrier_decision()` 接收决策，调用 `apply_decision()` 应用
 ///
@@ -81,35 +79,28 @@ impl BarrierNode {
         self
     }
 
-    /// 处理决策结果 — 返回 NextStep + StateDelta，不直接修改 State。
+    /// 处理决策结果 — 直接写入 ctx。
     ///
-    /// 由 executor 在收到外部决策后调用。Executor 负责 apply deltas。
-    pub fn apply_decision(&self, decision: BarrierDecision) -> (NextStep, Vec<StateDelta>) {
+    /// 由 executor 在收到外部决策后调用。
+    pub fn apply_decision_to_ctx(&self, ctx: &mut NodeContext<'_>, decision: BarrierDecision) {
         match decision {
             BarrierDecision::Approve => {
                 tracing::info!(barrier = %self.name, "approved");
-                let deltas = vec![
-                    StateDelta::put(&self.approve_key, serde_json::json!(true)),
-                    StateDelta::delete(&self.reject_key),
-                ];
-                (NextStep::GoToNext, deltas)
+                ctx.set(&self.approve_key, true);
+                ctx.remove(&self.reject_key);
             }
             BarrierDecision::Reject { reason } => {
                 tracing::warn!(barrier = %self.name, reason = %reason, "rejected");
-                let deltas = vec![
-                    StateDelta::put(&self.reject_key, serde_json::json!(reason)),
-                    StateDelta::delete(&self.approve_key),
-                ];
-                (NextStep::GoToNext, deltas)
+                ctx.set(&self.reject_key, reason);
+                ctx.remove(&self.approve_key);
             }
             BarrierDecision::Modify { key, value } => {
                 tracing::info!(barrier = %self.name, key = %key, "state modified");
-                let deltas = vec![StateDelta::put(key, value)];
-                (NextStep::GoToNext, deltas)
+                ctx.set(&key, value);
             }
             BarrierDecision::Reroute { target } => {
                 tracing::info!(barrier = %self.name, target = %target, "rerouted");
-                (NextStep::Goto(target), vec![])
+                ctx.goto(&target);
             }
         }
     }
@@ -117,43 +108,11 @@ impl BarrierNode {
 
 #[async_trait]
 impl FlowNode for BarrierNode {
-    /// 阻塞模式不支持 BarrierNode — 直接报错。
-    async fn execute(&self, _state: &State) -> Result<NodeOutput, GraphError> {
-        Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
-            "BarrierNode '{}' requires stream mode. Use GraphExecutor::execute_stream() for human-in-the-loop.",
-            self.name
-        ))))
-    }
-
-    /// 流式执行 — 返回 Pause，由 executor 发射事件并等待决策。
-    async fn execute_stream(
-        &self,
-        _state: &State,
-        _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        span_id: SpanId,
-    ) -> Result<StreamNodeResult, GraphError> {
-        let node_name = self.name.clone();
-
-        // barrier_id 由 executor 的 DecisionRegistry 生成
-        // 这里传一个 placeholder，executor 会用 DecisionRegistry::next_id() 覆盖
-        let barrier_id = BarrierId::new(&node_name, 0);
-
-        // 返回 Pause，由 executor 发射 BarrierWaiting 事件
-        Ok(StreamNodeResult::Pause {
-            deltas: vec![],
-            barrier_id,
-            node_name,
-            span_id,
-            timeout: self.timeout,
-            default_action: self.default_action.clone(),
-        })
-    }
-
-    fn metadata_hint(&self) -> NodeMetadata {
-        // BarrierNode 是 Human-in-the-loop，权重高
-        NodeMetadata {
-            token_cost: 0.0,
-            has_side_effects: true, // 审批后可能触发外部操作
-        }
+    /// 执行 — 发出 pause 信号，由 executor 发射事件并等待决策。
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        let barrier_id = BarrierId::new(&self.name, 0);
+        ctx.pause(barrier_id, self.timeout);
+        ctx.set_has_side_effects();
+        Ok(())
     }
 }

@@ -5,6 +5,7 @@
 //! 依赖 `lellm-core`，不依赖 agent/provider。
 
 pub mod barrier_node;
+pub mod branch_state;
 pub mod checkpoint;
 pub mod delta;
 pub mod error;
@@ -14,10 +15,14 @@ pub mod graph;
 pub mod hook;
 pub mod ids;
 pub mod node;
+pub mod node_context;
 pub mod parallel_node;
+pub mod runtime_event;
 pub mod state;
 pub mod statekey;
 pub mod store;
+pub mod stream_chunk;
+pub mod stream_emitter;
 
 // ─── IDs ─────────────────────────────────────────────────────
 pub use ids::{SpanId, TraceId};
@@ -72,3 +77,10 @@ pub use executor::GraphExecutor;
 
 // ─── Hooks ───────────────────────────────────────────────────
 pub use hook::{AgentHook, NoOpHook, TracingHook};
+
+// ─── v04: NodeContext + BranchState + Stream ──────────────────
+pub use branch_state::{BranchState, ChangeOperation, ChangeRecord};
+pub use node_context::{ExecutionControl, ExecutionSignal, NextAction, NodeContext, NodeMetadata};
+pub use runtime_event::RuntimeEvent;
+pub use stream_chunk::StreamChunk;
+pub use stream_emitter::StreamEmitter;

@@ -1,4 +1,4 @@
-//! ParallelNode — 并行执行多个分支，合并 StateDelta。
+//! ParallelNode — 并行执行多个分支，合并 State。
 //!
 //! 执行模型：
 //! ```text
@@ -8,27 +8,26 @@
 //!  ↓
 //! Branch A     Branch B     Branch C
 //!  ↓            ↓            ↓
-//! StateDelta   StateDelta   StateDelta
+//! BranchState  BranchState  BranchState
 //!  ↓            ↓            ↓
-//! ReducerRegistry.merge_deltas()
+//! ReducerRegistry.merge_changes()
 //!  ↓
-//! Merged Deltas → apply to State
+//! Merged State → apply to State
 //! ```
 //!
-//! 每个分支接收相同的 State 快照，独立产生 StateDelta。
-//! 所有 Delta 收集后通过 `ReducerRegistry::merge_deltas()` 合并。
-//! 未注册 Reducer 的 key 发生多 writer → `StateConflict` 错误。
+//! 每个分支接收相同的 State 快照，独立产生变更。
+//! 所有分支完成后，变更通过 ReducerRegistry 合并到 State。
 
 use std::sync::Arc;
 
 use crate::error::GraphError;
-use crate::node::{FlowNode, NextStep, NodeOutput};
-use crate::state::State;
+use crate::node::FlowNode;
+use crate::node_context::NodeContext;
 
-/// 并行节点 — 同时执行多个分支，合并 StateDelta。
+/// 并行节点 — 同时执行多个分支，合并 State。
 ///
-/// 每个分支接收相同的 State 快照，独立产生 StateDelta。
-/// 所有分支完成后，Delta 通过 `ReducerRegistry::merge_deltas()` 合并到 State。
+/// 每个分支接收相同的 State 快照，独立产生变更。
+/// 所有分支完成后，变更通过 ReducerRegistry 合并到 State。
 ///
 /// # 示例
 ///
@@ -56,7 +55,7 @@ pub enum ParallelErrorStrategy {
     /// 任一分支失败 → 立即返回错误（其余分支继续执行但结果被忽略）
     #[default]
     FailFast,
-    /// 等待所有分支完成，至少一个失败 → 返回错误但包含成功分支的 Delta
+    /// 等待所有分支完成，至少一个失败 → 返回错误但包含成功分支的变更
     CollectAll,
 }
 
@@ -100,30 +99,6 @@ impl ParallelNode {
     /// 获取标签。
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
-    }
-
-    /// 串行执行所有分支（用于阻塞模式 fallback）。
-    ///
-    /// ⚠️ 此方法顺序执行各分支，不发挥并行优势。
-    /// 真正的并行执行由 `Executor::handle_parallel()` 完成。
-    pub async fn execute_sequential(&self, state: &State) -> Result<NodeOutput, GraphError> {
-        let mut all_deltas = Vec::new();
-
-        for (name, branch) in &self.branches {
-            let output = branch.execute(state).await.map_err(|e| {
-                GraphError::Terminal(crate::error::TerminalError::NodeExecutionFailed {
-                    node: format!("{}/{}", self.display_name(), name),
-                    source: e.into(),
-                })
-            })?;
-            all_deltas.extend(output.deltas);
-        }
-
-        Ok(NodeOutput {
-            deltas: all_deltas,
-            next: NextStep::GoToNext,
-            metadata: None,
-        })
     }
 
     fn display_name(&self) -> String {
@@ -199,5 +174,48 @@ impl std::fmt::Debug for ParallelNode {
             )
             .field("error_strategy", &self.error_strategy)
             .finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl FlowNode for ParallelNode {
+    /// 执行 — Fork state 给每个分支，收集变更后合并。
+    ///
+    /// 注意：真正的并行执行由 Executor::handle_parallel() 完成。
+    /// 此方法提供串行 fallback，确保直接调用也能工作。
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        // Fork state for each branch
+        let mut branch_states = Vec::new();
+        for _ in 0..self.branches.len() {
+            branch_states.push(ctx.state().fork());
+        }
+
+        // Execute branches sequentially (serial fallback)
+        for ((name, node), branch_state) in self.branches.iter().zip(branch_states.iter_mut()) {
+            let mut branch_ctx = NodeContext::new(branch_state, None);
+            node.execute(&mut branch_ctx).await.map_err(|e| {
+                GraphError::Terminal(crate::error::TerminalError::NodeExecutionFailed {
+                    node: format!("{}/{}", self.display_name(), name),
+                    source: e.into(),
+                })
+            })?;
+        }
+
+        // Merge changes from all branches
+        // TODO: Use ReducerRegistry for merge
+        for branch_state in &branch_states {
+            for change in branch_state.changes() {
+                match change.operation {
+                    crate::branch_state::ChangeOperation::Put => {
+                        ctx.set(&change.key, change.value.clone());
+                    }
+                    crate::branch_state::ChangeOperation::Delete => {
+                        ctx.remove(&change.key);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }

@@ -12,9 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::delta::StateDelta;
-use crate::error::{GraphError, ObservedError};
-use crate::event::{BarrierId, GraphEvent};
-use crate::ids::SpanId;
+use crate::error::GraphError;
+use crate::event::BarrierId;
+use crate::node_context::NodeContext;
 use crate::state::State;
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
@@ -148,58 +148,21 @@ pub enum StreamNodeResult {
     },
 }
 
-/// 节点执行 trait — trait-based 设计。
+// ─── v04 FlowNode Trait ──────────────────────────────────────
+
+/// v04 节点执行 trait — Context 驱动一切。
 ///
-/// Graph 只知道 `dyn FlowNode`，不知道 `AgentNode`、`ToolNode` 等具体类型。
-/// `AgentFlowNode` 由 `lellm-agent` crate 提供。
-///
-/// **节点不修改 State。** 节点读取 `&State`，输出 `NodeOutput { deltas, next }`。
-/// Executor 收集 Delta 后统一 apply 到 State。
+/// 统一原则 — 节点不返回业务数据，只返回 `Result<(), GraphError>`：
+/// - State      → ctx.set() / ctx.append() / ctx.increment()
+/// - Stream     → ctx.emit()
+/// - Metadata   → ctx.set_token_cost()
+/// - Control    → ctx.goto() / ctx.end() / ctx.pause()
 #[async_trait]
 pub trait FlowNode: Send + Sync {
-    /// 执行节点逻辑（阻塞模式）。
+    /// 执行节点逻辑。
     ///
-    /// - `state` — 只读访问当前 State
-    /// - 返回 `NodeOutput { deltas, next }` — 修改意图 + 下一步路由
-    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError>;
-
-    /// 执行节点逻辑（流式模式），将内部事件转发到 channel。
-    ///
-    /// - `state` — 只读访问当前 State
-    /// - `sink` — 事件输出 channel
-    /// - `span_id` — 执行实例 ID（由 executor 生成）
-    ///
-    /// 默认实现直接调用 `execute`，返回 `StreamNodeResult::Continue`。
-    /// BarrierNode 覆写此方法以返回 `StreamNodeResult::Pause`。
-    async fn execute_stream(
-        &self,
-        state: &State,
-        _sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        span_id: SpanId,
-    ) -> Result<StreamNodeResult, GraphError> {
-        let output = self.execute(state).await?;
-        Ok(StreamNodeResult::Continue {
-            deltas: output.deltas,
-            next: output.next,
-            span_id,
-            observed: None,
-            metadata: output.metadata,
-        })
-    }
-
-    /// 节点元数据提示 — 静态声明节点的执行特征。
-    ///
-    /// 用于 Adaptive Checkpoint 的默认值。
-    /// NodeOutput.metadata 会覆盖此值。
-    ///
-    /// **四层优先级：**
-    /// 1. `NodeOutput.metadata` — 运行时实际值（最高优先级）
-    /// 2. `metadata_hint()` — 节点静态声明
-    /// 3. `NodeKind` 推断 — Executor 根据类型推断
-    /// 4. `NodeMetadata::default()` — 兜底值
-    fn metadata_hint(&self) -> NodeMetadata {
-        NodeMetadata::default()
-    }
+    /// - `ctx` — 节点上下文，包含 State、StreamEmitter、控制信号
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError>;
 }
 
 /// 节点类型枚举。
@@ -227,9 +190,9 @@ pub enum NodeKind {
 
 /// Task 节点回调类型别名。
 ///
-/// 闭包接收只读 `&State`，返回 `Vec<StateDelta>` 作为修改意图。
+/// 闭包接收 NodeContext，返回 `()` 作为修改意图。
 /// Arc 包装以支持 Clone。
-pub type TaskFn = Arc<dyn Fn(&State) -> Result<Vec<StateDelta>, GraphError> + Send + Sync>;
+pub type TaskFn = Arc<dyn Fn(&mut NodeContext<'_>) -> Result<(), GraphError> + Send + Sync>;
 
 /// 条件分支回调类型别名。
 /// Arc 包装以支持 Clone。
@@ -245,7 +208,7 @@ pub struct TaskNode {
 impl TaskNode {
     pub fn new(
         name: impl Into<String>,
-        func: impl Fn(&State) -> Result<Vec<StateDelta>, GraphError> + Send + Sync + 'static,
+        func: impl Fn(&mut NodeContext<'_>) -> Result<(), GraphError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             name: name.into(),
@@ -256,21 +219,8 @@ impl TaskNode {
 
 #[async_trait]
 impl FlowNode for TaskNode {
-    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
-        let deltas = (self.func)(state)?;
-        Ok(NodeOutput {
-            deltas,
-            next: NextStep::GoToNext,
-            metadata: None,
-        })
-    }
-
-    fn metadata_hint(&self) -> NodeMetadata {
-        // TaskNode 默认轻量级（纯 CPU 计算）
-        NodeMetadata {
-            token_cost: 0.0,
-            has_side_effects: false,
-        }
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        (self.func)(ctx)
     }
 }
 
@@ -321,22 +271,15 @@ impl ConditionNodeBuilder {
 
 #[async_trait]
 impl FlowNode for ConditionNode {
-    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
         for (target, condition) in &self.branches {
-            if condition(state) {
-                return Ok(NodeOutput::new(NextStep::Goto(target.clone())));
+            if condition(ctx.state()) {
+                ctx.goto(target);
+                return Ok(());
             }
         }
         // 无匹配 → GoToNext，由 Graph 层 edge_fallback 处理兜底
-        Ok(NodeOutput::new(NextStep::GoToNext))
-    }
-
-    fn metadata_hint(&self) -> NodeMetadata {
-        // ConditionNode 是纯逻辑判断，轻量级
-        NodeMetadata {
-            token_cost: 0.0,
-            has_side_effects: false,
-        }
+        Ok(())
     }
 }
 
@@ -344,39 +287,13 @@ impl FlowNode for ConditionNode {
 
 #[async_trait]
 impl FlowNode for NodeKind {
-    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
         match self {
-            Self::Task(n) => n.execute(state).await,
-            Self::Condition(n) => n.execute(state).await,
-            Self::Barrier(n) => n.execute(state).await,
-            Self::Parallel(n) => n.execute_sequential(state).await,
-            Self::External(n) => n.execute(state).await,
-        }
-    }
-
-    async fn execute_stream(
-        &self,
-        state: &State,
-        sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        span_id: SpanId,
-    ) -> Result<StreamNodeResult, GraphError> {
-        match self {
-            Self::Task(n) => n.execute_stream(state, sink, span_id).await,
-            Self::Condition(n) => n.execute_stream(state, sink, span_id).await,
-            Self::Barrier(n) => n.execute_stream(state, sink, span_id).await,
-            Self::Parallel(_) => {
-                // ⚠️ Parallel 节点应由 Executor::handle_parallel() 特殊处理。
-                // 此处提供串行 fallback，确保直接调用 execute_stream 也能工作。
-                let output = self.execute(state).await?;
-                Ok(StreamNodeResult::Continue {
-                    deltas: output.deltas,
-                    next: output.next,
-                    span_id,
-                    observed: None,
-                    metadata: output.metadata,
-                })
-            }
-            Self::External(n) => n.execute_stream(state, sink, span_id).await,
+            Self::Task(n) => n.execute(ctx).await,
+            Self::Condition(n) => n.execute(ctx).await,
+            Self::Barrier(n) => n.execute(ctx).await,
+            Self::Parallel(n) => n.execute(ctx).await,
+            Self::External(n) => n.execute(ctx).await,
         }
     }
 }
