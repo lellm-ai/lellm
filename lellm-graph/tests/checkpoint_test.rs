@@ -1,43 +1,46 @@
 //! Checkpoint 集成测试。
+//!
+//! 使用 NodeContext API（v04+）。
 
 use lellm_graph::{
-    CheckpointPolicy, CheckpointStore, CheckpointTrigger, GraphBuilder, GraphExecutor,
-    InMemoryCheckpointStore, NodeKind, StateDelta, StateExt, TaskNode,
+    BarrierDecision, CheckpointPolicy, CheckpointStore, CheckpointTrigger, GraphBuilder,
+    GraphExecutor, InMemoryCheckpointStore, NodeContext, NodeKind, State, TaskNode,
 };
 use std::sync::Arc;
 
+fn to_store(s: Arc<InMemoryCheckpointStore>) -> Arc<dyn lellm_graph::CheckpointStore> {
+    s
+}
+
+/// 构建一个简单的 3 节点线性图：a → b → c
 fn build_simple_graph() -> Arc<lellm_graph::Graph> {
     let mut g = GraphBuilder::new("test");
-    g.start("a");
-    g.end("c");
+    g.start("a").end("c");
     g.node(
         "a",
-        NodeKind::Task(TaskNode::new("a", |_s| {
-            Ok(vec![StateDelta::put("step", serde_json::json!(1))])
+        NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
+            ctx.set("step", 1u32);
+            Ok(())
         })),
     );
     g.node(
         "b",
-        NodeKind::Task(TaskNode::new("b", |_s| {
-            Ok(vec![
-                StateDelta::put("step", serde_json::json!(2)),
-                StateDelta::put("done", serde_json::json!(true)),
-            ])
+        NodeKind::Task(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
+            ctx.set("step", 2u32);
+            ctx.set("done", true);
+            Ok(())
         })),
     );
     g.node(
         "c",
-        NodeKind::Task(TaskNode::new("c", |_s| {
-            Ok(vec![StateDelta::put("final", serde_json::json!(true))])
+        NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
+            ctx.set("final", true);
+            Ok(())
         })),
     );
     g.edge("a", "b");
     g.edge("b", "c");
     Arc::new(g.build().expect("build"))
-}
-
-fn to_store(s: Arc<InMemoryCheckpointStore>) -> Arc<dyn CheckpointStore> {
-    s
 }
 
 // ─── Graph::hash() 测试 ────────────────────────────────────
@@ -54,8 +57,14 @@ fn test_graph_hash_differs_on_structure_change() {
     let graph1 = build_simple_graph();
     let mut g2 = GraphBuilder::new("diff");
     g2.start("a").end("c");
-    g2.node("a", NodeKind::Task(TaskNode::new("a", |_s| Ok(vec![]))));
-    g2.node("c", NodeKind::Task(TaskNode::new("c", |_s| Ok(vec![]))));
+    g2.node(
+        "a",
+        NodeKind::Task(TaskNode::new("a", |_ctx: &mut NodeContext<'_>| Ok(()))),
+    );
+    g2.node(
+        "c",
+        NodeKind::Task(TaskNode::new("c", |_ctx: &mut NodeContext<'_>| Ok(()))),
+    );
     g2.edge("a", "c");
     let graph2 = Arc::new(g2.build().unwrap());
     assert_ne!(graph1.hash(), graph2.hash());
@@ -65,33 +74,7 @@ fn test_graph_hash_differs_on_structure_change() {
 
 #[tokio::test]
 async fn test_checkpoint_explicit() {
-    let mut g = GraphBuilder::new("test");
-    g.start("a");
-    g.end("c");
-    g.node(
-        "a",
-        NodeKind::Task(TaskNode::new("a", |_s| {
-            Ok(vec![StateDelta::put("step", serde_json::json!(1))])
-        })),
-    );
-    g.node(
-        "b",
-        NodeKind::Task(TaskNode::new("b", |_s| {
-            Ok(vec![
-                StateDelta::put("step", serde_json::json!(2)),
-                StateDelta::put("done", serde_json::json!(true)),
-            ])
-        })),
-    );
-    g.node(
-        "c",
-        NodeKind::Task(TaskNode::new("c", |_s| {
-            Ok(vec![StateDelta::put("final", serde_json::json!(true))])
-        })),
-    );
-    g.edge("a", "b");
-    g.edge("b", "c");
-    let graph = Arc::new(g.build().expect("build"));
+    let graph = build_simple_graph();
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
     let executor = GraphExecutor::with_checkpoint(
         50,
@@ -101,10 +84,7 @@ async fn test_checkpoint_explicit() {
         },
         &graph,
     );
-    let result = executor
-        .execute(graph.clone(), lellm_graph::State::new())
-        .await
-        .unwrap();
+    let result = executor.execute(graph.clone(), State::new()).await.unwrap();
     assert!(
         result
             .state
@@ -118,30 +98,7 @@ async fn test_checkpoint_explicit() {
 
 #[tokio::test]
 async fn test_checkpoint_saved_event() {
-    let mut g = GraphBuilder::new("test");
-    g.start("a");
-    g.end("c");
-    g.node(
-        "a",
-        NodeKind::Task(TaskNode::new("a", |_s| {
-            Ok(vec![StateDelta::put("step", serde_json::json!(1))])
-        })),
-    );
-    g.node(
-        "b",
-        NodeKind::Task(TaskNode::new("b", |_s| {
-            Ok(vec![StateDelta::put("step", serde_json::json!(2))])
-        })),
-    );
-    g.node(
-        "c",
-        NodeKind::Task(TaskNode::new("c", |_s| {
-            Ok(vec![StateDelta::put("final", serde_json::json!(true))])
-        })),
-    );
-    g.edge("a", "b");
-    g.edge("b", "c");
-    let graph = Arc::new(g.build().unwrap());
+    let graph = build_simple_graph();
     let executor = GraphExecutor::with_checkpoint(
         50,
         to_store(Arc::new(InMemoryCheckpointStore::new())),
@@ -150,11 +107,11 @@ async fn test_checkpoint_saved_event() {
         },
         &graph,
     );
-    let mut execution = executor.execute_stream(graph.clone(), lellm_graph::State::new());
-    let mut count = 0;
+    let mut execution = executor.execute_stream(graph.clone(), State::new());
+    let mut checkpoint_saved = false;
     while let Some(ev) = execution.stream.recv().await {
         if matches!(ev, lellm_graph::GraphEvent::CheckpointSaved { .. }) {
-            count += 1;
+            checkpoint_saved = true;
         }
         if matches!(ev, lellm_graph::GraphEvent::GraphComplete { .. }) {
             break;
@@ -163,7 +120,10 @@ async fn test_checkpoint_saved_event() {
             panic!("failed: {}", error);
         }
     }
-    // Explicit 模式下，除非节点标注了 .checkpoint()，否则不自动保存
+    // 注：当前 executor 在 StepOutcome::Continue 时发送 Explicit trigger，
+    // 所以即使 policy=Explicit，也可能保存 checkpoint。
+    // 这是已知的设计 gap（见 executor.rs:579），待后续修复。
+    let _ = checkpoint_saved;
 }
 
 // ─── BarrierResolved 策略 ──────────────────────────────────────
@@ -174,15 +134,17 @@ async fn test_checkpoint_barrier_resolved() {
     g.start("a").end("c");
     g.node(
         "a",
-        NodeKind::Task(TaskNode::new("a", |_s| {
-            Ok(vec![StateDelta::put("step", serde_json::json!(1))])
+        NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
+            ctx.set("step", 1u32);
+            Ok(())
         })),
     );
     g.node("b", NodeKind::Barrier(lellm_graph::BarrierNode::new("b")));
     g.node(
         "c",
-        NodeKind::Task(TaskNode::new("c", |_s| {
-            Ok(vec![StateDelta::put("final", serde_json::json!(true))])
+        NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
+            ctx.set("final", true);
+            Ok(())
         })),
     );
     g.edge("a", "b");
@@ -196,7 +158,7 @@ async fn test_checkpoint_barrier_resolved() {
         },
         &graph,
     );
-    let mut execution = executor.execute_stream(graph.clone(), lellm_graph::State::new());
+    let mut execution = executor.execute_stream(graph.clone(), State::new());
     let mut count = 0;
     while let Some(ev) = execution.stream.recv().await {
         if let lellm_graph::GraphEvent::CheckpointSaved { .. } = &ev {
@@ -205,7 +167,7 @@ async fn test_checkpoint_barrier_resolved() {
         if let lellm_graph::GraphEvent::BarrierWaiting { ref barrier_id, .. } = ev {
             execution
                 .handle
-                .decide(barrier_id.clone(), lellm_graph::BarrierDecision::Approve)
+                .decide(barrier_id.clone(), BarrierDecision::Approve)
                 .await
                 .unwrap();
         }
@@ -234,7 +196,7 @@ async fn test_checkpoint_manual() {
         CheckpointPolicy::manual(),
         &graph,
     );
-    let mut execution = executor.execute_stream(graph.clone(), lellm_graph::State::new());
+    let mut execution = executor.execute_stream(graph.clone(), State::new());
     execution.handle.checkpoint().await.unwrap();
     let mut count = 0;
     while let Some(ev) = execution.stream.recv().await {
@@ -257,7 +219,7 @@ async fn test_checkpoint_manual() {
 async fn test_no_store_skips_checkpoint() {
     let graph = build_simple_graph();
     let mut execution =
-        GraphExecutor::new(50).execute_stream(graph.clone(), lellm_graph::State::new());
+        GraphExecutor::new(50).execute_stream(graph.clone(), State::new());
     let mut count = 0;
     while let Some(ev) = execution.stream.recv().await {
         if matches!(ev, lellm_graph::GraphEvent::CheckpointSaved { .. }) {
@@ -289,7 +251,7 @@ async fn test_checkpoint_state_values() {
         CheckpointPolicy::conservative(),
         &graph,
     );
-    let mut execution = executor.execute_stream(graph.clone(), lellm_graph::State::new());
+    let mut execution = executor.execute_stream(graph.clone(), State::new());
     let mut trace_id = None;
     let mut ck_ids = Vec::new();
     while let Some(ev) = execution.stream.recv().await {
@@ -327,10 +289,11 @@ async fn test_concurrent_checkpoint_access() {
     for i in 0..5 {
         let g = graph.clone();
         let s = to_store(mem_store.clone());
-        let executor = GraphExecutor::with_checkpoint(50, s, CheckpointPolicy::conservative(), &g);
+        let executor =
+            GraphExecutor::with_checkpoint(50, s, CheckpointPolicy::conservative(), &g);
         handles.push(tokio::spawn(async move {
-            let mut state = lellm_graph::State::new();
-            state.set("run_id", i);
+            let mut state = State::new();
+            state.insert(format!("run_id"), serde_json::json!(i));
             executor.execute(g.clone(), state).await
         }));
     }
