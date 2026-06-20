@@ -4,9 +4,7 @@
 
 use async_trait::async_trait;
 
-use lellm_graph::node::StreamNodeResult;
-use lellm_graph::{FlowEvent, FlowNode, GraphError, NextStep, NodeOutput};
-use lellm_graph::{GraphEvent, SpanId, State, StateDelta, TerminalError};
+use lellm_graph::{FlowNode, GraphError, NodeContext, TerminalError};
 
 use crate::hook::{AgentHook, AgentHookContext, AgentHookSnapshot};
 use crate::runtime::{AgentEvent, ToolUseLoop, ToolUseResult};
@@ -17,8 +15,8 @@ use crate::runtime::{AgentEvent, ToolUseLoop, ToolUseResult};
 ///
 /// # State 约定
 ///
-/// - 输入: `state.get("messages")` → `Vec<serde_json::Value>` 或 `serde_json::Value` 数组
-/// - 输出: `state.set("messages")` → 更新后的消息列表
+/// - 输入: `ctx.get("messages")` → `Vec<serde_json::Value>` 或 `serde_json::Value` 数组
+/// - 输出: `ctx.set("messages")` → 更新后的消息列表
 /// - 自定义 key: 通过 `message_key` 配置
 ///
 /// # 示例
@@ -39,8 +37,6 @@ pub struct AgentFlowNode {
     loop_: ToolUseLoop,
     /// State 中消息的 key（默认 "messages"）
     message_key: String,
-    /// 是否使用流式模式（仅在 execute_stream 中生效）
-    stream_events: bool,
     /// Agent-level hooks（在 agent loop 前后调用）
     hooks: Vec<std::sync::Arc<dyn AgentHook>>,
 }
@@ -52,7 +48,6 @@ impl AgentFlowNode {
             name: name.into(),
             loop_,
             message_key: "messages".to_string(),
-            stream_events: true,
             hooks: Vec::new(),
         }
     }
@@ -63,26 +58,17 @@ impl AgentFlowNode {
         self
     }
 
-    /// 是否发射流式事件到 sink（默认 true）。
-    pub fn stream_events(mut self, enabled: bool) -> Self {
-        self.stream_events = enabled;
-        self
-    }
-
     /// 添加 Agent-level hook。
     ///
-    /// Hook 在 agent loop 执行前后调用，返回的 Deltas 会合并到 State。
+    /// Hook 在 agent loop 执行前后调用。
     pub fn hook(mut self, hook: impl AgentHook + 'static) -> Self {
         self.hooks.push(std::sync::Arc::new(hook));
         self
     }
 
     /// 从 State 中提取输入消息。
-    fn extract_messages(&self, state: &State) -> Vec<lellm_core::Message> {
-        // 尝试从 State 中读取 messages
-        // 格式: Vec<serde_json::Value>，每个 Value 是一个 Message 的 JSON 表示
-        if let Some(value) = state.get(&self.message_key) {
-            // 如果是数组，逐个解析
+    fn extract_messages(&self, ctx: &NodeContext<'_>) -> Vec<lellm_core::Message> {
+        if let Some(value) = ctx.get_raw(&self.message_key) {
             if let Some(arr) = value.as_array() {
                 let mut messages = Vec::new();
                 for v in arr {
@@ -101,40 +87,37 @@ impl AgentFlowNode {
         }
     }
 
-    /// 将执行结果转换为 StateDelta 列表。
-    fn collect_deltas(&self, result: &ToolUseResult) -> Vec<StateDelta> {
-        // 将最终消息列表序列化为 JSON
+    /// 将执行结果写入 ctx。
+    fn apply_result(&self, ctx: &mut NodeContext<'_>, result: &ToolUseResult) {
         let messages: Vec<serde_json::Value> = result
             .messages
             .iter()
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
 
-        vec![
-            StateDelta::put(&self.message_key, serde_json::json!(messages)),
-            StateDelta::put(
-                format!("{}_stop_reason", self.name),
-                serde_json::json!(format!("{:?}", result.stop_reason)),
-            ),
-            StateDelta::put(
-                format!("{}_iterations", self.name),
-                serde_json::json!(result.iterations),
-            ),
-            StateDelta::put(
-                format!("{}_tool_calls", self.name),
-                serde_json::json!(result.tool_calls_executed),
-            ),
-        ]
+        ctx.set(&self.message_key, serde_json::json!(messages));
+        ctx.set(
+            format!("{}_stop_reason", self.name),
+            format!("{:?}", result.stop_reason),
+        );
+        ctx.set(
+            format!("{}_iterations", self.name),
+            result.iterations as u64,
+        );
+        ctx.set(
+            format!("{}_tool_calls", self.name),
+            result.tool_calls_executed as u64,
+        );
     }
 }
 
 #[async_trait]
 impl FlowNode for AgentFlowNode {
-    /// 阻塞执行 — 运行完整的 Agent Loop。
-    async fn execute(&self, state: &State) -> Result<NodeOutput, GraphError> {
-        let messages = self.extract_messages(state);
+    /// 执行 — 运行完整的 Agent Loop。
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        let messages = self.extract_messages(ctx);
 
-        // 如果没有消息，发送一个警告但仍继续执行（agent 可能只需要 system prompt）
+        // 如果没有消息，发送一个警告但仍继续执行
         if messages.is_empty() {
             tracing::debug!(
                 agent = %self.name,
@@ -144,139 +127,64 @@ impl FlowNode for AgentFlowNode {
         }
 
         // 调用 before_agent hooks
-        let ctx = AgentHookContext {
+        let hook_ctx = AgentHookContext {
             node_name: self.name.clone(),
             input_message_count: messages.len(),
         };
-        let mut hook_deltas: Vec<StateDelta> = self
-            .hooks
-            .iter()
-            .flat_map(|h| h.before_agent(&ctx))
-            .collect();
+        for hook in &self.hooks {
+            hook.before_agent(&hook_ctx);
+        }
 
-        let result = self.loop_.execute(messages).await.map_err(|e| {
-            GraphError::Terminal(TerminalError::NodeExecutionFailed {
-                node: self.name.clone(),
-                source: e.into(),
-            })
-        })?;
-
-        // 调用 after_agent hooks
-        let snapshot = AgentHookSnapshot {
-            result: result.clone(),
-            events: Vec::new(), // 非流式模式无事件
-        };
-        hook_deltas.extend(self.hooks.iter().flat_map(|h| h.after_agent(&snapshot)));
-
-        let mut deltas = self.collect_deltas(&result);
-        deltas.extend(hook_deltas);
-
-        tracing::debug!(
-            agent = %self.name,
-            iterations = result.iterations,
-            tool_calls = result.tool_calls_executed,
-            stop_reason = ?result.stop_reason,
-            "agent execution completed"
-        );
-
-        Ok(NodeOutput {
-            deltas,
-            next: NextStep::GoToNext,
-            metadata: None,
-        })
-    }
-
-    /// 流式执行 — 运行 Agent Loop 并转发事件。
-    async fn execute_stream(
-        &self,
-        state: &State,
-        sink: &tokio::sync::mpsc::Sender<GraphEvent>,
-        span_id: SpanId,
-    ) -> Result<StreamNodeResult, GraphError> {
-        let messages = self.extract_messages(state);
-
-        // 调用 before_agent hooks
-        let ctx = AgentHookContext {
-            node_name: self.name.clone(),
-            input_message_count: messages.len(),
-        };
-        let hook_deltas: Vec<StateDelta> = self
-            .hooks
-            .iter()
-            .flat_map(|h| h.before_agent(&ctx))
-            .collect();
-
-        // 发射 NodeStarted 事件
-        let _ = sink
-            .send(GraphEvent::Node {
-                span_id,
-                node_name: self.name.clone(),
-                event: FlowEvent::NodeStarted {
-                    node_id: self.name.clone(),
-                    span_id,
-                },
-            })
-            .await;
-
-        // 启动流式 Agent Loop
+        // 启动流式 Agent Loop 收集结果
         let mut agent_stream = self.loop_.execute_stream(messages);
-
         let mut final_result: Option<ToolUseResult> = None;
-        let mut error_delta: Option<StateDelta> = None;
+        let mut error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
         let mut events: Vec<AgentEvent> = Vec::new();
 
         while let Some(agent_event) = agent_stream.recv().await {
-            // 检查是否是终态事件
             let is_terminal = matches!(
                 &agent_event,
                 AgentEvent::LoopEnd { .. } | AgentEvent::LoopError { .. }
             );
 
-            // 收集事件（用于 after_agent hook）
             events.push(agent_event.clone());
 
-            // 转发事件（如果启用）
-            if self.stream_events {
-                let _ = sink
-                    .send(GraphEvent::Node {
-                        span_id,
-                        node_name: self.name.clone(),
-                        event: FlowEvent::Custom {
-                            node_id: self.name.clone(),
-                            payload: Box::new(agent_event.clone()),
-                        },
-                    })
-                    .await;
+            // 转发流式事件到 ctx.emit()
+            match &agent_event {
+                AgentEvent::Provider(provider_event) => {
+                    // 转发 Provider 事件中的文本数据
+                    match provider_event {
+                        lellm_provider::ProviderEvent::Token { token } => {
+                            ctx.emit(lellm_graph::StreamChunk::Text(token.clone()));
+                        }
+                        lellm_provider::ProviderEvent::ThinkingDelta { thinking, .. } => {
+                            ctx.emit(lellm_graph::StreamChunk::Thinking(thinking.clone()));
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
 
-            // 处理终态事件
             if is_terminal {
                 match &agent_event {
                     AgentEvent::LoopEnd { result } => {
                         final_result = Some(result.clone());
                     }
-                    AgentEvent::LoopError { error, .. } => {
-                        // 错误信息转为 Delta
-                        error_delta = Some(StateDelta::put(
-                            format!("{}_error", self.name),
-                            serde_json::json!(error.to_string()),
-                        ));
+                    AgentEvent::LoopError { error: err, .. } => {
+                        error = Some(Box::new(err.clone()));
                     }
                     _ => {}
                 }
             }
         }
 
-        // 如果有错误，返回 Fallback 让 Graph 决定如何处理
-        if let Some(err_delta) = error_delta {
-            return Ok(StreamNodeResult::Fallback {
-                deltas: hook_deltas
-                    .into_iter()
-                    .chain(std::iter::once(err_delta))
-                    .collect(),
-                reason: format!("agent loop error in '{}'", self.name),
-                node_name: self.name.clone(),
-            });
+        // 处理错误
+        if let Some(err) = error {
+            return Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                node: self.name.clone(),
+                source: err,
+            }));
         }
 
         // 写入最终结果
@@ -286,43 +194,27 @@ impl FlowNode for AgentFlowNode {
                 result: result.clone(),
                 events,
             };
-            let after_deltas: Vec<StateDelta> = self
-                .hooks
-                .iter()
-                .flat_map(|h| h.after_agent(&snapshot))
-                .collect();
+            for hook in &self.hooks {
+                hook.after_agent(&snapshot);
+            }
 
-            let mut deltas = self.collect_deltas(&result);
-            deltas.extend(hook_deltas);
-            deltas.extend(after_deltas);
+            self.apply_result(ctx, &result);
 
-            // 发射 NodeCompleted 事件
-            let _ = sink
-                .send(GraphEvent::Node {
-                    span_id,
-                    node_name: self.name.clone(),
-                    event: FlowEvent::NodeCompleted {
-                        node_id: self.name.clone(),
-                        span_id,
-                        duration: std::time::Duration::ZERO, // 由 executor 计算
-                    },
-                })
-                .await;
-
-            return Ok(StreamNodeResult::Continue {
-                deltas,
-                next: NextStep::GoToNext,
-                span_id,
-                observed: None,
-                metadata: None,
-            });
+            tracing::debug!(
+                agent = %self.name,
+                iterations = result.iterations,
+                tool_calls = result.tool_calls_executed,
+                stop_reason = ?result.stop_reason,
+                "agent execution completed"
+            );
+        } else {
+            // 没有收到终态事件
+            return Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                node: self.name.clone(),
+                source: "agent stream ended without terminal event".into(),
+            }));
         }
 
-        // 没有收到终态事件（channel 意外关闭）
-        Ok(StreamNodeResult::Fallback {
-            deltas: hook_deltas,
-            reason: "agent stream ended without terminal event".into(),
-            node_name: self.name.clone(),
-        })
+        Ok(())
     }
 }

@@ -226,4 +226,15 @@ impl BranchState {
     pub fn base(&self) -> &State {
         &self.base
     }
+
+    /// 获取当前状态的完整快照（base + local changes）。
+    ///
+    /// 用于条件边判断等需要完整状态的场景。
+    pub fn to_state(&self) -> State {
+        let mut state = self.base.as_ref().clone();
+        for (key, value) in &self.local {
+            state.insert(key.clone(), value.clone());
+        }
+        state
+    }
 }

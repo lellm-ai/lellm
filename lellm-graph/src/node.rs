@@ -12,8 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::delta::StateDelta;
-use crate::error::GraphError;
+use crate::error::{GraphError, ObservedError};
 use crate::event::BarrierId;
+use crate::ids::SpanId;
 use crate::node_context::NodeContext;
 use crate::state::State;
 
@@ -272,8 +273,10 @@ impl ConditionNodeBuilder {
 #[async_trait]
 impl FlowNode for ConditionNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        // 条件边需要完整状态快照来判断
+        let state = ctx.state().to_state();
         for (target, condition) in &self.branches {
-            if condition(ctx.state()) {
+            if condition(&state) {
                 ctx.goto(target);
                 return Ok(());
             }
