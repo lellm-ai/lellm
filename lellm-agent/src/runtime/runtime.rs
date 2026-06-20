@@ -354,7 +354,12 @@ impl ToolUseLoop {
         );
         let tool_node =
             super::react::ToolNode::new("tool", self.executor.clone(), self.config.clone());
-        let graph = super::react::build_react_graph(llm_node, tool_node);
+        let compactor_node = super::react::CompactorNode::new(
+            "compactor",
+            Box::new(LocalCompactor::new()),
+            self.config.context_budget.clone(),
+        );
+        let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
         let max_steps = self.config.max_iterations * 2 + 1;
 
         // 构建 NodeContext

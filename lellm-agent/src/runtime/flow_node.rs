@@ -135,6 +135,17 @@ impl AgentFlowNode {
     }
 
     /// 构建内部 ReAct Graph。
+    ///
+    /// ```text
+    /// START → budget_check
+    ///
+    /// budget_check --budget_ok--> [llm]
+    ///          --need_compact--> [compactor] → [llm]
+    ///
+    /// [llm] → [tool_decision]
+    ///    --has_tool_calls--> [tool] → [budget_check] (循环)
+    ///    --no_tool_calls--> [end]
+    /// ```
     fn build_react_graph(&self) -> Graph {
         let config = self.loop_.config().clone();
         let model = self.loop_.model().clone();
@@ -150,9 +161,15 @@ impl AgentFlowNode {
         );
 
         let tool_node =
-            crate::runtime::react::ToolNode::new(format!("{}_tool", self.name), executor, config);
+            crate::runtime::react::ToolNode::new(format!("{}_tool", self.name), executor.clone(), config.clone());
 
-        crate::runtime::react::build_react_graph(llm_node, tool_node)
+        let compactor_node = crate::runtime::react::CompactorNode::new(
+            format!("{}_compactor", self.name),
+            Box::new(crate::runtime::LocalCompactor::new()),
+            config.context_budget.clone(),
+        );
+
+        crate::runtime::react::build_react_graph(llm_node, tool_node, compactor_node)
     }
 }
 
@@ -287,11 +304,12 @@ impl AgentFlowNode {
             .iter()
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
-        ctx.set("messages", serde_json::json!(messages_json));
-        ctx.set("iterations", 0u32);
-        ctx.set("total_tool_calls", 0usize);
-        ctx.set("output_tokens", 0usize);
-        ctx.set("reasoning_tokens", 0usize);
+        ctx.set(super::react::SK_MESSAGES, serde_json::json!(messages_json));
+        ctx.set(super::react::SK_ITERATIONS, 0u32);
+        ctx.set(super::react::SK_TOTAL_TOOL_CALLS, 0usize);
+        ctx.set(super::react::SK_OUTPUT_TOKENS, 0usize);
+        ctx.set(super::react::SK_REASONING_TOKENS, 0usize);
+        ctx.set(super::react::SK_COMPACT_COUNT, 0u64);
 
         // 构建内部 ReAct Graph
         let graph = self.build_react_graph();
@@ -299,6 +317,20 @@ impl AgentFlowNode {
 
         // 执行 Graph
         graph.run_inline(ctx, max_steps).await?;
+
+        // 将内部 ReAct 结果传播到外层 State（带命名空间前缀）
+        if let Some(stop_reason) = ctx.get::<String>(super::react::SK_STOP_REASON) {
+            ctx.set(
+                format!("{}_stop_reason", self.name),
+                stop_reason.clone(),
+            );
+        }
+        if let Some(iterations) = ctx.get::<u64>(super::react::SK_ITERATIONS) {
+            ctx.set(format!("{}_iterations", self.name), iterations);
+        }
+        if let Some(tool_calls) = ctx.get::<u64>(super::react::SK_TOTAL_TOOL_CALLS) {
+            ctx.set(format!("{}_tool_calls", self.name), tool_calls);
+        }
 
         tracing::debug!(
             agent = %self.name,

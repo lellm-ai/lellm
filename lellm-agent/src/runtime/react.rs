@@ -20,13 +20,14 @@ use lellm_graph::{
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
 use super::context::{
-    AgentExecutionContext, ContextCompactor, LocalCompactor, estimate_reasoning_block,
+    AgentExecutionContext, ContextCompactor, ContextBudget, LocalCompactor,
+    estimate_reasoning_block,
 };
 use super::event::StopReason;
 use super::iteration::execute_with_fallback;
 use super::runtime::{
     ResolvedRound, get_iterations, get_messages, state_add_output_from_content,
-    state_add_tool_calls, state_compact, state_exceeded_total_output,
+    state_add_tool_calls, state_exceeded_total_output,
     state_exceeded_total_reasoning, state_next_iteration, state_push_assistant,
     state_push_tool_results, state_reached_max,
 };
@@ -43,10 +44,13 @@ pub const SK_REASONING_TOKENS: &str = "reasoning_tokens";
 pub const SK_HAS_TOOL_CALLS: &str = "has_tool_calls";
 pub const SK_STOP_REASON: &str = "stop_reason";
 pub const SK_LAST_RESPONSE: &str = "last_response";
+pub const SK_COMPACT_COUNT: &str = "compact_count";
 
 // ─── LLMNode ──────────────────────────────────────────────────
 
-/// LLM 调用节点 — 执行单次 LLM 调用，包含完整 ToolUseLoop 逻辑。
+/// LLM 调用节点 — 执行单次 LLM 调用。
+///
+/// 职责单一：只负责 LLM 调用，不感知 Compaction。
 ///
 /// 读取 State:
 /// - `messages` — 消息历史
@@ -67,7 +71,6 @@ pub struct LLMNode {
     pub executor: ToolExecutor,
     pub config: ToolUseConfig,
     pub deps: ToolUseDeps,
-    pub compactor: Box<dyn ContextCompactor>,
 }
 
 impl Clone for LLMNode {
@@ -78,7 +81,6 @@ impl Clone for LLMNode {
             executor: self.executor.clone(),
             config: self.config.clone(),
             deps: self.deps.clone(),
-            compactor: Box::new(LocalCompactor::new()),
         }
     }
 }
@@ -97,7 +99,6 @@ impl LLMNode {
             executor,
             config,
             deps,
-            compactor: Box::new(LocalCompactor::new()),
         }
     }
 }
@@ -130,17 +131,7 @@ impl FlowNode for LLMNode {
         // 2. 递增迭代
         state_next_iteration(&mut state);
 
-        // 3. Context compaction
-        if let Some(_compact_result) = state_compact(
-            &mut state,
-            &mut exec_ctx,
-            &self.config.context_budget,
-            &*self.compactor,
-        ) {
-            tracing::debug!("context compacted");
-        }
-
-        // 4. 获取工具定义
+        // 3. 获取工具定义
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
         // 5. 构建 LLM 请求
@@ -429,47 +420,199 @@ fn sync_state_to_ctx(ctx: &mut NodeContext<'_>, state: &lellm_graph::State) {
     }
 }
 
+// ─── CompactorNode ────────────────────────────────────────────
+
+/// 上下文压缩节点 — 独立 FlowNode，职责单一。
+///
+/// 读取 State:
+/// - `messages` — 消息历史
+///
+/// 写入 State:
+/// - `messages` — 压缩后的消息历史
+/// - `compaction_count` — 累计压缩次数
+///
+/// 不感知 LLM 调用的存在，只负责压缩。
+pub struct CompactorNode {
+    pub name: String,
+    pub compactor: Box<dyn ContextCompactor>,
+    pub budget: ContextBudget,
+}
+
+impl Clone for CompactorNode {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            compactor: Box::new(LocalCompactor::new()),
+            budget: self.budget.clone(),
+        }
+    }
+}
+
+impl CompactorNode {
+    pub fn new(
+        name: impl Into<String>,
+        compactor: Box<dyn ContextCompactor>,
+        budget: ContextBudget,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            compactor,
+            budget,
+        }
+    }
+}
+
+#[async_trait]
+impl FlowNode for CompactorNode {
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        let messages: Vec<Message> = ctx
+            .get::<Vec<serde_json::Value>>(SK_MESSAGES)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+
+        let result = self.compactor.compact(&messages, &self.budget);
+
+        // 只有实际压缩了才更新 state
+        if result.removed_messages > 0 {
+            let messages_json: Vec<serde_json::Value> = result
+                .messages
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            ctx.set(SK_MESSAGES, serde_json::json!(messages_json));
+
+            // 更新压缩次数统计
+            let count: u64 = ctx.get(SK_COMPACT_COUNT).unwrap_or(0);
+            ctx.set(SK_COMPACT_COUNT, count + 1);
+
+            tracing::debug!(
+                agent = %self.name,
+                before_tokens = result.before_tokens,
+                after_tokens = result.after_tokens,
+                removed = result.removed_messages,
+                "context compacted"
+            );
+        }
+
+        Ok(())
+    }
+}
+
+// ─── BudgetCondition ──────────────────────────────────────────
+
+/// 预算条件节点 — 检查 Token 预算，决定是否进入 Compactor。
+///
+/// 预算充足 → Goto("llm")
+/// 需要压缩 → Goto("compactor")
+pub struct BudgetCondition {
+    pub name: String,
+    pub budget: ContextBudget,
+}
+
+impl BudgetCondition {
+    pub fn new(name: impl Into<String>, budget: ContextBudget) -> Self {
+        Self {
+            name: name.into(),
+            budget,
+        }
+    }
+}
+
+#[async_trait]
+impl FlowNode for BudgetCondition {
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        let current_tokens: usize = ctx.get(SK_OUTPUT_TOKENS).unwrap_or(0);
+
+        if self.budget.should_compact(current_tokens) {
+            ctx.goto("compactor");
+        } else {
+            ctx.goto("llm");
+        }
+
+        Ok(())
+    }
+}
+
 // ─── build_react_graph ────────────────────────────────────────
 
 /// 构建 ReAct 内部图。
 ///
 /// ```text
-/// [llm] --has_tool_calls--> [condition] --yes--> [tool] --(self)--> [llm]
-///                        \--no--> [end]
+/// START → budget_check
+///
+/// budget_check --budget_ok--> [llm]
+///          --need_compact--> [compactor] → [llm]
+///
+/// [llm] → [tool_decision]
+///    --has_tool_calls--> [tool] → [budget_check] (循环)
+///    --no_tool_calls--> [end]
 /// ```
-pub fn build_react_graph(llm_node: LLMNode, tool_node: ToolNode) -> Graph {
+pub fn build_react_graph(
+    llm_node: LLMNode,
+    tool_node: ToolNode,
+    compactor_node: CompactorNode,
+) -> Graph {
     let llm_name = llm_node.name.clone();
+    let budget = llm_node.config.context_budget.clone();
 
     let mut builder = GraphBuilder::new(format!("react_{}", llm_name));
-    builder.start("llm");
+    builder.start("budget_check");
     builder.end("end");
 
+    // 节点注册
     builder.node("llm", NodeKind::External(Arc::new(llm_node)));
     builder.node("tool", NodeKind::External(Arc::new(tool_node)));
     builder.node(
-        "condition",
+        "tool_decision",
         NodeKind::External(Arc::new(ReactCondition::new(format!(
-            "{}_condition",
+            "{}_tool_decision",
             llm_name
         )))),
     );
+    builder.node(
+        "budget_check",
+        NodeKind::External(Arc::new(BudgetCondition::new(
+            format!("{}_budget", llm_name),
+            budget.clone(),
+        ))),
+    );
+    builder.node("compactor", NodeKind::External(Arc::new(compactor_node)));
 
-    // llm -> condition
-    builder.edge("llm", "condition");
+    // budget_check → llm (预算充足，直接走 LLM)
+    let budget_clone = budget.clone();
+    builder.edge_if("budget_check", "llm", move |state| {
+        let tokens: usize = state
+            .get(SK_OUTPUT_TOKENS)
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(0);
+        !budget_clone.should_compact(tokens)
+    });
 
-    // condition -> tool (有 tool_calls)
-    builder.edge_if("condition", "tool", |state| {
+    // budget_check → compactor (需要压缩)
+    builder.edge_fallback("budget_check", "compactor");
+
+    // compactor → llm (压缩完直接到 LLM)
+    builder.edge("compactor", "llm");
+
+    // llm → tool_decision
+    builder.edge("llm", "tool_decision");
+
+    // tool_decision → tool (有 tool_calls)
+    builder.edge_if("tool_decision", "tool", |state| {
         state
             .get(SK_HAS_TOOL_CALLS)
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     });
 
-    // condition -> end (无 tool_calls)
-    builder.edge_fallback("condition", "end");
+    // tool_decision → end (无 tool_calls)
+    builder.edge_fallback("tool_decision", "end");
 
-    // tool -> llm (自环)
-    builder.edge("tool", "llm");
+    // tool → budget_check (工具执行完，回到预算检查，形成循环)
+    builder.edge("tool", "budget_check");
 
     builder.build().expect("ReAct graph should be valid")
 }

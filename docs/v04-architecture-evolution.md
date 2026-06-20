@@ -51,7 +51,9 @@ pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::new("reasoning_token
 - [x] 从 `LoopState` 迁移所有字段到 Graph State keys（已完成）
 - [x] `ToolUseLoop` 删除 `LoopState`，改为读写 Graph State（已完成）
 - [x] Agent 核心 StateKey 常量定义（已完成）
-- [ ] `AgentFlowNode` 简化为 SubGraph 包装器（v0.4 ReAct = 有环图）
+- [x] `AgentFlowNode` 支持 ReAct Graph 模式（已完成）
+- [x] ReAct Graph 模式传播 StopReason 到外层 State（已完成）
+- [ ] ReAct Graph 模式补全流式输出（StreamChunk emit）
 - [ ] 验证 Checkpoint 能正确恢复 Agent 中间状态
 
 ---
@@ -86,15 +88,30 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 - 调用 `Graph::run_inline()` 驱动循环
 - `ToolUseLoop` 变成一层薄壳，API 签名不变（用户无感知）
 
-### 内部 ReAct Graph 的 State 传递
+### 内部 ReAct Graph 的结构
+
+```
+START → budget_check
+
+budget_check --budget_ok--> [llm]
+     --need_compact--> [compactor] → [llm]
+
+[llm] → [tool_decision]
+   --has_tool_calls--> [tool] → [budget_check] (循环)
+   --no_tool_calls--> [end]
+```
+
+**关键设计：Compactor 是独立 FlowNode，LLMNode 不感知 Compaction。**
 
 State 承载关键数据：
 
 - `SK_MESSAGES` → 消息历史
 - `SK_ITERATIONS` → 迭代计数
-- `SK_TOOL_CALLS` → 本轮工具调用
+- `SK_TOTAL_TOOL_CALLS` → 累计工具调用
 - `SK_OUTPUT_TOKENS` → 累计输出 Token
 - `SK_REASONING_TOKENS` → 累计推理 Token
+- `SK_COMPACT_COUNT` → 累计压缩次数
+- `SK_STOP_REASON` → 停止原因
 
 ### 嵌套结构
 
@@ -107,11 +124,13 @@ State 承载关键数据：
 
 ### 待做清单
 
-- [ ] 设计 `LLMNode` — 执行单次 LLM 调用，写入 messages 和 tool_calls
-- [ ] 设计 `ToolNode` — 读取 tool_calls，执行工具，写入 results
-- [ ] 设计 `ConditionNode` — 检查 tool_calls 是否为空，路由到 ToolNode 或 End
-- [ ] `Graph::run_inline()` 内联执行方法
-- [ ] `ToolUseLoop` 内部构建 ReAct Graph，替代 while 循环
+- [x] 设计 `LLMNode` — 执行单次 LLM 调用，写入 messages 和 tool_calls
+- [x] 设计 `ToolNode` — 读取 tool_calls，执行工具，写入 results
+- [x] 设计 `ReactCondition` — 检查 tool_calls 是否为空，路由到 ToolNode 或 End
+- [x] 设计 `BudgetCondition` — 检查 Token 预算，路由到 Compactor 或 LLM
+- [x] 设计 `CompactorNode` — 独立 FlowNode，职责单一（不感知 LLM）
+- [x] `Graph::run_inline()` 内联执行方法
+- [x] `ToolUseLoop` 内部构建 ReAct Graph，替代 while 循环
 - [ ] 验证流式输出与现有 `AgentStream` 兼容
 
 ---
@@ -490,6 +509,8 @@ impl Graph {
 - Parallel 合并
 
 内联模式：`NodeContext` 的 `stream = None`，节点照常 `execute()`，事件静默丢弃。
+
+**`NextStep::Next` 在内联模式下的处理：支持边条件路由。** 与外部 `Executor` 行为完全一致——节点返回 `NextAction::Next` 时，`run_inline()` 调用 `resolve_next_inline()` 解析边条件（条件边 → 普通边 → Fallback 边）。这样内外行为统一，减少认知负担。开销可忽略（内联 Graph 节点数极少）。
 
 ### AgentFlowNode 实现
 
