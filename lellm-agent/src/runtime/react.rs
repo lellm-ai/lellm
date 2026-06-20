@@ -287,6 +287,28 @@ impl FlowNode for LLMNode {
         sync_to_ctx(ctx, &state);
         ctx.set(SK_HAS_TOOL_CALLS, has_tool_calls);
 
+        // 13.5. StreamChunk emit (v04 #1) — 阻塞模式一次性发射完整 response
+        for block in &response.content {
+            match block {
+                lellm_core::ContentBlock::Text(t) => {
+                    ctx.emit(lellm_graph::StreamChunk::Text(t.text.clone()));
+                }
+                lellm_core::ContentBlock::Thinking(th) => {
+                    ctx.emit(lellm_graph::StreamChunk::Thinking(th.thinking.clone()));
+                }
+                _ => {}
+            }
+        }
+        if has_tool_calls {
+            for tc in &tool_calls {
+                ctx.emit(lellm_graph::StreamChunk::ToolCall {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                });
+            }
+        }
+
         if has_tool_calls {
             tracing::debug!(
                 iteration = state.iterations,
@@ -294,7 +316,6 @@ impl FlowNode for LLMNode {
                 "LLM call completed, executing tools"
             );
         } else {
-            // 无 tool_calls → 结束
             ctx.set(SK_STOP_REASON, format!("{:?}", StopReason::Complete));
             ctx.set(
                 SK_LAST_RESPONSE,
@@ -392,10 +413,34 @@ impl FlowNode for ToolNode {
             })
             .collect();
 
-        // 4. 追加到消息历史
+        // 4. StreamChunk emit (v04 #1) — 工具执行结果（先 emit，再 extend）
+        for result in &results {
+            if let Message::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+            } = result
+            {
+                let content_str: String = content
+                    .iter()
+                    .filter_map(|b| match b {
+                        lellm_core::ContentBlock::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                ctx.emit(lellm_graph::StreamChunk::ToolResult {
+                    id: tool_call_id.clone(),
+                    content: content_str,
+                    is_error: *is_error,
+                });
+            }
+        }
+
+        // 5. 追加到消息历史
         state.messages.extend(results);
 
-        // 5. 同步状态到 ctx
+        // 6. 同步状态到 ctx
         set_agent_state(ctx, &state);
         sync_to_ctx(ctx, &state);
 

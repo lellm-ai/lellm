@@ -395,7 +395,13 @@ impl ToolUseLoop {
         })
     }
 
-    /// 流式执行，返回事件接收器
+    /// 流式执行，返回事件接收器。
+    ///
+    /// ⚠️ TODO (v04 #3): 迁移到 ReAct Graph 驱动。
+    /// 当前仍使用手写 while 循环。完整迁移需要：
+    /// 1. LLMNode 支持 streaming API (`provider.stream()`)
+    /// 2. `Graph::run_inline_stream()` 方法
+    /// 3. AgentEvent ↔ StreamChunk 桥接
     pub fn execute_stream(&self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let model = self.model.clone();

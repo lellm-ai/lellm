@@ -292,4 +292,9 @@ impl<'a> NodeContext<'a> {
     pub fn state(&self) -> &BranchState {
         self.state
     }
+
+    /// 获取数据面发射器引用（供 `run_inline()` 等嵌套场景透传给子节点）。
+    pub fn stream(&self) -> Option<&'a StreamEmitter> {
+        self.stream
+    }
 }

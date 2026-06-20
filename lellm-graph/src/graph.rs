@@ -302,7 +302,9 @@ impl Graph {
 
             // 创建子 BranchState
             let mut branch = ctx.state().fork();
-            let mut child_ctx = crate::node_context::NodeContext::new(&mut branch, None);
+            // 透传父 ctx 的 StreamEmitter（v04 #1: 让内联节点也能发射流式事件）
+            let stream = ctx.stream();
+            let mut child_ctx = crate::node_context::NodeContext::new(&mut branch, stream);
 
             // 执行节点
             node.execute(&mut child_ctx).await?;
