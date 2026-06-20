@@ -160,8 +160,11 @@ impl AgentFlowNode {
             deps,
         );
 
-        let tool_node =
-            crate::runtime::react::ToolNode::new(format!("{}_tool", self.name), executor.clone(), config.clone());
+        let tool_node = crate::runtime::react::ToolNode::new(
+            format!("{}_tool", self.name),
+            executor.clone(),
+            config.clone(),
+        );
 
         let compactor_node = crate::runtime::react::CompactorNode::new(
             format!("{}_compactor", self.name),
@@ -302,8 +305,7 @@ impl AgentFlowNode {
         messages: Vec<lellm_core::Message>,
     ) -> Result<(), GraphError> {
         // 初始化 Typed State
-        let agent_state =
-            super::typed_state::AgentState::from_messages(messages);
+        let agent_state = super::typed_state::AgentState::from_messages(messages);
         ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state);
 
         // 构建内部 ReAct Graph
@@ -324,8 +326,14 @@ impl AgentFlowNode {
                 format!("{:?}", stop_reason),
             );
         }
-        ctx.set(format!("{}_iterations", self.name), agent_state.iterations as u64);
-        ctx.set(format!("{}_tool_calls", self.name), agent_state.total_tool_calls as u64);
+        ctx.set(
+            format!("{}_iterations", self.name),
+            agent_state.iterations as u64,
+        );
+        ctx.set(
+            format!("{}_tool_calls", self.name),
+            agent_state.total_tool_calls as u64,
+        );
 
         tracing::debug!(
             agent = %self.name,

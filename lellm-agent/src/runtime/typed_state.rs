@@ -162,11 +162,7 @@ impl WorkflowState for AgentState {
 
     fn merge(self, other: Self) -> Result<Self, lellm_graph::WorkflowError> {
         Ok(Self {
-            messages: self
-                .messages
-                .into_iter()
-                .chain(other.messages)
-                .collect(),
+            messages: self.messages.into_iter().chain(other.messages).collect(),
             iterations: self.iterations.max(other.iterations),
             total_tool_calls: self.total_tool_calls.max(other.total_tool_calls),
             output_tokens: self.output_tokens + other.output_tokens,
@@ -194,4 +190,3 @@ impl AgentState {
         serde_json::from_value(v).ok()
     }
 }
-

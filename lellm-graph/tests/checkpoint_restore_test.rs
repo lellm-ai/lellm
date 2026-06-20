@@ -151,11 +151,17 @@ async fn test_checkpoint_state_consistency() {
         CheckpointPolicy::conservative(),
         &graph,
     );
-    let result1 = executor1.execute(graph.clone(), State::new()).await.unwrap();
+    let result1 = executor1
+        .execute(graph.clone(), State::new())
+        .await
+        .unwrap();
 
     // 无 Checkpoint 执行
     let executor2 = GraphExecutor::new(50);
-    let result2 = executor2.execute(graph.clone(), State::new()).await.unwrap();
+    let result2 = executor2
+        .execute(graph.clone(), State::new())
+        .await
+        .unwrap();
 
     // 两种执行路径的最终状态应一致
     assert_eq!(
@@ -195,9 +201,8 @@ async fn test_checkpoint_typed_state_roundtrip() {
     g.node(
         "read",
         NodeKind::Task(TaskNode::new("read", |ctx: &mut NodeContext<'_>| {
-            let restored: TestTypedState = ctx
-                .get("typed_state")
-                .expect("typed state should exist");
+            let restored: TestTypedState =
+                ctx.get("typed_state").expect("typed state should exist");
             assert_eq!(restored.counter, 42);
             assert_eq!(restored.messages.len(), 2);
             ctx.set("verified", true);
@@ -218,7 +223,10 @@ async fn test_checkpoint_typed_state_roundtrip() {
     let result = executor.execute(graph.clone(), State::new()).await.unwrap();
 
     // 验证图执行通过（read 节点的 assert 没有 panic）
-    assert_eq!(result.state.get("verified").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        result.state.get("verified").and_then(|v| v.as_bool()),
+        Some(true)
+    );
 
     // 从 Checkpoint 加载，验证 Typed State 完整保留
     let ck = mem_store
@@ -228,7 +236,10 @@ async fn test_checkpoint_typed_state_roundtrip() {
         .expect("should have checkpoint");
 
     let restored: TestTypedState = serde_json::from_value(
-        ck.state.get("typed_state").cloned().expect("typed_state in checkpoint"),
+        ck.state
+            .get("typed_state")
+            .cloned()
+            .expect("typed_state in checkpoint"),
     )
     .expect("typed state should survive checkpoint roundtrip");
 
@@ -259,7 +270,11 @@ async fn test_checkpoint_list_ordering() {
 
     // 能逐个加载
     for id in &ids {
-        let ck = mem_store.load(id).await.unwrap().expect("checkpoint exists");
+        let ck = mem_store
+            .load(id)
+            .await
+            .unwrap()
+            .expect("checkpoint exists");
         assert_eq!(ck.parent_trace_id, result.trace_id);
     }
 }
@@ -346,10 +361,9 @@ async fn test_circular_graph_checkpoint_and_resume() {
     );
 
     // 验证执行轨迹
-    let history: Vec<u32> = serde_json::from_value(
-        result1.state.get("history").cloned().unwrap_or_default()
-    )
-    .unwrap_or_default();
+    let history: Vec<u32> =
+        serde_json::from_value(result1.state.get("history").cloned().unwrap_or_default())
+            .unwrap_or_default();
     assert_eq!(history, vec![1, 2, 3], "should have incremented 3 times");
 
     // 验证 Checkpoint 被保存
@@ -412,7 +426,9 @@ impl CheckpointStore for FailingStore {
     ) -> Result<(), CheckpointStoreError> {
         let mut count = self.call_count.lock().unwrap();
         *count += 1;
-        Err(CheckpointStoreError::Storage("simulated storage failure".into()))
+        Err(CheckpointStoreError::Storage(
+            "simulated storage failure".into(),
+        ))
     }
 
     async fn load(
@@ -436,10 +452,7 @@ impl CheckpointStore for FailingStore {
         Ok(Vec::new())
     }
 
-    async fn delete(
-        &self,
-        _id: &lellm_graph::CheckpointId,
-    ) -> Result<bool, CheckpointStoreError> {
+    async fn delete(&self, _id: &lellm_graph::CheckpointId) -> Result<bool, CheckpointStoreError> {
         Ok(false)
     }
 

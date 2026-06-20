@@ -261,7 +261,10 @@ impl<'a> NodeContext<'a> {
     ///
     /// 通过 key 获取存储的类型化状态对象。
     /// 与 `get::<T>()` 的区别：此方法明确用于 WorkflowState 协议。
-    pub fn get_state<S: WorkflowState + serde::de::DeserializeOwned>(&self, key: &str) -> Option<S> {
+    pub fn get_state<S: WorkflowState + serde::de::DeserializeOwned>(
+        &self,
+        key: &str,
+    ) -> Option<S> {
         self.get(key)
     }
 

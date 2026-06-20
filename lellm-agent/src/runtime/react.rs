@@ -15,22 +15,23 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 
-use lellm_core::{ChatResponse, Message, ToolCall};
+use lellm_core::{ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock, ToolCall};
 use lellm_graph::{
     FlowNode, Graph, GraphBuilder, GraphError, NodeContext, NodeKind, TerminalError,
 };
+use lellm_provider::ProviderEvent;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
 use super::context::{
-    AgentExecutionContext, ContextCompactor, ContextBudget, LocalCompactor,
+    AgentExecutionContext, ContextBudget, ContextCompactor, LocalCompactor,
     estimate_reasoning_block, estimate_text,
 };
 use super::event::StopReason;
-use super::iteration::execute_with_fallback;
 use super::runtime::ResolvedRound;
 use super::tools::{ToolExecutor, execute_batch_with};
-use super::typed_state::{AgentState, AGENT_STATE_KEY};
+use super::typed_state::{AGENT_STATE_KEY, AgentState};
 use lellm_provider::ResolvedModel;
 
 // ─── State Keys（边条件等仍需要字符串 key）──────────────────
@@ -182,21 +183,75 @@ impl FlowNode for LLMNode {
             &round.definitions,
         );
 
-        // 6. 执行 LLM 调用（带 fallback）
-        let response = execute_with_fallback(
-            &self.deps.fallback,
-            |_| true,
-            || self.model.provider.call(&req),
-            state.iterations,
-            &state.messages,
-        )
-        .await
-        .map_err(|e| {
+        // 6. 执行 LLM 流式调用（v04: 真正的流式输出）
+        let mut stream = self.model.provider.stream(&req).await.map_err(|e| {
             GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: self.name.clone(),
                 source: e.into(),
             })
         })?;
+
+        // 收集流式事件，构建完整的 ChatResponse
+        let mut content_blocks: Vec<ContentBlock> = Vec::new();
+        let mut current_text = String::new();
+        let mut current_thinking = String::new();
+        let mut tool_calls_count: usize = 0;
+        let mut usage: Option<lellm_core::TokenUsage> = None;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(ProviderEvent::Token { token }) => {
+                    // 实时发射 StreamChunk（真正的流式输出）
+                    ctx.emit(lellm_graph::StreamChunk::Text(token.clone()));
+                    current_text.push_str(&token);
+                }
+                Ok(ProviderEvent::ThinkingDelta { thinking, .. }) => {
+                    ctx.emit(lellm_graph::StreamChunk::Thinking(thinking.clone()));
+                    current_thinking.push_str(&thinking);
+                }
+                Ok(ProviderEvent::ResponseComplete {
+                    tool_calls,
+                    usage: u,
+                }) => {
+                    // 将 tool_calls 添加到 content_blocks
+                    for tc in tool_calls {
+                        content_blocks.push(ContentBlock::ToolCall(tc));
+                    }
+                    tool_calls_count = content_blocks
+                        .iter()
+                        .filter(|b| matches!(b, ContentBlock::ToolCall(_)))
+                        .count();
+                    usage = u;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                        node: self.name.clone(),
+                        source: e.into(),
+                    }));
+                }
+            }
+        }
+
+        // 构建完整的 ChatResponse
+        if !current_thinking.is_empty() {
+            content_blocks.push(ContentBlock::Thinking(ThinkingBlock {
+                thinking: current_thinking,
+                redacted: None,
+            }));
+        }
+        if !current_text.is_empty() {
+            content_blocks.push(ContentBlock::Text(TextBlock {
+                text: current_text,
+                cache_control: None,
+            }));
+        }
+
+        let response = ChatResponse {
+            content: content_blocks,
+            usage: usage.unwrap_or_default(),
+            raw: serde_json::json!(null),
+        };
 
         // 7. 检查 reasoning budget（单轮）
         if let Some(limit) = self.config.request_options.max_reasoning_tokens {
@@ -276,10 +331,9 @@ impl FlowNode for LLMNode {
 
         // 12. 检查是否有 tool_calls
         let has_tool_calls = response.has_tool_calls();
-        let tool_calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
 
         if has_tool_calls {
-            state.total_tool_calls += tool_calls.len();
+            state.total_tool_calls += tool_calls_count;
         }
 
         // 13. 同步状态到 ctx
@@ -287,44 +341,11 @@ impl FlowNode for LLMNode {
         sync_to_ctx(ctx, &state);
         ctx.set(SK_HAS_TOOL_CALLS, has_tool_calls);
 
-        // 13.5. StreamChunk emit (v04 #1) — 阻塞模式一次性发射完整 response
-        for block in &response.content {
-            match block {
-                lellm_core::ContentBlock::Text(t) => {
-                    ctx.emit(lellm_graph::StreamChunk::Text(t.text.clone()));
-                }
-                lellm_core::ContentBlock::Thinking(th) => {
-                    ctx.emit(lellm_graph::StreamChunk::Thinking(th.thinking.clone()));
-                }
-                _ => {}
-            }
-        }
-        if has_tool_calls {
-            for tc in &tool_calls {
-                let args_str = match serde_json::to_string(&tc.arguments) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(
-                            tool_call_id = %tc.id,
-                            tool_name = %tc.name,
-                            error = %e,
-                            "failed to serialize tool call arguments for StreamChunk"
-                        );
-                        format!("{{\"error\":\"serialization_failed\",\"detail\":\"{}\"}}", e)
-                    }
-                };
-                ctx.emit(lellm_graph::StreamChunk::ToolCall {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: args_str,
-                });
-            }
-        }
-
+        // 14. 处理完成逻辑
         if has_tool_calls {
             tracing::debug!(
                 iteration = state.iterations,
-                tool_calls = tool_calls.len(),
+                tool_calls = tool_calls_count,
                 "LLM call completed, executing tools"
             );
         } else {
@@ -412,7 +433,10 @@ impl FlowNode for ToolNode {
                     ref content,
                 } = m
                 {
-                    let truncated = self.config.context_budget.truncate_tool_result_blocks(content);
+                    let truncated = self
+                        .config
+                        .context_budget
+                        .truncate_tool_result_blocks(content);
                     if truncated != *content {
                         return Message::ToolResult {
                             tool_call_id: tool_call_id.clone(),

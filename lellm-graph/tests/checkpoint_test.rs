@@ -218,8 +218,7 @@ async fn test_checkpoint_manual() {
 #[tokio::test]
 async fn test_no_store_skips_checkpoint() {
     let graph = build_simple_graph();
-    let mut execution =
-        GraphExecutor::new(50).execute_stream(graph.clone(), State::new());
+    let mut execution = GraphExecutor::new(50).execute_stream(graph.clone(), State::new());
     let mut count = 0;
     while let Some(ev) = execution.stream.recv().await {
         if matches!(ev, lellm_graph::GraphEvent::CheckpointSaved { .. }) {
@@ -289,8 +288,7 @@ async fn test_concurrent_checkpoint_access() {
     for i in 0..5 {
         let g = graph.clone();
         let s = to_store(mem_store.clone());
-        let executor =
-            GraphExecutor::with_checkpoint(50, s, CheckpointPolicy::conservative(), &g);
+        let executor = GraphExecutor::with_checkpoint(50, s, CheckpointPolicy::conservative(), &g);
         handles.push(tokio::spawn(async move {
             let mut state = State::new();
             state.insert(format!("run_id"), serde_json::json!(i));

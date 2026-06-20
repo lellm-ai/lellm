@@ -53,7 +53,7 @@ pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::new("reasoning_token
 - [x] Agent 核心 StateKey 常量定义（已完成）
 - [x] `AgentFlowNode` 支持 ReAct Graph 模式（已完成）
 - [x] ReAct Graph 模式传播 StopReason 到外层 State（已完成）
-- [ ] ReAct Graph 模式补全流式输出（StreamChunk emit）
+- [x] ReAct Graph 模式补全流式输出（StreamChunk emit）（已完成）
 - [ ] 验证 Checkpoint 能正确恢复 Agent 中间状态
 
 ---
@@ -131,7 +131,7 @@ State 承载关键数据：
 - [x] 设计 `CompactorNode` — 独立 FlowNode，职责单一（不感知 LLM）
 - [x] `Graph::run_inline()` 内联执行方法
 - [x] `ToolUseLoop` 内部构建 ReAct Graph，替代 while 循环
-- [ ] 验证流式输出与现有 `AgentStream` 兼容
+- [x] 验证流式输出与现有 `AgentStream` 兼容（已完成）
 
 ---
 

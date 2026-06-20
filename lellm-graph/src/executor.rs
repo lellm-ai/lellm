@@ -1206,12 +1206,8 @@ impl GraphExecutor {
         };
 
         // 从 Checkpoint 记录的 current_node 恢复执行（如果有效）
-        let execution = self.execute_stream_with(
-            graph.clone(),
-            initial_state,
-            resume_node,
-            Some(*trace_id),
-        );
+        let execution =
+            self.execute_stream_with(graph.clone(), initial_state, resume_node, Some(*trace_id));
         Ok(execution)
     }
 }
