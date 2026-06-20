@@ -615,12 +615,12 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 
 ##### 待做清单
 
-- [ ] 统一 execute() / execute_stream() 为 `execute_iteration(state, ctx, sink)`
-- [ ] 引入 `EventSink` trait — 非流式用 NullEventSink，流式用 ChannelEventSink
-- [ ] 拆分 `StreamAggregationContext` — 流式聚合缓冲区，不属于 State
-- [ ] 设计 `LLMNode` — 执行单次 LLM 调用，写入 messages 和 tool_calls 到 State
-- [ ] 设计 `ToolNode` — 读取 tool_calls，执行工具，写入 results 到 State
-- [ ] 设计 `ConditionNode` — 检查 tool_calls 是否为空，路由到 ToolNode 或 End
+- [ ] FlowNode 统一为 `execute(ctx) -> Result<(), GraphError>` — Context 驱动一切
+- [ ] 消除 `NodeOutput`, `StreamNodeResult` — 所有数据写入 Context
+- [ ] 引入 `ExecutionControl` + `ExecutionSignal` — 控制信号独立于路由
+- [ ] Overlay State：`StateSnapshot` + `BranchState` 双层模型
+- [ ] 设计 `LLMNode` — 执行单次 LLM 调用，`ctx.append(SK_MESSAGES, ...)` 
+- [ ] 设计 `ToolNode` — 读取 tool_calls，执行工具，`ctx.append(SK_MESSAGES, ...)`
 - [ ] `ToolUseLoop` 内部构建 ReAct Graph，替代 while 循环
 - [ ] `AgentFlowNode` 简化为 SubGraph 包装器
 - [ ] `compact()` 变成 Graph 中的 BudgetGuardNode + CompactNode
@@ -671,10 +671,18 @@ pub trait Merge {
   [AgentExecutionContext = Runtime Cache]
                                     │
                                     ▼
-  v0.4 (破茧成蝶: 强类型领域)
+  v0.4 (破茧成蝶: 统一执行模型)
   [ReAct = 有环图] ──> [Agent 降维成 SubGraph]
+  [Context 驱动一切] ──> [FlowNode.execute(ctx) -> Result<(), GraphError>]
+  [Overlay State] ──> [StateSnapshot + BranchState]
+  [ChangeLog 节点级别] ──> [Reducer merge changes]
+  [Control/Data Plane 分离] ──> [RuntimeEvent + StreamChunk]
+  [ExecutionControl + ExecutionSignal]
+                                    │
+                                    ▼
+  v0.4+ (强类型领域)
   [砸碎 HashMap] ──> [Workflow<S>]
-  [Effect 事件溯源] ──> [SK_TOOL_CALL_HISTORY]
+  [Effect 事件溯源] ──> [编译期 Merge]
                                     │
                                     ▼
   v0.5 (多智能体时代)
@@ -684,18 +692,18 @@ pub trait Merge {
 
 #### 架构演进对比
 
-| 维度 | v0.3.1 务实形态 (方案 B+) | v0.4+ 终极形态 (Typed State) |
-|------|------------------------|----------------------------|
-| **状态底层** | `HashMap<String, serde_json::Value>` | 用户自定义强类型结构体 `S` |
-| **类型安全** | 靠 `StateKey<T>` 在边界处做动态检查 | 纯编译期静态类型安全 |
-| **变更机制** | `StateDelta` + `ReducerRegistry` | `Effect<S>` 纯函数重放 (`apply`) |
-| **并行合并** | 运行时字符串匹配 Reducer | `Merge` trait 编译期确定 |
-| **Checkpoint** | 全量/增量 State 快照 | Effect Log 重放 |
-| **编排心智** | "我往一个共享的 KV 盒子里塞数据" | "我在驱动一个专属的领域状态机" |
-| **可观测性** | State 快照 + 事件流 | Effect Log = 天然审计轨迹 |
+| 维度 | v0.3.1 | v0.4 | v0.4+ (终极) |
+|------|-------|------|-------------|
+| **节点签名** | `execute(state) -> NodeOutput` | `execute(ctx) -> Result<(), GraphError>` | 同 v0.4 |
+| **状态底层** | `HashMap<String, Value>` | 同 v0.3.1 | 强类型 `S` |
+| **变更机制** | `StateDelta` | `ChangeRecord` (Overlay) | `Effect<S>` |
+| **并行合并** | 运行时 Reducer | Reducer merge changes | `Merge` trait 编译期 |
+| **Checkpoint** | State 快照 | Snapshot + ChangeLog | Effect Log 重放 |
+| **中间类型** | `NodeOutput`, `StreamNodeResult` | 消失 | 消失 |
 
 | 版本 | 范围 |
 |------|------|
-| v0.4 | ReAct = 有环图 + Agent 降维成 SubGraph + Typed State + Effect 事件溯源 + Workflow\<S\> |
+| v0.4 | ReAct = 有环图 + Agent 降维成 SubGraph + Context 驱动 + Overlay State + Control/Data Plane 分离 |
+| v0.4+ | 砸碎 HashMap + Workflow<S> + Effect 事件溯源 + 编译期 Merge |
 | v0.5 | Multi-Agent Orchestration + Durable Execution + Agent↔Agent via MCP |
 | v0.6 | Sampling |

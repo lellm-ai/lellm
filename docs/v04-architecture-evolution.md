@@ -10,7 +10,7 @@
 - [二、v0.4 核心：ReAct = 有环图](#二v04-核心理act--有环图)
 - [三、Control Plane / Data Plane 分离](#三control-plane--data-plane-分离)
 - [四、NodeContext + StateStore](#四nodecontext--statestore)
-- [五、StateStore 内建 ChangeLog](#五statestore-内建-changelog)
+- [五、Overlay State：StateSnapshot + BranchState](#五overlay-statestatesnapshot--branchstate)
 - [六、嵌套执行模型](#六嵌套执行模型)
 - [七、v0.4+ 终局：Typed State + Effect 事件溯源](#七v04-终局typed-state--effect-事件溯源)
 - [八、架构演进路线图](#八架构演进路线图)
@@ -48,9 +48,10 @@ pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::new("reasoning_token
 
 ### 待做清单
 
-- [ ] 从 `LoopState` 迁移所有字段到 Graph State keys
-- [ ] `ToolUseLoop` 删除 `LoopState`，改为读写 Graph State
-- [ ] `AgentFlowNode` 简化为 SubGraph 包装器
+- [x] 从 `LoopState` 迁移所有字段到 Graph State keys（已完成）
+- [x] `ToolUseLoop` 删除 `LoopState`，改为读写 Graph State（已完成）
+- [x] Agent 核心 StateKey 常量定义（已完成）
+- [ ] `AgentFlowNode` 简化为 SubGraph 包装器（v0.4 ReAct = 有环图）
 - [ ] 验证 Checkpoint 能正确恢复 Agent 中间状态
 
 ---
@@ -202,43 +203,104 @@ Tool 调用完成        → StreamChunk::ToolResult(...)
 
 ### 问题
 
-v0.3 的 `FlowContext` 承载了过多职责（State、事件发射器、TraceId 等），且 `StateDelta` 是节点外部概念，导致"节点驱动状态管理"的混乱。
+v0.3 的 `FlowNode::execute(&self, state: &State) -> Result<NodeOutput, GraphError>` 是**只读 State + Delta 输出**的模型。节点不直接写 State，而是输出 `Vec<StateDelta>`，由 Executor 统一 apply。
 
-### 决策：Runtime Handle 而非 Runtime State
+这导致：
+1. ToolUseLoop 内部已经"偷偷"直接写 State（`state_push_assistant` 等辅助函数）
+2. `NodeOutput` 和 `StreamNodeResult` 两套返回类型，`execute()` / `execute_stream()` 双路径维护
+3. 节点返回了太多东西（deltas, next, metadata, observed, span_id）
+
+### 决策：Context 驱动一切
+
+统一原则 — 节点不返回业务数据，只返回 `Result<(), GraphError>`：
+
+```
+State      → ctx.set() / ctx.append() / ctx.increment()
+Stream     → ctx.emit()
+Metadata   → ctx.metadata().token_cost = 100.0
+Control    → ctx.goto() / ctx.end() / ctx.pause()
+```
 
 ```rust
 pub struct NodeContext<'a> {
-    /// 执行状态 — 借用引用，不拥有
-    state: &'a mut StateStore,
-    /// 数据面发射器 — 可选
+    /// 执行状态 — 直接写
+    state: &'a mut BranchState,
+    /// 数据面发射器 — 可选（阻塞模式 = None）
     stream: Option<&'a StreamEmitter>,
+    /// 控制信号 — 节点写入，Executor 读取
+    control: ExecutionControl,
+    /// 节点元数据 — 节点写入
+    metadata: NodeMetadata,
 }
 ```
 
-**设计原则：**
-
-- `NodeContext` 是 **Runtime Handle**（运行时句柄），不是 Runtime State
+**`NodeContext` 是 Runtime Handle（运行时句柄），不是 Runtime State。**
 - 节点只借用，不拥有。零复制透传给子组件
-- 只允许两类东西：State + Stream
 - 禁止放入：RuntimeEventEmitter、TraceId、SpanId、GraphHandle、ExecutorConfig
 
-### API 设计
+### FlowNode Trait — 统一单方法
 
 ```rust
 pub trait FlowNode {
     async fn execute(
         &self,
         ctx: &mut NodeContext<'_>,
-    ) -> Result<NodeOutput, GraphError>;
+    ) -> Result<(), GraphError>;
+}
+```
+
+**消失的中间类型：** `NodeOutput`、`StreamNodeResult`、`NodeMetadata`(返回值)
+
+### State API — CRUD + Reducer 便捷方法
+
+```rust
+// 节点使用方式：
+ctx.get::<Vec<Message>>(SK_MESSAGES)  // 读取，返回 clone
+ctx.set(SK_ITERATIONS, n)             // 写入
+ctx.append(SK_MESSAGES, msg)          // 追加
+ctx.increment(SK_OUTPUT_TOKENS, n)    // 递增
+ctx.remove::<T>(SK_KEY)               // 删除
+ctx.emit(StreamChunk::Text(token))    // 发射数据面事件（无 stream 则静默丢弃）
+```
+
+### ExecutionControl — 控制信号
+
+```rust
+pub struct ExecutionControl {
+    next: Option<NextStep>,            // None = 默认 Next
+    signal: Option<ExecutionSignal>,   // None = 无信号
 }
 
-// 节点使用方式：
-ctx.get(SK_MESSAGES)          // 读取
-ctx.set(SK_ITERATIONS, n)     // 写入
-ctx.append(SK_MESSAGES, msg)  // 追加
-ctx.increment(SK_OUTPUT_TOKENS, tokens)  // 递增
-ctx.emit(StreamChunk::Text(token))  // 发射数据面事件
+impl ExecutionControl {
+    fn take(self) -> (NextStep, Option<ExecutionSignal>) {
+        (self.next.unwrap_or(NextStep::Next), self.signal)
+    }
+}
 ```
+
+```rust
+pub enum NextStep {
+    Next,         // 按拓扑顺序走下一步（默认值）
+    Goto(NodeId), // 跳转到指定节点
+    End,          // 结束执行
+}
+
+pub enum ExecutionSignal {
+    Pause(BarrierWait),  // Barrier 挂起执行
+}
+```
+
+```rust
+// 节点控制流写法：
+ctx.goto("tool_node");  // 跳转到工具节点
+ctx.end();              // 结束执行
+ctx.pause(BarrierWait { ... });  // Barrier 挂起
+// 不调用任何控制方法 → 默认 NextStep::Next
+```
+
+**多次调用的语义：最后一次获胜。** 与 State 写入的"最后写入者胜"一致。
+
+**Fallback 回归 Error Policy** — 节点不声明 Fallback。节点失败返回 `Err(GraphError)`，Executor 根据 `edge_fallback` 决定降级或终止。
 
 ### StreamEmitter 设计
 
@@ -252,53 +314,89 @@ pub struct StreamEmitter {
 
 ---
 
-## 五、StateStore 内建 ChangeLog
+## 五、Overlay State：StateSnapshot + BranchState
 
 ### 问题
 
 v0.3 的 Delta 模型是"节点产生 Delta → Executor 收集 → apply"。
-如果节点直接写 State，Delta 必须变成 StateStore 的内部实现。
+如果节点直接写 State，变更追踪必须变成 State 系统的内部实现。
 
-### 决策：Event Sourcing Lite
+同时，并行分支需要高效 fork — 不能深拷贝整个 State。
+
+### 决策：拆成两个类型
+
+不是用一个 `StateStore` 承担所有职责，而是按执行态拆分：
 
 ```rust
-pub struct StateStore {
+/// 不可变的状态快照 — 对应全量 Checkpoint
+pub struct StateSnapshot {
     values: HashMap<KeyId, Value>,
-    changes: Vec<ChangeRecord>,
 }
 
-pub struct ChangeRecord {
-    key: StateKeyId,
-    operation: ChangeOperation,  // Put | Append | Increment | Delete
-    value: Value,
-}
-
-pub struct ChangeSet {
-    changes: Vec<ChangeRecord>,
+/// 可写的分支状态 — 一层 Overlay，对应增量 Checkpoint
+pub struct BranchState {
+    base: Arc<StateSnapshot>,          // fork = O(1)
+    local: HashMap<KeyId, Value>,      // 本层写入缓存
+    changes: Vec<ChangeRecord>,        // 变更日志
 }
 ```
 
-**StateDelta 改名 → ChangeRecord**，语义从"节点产生的增量"变为"状态系统记录的变更"。
+**Overlay 模型的核心约束：永远只有一层 overlay，不是 MVCC 链。**
 
-### 节点写法不变
+### 读取 — O(1)
 
 ```rust
-ctx.append(SK_MESSAGES, msg);    // 直接写，StateStore 内部自动记 ChangeRecord
-ctx.increment(SK_OUTPUT_TOKENS, n);
-ctx.set(SK_STOP_REASON, reason);
+fn get(&self, key: KeyId) -> Option<&Value> {
+    self.local.get(&key)
+        .or_else(|| self.base.values.get(&key))
+}
 ```
 
-### 并行分支模型
+最多查两层。不存在递归风险。
+
+### 写入 — 自动记 ChangeRecord
+
+```rust
+fn set(&mut self, key: KeyId, value: Value) {
+    self.local.insert(key, value);
+    self.changes.push(ChangeRecord {
+        key,
+        operation: ChangeOperation::Put,
+        value,
+    });
+}
+```
+
+**ChangeLog 生命周期：节点级别。** 每次 `FlowNode::execute()` 前清空 changes，执行后 Executor 收集。
+
+**同 key 多次操作：不合并。** 每次操作产生一条 ChangeRecord。忠实记录，便于审计。
+
+### Fork — O(1)
+
+```rust
+fn fork(&self) -> BranchState {
+    BranchState {
+        base: Arc::new(self.to_snapshot()),  // apply changes → new snapshot
+        local: HashMap::new(),
+        changes: Vec::new(),
+    }
+}
+```
+
+ParallelNode fork 时：`apply_changes(base, changes)` 生成新 snapshot，各分支独立 Overlay。
+
+### Merge — O(branches × changes)
 
 ```
-base_state
-   ↓ fork
-branch_a (values + changelog)
-branch_b (values + changelog)
+branch_a.changes
+branch_b.changes
+branch_c.changes
    ↓
-ReducerRegistry.merge(branch_a.changelog, branch_b.changelog)
+ReducerRegistry.merge(所有 changes)
    ↓
-merged_changes → apply to base_state
+apply(snapshot, merged_changes)
+   ↓
+new_snapshot
 ```
 
 **Reducer 的职责从"合并 Node Delta"变为"合并 Branch ChangeLog"。**
@@ -307,12 +405,14 @@ merged_changes → apply to base_state
 
 ```rust
 Checkpoint {
-    base_snapshot: State,
-    recent_changes: ChangeSet,
+    base_snapshot: StateSnapshot,   // 全量
+    recent_changes: ChangeSet,      // 增量
 }
 ```
 
-恢复：`restore(snapshot) → apply(changes)` — 完全复用同一套机制。
+- `StateSnapshot` 天然对应全量 Checkpoint
+- `changes` 天然对应增量 Checkpoint
+- 恢复：`restore(snapshot) → apply(changes)` — 完全复用同一套机制
 
 ### 架构对比
 
@@ -321,10 +421,18 @@ Checkpoint {
 FlowNode → StateDelta → Reducer → State
 ```
 
-**v0.4（状态系统驱动状态管理）：**
+**v0.4（Context 驱动，状态系统自动追踪）：**
 ```
-FlowNode → NodeContext → StateStore → ChangeLog → Reducer → Checkpoint
+FlowNode → NodeContext → BranchState → ChangeLog → Reducer → Checkpoint
 ```
+
+| 维度 | v0.3 Delta 模型 | v0.4 Overlay 模型 |
+|------|----------------|------------------|
+| 节点写法 | 返回 `Vec<StateDelta>` | `ctx.set()` / `ctx.append()` |
+| 变更追踪 | 节点显式产生 | State 系统自动记录 |
+| 并行 Fork | `state.clone()`（深拷贝） | `base.to_snapshot()`（O(changes)） |
+| 并行 Merge | `merge_deltas()` | `merge_changes()` |
+| 中间类型 | `NodeOutput`, `StreamNodeResult` | 消失 |
 
 ---
 
@@ -378,19 +486,21 @@ impl Graph {
 **`run_inline()` 只包含"路由解析 + 节点执行"的纯逻辑，剥离了：**
 - RuntimeEvent 发射
 - Checkpoint
-- Barrier 等待
+- Barrier 等待（内联模式不支持 Pause 信号）
 - Parallel 合并
+
+内联模式：`NodeContext` 的 `stream = None`，节点照常 `execute()`，事件静默丢弃。
 
 ### AgentFlowNode 实现
 
 ```rust
 impl FlowNode for AgentFlowNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<NodeOutput, GraphError> {
+    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
         // 外部 Graph 已发出 NodeStarted("agent")
         let react_graph = self.build_react_graph();
         react_graph.run_inline(ctx, self.max_iterations).await?;
         // 外部 Graph 将发出 NodeCompleted("agent")
-        Ok(NodeOutput { next: NextStep::GoToNext, .. })
+        Ok(())
     }
 }
 ```
@@ -519,8 +629,14 @@ impl Merge for AgentState {
 | ToolUseLoop 替换方式 | 内部替换，API 不变 | 用户无感知迁移 |
 | 事件体系 | RuntimeEvent + StreamChunk 分离 | Control Plane / Data Plane 解耦 |
 | AgentEvent | 消失，合并为 StreamChunk | 消除俄罗斯套娃包装 |
-| NodeContext | Runtime Handle，不拥有数据 | 借用语义，零复制透传 |
-| StateDelta | 改名 ChangeRecord，内建到 StateStore | 状态系统驱动状态管理 |
+| FlowNode 签名 | `execute(ctx) -> Result<(), GraphError>` | Context 驱动一切，零歧义 |
+| NodeOutput | 消失 | 所有数据写入 Context |
+| StreamNodeResult | 消失 | 统一为单方法 |
+| NextStep | 仅保留路由语义（Next, Goto, End） | 不混入控制信号 |
+| ExecutionSignal | 独立枚举（Pause） | Barrier 挂起不是路由 |
+| Fallback | 回归 Error Policy | 节点不声明 fallback，边定义驱动 |
+| State 模型 | StateSnapshot + BranchState 双层 Overlay | Fork O(1)，Merge O(changes) |
+| ChangeLog | 节点级别，不合并 | 忠实记录，便于审计 |
 | 嵌套执行 | 内部不产生 RuntimeEvent | 防止递归嵌套和路径地狱 |
 | Graph 执行模式 | run_inline() + Executor::execute() | 区分内联与完整执行 |
 | v0.4 TypedState 时机 | v0.4+ 专门 grill | 范围大，需要独立规划 |
