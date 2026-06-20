@@ -28,8 +28,8 @@ use super::context::{
 };
 use super::event::{AgentEvent, AgentStream, StopReason};
 use super::fallback::{FallbackAction, FallbackContext};
-use super::iteration::{StreamIterResult, do_stream_iteration, emit, execute_with_fallback};
-use super::tools::{ToolExecutor, ToolSnapshot, execute_batch_with};
+use super::iteration::{StreamIterResult, do_stream_iteration, emit};
+use super::tools::{ToolExecutor, ToolSnapshot};
 
 // ─── 本轮解析数据 ────────────────────────────────────────────────
 
@@ -336,124 +336,84 @@ impl ToolUseLoop {
     }
 
     /// 非流式执行
+    ///
+    /// v04: 内部构建 ReAct Graph，调用 graph.run_inline() 驱动循环
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
-        let mut state = create_initial_state(&initial_messages);
-        let mut ctx = AgentExecutionContext::new(&initial_messages);
-        let mut last_response: Option<ChatResponse> = None;
-        let compactor: Box<dyn ContextCompactor> = Box::new(LocalCompactor::new());
 
-        loop {
-            if state_reached_max(&state, self.config.max_iterations) {
-                return Ok(build_result(
-                    &state,
-                    StopReason::MaxIterationsReached,
-                    last_response.unwrap_or_else(empty_response),
-                ));
+        // 初始化 State
+        let state = create_initial_state(&initial_messages);
+
+        // 构建 ReAct Graph
+        let llm_node = super::react::LLMNode::new(
+            "llm",
+            self.model.clone(),
+            self.executor.clone(),
+            self.config.clone(),
+            self.deps.clone(),
+        );
+        let tool_node =
+            super::react::ToolNode::new("tool", self.executor.clone(), self.config.clone());
+        let graph = super::react::build_react_graph(llm_node, tool_node);
+        let max_steps = self.config.max_iterations * 2 + 1;
+
+        // 构建 NodeContext
+        let mut branch = lellm_graph::BranchState::from_state(state.clone());
+        let mut ctx = lellm_graph::NodeContext::new(&mut branch, None);
+
+        // 写入初始状态
+        let messages_json: Vec<serde_json::Value> = initial_messages
+            .iter()
+            .filter_map(|m| serde_json::to_value(m).ok())
+            .collect();
+        ctx.set(super::react::SK_MESSAGES, serde_json::json!(messages_json));
+        ctx.set(super::react::SK_ITERATIONS, 0u32);
+        ctx.set(super::react::SK_TOTAL_TOOL_CALLS, 0usize);
+        ctx.set(super::react::SK_OUTPUT_TOKENS, 0usize);
+        ctx.set(super::react::SK_REASONING_TOKENS, 0usize);
+
+        // 执行 ReAct Graph
+        graph.run_inline(&mut ctx, max_steps).await.map_err(|e| {
+            lellm_core::LlmError::Provider {
+                provider: "react_graph".to_string(),
+                status: None,
+                code: None,
+                message: e.to_string(),
             }
-            state_next_iteration(&mut state);
-            state_compact(
-                &mut state,
-                &mut ctx,
-                &self.config.context_budget,
-                &*compactor,
-            );
+        })?;
 
-            let round = ResolvedRound::new(self.executor.snapshot().await);
+        // 从 ctx 提取结果
+        let messages: Vec<Message> = ctx
+            .get::<Vec<serde_json::Value>>(super::react::SK_MESSAGES)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
 
-            let req = super::config::build_request_inner_with_round(
-                &self.model,
-                &get_messages(&state),
-                self.config.max_output_tokens,
-                &self.config.request_options,
-                get_iterations(&state) as usize,
-                &round.definitions,
-            );
+        let iterations: u32 = ctx.get(super::react::SK_ITERATIONS).unwrap_or(0);
+        let tool_calls_executed: usize = ctx.get(super::react::SK_TOTAL_TOOL_CALLS).unwrap_or(0);
 
-            let iteration = get_iterations(&state) as usize;
-            let msg_snapshot = get_messages(&state);
-            let response = execute_with_fallback(
-                &self.deps.fallback,
-                |_| true,
-                || self.model.provider.call(&req),
-                iteration,
-                &msg_snapshot,
-            )
-            .await?;
-            last_response = Some(response.clone());
+        let stop_reason_str: String = ctx.get(super::react::SK_STOP_REASON).unwrap_or_default();
+        let stop_reason = match stop_reason_str.as_str() {
+            "Complete" => StopReason::Complete,
+            "MaxIterationsReached" => StopReason::MaxIterationsReached,
+            "OutputBudgetExceeded" => StopReason::OutputBudgetExceeded,
+            "ReasoningBudgetExceeded" => StopReason::ReasoningBudgetExceeded,
+            _ => StopReason::Complete,
+        };
 
-            if let Some(limit) = self.config.request_options.max_reasoning_tokens {
-                let round_reasoning: usize = response
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        lellm_core::ContentBlock::Thinking(th) => {
-                            Some(estimate_reasoning_block(th))
-                        }
-                        _ => None,
-                    })
-                    .sum();
-                if round_reasoning > limit as usize {
-                    tracing::warn!(
-                        round_reasoning,
-                        max_reasoning_tokens = limit,
-                        "single-round reasoning budget exceeded (non-stream, soft limit)"
-                    );
-                    return Ok(build_result(
-                        &state,
-                        StopReason::ReasoningBudgetExceeded,
-                        response,
-                    ));
-                }
-            }
+        let last_response: ChatResponse = ctx
+            .get_raw(super::react::SK_LAST_RESPONSE)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_else(empty_response);
 
-            state_add_output_from_content(&mut state, &mut ctx, &response.content);
-
-            if state_exceeded_total_output(&state, self.config.max_total_output_tokens) {
-                return Ok(build_result(
-                    &state,
-                    StopReason::OutputBudgetExceeded,
-                    response,
-                ));
-            }
-
-            if state_exceeded_total_reasoning(&state, self.config.max_total_reasoning_tokens) {
-                return Ok(build_result(
-                    &state,
-                    StopReason::ReasoningBudgetExceeded,
-                    response,
-                ));
-            }
-
-            if !response.has_tool_calls() {
-                return Ok(build_result(&state, StopReason::Complete, response));
-            }
-
-            let tool_calls: Vec<_> = response.tool_calls().cloned().collect();
-            state_push_assistant(&mut state, &mut ctx, response.content.clone());
-            state_add_tool_calls(&mut state, tool_calls.len());
-
-            let batch =
-                execute_batch_with(&tool_calls, &round.snapshot, &self.executor.retry_policy())
-                    .await;
-
-            if batch.panicked {
-                tracing::warn!("tool batch task panicked — error results filled in by executor");
-            }
-
-            state_push_tool_results(
-                &mut state,
-                &mut ctx,
-                batch.results,
-                &self.config.context_budget,
-            );
-
-            tracing::debug!(
-                iteration = get_iterations(&state),
-                tool_calls = tool_calls.len(),
-                "tool-use loop iteration"
-            );
-        }
+        Ok(ToolUseResult {
+            stop_reason,
+            response: last_response,
+            messages,
+            iterations: iterations as usize,
+            tool_calls_executed,
+        })
     }
 
     /// 流式执行，返回事件接收器

@@ -140,7 +140,6 @@ impl AgentFlowNode {
         let model = self.loop_.model().clone();
         let executor = self.loop_.executor().clone();
         let deps = self.loop_.deps().clone();
-        let max_iterations = config.max_iterations;
 
         let llm_node = crate::runtime::react::LLMNode::new(
             format!("{}_llm", self.name),
@@ -153,7 +152,7 @@ impl AgentFlowNode {
         let tool_node =
             crate::runtime::react::ToolNode::new(format!("{}_tool", self.name), executor, config);
 
-        crate::runtime::react::build_react_graph(llm_node, tool_node, max_iterations)
+        crate::runtime::react::build_react_graph(llm_node, tool_node)
     }
 }
 
