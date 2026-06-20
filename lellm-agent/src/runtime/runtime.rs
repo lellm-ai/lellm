@@ -315,6 +315,26 @@ impl ToolUseLoop {
         )
     }
 
+    /// 获取模型引用。
+    pub fn model(&self) -> &ResolvedModel {
+        &self.model
+    }
+
+    /// 获取执行器引用。
+    pub fn executor(&self) -> &ToolExecutor {
+        &self.executor
+    }
+
+    /// 获取配置引用。
+    pub fn config(&self) -> &ToolUseConfig {
+        &self.config
+    }
+
+    /// 获取依赖引用。
+    pub fn deps(&self) -> &ToolUseDeps {
+        &self.deps
+    }
+
     /// 非流式执行
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
