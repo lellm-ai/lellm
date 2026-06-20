@@ -40,7 +40,7 @@ pub enum AgentEvent {
 }
 
 /// Agent loop 停止原因 — 描述"为什么停止"，而非"响应长什么样"
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StopReason {
     /// Agent 已获得最终答案并正常结束
     Complete,

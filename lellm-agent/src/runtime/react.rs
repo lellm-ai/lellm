@@ -4,6 +4,9 @@
 //! 构建内部 Graph（LLM Node → Condition → Tool Node → 自环），
 //! 调用 `Graph::run_inline()` 驱动循环。
 //!
+//! v0.4+ Typed State: 节点使用 `AgentState` 替代 `HashMap<String, Value>`，
+//! 通过 `AgentEffect` 描述状态转换。
+//!
 //! ```text
 //! [LLM] --有tool_calls--> [Tool] --(自环)--> [LLM]
 //!      --无tool_calls--> [End]
@@ -21,20 +24,16 @@ use lellm_graph::{
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
 use super::context::{
     AgentExecutionContext, ContextCompactor, ContextBudget, LocalCompactor,
-    estimate_reasoning_block,
+    estimate_reasoning_block, estimate_text,
 };
 use super::event::StopReason;
 use super::iteration::execute_with_fallback;
-use super::runtime::{
-    ResolvedRound, get_iterations, get_messages, state_add_output_from_content,
-    state_add_tool_calls, state_exceeded_total_output,
-    state_exceeded_total_reasoning, state_next_iteration, state_push_assistant,
-    state_push_tool_results, state_reached_max,
-};
+use super::runtime::ResolvedRound;
 use super::tools::{ToolExecutor, execute_batch_with};
+use super::typed_state::{AgentState, AGENT_STATE_KEY};
 use lellm_provider::ResolvedModel;
 
-// ─── State Keys ──────────────────────────────────────────────
+// ─── State Keys（边条件等仍需要字符串 key）──────────────────
 
 pub const SK_MESSAGES: &str = "messages";
 pub const SK_ITERATIONS: &str = "iterations";
@@ -46,25 +45,64 @@ pub const SK_STOP_REASON: &str = "stop_reason";
 pub const SK_LAST_RESPONSE: &str = "last_response";
 pub const SK_COMPACT_COUNT: &str = "compact_count";
 
+// ─── Typed State 辅助函数 ──────────────────────────────────────
+
+/// 从 NodeContext 获取 AgentState。不存在则创建空状态。
+fn get_agent_state(ctx: &NodeContext<'_>) -> AgentState {
+    ctx.get_state::<AgentState>(AGENT_STATE_KEY)
+        .unwrap_or_default()
+}
+
+/// 将 AgentState 写回 NodeContext。
+fn set_agent_state(ctx: &mut NodeContext<'_>, state: &AgentState) {
+    ctx.set_state(AGENT_STATE_KEY, state.clone());
+}
+
+/// 同步 AgentState 的关键字段到 ctx（供边条件使用）。
+///
+/// 边条件（`edge_if`）直接读取 `State`（HashMap），不感知 AgentState。
+/// 此函数桥接 typed state → dynamic state。
+fn sync_to_ctx(ctx: &mut NodeContext<'_>, state: &AgentState) {
+    ctx.set(SK_ITERATIONS, state.iterations as u64);
+    ctx.set(SK_TOTAL_TOOL_CALLS, state.total_tool_calls as u64);
+    ctx.set(SK_OUTPUT_TOKENS, state.output_tokens as u64);
+    ctx.set(SK_REASONING_TOKENS, state.reasoning_tokens as u64);
+    ctx.set(SK_COMPACT_COUNT, state.compact_count as u64);
+
+    // messages 以 JSON 数组存储（边条件可能读取）
+    let messages_json: Vec<serde_json::Value> = state
+        .messages
+        .iter()
+        .filter_map(|m| serde_json::to_value(m).ok())
+        .collect();
+    ctx.set(SK_MESSAGES, serde_json::json!(messages_json));
+}
+
+/// 分离 output / reasoning token
+fn split_output_tokens(content: &[lellm_core::ContentBlock]) -> (usize, usize) {
+    let mut output_tokens: usize = 0;
+    let mut reasoning_tokens: usize = 0;
+    for b in content {
+        match b {
+            lellm_core::ContentBlock::Text(t) => output_tokens += estimate_text(&t.text),
+            lellm_core::ContentBlock::Thinking(th) => {
+                reasoning_tokens += estimate_reasoning_block(th)
+            }
+            lellm_core::ContentBlock::Image { .. } | lellm_core::ContentBlock::ToolCall(_) => {}
+        }
+    }
+    (output_tokens, reasoning_tokens)
+}
+
 // ─── LLMNode ──────────────────────────────────────────────────
 
 /// LLM 调用节点 — 执行单次 LLM 调用。
 ///
 /// 职责单一：只负责 LLM 调用，不感知 Compaction。
 ///
-/// 读取 State:
-/// - `messages` — 消息历史
-/// - `iterations` — 当前迭代轮次
-/// - `output_tokens` — 累计输出 Token
-/// - `reasoning_tokens` — 累计推理 Token
+/// # Typed State
 ///
-/// 写入 State:
-/// - `messages` — 追加 assistant 响应
-/// - `iterations` — 递增
-/// - `output_tokens` — 累计输出 Token
-/// - `reasoning_tokens` — 累计推理 Token
-/// - `has_tool_calls` — 是否有工具调用
-/// - `stop_reason` — 停止原因（如果达到预算）
+/// 从 ctx 获取 `AgentState`，直接操作 typed 字段，写回 ctx。
 pub struct LLMNode {
     pub name: String,
     pub model: ResolvedModel,
@@ -106,15 +144,15 @@ impl LLMNode {
 #[async_trait]
 impl FlowNode for LLMNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let messages = get_messages_from_ctx(ctx);
-        let mut state = create_state_from_ctx(ctx);
-        let mut exec_ctx = AgentExecutionContext::new(&messages);
+        // 1. 获取 AgentState
+        let mut state = get_agent_state(ctx);
+        let mut exec_ctx = AgentExecutionContext::new(state.messages_ref());
 
-        // 1. 检查最大迭代
-        if state_reached_max(&state, self.config.max_iterations) {
-            let last_response: ChatResponse = ctx
-                .get_raw(SK_LAST_RESPONSE)
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
+        // 2. 检查最大迭代
+        if state.reached_max(self.config.max_iterations) {
+            let last_response = ctx
+                .get::<Option<ChatResponse>>(SK_LAST_RESPONSE)
+                .flatten()
                 .unwrap_or_else(empty_response);
             ctx.set(
                 SK_STOP_REASON,
@@ -128,31 +166,29 @@ impl FlowNode for LLMNode {
             return Ok(());
         }
 
-        // 2. 递增迭代
-        state_next_iteration(&mut state);
+        // 3. 递增迭代
+        state.iterations += 1;
 
-        // 3. 获取工具定义
+        // 4. 获取工具定义
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
         // 5. 构建 LLM 请求
         let req = build_request_inner_with_round(
             &self.model,
-            &get_messages(&state),
+            &state.messages,
             self.config.max_output_tokens,
             &self.config.request_options,
-            get_iterations(&state) as usize,
+            state.iterations,
             &round.definitions,
         );
 
         // 6. 执行 LLM 调用（带 fallback）
-        let iteration = get_iterations(&state) as usize;
-        let msg_snapshot = get_messages(&state);
         let response = execute_with_fallback(
             &self.deps.fallback,
             |_| true,
             || self.model.provider.call(&req),
-            iteration,
-            &msg_snapshot,
+            state.iterations,
+            &state.messages,
         )
         .await
         .map_err(|e| {
@@ -178,8 +214,12 @@ impl FlowNode for LLMNode {
                     max_reasoning_tokens = limit,
                     "single-round reasoning budget exceeded"
                 );
-                state_add_output_from_content(&mut state, &mut exec_ctx, &response.content);
-                sync_state_to_ctx(ctx, &state);
+
+                let (ot, rt) = split_output_tokens(&response.content);
+                state.output_tokens += ot;
+                state.reasoning_tokens += rt;
+                exec_ctx.add_tokens(ot + rt);
+                set_agent_state(ctx, &state);
                 ctx.set(
                     SK_STOP_REASON,
                     format!("{:?}", StopReason::ReasoningBudgetExceeded),
@@ -194,11 +234,14 @@ impl FlowNode for LLMNode {
         }
 
         // 8. 记录输出 token
-        state_add_output_from_content(&mut state, &mut exec_ctx, &response.content);
+        let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
+        state.output_tokens += output_tokens;
+        state.reasoning_tokens += reasoning_tokens;
+        exec_ctx.add_tokens(output_tokens + reasoning_tokens);
 
         // 9. 检查总输出预算
-        if state_exceeded_total_output(&state, self.config.max_total_output_tokens) {
-            sync_state_to_ctx(ctx, &state);
+        if state.exceeded_output(self.config.max_total_output_tokens) {
+            set_agent_state(ctx, &state);
             ctx.set(
                 SK_STOP_REASON,
                 format!("{:?}", StopReason::OutputBudgetExceeded),
@@ -212,8 +255,8 @@ impl FlowNode for LLMNode {
         }
 
         // 10. 检查总推理预算
-        if state_exceeded_total_reasoning(&state, self.config.max_total_reasoning_tokens) {
-            sync_state_to_ctx(ctx, &state);
+        if state.exceeded_reasoning(self.config.max_total_reasoning_tokens) {
+            set_agent_state(ctx, &state);
             ctx.set(
                 SK_STOP_REASON,
                 format!("{:?}", StopReason::ReasoningBudgetExceeded),
@@ -226,25 +269,27 @@ impl FlowNode for LLMNode {
             return Ok(());
         }
 
-        // 11. 写入 assistant 响应到 messages
-        state_push_assistant(&mut state, &mut exec_ctx, response.content.clone());
+        // 11. 写入 assistant 响应到消息历史
+        let content = response.content.clone();
+        let msg = Message::Assistant { content };
+        state.messages.push(msg);
 
         // 12. 检查是否有 tool_calls
         let has_tool_calls = response.has_tool_calls();
         let tool_calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
 
         if has_tool_calls {
-            state_add_tool_calls(&mut state, tool_calls.len());
+            state.total_tool_calls += tool_calls.len();
         }
 
         // 13. 同步状态到 ctx
-        sync_state_to_ctx(ctx, &state);
+        set_agent_state(ctx, &state);
+        sync_to_ctx(ctx, &state);
         ctx.set(SK_HAS_TOOL_CALLS, has_tool_calls);
 
         if has_tool_calls {
-            // 有 tool_calls → 继续循环（到 ToolNode）
             tracing::debug!(
-                iteration = get_iterations(&state),
+                iteration = state.iterations,
                 tool_calls = tool_calls.len(),
                 "LLM call completed, executing tools"
             );
@@ -257,7 +302,7 @@ impl FlowNode for LLMNode {
             );
             ctx.end();
             tracing::debug!(
-                iteration = get_iterations(&state),
+                iteration = state.iterations,
                 "LLM call completed, no tool calls"
             );
         }
@@ -270,11 +315,9 @@ impl FlowNode for LLMNode {
 
 /// 工具执行节点 — 读取 tool_calls，执行工具，写入 results。
 ///
-/// 读取 State:
-/// - `messages` — 消息历史（用于工具结果截断）
+/// # Typed State
 ///
-/// 写入 State:
-/// - `messages` — 追加工具执行结果
+/// 从 ctx 获取 `AgentState`，执行工具，追加结果到消息历史。
 pub struct ToolNode {
     pub name: String,
     pub executor: ToolExecutor,
@@ -304,15 +347,12 @@ impl ToolNode {
 #[async_trait]
 impl FlowNode for ToolNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let messages = get_messages_from_ctx(ctx);
-        let mut state = create_state_from_ctx(ctx);
-        let mut exec_ctx = AgentExecutionContext::new(&messages);
-
+        let mut state = get_agent_state(ctx);
         // 1. 获取工具调用
         let round = ResolvedRound::new(self.executor.snapshot().await);
         let last_response: ChatResponse = ctx
-            .get_raw(SK_LAST_RESPONSE)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .get::<Option<ChatResponse>>(SK_LAST_RESPONSE)
+            .flatten()
             .unwrap_or_else(empty_response);
         let tool_calls: Vec<ToolCall> = last_response.tool_calls().cloned().collect();
 
@@ -328,16 +368,36 @@ impl FlowNode for ToolNode {
             tracing::warn!("tool batch task panicked — error results filled in by executor");
         }
 
-        // 3. 写入工具结果到 messages
-        state_push_tool_results(
-            &mut state,
-            &mut exec_ctx,
-            batch.results,
-            &self.config.context_budget,
-        );
+        // 3. 应用预算截断
+        let results: Vec<Message> = batch
+            .results
+            .into_iter()
+            .map(|m| {
+                if let Message::ToolResult {
+                    ref tool_call_id,
+                    is_error: false,
+                    ref content,
+                } = m
+                {
+                    let truncated = self.config.context_budget.truncate_tool_result_blocks(content);
+                    if truncated != *content {
+                        return Message::ToolResult {
+                            tool_call_id: tool_call_id.clone(),
+                            is_error: false,
+                            content: truncated,
+                        };
+                    }
+                }
+                m
+            })
+            .collect();
 
-        // 4. 同步状态到 ctx
-        sync_state_to_ctx(ctx, &state);
+        // 4. 追加到消息历史
+        state.messages.extend(results);
+
+        // 5. 同步状态到 ctx
+        set_agent_state(ctx, &state);
+        sync_to_ctx(ctx, &state);
 
         tracing::debug!(tool_calls = tool_calls.len(), "tool execution completed");
 
@@ -376,62 +436,13 @@ impl FlowNode for ReactCondition {
     }
 }
 
-// ─── 辅助函数 ─────────────────────────────────────────────────
-
-fn get_messages_from_ctx(ctx: &NodeContext<'_>) -> Vec<Message> {
-    ctx.get::<Vec<serde_json::Value>>(SK_MESSAGES)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|v| serde_json::from_value(v).ok())
-        .collect()
-}
-
-fn create_state_from_ctx(ctx: &NodeContext<'_>) -> lellm_graph::State {
-    let mut state = lellm_graph::State::new();
-    if let Some(v) = ctx.get_raw(SK_MESSAGES) {
-        state.insert(SK_MESSAGES.to_string(), v.clone());
-    }
-    if let Some(v) = ctx.get_raw(SK_ITERATIONS) {
-        state.insert(SK_ITERATIONS.to_string(), v.clone());
-    }
-    if let Some(v) = ctx.get_raw(SK_TOTAL_TOOL_CALLS) {
-        state.insert(SK_TOTAL_TOOL_CALLS.to_string(), v.clone());
-    }
-    if let Some(v) = ctx.get_raw(SK_OUTPUT_TOKENS) {
-        state.insert(SK_OUTPUT_TOKENS.to_string(), v.clone());
-    }
-    if let Some(v) = ctx.get_raw(SK_REASONING_TOKENS) {
-        state.insert(SK_REASONING_TOKENS.to_string(), v.clone());
-    }
-    state
-}
-
-fn sync_state_to_ctx(ctx: &mut NodeContext<'_>, state: &lellm_graph::State) {
-    for key in [
-        SK_MESSAGES,
-        SK_ITERATIONS,
-        SK_TOTAL_TOOL_CALLS,
-        SK_OUTPUT_TOKENS,
-        SK_REASONING_TOKENS,
-    ] {
-        if let Some(v) = state.get(key) {
-            ctx.set(key, v.clone());
-        }
-    }
-}
-
 // ─── CompactorNode ────────────────────────────────────────────
 
 /// 上下文压缩节点 — 独立 FlowNode，职责单一。
 ///
-/// 读取 State:
-/// - `messages` — 消息历史
+/// # Typed State
 ///
-/// 写入 State:
-/// - `messages` — 压缩后的消息历史
-/// - `compaction_count` — 累计压缩次数
-///
-/// 不感知 LLM 调用的存在，只负责压缩。
+/// 从 AgentState 获取消息历史，压缩后替换。
 pub struct CompactorNode {
     pub name: String,
     pub compactor: Box<dyn ContextCompactor>,
@@ -465,27 +476,20 @@ impl CompactorNode {
 #[async_trait]
 impl FlowNode for CompactorNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let messages: Vec<Message> = ctx
-            .get::<Vec<serde_json::Value>>(SK_MESSAGES)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
+        let mut state = get_agent_state(ctx);
 
-        let result = self.compactor.compact(&messages, &self.budget);
+        if !self.budget.should_compact(state.output_tokens) {
+            return Ok(());
+        }
+
+        let result = self.compactor.compact(&state.messages, &self.budget);
 
         // 只有实际压缩了才更新 state
         if result.removed_messages > 0 {
-            let messages_json: Vec<serde_json::Value> = result
-                .messages
-                .iter()
-                .filter_map(|m| serde_json::to_value(m).ok())
-                .collect();
-            ctx.set(SK_MESSAGES, serde_json::json!(messages_json));
-
-            // 更新压缩次数统计
-            let count: u64 = ctx.get(SK_COMPACT_COUNT).unwrap_or(0);
-            ctx.set(SK_COMPACT_COUNT, count + 1);
+            state.messages = result.messages;
+            state.compact_count += 1;
+            set_agent_state(ctx, &state);
+            sync_to_ctx(ctx, &state);
 
             tracing::debug!(
                 agent = %self.name,
@@ -523,9 +527,9 @@ impl BudgetCondition {
 #[async_trait]
 impl FlowNode for BudgetCondition {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let current_tokens: usize = ctx.get(SK_OUTPUT_TOKENS).unwrap_or(0);
+        let state = get_agent_state(ctx);
 
-        if self.budget.should_compact(current_tokens) {
+        if self.budget.should_compact(state.output_tokens) {
             ctx.goto("compactor");
         } else {
             ctx.goto("llm");

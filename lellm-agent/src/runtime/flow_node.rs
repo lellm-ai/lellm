@@ -294,22 +294,17 @@ impl AgentFlowNode {
     }
 
     /// 使用 ReAct Graph 模式执行。
+    ///
+    /// v0.4+: 使用 Typed State (AgentState) 替代 HashMap 初始化。
     async fn execute_with_react_graph(
         &self,
         ctx: &mut NodeContext<'_>,
         messages: Vec<lellm_core::Message>,
     ) -> Result<(), GraphError> {
-        // 初始化 State
-        let messages_json: Vec<serde_json::Value> = messages
-            .iter()
-            .filter_map(|m| serde_json::to_value(m).ok())
-            .collect();
-        ctx.set(super::react::SK_MESSAGES, serde_json::json!(messages_json));
-        ctx.set(super::react::SK_ITERATIONS, 0u32);
-        ctx.set(super::react::SK_TOTAL_TOOL_CALLS, 0usize);
-        ctx.set(super::react::SK_OUTPUT_TOKENS, 0usize);
-        ctx.set(super::react::SK_REASONING_TOKENS, 0usize);
-        ctx.set(super::react::SK_COMPACT_COUNT, 0u64);
+        // 初始化 Typed State
+        let agent_state =
+            super::typed_state::AgentState::from_messages(messages);
+        ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state);
 
         // 构建内部 ReAct Graph
         let graph = self.build_react_graph();
@@ -318,22 +313,24 @@ impl AgentFlowNode {
         // 执行 Graph
         graph.run_inline(ctx, max_steps).await?;
 
-        // 将内部 ReAct 结果传播到外层 State（带命名空间前缀）
-        if let Some(stop_reason) = ctx.get::<String>(super::react::SK_STOP_REASON) {
+        // 从 Typed State 提取结果，传播到外层 State（带命名空间前缀）
+        let agent_state: super::typed_state::AgentState = ctx
+            .get_state(super::typed_state::AGENT_STATE_KEY)
+            .unwrap_or_default();
+
+        if let Some(ref stop_reason) = agent_state.stop_reason {
             ctx.set(
                 format!("{}_stop_reason", self.name),
-                stop_reason.clone(),
+                format!("{:?}", stop_reason),
             );
         }
-        if let Some(iterations) = ctx.get::<u64>(super::react::SK_ITERATIONS) {
-            ctx.set(format!("{}_iterations", self.name), iterations);
-        }
-        if let Some(tool_calls) = ctx.get::<u64>(super::react::SK_TOTAL_TOOL_CALLS) {
-            ctx.set(format!("{}_tool_calls", self.name), tool_calls);
-        }
+        ctx.set(format!("{}_iterations", self.name), agent_state.iterations as u64);
+        ctx.set(format!("{}_tool_calls", self.name), agent_state.total_tool_calls as u64);
 
         tracing::debug!(
             agent = %self.name,
+            iterations = agent_state.iterations,
+            tool_calls = agent_state.total_tool_calls,
             "agent execution completed (ReAct Graph mode)"
         );
 

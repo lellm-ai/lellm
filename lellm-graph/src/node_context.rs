@@ -5,6 +5,7 @@
 
 use crate::branch_state::BranchState;
 use crate::stream_emitter::StreamEmitter;
+use crate::workflow_state::WorkflowState;
 
 // ─── ExecutionSignal ──────────────────────────────────────────
 
@@ -95,6 +96,12 @@ pub struct NodeMetadata {
 /// NodeContext 是 Runtime Handle（运行时句柄），不是 Runtime State。
 /// - 节点只借用，不拥有。零复制透传给子组件
 /// - 禁止放入：RuntimeEventEmitter、TraceId、SpanId、GraphHandle、ExecutorConfig
+///
+/// # Effects 缓冲（v0.4+）
+///
+/// `effects` 字段收集节点产生的 Effect（领域事件），
+/// 供上层（如 Agent 的 ReAct 循环）统一 apply 到 Typed State。
+/// 传统 `ctx.set()` 路径仍然可用，向后兼容。
 pub struct NodeContext<'a> {
     /// 执行状态 — 直接写
     state: &'a mut BranchState,
@@ -104,6 +111,8 @@ pub struct NodeContext<'a> {
     control: ExecutionControl,
     /// 节点元数据 — 节点写入
     metadata: NodeMetadata,
+    /// Effect 缓冲 — 节点产生的领域事件（v0.4+ Typed State）
+    effects: Vec<serde_json::Value>,
 }
 
 impl<'a> NodeContext<'a> {
@@ -114,6 +123,7 @@ impl<'a> NodeContext<'a> {
             stream,
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
+            effects: Vec::new(),
         }
     }
 
@@ -209,6 +219,61 @@ impl<'a> NodeContext<'a> {
     /// 标记有副作用。
     pub fn set_has_side_effects(&mut self) {
         self.metadata.has_side_effects = true;
+    }
+
+    // ─── Effects 缓冲（v0.4+ Typed State）───────────────────
+
+    /// 发射一个 Effect（领域事件）到缓冲。
+    ///
+    /// 节点通过此方法产生 Effect，上层统一 apply 到 Typed State。
+    /// 传统 `ctx.set()` 路径仍然可用，向后兼容。
+    ///
+    /// # 示例
+    ///
+    /// ```rust,ignore
+    /// // Agent 节点发射 Effect
+    /// ctx.emit_effect(AgentEffect::AppendMessage(msg));
+    /// // 或者
+    /// ctx.emit_effect_json(serde_json::to_value(effect)?);
+    /// ```
+    pub fn emit_effect<E: serde::Serialize>(&mut self, effect: E) {
+        if let Ok(v) = serde_json::to_value(effect) {
+            self.effects.push(v);
+        }
+    }
+
+    /// 消费 Effect 缓冲（返回所有收集的 Effect）。
+    ///
+    /// 上层（如 ReAct 循环）调用此方法获取节点产生的 Effect，
+    /// 然后 apply 到 Typed State。
+    pub fn consume_effects(&mut self) -> Vec<serde_json::Value> {
+        std::mem::take(&mut self.effects)
+    }
+
+    /// 获取已收集的 Effect 数量（不消费）。
+    pub fn effects_len(&self) -> usize {
+        self.effects.len()
+    }
+
+    // ─── Typed State 访问（v0.4+）───────────────────────────
+
+    /// 从 State 读取类型化值（WorkflowState）。
+    ///
+    /// 通过 key 获取存储的类型化状态对象。
+    /// 与 `get::<T>()` 的区别：此方法明确用于 WorkflowState 协议。
+    pub fn get_state<S: WorkflowState + serde::de::DeserializeOwned>(&self, key: &str) -> Option<S> {
+        self.get(key)
+    }
+
+    /// 写入类型化值（WorkflowState）到 State。
+    ///
+    /// 通过 key 存储类型化状态对象。
+    pub fn set_state<S: WorkflowState + serde::Serialize>(
+        &mut self,
+        key: impl Into<String>,
+        state: S,
+    ) {
+        self.set(key, state);
     }
 
     // ─── 内部方法（供 Executor 使用）─────────────────────────

@@ -23,6 +23,7 @@ pub mod statekey;
 pub mod store;
 pub mod stream_chunk;
 pub mod stream_emitter;
+pub mod workflow_state;
 
 // ─── IDs ─────────────────────────────────────────────────────
 pub use ids::{SpanId, TraceId};
@@ -84,3 +85,4 @@ pub use node_context::{ExecutionControl, ExecutionSignal, NextAction, NodeContex
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::StreamChunk;
 pub use stream_emitter::StreamEmitter;
+pub use workflow_state::{Effect, WorkflowError, WorkflowState};

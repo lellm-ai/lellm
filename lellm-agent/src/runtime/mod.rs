@@ -16,6 +16,7 @@ pub mod retry;
 #[allow(clippy::module_inception)]
 pub mod runtime;
 pub mod tools;
+pub mod typed_state;
 
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
@@ -38,6 +39,7 @@ pub use lellm_provider::ResolvedModel;
 pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{ResolvedRound, ToolUseLoop, ToolUseResult};
+pub use typed_state::{AgentEffect, AgentState};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};

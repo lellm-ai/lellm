@@ -564,13 +564,20 @@ v0.3 的 `HashMap<String, Value>` 是动态的、弱类型的。
 
 ### 终局愿景：Workflow<S> + Effect<S>
 
-#### 核心 1：节点返回 Effect 而非 Delta
+#### 核心 1：节点返回 Effect 而非 Delta — ✅ 已实现
 
 ```rust
 pub enum AgentEffect {
     AppendMessage(Message),
+    AppendMessages(Vec<Message>),
     IncrementIteration,
-    RecordUsage(TokenUsage),
+    AddToolCalls(usize),
+    AddOutputTokens(usize),
+    AddReasoningTokens(usize),
+    IncrementCompactCount,
+    ReplaceMessages(Vec<Message>),
+    SetStopReason(StopReason),
+    SetLastResponse(ChatResponse),
 }
 
 impl WorkflowState for AgentState {
@@ -580,35 +587,49 @@ impl WorkflowState for AgentState {
         match effect {
             AgentEffect::AppendMessage(msg) => self.messages.push(msg),
             AgentEffect::IncrementIteration => self.iterations += 1,
-            AgentEffect::RecordUsage(usage) => self.usage += usage,
+            // ...
         }
     }
 }
 ```
 
-#### 核心 2：编译期 Merge 替代运行时 ReducerRegistry
+#### 核心 2：编译期 Merge 替代运行时 ReducerRegistry — ✅ 已实现
 
 ```rust
-pub trait Merge {
-    fn merge(self, other: Self) -> Result<Self, WorkflowError>;
-}
-
-impl Merge for AgentState {
-    fn merge(mut self, other: Self) -> Result<Self, WorkflowError> {
-        self.messages.extend(other.messages);
-        self.iterations = self.iterations.max(other.iterations);
-        Ok(self)
+impl WorkflowState for AgentState {
+    fn merge(self, other: Self) -> Result<Self, WorkflowError> {
+        Ok(Self {
+            messages: self.messages.into_iter().chain(other.messages).collect(),
+            iterations: self.iterations.max(other.iterations),
+            total_tool_calls: self.total_tool_calls.max(other.total_tool_calls),
+            output_tokens: self.output_tokens + other.output_tokens,
+            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
+            // ...
+        })
     }
 }
 ```
 
 **零运行时字符串匹配开销。** 合并规则在编译期确定。
 
-#### 核心 3：Checkpoint = Effect Log
+#### 核心 3：Checkpoint = Effect Log — 📋 规划中
 
 - **持久化**：追加轻量级 Effect（如 `IncrementIteration`）到数据库，而非序列化几百 KB 的 JSON State
 - **恢复**：重放 Effect Log，天然支持确定性重放测试（Deterministic Replay Testing）
 - **可观测性**：每个 Effect 都是领域事件，天然可审计
+
+### 已完成的工作（2026-06-20）
+
+- [x] `WorkflowState` trait + `Effect` trait（`lellm-graph/src/workflow_state.rs`）
+- [x] `NodeContext` 添加 effects 缓冲（`emit_effect` / `consume_effects`）
+- [x] `NodeContext` 添加 typed 访问（`get_state` / `set_state`）
+- [x] `AgentState` struct + `AgentEffect` enum（`lellm-agent/src/runtime/typed_state.rs`）
+- [x] ReAct 节点全面重构 — 消除 `create_state_from_ctx` / `sync_state_to_ctx`
+- [x] `ToolUseLoop::execute` 使用 Typed State 初始化 + 结果提取
+- [x] `AgentFlowNode::execute_with_react_graph` 使用 Typed State
+- [x] `StopReason` 加 serde derive（支持序列化）
+- [ ] Effect Log 持久化到 Checkpoint
+- [ ] 确定性重放测试
 
 ---
 

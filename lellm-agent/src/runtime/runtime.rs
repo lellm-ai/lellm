@@ -338,11 +338,9 @@ impl ToolUseLoop {
     /// 非流式执行
     ///
     /// v04: 内部构建 ReAct Graph，调用 graph.run_inline() 驱动循环
+    /// v0.4+: 使用 Typed State (AgentState) 替代 HashMap
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
-
-        // 初始化 State
-        let state = create_initial_state(&initial_messages);
 
         // 构建 ReAct Graph
         let llm_node = super::react::LLMNode::new(
@@ -362,20 +360,13 @@ impl ToolUseLoop {
         let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
         let max_steps = self.config.max_iterations * 2 + 1;
 
-        // 构建 NodeContext
-        let mut branch = lellm_graph::BranchState::from_state(state.clone());
+        // 构建 NodeContext + 初始化 AgentState
+        let mut branch = lellm_graph::BranchState::empty();
         let mut ctx = lellm_graph::NodeContext::new(&mut branch, None);
 
-        // 写入初始状态
-        let messages_json: Vec<serde_json::Value> = initial_messages
-            .iter()
-            .filter_map(|m| serde_json::to_value(m).ok())
-            .collect();
-        ctx.set(super::react::SK_MESSAGES, serde_json::json!(messages_json));
-        ctx.set(super::react::SK_ITERATIONS, 0u32);
-        ctx.set(super::react::SK_TOTAL_TOOL_CALLS, 0usize);
-        ctx.set(super::react::SK_OUTPUT_TOKENS, 0usize);
-        ctx.set(super::react::SK_REASONING_TOKENS, 0usize);
+        // 写入初始 Typed State
+        let agent_state = super::typed_state::AgentState::from_messages(initial_messages);
+        ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state);
 
         // 执行 ReAct Graph
         graph.run_inline(&mut ctx, max_steps).await.map_err(|e| {
@@ -387,37 +378,20 @@ impl ToolUseLoop {
             }
         })?;
 
-        // 从 ctx 提取结果
-        let messages: Vec<Message> = ctx
-            .get::<Vec<serde_json::Value>>(super::react::SK_MESSAGES)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
-            .collect();
+        // 从 Typed State 提取结果
+        let agent_state: super::typed_state::AgentState = ctx
+            .get_state(super::typed_state::AGENT_STATE_KEY)
+            .unwrap_or_default();
 
-        let iterations: u32 = ctx.get(super::react::SK_ITERATIONS).unwrap_or(0);
-        let tool_calls_executed: usize = ctx.get(super::react::SK_TOTAL_TOOL_CALLS).unwrap_or(0);
-
-        let stop_reason_str: String = ctx.get(super::react::SK_STOP_REASON).unwrap_or_default();
-        let stop_reason = match stop_reason_str.as_str() {
-            "Complete" => StopReason::Complete,
-            "MaxIterationsReached" => StopReason::MaxIterationsReached,
-            "OutputBudgetExceeded" => StopReason::OutputBudgetExceeded,
-            "ReasoningBudgetExceeded" => StopReason::ReasoningBudgetExceeded,
-            _ => StopReason::Complete,
-        };
-
-        let last_response: ChatResponse = ctx
-            .get_raw(super::react::SK_LAST_RESPONSE)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_else(empty_response);
+        let stop_reason = agent_state.stop_reason.unwrap_or(StopReason::Complete);
+        let last_response = agent_state.last_response.unwrap_or_else(empty_response);
 
         Ok(ToolUseResult {
             stop_reason,
             response: last_response,
-            messages,
-            iterations: iterations as usize,
-            tool_calls_executed,
+            messages: agent_state.messages,
+            iterations: agent_state.iterations,
+            tool_calls_executed: agent_state.total_tool_calls,
         })
     }
 
