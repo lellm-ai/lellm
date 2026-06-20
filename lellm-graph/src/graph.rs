@@ -12,7 +12,7 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::error::{BuildError, BuildErrors, DiagnosticCategory, GraphDiagnostics};
-use crate::node::NodeKind;
+use crate::node::{FlowNode, NodeKind};
 use crate::state::State;
 
 // ─── Edge ──────────────────────────────────────────────────────
@@ -252,6 +252,140 @@ impl Graph {
                 .push(edge.to.clone());
         }
         adj
+    }
+
+    // ─── 内联执行 ────────────────────────────────────────────
+
+    /// 内联执行 — 不产生 RuntimeEvent，不 Checkpoint。
+    ///
+    /// 仅用于嵌套场景（如 AgentFlowNode 内部 ReAct 循环）。
+    /// 只包含"路由解析 + 节点执行"的纯逻辑，剥离了：
+    /// - RuntimeEvent 发射
+    /// - Checkpoint
+    /// - Barrier 等待（内联模式不支持 Pause 信号）
+    ///
+    /// # 参数
+    /// - `ctx` — 节点上下文
+    /// - `max_steps` — 最大步数（防止无限循环）
+    ///
+    /// # 返回
+    /// - `Ok(())` — 正常结束（到达 end 节点）
+    /// - `Err(GraphError)` — 执行出错
+    pub async fn run_inline(
+        &self,
+        ctx: &mut crate::node_context::NodeContext<'_>,
+        max_steps: usize,
+    ) -> Result<(), crate::error::GraphError> {
+        use crate::node_context::NextAction;
+        use crate::stream_emitter::StreamEmitter;
+
+        let mut current = self.start_node().to_string();
+        let mut step: usize = 0;
+
+        loop {
+            step += 1;
+            if step > max_steps {
+                return Err(crate::error::GraphError::Terminal(
+                    crate::error::TerminalError::StepsExceeded { limit: max_steps },
+                ));
+            }
+
+            let node = self.nodes.get(&current).ok_or_else(|| {
+                crate::error::GraphError::Terminal(crate::error::TerminalError::NodeNotFound(
+                    current.clone(),
+                ))
+            })?;
+
+            // 创建临时 StreamEmitter（内联模式）
+            let (tx, _rx) = tokio::sync::mpsc::channel(64);
+            let _emitter = StreamEmitter::new(tx);
+
+            // 创建子 BranchState
+            let mut branch = ctx.state().fork();
+            let mut child_ctx = crate::node_context::NodeContext::new(&mut branch, None);
+
+            // 执行节点
+            node.execute(&mut child_ctx).await?;
+
+            // 提取控制信号
+            let (next_action, _signal) = child_ctx.take_control();
+
+            // 将变更 apply 回父 ctx
+            for change in branch.changes() {
+                match change.operation {
+                    crate::branch_state::ChangeOperation::Put => {
+                        ctx.set(&change.key, change.value.clone());
+                    }
+                    crate::branch_state::ChangeOperation::Delete => {
+                        ctx.remove(&change.key);
+                    }
+                }
+            }
+
+            // 处理路由
+            match next_action {
+                NextAction::End => return Ok(()),
+                NextAction::Goto(target) => {
+                    current = target;
+                }
+                NextAction::Next => {
+                    if current == self.end_node() {
+                        return Ok(());
+                    }
+                    // 解析下一个节点
+                    current = self.resolve_next_inline(&current, ctx.state())?;
+                }
+            }
+        }
+    }
+
+    /// 内联路由解析（简化版，不支持 Barrier）。
+    fn resolve_next_inline(
+        &self,
+        current: &str,
+        state: &crate::branch_state::BranchState,
+    ) -> Result<String, crate::error::GraphError> {
+        let edges = self.edges_from(current);
+
+        if edges.is_empty() {
+            return Err(crate::error::GraphError::Terminal(
+                crate::error::TerminalError::InvalidGraph(format!(
+                    "node '{}' has no outgoing edges and is not the end node",
+                    current
+                )),
+            ));
+        }
+
+        // 1. 条件边
+        for edge in &edges {
+            if edge.is_conditional() {
+                let full_state = state.to_state();
+                if edge.condition.as_ref().is_some_and(|c| c(&full_state)) {
+                    return Ok(edge.to.clone());
+                }
+            }
+        }
+
+        // 2. 普通边
+        for edge in &edges {
+            if edge.is_normal() {
+                return Ok(edge.to.clone());
+            }
+        }
+
+        // 3. Fallback 边
+        for edge in &edges {
+            if edge.fallback {
+                return Ok(edge.to.clone());
+            }
+        }
+
+        Err(crate::error::GraphError::Terminal(
+            crate::error::TerminalError::InvalidGraph(format!(
+                "node '{}' has no matching outgoing edge",
+                current
+            )),
+        ))
     }
 
     /// 查找所有环。

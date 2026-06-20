@@ -10,6 +10,7 @@ pub mod event;
 pub mod fallback;
 pub mod flow_node;
 pub(crate) mod iteration;
+pub mod react;
 pub mod request_opts;
 pub mod retry;
 #[allow(clippy::module_inception)]
