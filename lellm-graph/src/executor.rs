@@ -231,6 +231,48 @@ impl GraphExecutor {
                     decision_rx,
                     cancel_rx,
                     checkpoint_rx,
+                    None,
+                    None,
+                )
+                .await;
+        });
+
+        GraphExecution {
+            stream: event_rx,
+            handle,
+        }
+    }
+
+    /// 内部：流式执行，支持指定起始节点和追踪 ID。
+    ///
+    /// - `start_node`: 覆盖图的起始节点（用于 Checkpoint 恢复）
+    /// - `trace_id`: 覆盖追踪 ID（用于 Checkpoint 恢复）
+    fn execute_stream_with(
+        &self,
+        graph: Arc<Graph>,
+        initial_state: State,
+        start_node: Option<String>,
+        trace_id: Option<TraceId>,
+    ) -> GraphExecution {
+        let executor = self.clone();
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (decision_tx, decision_rx) = mpsc::channel(16);
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
+        let (checkpoint_tx, checkpoint_rx) = mpsc::channel(8);
+
+        let handle = GraphHandle::new(decision_tx, cancel_tx, checkpoint_tx);
+
+        tokio::spawn(async move {
+            executor
+                .run_loop(
+                    graph,
+                    initial_state,
+                    event_tx,
+                    decision_rx,
+                    cancel_rx,
+                    checkpoint_rx,
+                    start_node,
+                    trace_id,
                 )
                 .await;
         });
@@ -251,6 +293,8 @@ impl GraphExecutor {
         mut decision_rx: mpsc::Receiver<BarrierDecisionMessage>,
         mut cancel_rx: mpsc::Receiver<()>,
         mut checkpoint_rx: mpsc::Receiver<()>,
+        start_node: Option<String>,
+        trace_id: Option<TraceId>,
     ) {
         let start_time = Instant::now();
         let mut state = initial_state;
@@ -263,9 +307,9 @@ impl GraphExecutor {
             _reducer_registry.register(key, *reducer);
         }
 
-        let mut current = graph.start_node().to_string();
+        let mut current = start_node.unwrap_or_else(|| graph.start_node().to_string());
         let mut step: usize = 0;
-        let trace_id = TraceId::default();
+        let trace_id = trace_id.unwrap_or_default();
 
         // 发射 GraphStart (RuntimeEvent) + GraphEvent
         self.emit_runtime(
@@ -393,6 +437,7 @@ impl GraphExecutor {
                         start_time: node_start,
                         end_time: node_end,
                         success: true,
+                        error: None,
                     });
 
                     // Adaptive Checkpoint
@@ -554,12 +599,14 @@ impl GraphExecutor {
                 }
                 Err(e) => {
                     // 记录失败日志
+                    let error_str = e.to_string();
                     execution_log.push(ExecutionEntry {
                         step,
                         node_name: node_name.clone(),
                         start_time: node_start,
                         end_time: node_end,
                         success: false,
+                        error: Some(error_str.clone()),
                     });
 
                     self.emit_runtime(
@@ -756,6 +803,7 @@ impl GraphExecutor {
                     start_time: node_start,
                     end_time,
                     success: true,
+                    error: None,
                 });
 
                 if self
@@ -1125,7 +1173,45 @@ impl GraphExecutor {
             })?;
 
         let initial_state = checkpoint.state.clone();
-        let execution = self.execute_stream(graph.clone(), initial_state);
+
+        // 解析恢复节点：如果 current_node 是图的合法节点则从中恢复，
+        // 否则从 start_node 开始（如 Checkpoint 记录的是 "__complete__"）。
+        let resume_node = {
+            let cn = checkpoint.current_node.0.as_str();
+            if cn == "__complete__" || cn == graph.end_node() {
+                // 图已完成或停在终点 — 从起点重新开始
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    current_node = %cn,
+                    "checkpoint indicates graph was already complete; \
+                     resuming from start node. \
+                     Consider using an intermediate checkpoint for true recovery."
+                );
+                None
+            } else if graph.nodes.contains_key(cn) {
+                tracing::info!(
+                    trace_id = %trace_id,
+                    resume_node = %cn,
+                    "resuming from checkpoint node"
+                );
+                Some(cn.to_string())
+            } else {
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    current_node = %cn,
+                    "checkpoint node not found in graph; resuming from start node"
+                );
+                None
+            }
+        };
+
+        // 从 Checkpoint 记录的 current_node 恢复执行（如果有效）
+        let execution = self.execute_stream_with(
+            graph.clone(),
+            initial_state,
+            resume_node,
+            Some(*trace_id),
+        );
         Ok(execution)
     }
 }

@@ -412,17 +412,6 @@ pub enum GraphHashMode {
 
 // ─── ExecutionTrace ─────────────────────────────────────────────
 
-/// 节点执行记录。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionEntry {
-    pub step: usize,
-    pub node_name: String,
-    pub start_time: String,
-    pub end_time: String,
-    pub success: bool,
-    pub error: Option<String>,
-}
-
 /// Barrier 决策记录。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BarrierDecisionRecord {
@@ -432,12 +421,16 @@ pub struct BarrierDecisionRecord {
     pub decided_at: String,
 }
 
-/// ExecutionTrace — Delta 历史。
+/// ExecutionTrace — Delta 历史（可序列化）。
+///
+/// 节点执行记录以 JSON Value 数组存储，
+/// 源自 `state::ExecutionEntry::to_json_value()`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionTrace {
     pub trace_id: TraceId,
     pub initial_state: State,
-    pub entries: Vec<ExecutionEntry>,
+    /// 节点执行记录（JSON 序列化格式，见 `state::ExecutionEntry::to_json_value()`）
+    pub entries: Vec<Value>,
     pub deltas: Vec<StateDelta>,
     pub barrier_decisions: Vec<BarrierDecisionRecord>,
 }
@@ -452,15 +445,6 @@ impl ExecutionTrace {
             barrier_decisions: Vec::new(),
         }
     }
-}
-
-/// 图执行最终结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphResult {
-    pub trace_id: TraceId,
-    pub state: State,
-    pub execution_log: Vec<ExecutionEntry>,
-    pub duration_ms: u128,
 }
 
 // ─── Helpers ────────────────────────────────────────────────────

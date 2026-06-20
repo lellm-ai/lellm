@@ -301,10 +301,22 @@ impl FlowNode for LLMNode {
         }
         if has_tool_calls {
             for tc in &tool_calls {
+                let args_str = match serde_json::to_string(&tc.arguments) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool_call_id = %tc.id,
+                            tool_name = %tc.name,
+                            error = %e,
+                            "failed to serialize tool call arguments for StreamChunk"
+                        );
+                        format!("{{\"error\":\"serialization_failed\",\"detail\":\"{}\"}}", e)
+                    }
+                };
                 ctx.emit(lellm_graph::StreamChunk::ToolCall {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
-                    arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                    arguments: args_str,
                 });
             }
         }
@@ -421,14 +433,33 @@ impl FlowNode for ToolNode {
                 is_error,
             } = result
             {
+                let mut dropped_types = Vec::new();
                 let content_str: String = content
                     .iter()
                     .filter_map(|b| match b {
                         lellm_core::ContentBlock::Text(t) => Some(t.text.clone()),
-                        _ => None,
+                        lellm_core::ContentBlock::Image { .. } => {
+                            dropped_types.push("Image");
+                            None
+                        }
+                        lellm_core::ContentBlock::Thinking(_) => {
+                            dropped_types.push("Thinking");
+                            None
+                        }
+                        lellm_core::ContentBlock::ToolCall(_) => {
+                            dropped_types.push("ToolCall");
+                            None
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join("");
+                if !dropped_types.is_empty() {
+                    tracing::debug!(
+                        tool_call_id = %tool_call_id,
+                        dropped_types = ?dropped_types,
+                        "ToolResult StreamChunk only emits Text blocks; non-Text blocks dropped"
+                    );
+                }
                 ctx.emit(lellm_graph::StreamChunk::ToolResult {
                     id: tool_call_id.clone(),
                     content: content_str,

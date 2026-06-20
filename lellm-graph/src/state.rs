@@ -3,7 +3,7 @@
 //! 包含 Graph 共享状态的核心类型（从 lellm-runtime 合并）和 Graph 特有的执行结果类型。
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -200,6 +200,8 @@ pub struct GraphResult {
 }
 
 /// 单个节点执行记录。
+///
+/// 运行时使用 `Instant` 精确计时，序列化时转换为 ISO-8601 字符串。
 #[derive(Debug, Clone)]
 pub struct ExecutionEntry {
     /// 全局步数（第几步）
@@ -212,6 +214,8 @@ pub struct ExecutionEntry {
     pub end_time: Instant,
     /// 是否成功
     pub success: bool,
+    /// 错误信息（失败时）
+    pub error: Option<String>,
 }
 
 impl ExecutionEntry {
@@ -219,4 +223,39 @@ impl ExecutionEntry {
     pub fn elapsed(&self) -> Duration {
         self.end_time.duration_since(self.start_time)
     }
+
+    /// 序列化为 JSON Value（Instant → ISO-8601 字符串）。
+    /// 供 Checkpoint 持久化使用。
+    pub fn to_json_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "step": self.step,
+            "node_name": self.node_name,
+            "start_time": instant_to_iso(&self.start_time),
+            "end_time": instant_to_iso(&self.end_time),
+            "success": self.success,
+            "error": self.error,
+        })
+    }
+}
+
+/// 将 Instant 转换为 ISO-8601 时间戳字符串。
+/// 使用 UNIX_EPOCH 近似计算，不依赖 chrono。
+fn instant_to_iso(instant: &Instant) -> String {
+    // Instant 无法直接转为 SystemTime，用 epoch 秒数近似
+    // 注意：这是近似值，仅用于日志和 Checkpoint 展示
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let elapsed_secs = instant.elapsed().as_secs();
+    let secs = now_secs.saturating_sub(elapsed_secs);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        ((secs / 86400 / 365) + 1970) as u16,
+        ((secs / 86400 % 365) / 30 + 1) as u8,
+        (secs / 86400 % 30 + 1) as u8,
+        (secs % 86400 / 3600) as u8,
+        (secs % 3600 / 60) as u8,
+        (secs % 60) as u8
+    )
 }
