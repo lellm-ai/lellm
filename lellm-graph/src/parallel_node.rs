@@ -19,8 +19,11 @@
 //! 所有分支完成后，变更通过 ReducerRegistry 合并到 State。
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::error::GraphError;
+use crate::event::FlowEvent;
+use crate::ids::SpanId;
 use crate::node::FlowNode;
 use crate::node_context::NodeContext;
 
@@ -184,6 +187,17 @@ impl FlowNode for ParallelNode {
     /// 注意：真正的并行执行由 Executor::handle_parallel() 完成。
     /// 此方法提供串行 fallback，确保直接调用也能工作。
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+        let start_time = Instant::now();
+        let span_id = SpanId::new();
+        let branch_count = self.branches.len();
+
+        // Emit ParallelStarted
+        ctx.emit_flow_event(FlowEvent::ParallelStarted {
+            node_id: self.display_name(),
+            branch_count,
+            span_id,
+        });
+
         // Fork state for each branch
         let mut branch_states = Vec::new();
         for _ in 0..self.branches.len() {
@@ -192,13 +206,30 @@ impl FlowNode for ParallelNode {
 
         // Execute branches sequentially (serial fallback)
         for ((name, node), branch_state) in self.branches.iter().zip(branch_states.iter_mut()) {
+            let branch_start = Instant::now();
+            let branch_span = SpanId::new();
             let mut branch_ctx = NodeContext::new(branch_state, None);
-            node.execute(&mut branch_ctx).await.map_err(|e| {
+            let result = node.execute(&mut branch_ctx).await.map_err(|e| {
                 GraphError::Terminal(crate::error::TerminalError::NodeExecutionFailed {
                     node: format!("{}/{}", self.display_name(), name),
                     source: e.into(),
                 })
-            })?;
+            });
+            let branch_duration = branch_start.elapsed();
+            let success = result.is_ok();
+
+            // Emit BranchCompleted
+            ctx.emit_flow_event(FlowEvent::BranchCompleted {
+                branch_name: name.clone(),
+                node_id: self.display_name(),
+                span_id: branch_span,
+                success,
+                duration: branch_duration,
+            });
+
+            if !success {
+                return result;
+            }
         }
 
         // Merge changes from all branches
@@ -215,6 +246,13 @@ impl FlowNode for ParallelNode {
                 }
             }
         }
+
+        // Emit ParallelCompleted
+        ctx.emit_flow_event(FlowEvent::ParallelCompleted {
+            node_id: self.display_name(),
+            span_id,
+            duration: start_time.elapsed(),
+        });
 
         Ok(())
     }

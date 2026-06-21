@@ -4,6 +4,7 @@
 //! 节点通过 NodeContext 读写 State、发射数据面事件、发出控制信号。
 
 use crate::branch_state::BranchState;
+use crate::event::FlowEvent;
 use crate::stream_emitter::StreamEmitter;
 use crate::workflow_state::WorkflowState;
 
@@ -113,6 +114,8 @@ pub struct NodeContext<'a> {
     metadata: NodeMetadata,
     /// Effect 缓冲 — 节点产生的领域事件（v0.4+ Typed State）
     effects: Vec<serde_json::Value>,
+    /// FlowEvent 缓冲 — 节点产生的控制面事件（供 Executor 转发到 GraphEvent）
+    flow_events: Vec<FlowEvent>,
 }
 
 impl<'a> NodeContext<'a> {
@@ -124,6 +127,7 @@ impl<'a> NodeContext<'a> {
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
             effects: Vec::new(),
+            flow_events: Vec::new(),
         }
     }
 
@@ -186,6 +190,11 @@ impl<'a> NodeContext<'a> {
         if let Some(stream) = &self.stream {
             stream.emit(chunk);
         }
+    }
+
+    /// 发射控制面 FlowEvent（缓冲到 NodeContext，供 Executor 收集转发）。
+    pub fn emit_flow_event(&mut self, event: FlowEvent) {
+        self.flow_events.push(event);
     }
 
     // ─── 控制信号 ─────────────────────────────────────────
@@ -299,5 +308,10 @@ impl<'a> NodeContext<'a> {
     /// 获取数据面发射器引用（供 `run_inline()` 等嵌套场景透传给子节点）。
     pub fn stream(&self) -> Option<&'a StreamEmitter> {
         self.stream
+    }
+
+    /// 消费 FlowEvent 缓冲（Executor 调用）。
+    pub fn take_flow_events(&mut self) -> Vec<FlowEvent> {
+        std::mem::take(&mut self.flow_events)
     }
 }

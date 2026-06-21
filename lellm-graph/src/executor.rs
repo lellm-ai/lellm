@@ -18,7 +18,8 @@ use crate::checkpoint::{
 use crate::delta::ReducerRegistry;
 use crate::error::{GraphError, TerminalError};
 use crate::event::{
-    BarrierDecision, BarrierDecisionMessage, BarrierId, GraphEvent, GraphExecution, GraphHandle,
+    BarrierDecision, BarrierDecisionMessage, BarrierId, FlowEvent, GraphEvent, GraphExecution,
+    GraphHandle,
 };
 use crate::graph::Graph;
 use crate::ids::{SpanId, TraceId};
@@ -429,7 +430,7 @@ impl GraphExecutor {
             let duration = node_end.duration_since(node_start);
 
             match exec_result {
-                Ok((next_action, signal, metadata)) => {
+                Ok((next_action, signal, metadata, flow_events)) => {
                     // 记录执行日志
                     execution_log.push(ExecutionEntry {
                         step,
@@ -439,6 +440,23 @@ impl GraphExecutor {
                         success: true,
                         error: None,
                     });
+
+                    // 发射节点产生的 FlowEvent（如 ParallelStarted, BranchCompleted 等）
+                    for flow_event in flow_events {
+                        if self
+                            .send(
+                                &event_tx,
+                                GraphEvent::Node {
+                                    span_id,
+                                    node_name: node_name.clone(),
+                                    event: flow_event,
+                                },
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                    }
 
                     // Adaptive Checkpoint
                     if self.policy.has_adaptive_trigger() {
@@ -647,14 +665,14 @@ impl GraphExecutor {
 
     /// 使用 BranchState + NodeContext 执行单个节点。
     ///
-    /// 返回 (NextAction, Option<ExecutionSignal>, NodeMetadata)。
+    /// 返回 (NextAction, Option<ExecutionSignal>, NodeMetadata, Vec<FlowEvent>)。
     async fn execute_node(
         &self,
         node: &NodeKind,
         state: &mut State,
         _node_name: &str,
         _span_id: SpanId,
-    ) -> Result<(NextAction, Option<ExecutionSignal>, NodeMetadata), GraphError> {
+    ) -> Result<(NextAction, Option<ExecutionSignal>, NodeMetadata, Vec<FlowEvent>), GraphError> {
         // 1. 创建 BranchState（从当前 State）
         let mut branch = BranchState::from_state(state.clone());
 
@@ -671,6 +689,7 @@ impl GraphExecutor {
         // 5. 提取控制信号
         let (next_action, signal) = ctx.take_control();
         let metadata = ctx.take_metadata();
+        let flow_events = ctx.take_flow_events();
 
         // 6. 将 BranchState 变更 apply 回主 State
         for change in branch.changes() {
@@ -684,7 +703,7 @@ impl GraphExecutor {
             }
         }
 
-        Ok((next_action, signal, metadata))
+        Ok((next_action, signal, metadata, flow_events))
     }
 
     // ─── Barrier 处理 ──────────────────────────────────────────
