@@ -141,6 +141,41 @@ impl Graph {
         self.edges.iter().find(|e| e.from == from && e.to == to)
     }
 
+    /// 获取节点映射表引用。
+    pub fn node_map(&self) -> &IndexMap<String, NodeKind> {
+        &self.nodes
+    }
+
+    /// 路由解析 — 根据当前节点和 State 找到下一个节点。
+    ///
+    /// 三类边优先级：条件边 > 普通边 > Fallback 边。
+    pub fn resolve_next(&self, current: &str, state: &State) -> Option<String> {
+        let edges = self.edges_from(current);
+
+        // 1. 条件边
+        for edge in &edges {
+            if edge.is_conditional() && edge.condition.as_ref().is_some_and(|c| c(state)) {
+                return Some(edge.to.clone());
+            }
+        }
+
+        // 2. 普通边
+        for edge in &edges {
+            if edge.is_normal() {
+                return Some(edge.to.clone());
+            }
+        }
+
+        // 3. Fallback 边
+        for edge in &edges {
+            if edge.fallback {
+                return Some(edge.to.clone());
+            }
+        }
+
+        None
+    }
+
     /// 查找指定节点的 fallback 边目标。
     ///
     /// 用于 Fallback 控制流：节点主动声明降级后，Executor 查找 fallback 边路由。

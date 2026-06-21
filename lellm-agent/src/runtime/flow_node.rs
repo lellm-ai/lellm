@@ -298,28 +298,109 @@ impl AgentFlowNode {
 
     /// 使用 ReAct Graph 模式执行。
     ///
-    /// v0.4+: 使用 Typed State (AgentState) 替代 HashMap 初始化。
+    /// v0.4+ Effect 模式：
+    /// 1. 维护 AgentState 生命周期
+    /// 2. 节点只 emit_effect，不直接改状态
+    /// 3. 循环消费 Effect → apply → 同步到 ctx（供边条件使用）
     async fn execute_with_react_graph(
         &self,
         ctx: &mut NodeContext<'_>,
         messages: Vec<lellm_core::Message>,
     ) -> Result<(), GraphError> {
-        // 初始化 Typed State
-        let agent_state = super::typed_state::AgentState::from_messages(messages);
-        ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state);
+        use lellm_graph::NextAction;
 
-        // 构建内部 ReAct Graph
+        // 1. 初始化 Typed State
+        let mut agent_state = super::typed_state::AgentState::from_messages(messages);
+
+        // 2. 构建内部 ReAct Graph
         let graph = self.build_react_graph();
-        let max_steps = self.loop_.config().max_iterations * 2 + 1; // LLM + Tool per iteration
+        let max_steps = self.loop_.config().max_iterations * 2 + 1;
 
-        // 执行 Graph
-        graph.run_inline(ctx, max_steps).await?;
+        // 3. Effect 驱动的执行循环
+        let mut current = graph.start_node().to_string();
+        let mut step: usize = 0;
 
-        // 从 Typed State 提取结果，传播到外层 State（带命名空间前缀）
-        let agent_state: super::typed_state::AgentState = ctx
-            .get_state(super::typed_state::AGENT_STATE_KEY)
-            .unwrap_or_default();
+        loop {
+            step += 1;
+            if step > max_steps {
+                return Err(GraphError::Terminal(
+                    TerminalError::StepsExceeded { limit: max_steps },
+                ));
+            }
 
+            // 3a. 写入 AgentState 到 ctx（节点可读）
+            ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state.clone());
+
+            // 3b. 创建子 NodeContext（fork BranchState + 透传 StreamEmitter）
+            let mut branch = ctx.state().fork();
+            let stream = ctx.stream();
+            let mut child_ctx = NodeContext::new(&mut branch, stream);
+
+            // 3c. 写入 AgentState 到子 ctx
+            child_ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state.clone());
+
+            // 3d. 查找并执行节点
+            let node_ref = graph
+                .node_map()
+                .get(&current)
+                .ok_or_else(|| {
+                    GraphError::Terminal(TerminalError::NodeNotFound(current.clone()))
+                })?;
+            node_ref.execute(&mut child_ctx).await?;
+
+            // 3e. 消费 Effect → apply 到 AgentState
+            for v in child_ctx.consume_effects() {
+                agent_state.apply_from_value(v).map_err(|e| {
+                    GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                        node: current.clone(),
+                        source: Box::new(e),
+                    })
+                })?;
+            }
+
+            // 3f. 提取控制信号
+            let (next_action, _signal) = child_ctx.take_control();
+
+            // 3g. 释放 child_ctx 对 branch 的借用
+            drop(child_ctx);
+
+            // 3h. 将 BranchState 变更 apply 回父 ctx
+            for change in branch.changes() {
+                match change.operation {
+                    lellm_graph::ChangeOperation::Put => {
+                        ctx.set(&change.key, change.value.clone());
+                    }
+                    lellm_graph::ChangeOperation::Delete => {
+                        ctx.remove(&change.key);
+                    }
+                }
+            }
+
+            // 3h. 处理路由
+            match next_action {
+                NextAction::End => break,
+                NextAction::Goto(target) => {
+                    current = target;
+                }
+                NextAction::Next => {
+                    if current == graph.end_node() {
+                        break;
+                    }
+                    // 同步 AgentState 关键字段到 ctx（供边条件使用）
+                    sync_agent_state_to_ctx(ctx, &agent_state);
+                    // 从 ctx 的 BranchState 获取完整 State 用于路由
+                    let full_state = ctx.state().to_state();
+                    current = graph.resolve_next(&current, &full_state).ok_or_else(|| {
+                        GraphError::Terminal(TerminalError::InvalidGraph(format!(
+                            "node '{}' has no matching outgoing edge",
+                            current
+                        )))
+                    })?;
+                }
+            }
+        }
+
+        // 4. 从 Typed State 提取结果，传播到外层 State
         if let Some(ref stop_reason) = agent_state.stop_reason {
             ctx.set(
                 format!("{}_stop_reason", self.name),
@@ -339,9 +420,24 @@ impl AgentFlowNode {
             agent = %self.name,
             iterations = agent_state.iterations,
             tool_calls = agent_state.total_tool_calls,
-            "agent execution completed (ReAct Graph mode)"
+            "agent execution completed (ReAct Graph mode, Effect-driven)"
         );
 
         Ok(())
     }
+}
+
+/// 同步 AgentState 关键字段到 ctx（供边条件使用）。
+///
+/// 边条件（`edge_if`）直接读取 `State`（HashMap），不感知 AgentState。
+/// 此函数桥接 typed state → dynamic state。
+fn sync_agent_state_to_ctx(ctx: &mut NodeContext<'_>, state: &super::typed_state::AgentState) {
+    use crate::runtime::react::{
+        SK_COMPACT_COUNT, SK_ITERATIONS, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS,
+    };
+    ctx.set(SK_ITERATIONS, state.iterations as u64);
+    ctx.set(SK_TOTAL_TOOL_CALLS, state.total_tool_calls as u64);
+    ctx.set(SK_OUTPUT_TOKENS, state.output_tokens as u64);
+    ctx.set(SK_REASONING_TOKENS, state.reasoning_tokens as u64);
+    ctx.set(SK_COMPACT_COUNT, state.compact_count as u64);
 }

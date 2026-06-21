@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 
 use lellm_core::{ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock, ToolCall};
 use lellm_graph::{
-    FlowNode, Graph, GraphBuilder, GraphError, NodeContext, NodeKind, TerminalError,
+    FlowNode, Graph, GraphBuilder, GraphError, NodeContext, NodeKind, TaskNode, TerminalError,
 };
 use lellm_provider::ProviderEvent;
 
@@ -36,15 +36,15 @@ use lellm_provider::ResolvedModel;
 
 // ─── State Keys（边条件等仍需要字符串 key）──────────────────
 
-pub const SK_MESSAGES: &str = "messages";
-pub const SK_ITERATIONS: &str = "iterations";
-pub const SK_TOTAL_TOOL_CALLS: &str = "total_tool_calls";
-pub const SK_OUTPUT_TOKENS: &str = "output_tokens";
-pub const SK_REASONING_TOKENS: &str = "reasoning_tokens";
-pub const SK_HAS_TOOL_CALLS: &str = "has_tool_calls";
-pub const SK_STOP_REASON: &str = "stop_reason";
-pub const SK_LAST_RESPONSE: &str = "last_response";
-pub const SK_COMPACT_COUNT: &str = "compact_count";
+pub(crate) const SK_MESSAGES: &str = "messages";
+pub(crate) const SK_ITERATIONS: &str = "iterations";
+pub(crate) const SK_TOTAL_TOOL_CALLS: &str = "total_tool_calls";
+pub(crate) const SK_OUTPUT_TOKENS: &str = "output_tokens";
+pub(crate) const SK_REASONING_TOKENS: &str = "reasoning_tokens";
+pub(crate) const SK_HAS_TOOL_CALLS: &str = "has_tool_calls";
+pub(crate) const SK_STOP_REASON: &str = "stop_reason";
+pub(crate) const SK_LAST_RESPONSE: &str = "last_response";
+pub(crate) const SK_COMPACT_COUNT: &str = "compact_count";
 
 // ─── Typed State 辅助函数 ──────────────────────────────────────
 
@@ -54,29 +54,51 @@ fn get_agent_state(ctx: &NodeContext<'_>) -> AgentState {
         .unwrap_or_default()
 }
 
-/// 将 AgentState 写回 NodeContext。
-fn set_agent_state(ctx: &mut NodeContext<'_>, state: &AgentState) {
-    ctx.set_state(AGENT_STATE_KEY, state.clone());
-}
-
-/// 同步 AgentState 的关键字段到 ctx（供边条件使用）。
+/// Dual-write bridge：同时 emit_effect + ctx.set（供 run_inline 路径使用）。
 ///
-/// 边条件（`edge_if`）直接读取 `State`（HashMap），不感知 AgentState。
-/// 此函数桥接 typed state → dynamic state。
-fn sync_to_ctx(ctx: &mut NodeContext<'_>, state: &AgentState) {
-    ctx.set(SK_ITERATIONS, state.iterations as u64);
-    ctx.set(SK_TOTAL_TOOL_CALLS, state.total_tool_calls as u64);
-    ctx.set(SK_OUTPUT_TOKENS, state.output_tokens as u64);
-    ctx.set(SK_REASONING_TOKENS, state.reasoning_tokens as u64);
-    ctx.set(SK_COMPACT_COUNT, state.compact_count as u64);
-
-    // messages 以 JSON 数组存储（边条件可能读取）
-    let messages_json: Vec<serde_json::Value> = state
-        .messages
-        .iter()
-        .filter_map(|m| serde_json::to_value(m).ok())
-        .collect();
-    ctx.set(SK_MESSAGES, serde_json::json!(messages_json));
+/// emit_effect → Effect 驱动路径（AgentFlowNode::execute_with_react_graph）
+/// ctx.set → run_inline 路径（ToolUseLoop::execute 通过 BranchState 变更获取）
+///
+/// 注意：递增操作直接从 ctx 读当前值（而非 AgentState），
+/// 因为 AgentState 在父 ctx 中，子 branch 无法看到已 apply 的值。
+fn emit_and_set(
+    ctx: &mut NodeContext<'_>,
+    effect: super::typed_state::AgentEffect,
+) {
+    ctx.emit_effect(effect.clone());
+    match effect {
+        super::typed_state::AgentEffect::IncrementIteration => {
+            let cur: u64 = ctx.get(SK_ITERATIONS).unwrap_or(0);
+            ctx.set(SK_ITERATIONS, cur + 1);
+        }
+        super::typed_state::AgentEffect::AddOutputTokens(n) => {
+            let cur: u64 = ctx.get(SK_OUTPUT_TOKENS).unwrap_or(0);
+            ctx.set(SK_OUTPUT_TOKENS, cur + n as u64);
+        }
+        super::typed_state::AgentEffect::AddReasoningTokens(n) => {
+            let cur: u64 = ctx.get(SK_REASONING_TOKENS).unwrap_or(0);
+            ctx.set(SK_REASONING_TOKENS, cur + n as u64);
+        }
+        super::typed_state::AgentEffect::AddToolCalls(n) => {
+            let cur: u64 = ctx.get(SK_TOTAL_TOOL_CALLS).unwrap_or(0);
+            ctx.set(SK_TOTAL_TOOL_CALLS, cur + n as u64);
+        }
+        super::typed_state::AgentEffect::IncrementCompactCount => {
+            let cur: u64 = ctx.get(SK_COMPACT_COUNT).unwrap_or(0);
+            ctx.set(SK_COMPACT_COUNT, cur + 1);
+        }
+        super::typed_state::AgentEffect::SetStopReason(reason) => {
+            ctx.set(SK_STOP_REASON, format!("{:?}", reason));
+        }
+        super::typed_state::AgentEffect::SetLastResponse(response) => {
+            ctx.set(SK_LAST_RESPONSE, serde_json::to_value(&response).unwrap_or_default());
+        }
+        super::typed_state::AgentEffect::AppendMessage(_)
+        | super::typed_state::AgentEffect::AppendMessages(_)
+        | super::typed_state::AgentEffect::ReplaceMessages(_) => {
+            // 消息变更由 Effect 驱动路径处理
+        }
+    }
 }
 
 /// 分离 output / reasoning token
@@ -145,41 +167,37 @@ impl LLMNode {
 #[async_trait]
 impl FlowNode for LLMNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        // 1. 获取 AgentState
-        let mut state = get_agent_state(ctx);
+        use super::typed_state::AgentEffect;
+
+        // 1. 获取 AgentState（只读）
+        let state = get_agent_state(ctx);
         let mut exec_ctx = AgentExecutionContext::new(state.messages_ref());
 
         // 2. 检查最大迭代
         if state.reached_max(self.config.max_iterations) {
+            emit_and_set(ctx, AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
             let last_response = ctx
                 .get::<Option<ChatResponse>>(SK_LAST_RESPONSE)
                 .flatten()
                 .unwrap_or_else(empty_response);
-            ctx.set(
-                SK_STOP_REASON,
-                format!("{:?}", StopReason::MaxIterationsReached),
-            );
-            ctx.set(
-                SK_LAST_RESPONSE,
-                serde_json::to_value(&last_response).unwrap_or_default(),
-            );
+            emit_and_set(ctx, AgentEffect::SetLastResponse(last_response));
             ctx.end();
             return Ok(());
         }
 
-        // 3. 递增迭代
-        state.iterations += 1;
+        // 3. Emit 迭代递增 Effect
+        emit_and_set(ctx, AgentEffect::IncrementIteration);
 
         // 4. 获取工具定义
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
-        // 5. 构建 LLM 请求
+        // 5. 构建 LLM 请求（使用新迭代数）
         let req = build_request_inner_with_round(
             &self.model,
             &state.messages,
             self.config.max_output_tokens,
             &self.config.request_options,
-            state.iterations,
+            state.iterations + 1,
             &round.definitions,
         );
 
@@ -201,7 +219,6 @@ impl FlowNode for LLMNode {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(ProviderEvent::Token { token }) => {
-                    // 实时发射 StreamChunk（真正的流式输出）
                     ctx.emit(lellm_graph::StreamChunk::Text(token.clone()));
                     current_text.push_str(&token);
                 }
@@ -213,7 +230,6 @@ impl FlowNode for LLMNode {
                     tool_calls,
                     usage: u,
                 }) => {
-                    // 将 tool_calls 添加到 content_blocks
                     for tc in tool_calls {
                         content_blocks.push(ContentBlock::ToolCall(tc));
                     }
@@ -253,7 +269,11 @@ impl FlowNode for LLMNode {
             raw: serde_json::json!(null),
         };
 
-        // 7. 检查 reasoning budget（单轮）
+        // 7. 分离 output / reasoning token
+        let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
+        exec_ctx.add_tokens(output_tokens + reasoning_tokens);
+
+        // 8. 检查 reasoning budget（单轮）
         if let Some(limit) = self.config.request_options.max_reasoning_tokens {
             let round_reasoning: usize = response
                 .content
@@ -269,94 +289,62 @@ impl FlowNode for LLMNode {
                     max_reasoning_tokens = limit,
                     "single-round reasoning budget exceeded"
                 );
-
-                let (ot, rt) = split_output_tokens(&response.content);
-                state.output_tokens += ot;
-                state.reasoning_tokens += rt;
-                exec_ctx.add_tokens(ot + rt);
-                set_agent_state(ctx, &state);
-                ctx.set(
-                    SK_STOP_REASON,
-                    format!("{:?}", StopReason::ReasoningBudgetExceeded),
-                );
-                ctx.set(
-                    SK_LAST_RESPONSE,
-                    serde_json::to_value(&response).unwrap_or_default(),
-                );
+                emit_and_set(ctx, AgentEffect::AddOutputTokens(output_tokens));
+                emit_and_set(ctx, AgentEffect::AddReasoningTokens(reasoning_tokens));
+                emit_and_set(ctx, AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded));
+                emit_and_set(ctx, AgentEffect::SetLastResponse(response));
                 ctx.end();
                 return Ok(());
             }
         }
 
-        // 8. 记录输出 token
-        let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
-        state.output_tokens += output_tokens;
-        state.reasoning_tokens += reasoning_tokens;
-        exec_ctx.add_tokens(output_tokens + reasoning_tokens);
+        // 9. Emit Token Effects (dual-write)
+        emit_and_set(ctx, AgentEffect::AddOutputTokens(output_tokens));
+        emit_and_set(ctx, AgentEffect::AddReasoningTokens(reasoning_tokens));
 
-        // 9. 检查总输出预算
-        if state.exceeded_output(self.config.max_total_output_tokens) {
-            set_agent_state(ctx, &state);
-            ctx.set(
-                SK_STOP_REASON,
-                format!("{:?}", StopReason::OutputBudgetExceeded),
-            );
-            ctx.set(
-                SK_LAST_RESPONSE,
-                serde_json::to_value(&response).unwrap_or_default(),
-            );
+        // 10. 检查总输出预算（用本地累加判断，因为 Effect 还未 apply）
+        if state.exceeded_output_with_extra(
+            self.config.max_total_output_tokens,
+            output_tokens,
+        ) {
+            emit_and_set(ctx, AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
+            emit_and_set(ctx, AgentEffect::SetLastResponse(response));
             ctx.end();
             return Ok(());
         }
 
-        // 10. 检查总推理预算
-        if state.exceeded_reasoning(self.config.max_total_reasoning_tokens) {
-            set_agent_state(ctx, &state);
-            ctx.set(
-                SK_STOP_REASON,
-                format!("{:?}", StopReason::ReasoningBudgetExceeded),
-            );
-            ctx.set(
-                SK_LAST_RESPONSE,
-                serde_json::to_value(&response).unwrap_or_default(),
-            );
+        // 11. 检查总推理预算
+        if state.exceeded_reasoning_with_extra(
+            self.config.max_total_reasoning_tokens,
+            reasoning_tokens,
+        ) {
+            emit_and_set(ctx, AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded));
+            emit_and_set(ctx, AgentEffect::SetLastResponse(response));
             ctx.end();
             return Ok(());
         }
 
-        // 11. 写入 assistant 响应到消息历史
+        // 12. Emit 消息追加 Effect
         let content = response.content.clone();
         let msg = Message::Assistant { content };
-        state.messages.push(msg);
+        emit_and_set(ctx, AgentEffect::AppendMessage(msg));
 
-        // 12. 检查是否有 tool_calls
+        // 13. 检查是否有 tool_calls
         let has_tool_calls = response.has_tool_calls();
 
         if has_tool_calls {
-            state.total_tool_calls += tool_calls_count;
-        }
-
-        // 13. 同步状态到 ctx
-        set_agent_state(ctx, &state);
-        sync_to_ctx(ctx, &state);
-        ctx.set(SK_HAS_TOOL_CALLS, has_tool_calls);
-
-        // 14. 处理完成逻辑
-        if has_tool_calls {
+            emit_and_set(ctx, AgentEffect::AddToolCalls(tool_calls_count));
             tracing::debug!(
-                iteration = state.iterations,
+                iteration = state.iterations + 1,
                 tool_calls = tool_calls_count,
                 "LLM call completed, executing tools"
             );
         } else {
-            ctx.set(SK_STOP_REASON, format!("{:?}", StopReason::Complete));
-            ctx.set(
-                SK_LAST_RESPONSE,
-                serde_json::to_value(&response).unwrap_or_default(),
-            );
+            emit_and_set(ctx, AgentEffect::SetStopReason(StopReason::Complete));
+            emit_and_set(ctx, AgentEffect::SetLastResponse(response));
             ctx.end();
             tracing::debug!(
-                iteration = state.iterations,
+                iteration = state.iterations + 1,
                 "LLM call completed, no tool calls"
             );
         }
@@ -401,7 +389,8 @@ impl ToolNode {
 #[async_trait]
 impl FlowNode for ToolNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let mut state = get_agent_state(ctx);
+        use super::typed_state::AgentEffect;
+
         // 1. 获取工具调用
         let round = ResolvedRound::new(self.executor.snapshot().await);
         let last_response: ChatResponse = ctx
@@ -449,7 +438,7 @@ impl FlowNode for ToolNode {
             })
             .collect();
 
-        // 4. StreamChunk emit (v04 #1) — 工具执行结果（先 emit，再 extend）
+        // 4. StreamChunk emit (v04 #1) — 工具执行结果
         for result in &results {
             if let Message::ToolResult {
                 tool_call_id,
@@ -457,33 +446,16 @@ impl FlowNode for ToolNode {
                 is_error,
             } = result
             {
-                let mut dropped_types = Vec::new();
                 let content_str: String = content
                     .iter()
                     .filter_map(|b| match b {
                         lellm_core::ContentBlock::Text(t) => Some(t.text.clone()),
-                        lellm_core::ContentBlock::Image { .. } => {
-                            dropped_types.push("Image");
-                            None
-                        }
-                        lellm_core::ContentBlock::Thinking(_) => {
-                            dropped_types.push("Thinking");
-                            None
-                        }
-                        lellm_core::ContentBlock::ToolCall(_) => {
-                            dropped_types.push("ToolCall");
-                            None
-                        }
+                        lellm_core::ContentBlock::Image { .. }
+                        | lellm_core::ContentBlock::Thinking(_)
+                        | lellm_core::ContentBlock::ToolCall(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                if !dropped_types.is_empty() {
-                    tracing::debug!(
-                        tool_call_id = %tool_call_id,
-                        dropped_types = ?dropped_types,
-                        "ToolResult StreamChunk only emits Text blocks; non-Text blocks dropped"
-                    );
-                }
                 ctx.emit(lellm_graph::StreamChunk::ToolResult {
                     id: tool_call_id.clone(),
                     content: content_str,
@@ -492,12 +464,8 @@ impl FlowNode for ToolNode {
             }
         }
 
-        // 5. 追加到消息历史
-        state.messages.extend(results);
-
-        // 6. 同步状态到 ctx
-        set_agent_state(ctx, &state);
-        sync_to_ctx(ctx, &state);
+        // 5. Emit 消息追加 Effect（不直接改 state）
+        ctx.emit_effect(AgentEffect::AppendMessages(results));
 
         tracing::debug!(tool_calls = tool_calls.len(), "tool execution completed");
 
@@ -576,7 +544,9 @@ impl CompactorNode {
 #[async_trait]
 impl FlowNode for CompactorNode {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let mut state = get_agent_state(ctx);
+        use super::typed_state::AgentEffect;
+
+        let state = get_agent_state(ctx);
 
         if !self.budget.should_compact(state.output_tokens) {
             return Ok(());
@@ -584,12 +554,10 @@ impl FlowNode for CompactorNode {
 
         let result = self.compactor.compact(&state.messages, &self.budget);
 
-        // 只有实际压缩了才更新 state
+        // 只有实际压缩了才 emit Effects
         if result.removed_messages > 0 {
-            state.messages = result.messages;
-            state.compact_count += 1;
-            set_agent_state(ctx, &state);
-            sync_to_ctx(ctx, &state);
+            ctx.emit_effect(AgentEffect::ReplaceMessages(result.messages));
+            ctx.emit_effect(AgentEffect::IncrementCompactCount);
 
             tracing::debug!(
                 agent = %self.name,
@@ -683,6 +651,8 @@ pub fn build_react_graph(
         ))),
     );
     builder.node("compactor", NodeKind::External(Arc::new(compactor_node)));
+    // End 节点 — no-op 终端节点（LLMNode 通过 ctx.end() 终止，实际不会执行到此）
+    builder.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
 
     // budget_check → llm (预算充足，直接走 LLM)
     let budget_clone = budget.clone();

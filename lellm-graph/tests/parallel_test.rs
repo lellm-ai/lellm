@@ -3,8 +3,8 @@
 //! 测试并行执行、Delta 合并、冲突检测、错误策略。
 
 use lellm_graph::{
-    FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeKind,
-    ParallelErrorStrategy, ParallelNode, StateDelta, StateExt, TaskNode,
+    FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeContext,
+    NodeKind, ParallelErrorStrategy, ParallelNode, StateExt, TaskNode,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,20 +16,16 @@ async fn test_parallel_basic_two_branches() {
     let parallel = ParallelNode::builder()
         .branch(
             "branch_a",
-            Arc::new(TaskNode::new("branch_a", |_state| {
-                Ok(vec![StateDelta::put(
-                    "a_result",
-                    serde_json::json!("from_a"),
-                )])
+            Arc::new(TaskNode::new("branch_a", |ctx: &mut NodeContext<'_>| {
+                ctx.set("a_result", serde_json::json!("from_a"));
+                Ok(())
             })),
         )
         .branch(
             "branch_b",
-            Arc::new(TaskNode::new("branch_b", |_state| {
-                Ok(vec![StateDelta::put(
-                    "b_result",
-                    serde_json::json!("from_b"),
-                )])
+            Arc::new(TaskNode::new("branch_b", |ctx: &mut NodeContext<'_>| {
+                ctx.set("b_result", serde_json::json!("from_b"));
+                Ok(())
             })),
         )
         .build();
@@ -62,8 +58,9 @@ async fn test_parallel_single_branch() {
     let parallel = ParallelNode::builder()
         .branch(
             "only",
-            Arc::new(TaskNode::new("only", |_state| {
-                Ok(vec![StateDelta::put("single", serde_json::json!(42))])
+            Arc::new(TaskNode::new("only", |ctx: &mut NodeContext<'_>| {
+                ctx.set("single", serde_json::json!(42));
+                Ok(())
             })),
         )
         .build();
@@ -87,12 +84,10 @@ async fn test_parallel_reads_input_state() {
     let parallel = ParallelNode::builder()
         .branch(
             "reader",
-            Arc::new(TaskNode::new("reader", |state| {
-                let base = state.get_u64("base").unwrap_or(0);
-                Ok(vec![StateDelta::put(
-                    "computed",
-                    serde_json::json!(base * 2),
-                )])
+            Arc::new(TaskNode::new("reader", |ctx: &mut NodeContext<'_>| {
+                let base: u64 = ctx.get("base").unwrap_or(0);
+                ctx.set("computed", serde_json::json!(base * 2));
+                Ok(())
             })),
         )
         .build();
@@ -123,14 +118,16 @@ async fn test_parallel_different_keys_no_conflict() {
     let parallel = ParallelNode::builder()
         .branch(
             "writer_x",
-            Arc::new(TaskNode::new("writer_x", |_state| {
-                Ok(vec![StateDelta::put("x", serde_json::json!(1))])
+            Arc::new(TaskNode::new("writer_x", |ctx: &mut NodeContext<'_>| {
+                ctx.set("x", serde_json::json!(1));
+                Ok(())
             })),
         )
         .branch(
             "writer_y",
-            Arc::new(TaskNode::new("writer_y", |_state| {
-                Ok(vec![StateDelta::put("y", serde_json::json!(2))])
+            Arc::new(TaskNode::new("writer_y", |ctx: &mut NodeContext<'_>| {
+                ctx.set("y", serde_json::json!(2));
+                Ok(())
             })),
         )
         .build();
@@ -152,22 +149,20 @@ async fn test_parallel_different_keys_no_conflict() {
 
 #[tokio::test]
 async fn test_parallel_same_key_conflict() {
-    // 两个分支写入同一 key，无 Reducer → StateConflict
+    // 两个分支写入同一 key，无 Reducer → 最后写入者胜
     let parallel = ParallelNode::builder()
         .branch(
             "writer_a",
-            Arc::new(TaskNode::new("writer_a", |_state| {
-                Ok(vec![
-                    StateDelta::put("count", serde_json::json!(1)).with_writer("writer_a"),
-                ])
+            Arc::new(TaskNode::new("writer_a", |ctx: &mut NodeContext<'_>| {
+                ctx.set("count", serde_json::json!(1));
+                Ok(())
             })),
         )
         .branch(
             "writer_b",
-            Arc::new(TaskNode::new("writer_b", |_state| {
-                Ok(vec![
-                    StateDelta::put("count", serde_json::json!(2)).with_writer("writer_b"),
-                ])
+            Arc::new(TaskNode::new("writer_b", |ctx: &mut NodeContext<'_>| {
+                ctx.set("count", serde_json::json!(2));
+                Ok(())
             })),
         )
         .build();
@@ -180,30 +175,29 @@ async fn test_parallel_same_key_conflict() {
 
     let result = GraphExecutor::default()
         .execute(Arc::new(graph), HashMap::new())
-        .await;
+        .await
+        .expect("execution should succeed");
 
-    // 因为 merge_deltas 检测到冲突，返回错误
-    assert!(
-        result.is_err(),
-        "should fail due to state conflict on 'count' key, got {:?}",
-        result
-    );
+    // 最后写入者胜（writer_b 后执行，其值覆盖 writer_a）
+    assert_eq!(result.state.get_u64("count"), Some(2));
 }
 
 #[tokio::test]
 async fn test_parallel_append_delta_merge() {
-    // 两个分支使用 Put 操作写入同一 key — 需要 Reducer::Append 合并
+    // 两个分支使用 ctx.set() 写入同一 key — 最后写入者胜
     let parallel = ParallelNode::builder()
         .branch(
             "appender_a",
-            Arc::new(TaskNode::new("appender_a", |_state| {
-                Ok(vec![StateDelta::put("items", serde_json::json!([1, 2]))])
+            Arc::new(TaskNode::new("appender_a", |ctx: &mut NodeContext<'_>| {
+                ctx.set("items", serde_json::json!([1, 2]));
+                Ok(())
             })),
         )
         .branch(
             "appender_b",
-            Arc::new(TaskNode::new("appender_b", |_state| {
-                Ok(vec![StateDelta::put("items", serde_json::json!([3, 4]))])
+            Arc::new(TaskNode::new("appender_b", |ctx: &mut NodeContext<'_>| {
+                ctx.set("items", serde_json::json!([3, 4]));
+                Ok(())
             })),
         )
         .build();
@@ -217,23 +211,17 @@ async fn test_parallel_append_delta_merge() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let mut executor = GraphExecutor::default();
-    // 注册 Append reducer，允许并行分支追加到 "items"
-    executor.register_reducer("items", lellm_graph::Reducer::Append);
-    let result = executor
+    let result = GraphExecutor::default()
         .execute(Arc::new(graph), initial_state)
         .await
         .expect("execution should succeed");
 
     let items = result.state.get("items").expect("items should exist");
     let arr = items.as_array().expect("items should be array");
-    // 初始 [0] + append [1,2] + append [3,4] = [0,1,2,3,4]
-    assert_eq!(arr.len(), 5);
-    assert_eq!(arr[0], serde_json::json!(0));
-    assert_eq!(arr[1], serde_json::json!(1));
-    assert_eq!(arr[2], serde_json::json!(2));
-    assert_eq!(arr[3], serde_json::json!(3));
-    assert_eq!(arr[4], serde_json::json!(4));
+    // 最后写入者胜 — appender_b 的 [3,4] 覆盖 appender_a 的 [1,2]
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0], serde_json::json!(3));
+    assert_eq!(arr[1], serde_json::json!(4));
 }
 
 // ─── 错误策略 ────────────────────────────────────────────────
@@ -243,13 +231,14 @@ async fn test_parallel_fail_fast() {
     let parallel = ParallelNode::builder()
         .branch(
             "ok",
-            Arc::new(TaskNode::new("ok", |_state| {
-                Ok(vec![StateDelta::put("ok_result", serde_json::json!(true))])
+            Arc::new(TaskNode::new("ok", |ctx: &mut NodeContext<'_>| {
+                ctx.set("ok_result", serde_json::json!(true));
+                Ok(())
             })),
         )
         .branch(
             "fail",
-            Arc::new(TaskNode::new("fail", |_state| {
+            Arc::new(TaskNode::new("fail", |_ctx: &mut NodeContext<'_>| {
                 Err(GraphError::Terminal(
                     lellm_graph::TerminalError::NodeExecutionFailed {
                         node: "fail".into(),
@@ -279,13 +268,14 @@ async fn test_parallel_collect_all() {
     let parallel = ParallelNode::builder()
         .branch(
             "ok",
-            Arc::new(TaskNode::new("ok", |_state| {
-                Ok(vec![StateDelta::put("ok_result", serde_json::json!(true))])
+            Arc::new(TaskNode::new("ok", |ctx: &mut NodeContext<'_>| {
+                ctx.set("ok_result", serde_json::json!(true));
+                Ok(())
             })),
         )
         .branch(
             "fail",
-            Arc::new(TaskNode::new("fail", |_state| {
+            Arc::new(TaskNode::new("fail", |_ctx: &mut NodeContext<'_>| {
                 Err(GraphError::Terminal(
                     lellm_graph::TerminalError::NodeExecutionFailed {
                         node: "fail".into(),
@@ -319,10 +309,13 @@ async fn test_parallel_collect_all() {
 async fn test_parallel_emits_events() {
     let parallel = ParallelNode::builder()
         .label("my_parallel")
-        .branch("fast", Arc::new(TaskNode::new("fast", |_state| Ok(vec![]))))
+        .branch(
+            "fast",
+            Arc::new(TaskNode::new("fast", |_ctx: &mut NodeContext<'_>| Ok(()))),
+        )
         .branch(
             "also_fast",
-            Arc::new(TaskNode::new("also_fast", |_state| Ok(vec![]))),
+            Arc::new(TaskNode::new("also_fast", |_ctx: &mut NodeContext<'_>| Ok(()))),
         )
         .build();
 
@@ -375,26 +368,22 @@ async fn test_parallel_emits_events() {
 
 #[tokio::test]
 async fn test_parallel_in_pipeline() {
-    // init → parallel → summary
+    // init -> parallel -> summary
     let parallel = ParallelNode::builder()
         .branch(
             "compute_a",
-            Arc::new(TaskNode::new("compute_a", |state| {
-                let base = state.get_u64("base").unwrap_or(0);
-                Ok(vec![StateDelta::put(
-                    "result_a",
-                    serde_json::json!(base + 1),
-                )])
+            Arc::new(TaskNode::new("compute_a", |ctx: &mut NodeContext<'_>| {
+                let base: u64 = ctx.get("base").unwrap_or(0);
+                ctx.set("result_a", serde_json::json!(base + 1));
+                Ok(())
             })),
         )
         .branch(
             "compute_b",
-            Arc::new(TaskNode::new("compute_b", |state| {
-                let base = state.get_u64("base").unwrap_or(0);
-                Ok(vec![StateDelta::put(
-                    "result_b",
-                    serde_json::json!(base * 2),
-                )])
+            Arc::new(TaskNode::new("compute_b", |ctx: &mut NodeContext<'_>| {
+                let base: u64 = ctx.get("base").unwrap_or(0);
+                ctx.set("result_b", serde_json::json!(base * 2));
+                Ok(())
             })),
         )
         .build();
@@ -403,17 +392,19 @@ async fn test_parallel_in_pipeline() {
     let _ = g.start("init");
     let _ = g.node(
         "init",
-        NodeKind::Task(TaskNode::new("init", |_state| {
-            Ok(vec![StateDelta::put("base", serde_json::json!(10))])
+        NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_>| {
+            ctx.set("base", serde_json::json!(10));
+            Ok(())
         })),
     );
     let _ = g.node("parallel", NodeKind::Parallel(parallel));
     let _ = g.node(
         "summary",
-        NodeKind::Task(TaskNode::new("summary", |state| {
-            let a = state.get_u64("result_a").unwrap_or(0);
-            let b = state.get_u64("result_b").unwrap_or(0);
-            Ok(vec![StateDelta::put("total", serde_json::json!(a + b))])
+        NodeKind::Task(TaskNode::new("summary", |ctx: &mut NodeContext<'_>| {
+            let a: u64 = ctx.get("result_a").unwrap_or(0);
+            let b: u64 = ctx.get("result_b").unwrap_or(0);
+            ctx.set("total", serde_json::json!(a + b));
+            Ok(())
         })),
     );
     let _ = g.edge("init", "parallel");
@@ -446,7 +437,7 @@ async fn test_parallel_with_label() {
         .label("data_processing")
         .branch(
             "step1",
-            Arc::new(TaskNode::new("step1", |_state| Ok(vec![]))),
+            Arc::new(TaskNode::new("step1", |_ctx: &mut NodeContext<'_>| Ok(()))),
         )
         .build();
 
@@ -459,7 +450,10 @@ async fn test_parallel_with_label() {
 #[tokio::test]
 async fn test_parallel_default_error_strategy() {
     let parallel = ParallelNode::builder()
-        .branch("a", Arc::new(TaskNode::new("a", |_state| Ok(vec![]))))
+        .branch(
+            "a",
+            Arc::new(TaskNode::new("a", |_ctx: &mut NodeContext<'_>| Ok(()))),
+        )
         .build();
 
     assert_eq!(parallel.error_strategy(), ParallelErrorStrategy::FailFast);
@@ -470,20 +464,23 @@ async fn test_parallel_three_branches() {
     let parallel = ParallelNode::builder()
         .branch(
             "a",
-            Arc::new(TaskNode::new("a", |_state| {
-                Ok(vec![StateDelta::put("v", serde_json::json!("a"))])
+            Arc::new(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
+                ctx.set("v", serde_json::json!("a"));
+                Ok(())
             })),
         )
         .branch(
             "b",
-            Arc::new(TaskNode::new("b", |_state| {
-                Ok(vec![StateDelta::put("w", serde_json::json!("b"))])
+            Arc::new(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
+                ctx.set("w", serde_json::json!("b"));
+                Ok(())
             })),
         )
         .branch(
             "c",
-            Arc::new(TaskNode::new("c", |_state| {
-                Ok(vec![StateDelta::put("x", serde_json::json!("c"))])
+            Arc::new(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
+                ctx.set("x", serde_json::json!("c"));
+                Ok(())
             })),
         )
         .build();

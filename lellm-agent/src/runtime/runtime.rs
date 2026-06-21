@@ -378,7 +378,14 @@ impl ToolUseLoop {
             }
         })?;
 
-        // 从 Typed State 提取结果
+        // 从动态 State 提取结果（run_inline 路径下，AgentState 未被 Effect 更新，
+        // 但 emit_and_set bridge 已将关键值写入动态 State）
+        let iterations: usize = ctx.get(super::react::SK_ITERATIONS).unwrap_or(0);
+        let total_tool_calls: usize = ctx.get(super::react::SK_TOTAL_TOOL_CALLS).unwrap_or(0);
+        let output_tokens: usize = ctx.get(super::react::SK_OUTPUT_TOKENS).unwrap_or(0);
+        let reasoning_tokens: usize = ctx.get(super::react::SK_REASONING_TOKENS).unwrap_or(0);
+
+        // 从 Typed State 提取消息和响应
         let agent_state: super::typed_state::AgentState = ctx
             .get_state(super::typed_state::AGENT_STATE_KEY)
             .unwrap_or_default();
@@ -390,8 +397,8 @@ impl ToolUseLoop {
             stop_reason,
             response: last_response,
             messages: agent_state.messages,
-            iterations: agent_state.iterations,
-            tool_calls_executed: agent_state.total_tool_calls,
+            iterations,
+            tool_calls_executed: total_tool_calls,
         })
     }
 

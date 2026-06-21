@@ -77,6 +77,24 @@ impl AgentState {
         }
     }
 
+    /// 检查加上额外 Token 后是否超过总输出预算。
+    ///
+    /// 用于 Effect 未 apply 时的预判（节点 emit Effect 之前）。
+    pub fn exceeded_output_with_extra(&self, max: Option<u32>, extra: usize) -> bool {
+        match max {
+            Some(limit) => self.output_tokens + extra >= limit as usize,
+            None => false,
+        }
+    }
+
+    /// 检查加上额外 Token 后是否超过总推理预算。
+    pub fn exceeded_reasoning_with_extra(&self, max: Option<u32>, extra: usize) -> bool {
+        match max {
+            Some(limit) => self.reasoning_tokens + extra >= limit as usize,
+            None => false,
+        }
+    }
+
     /// 检查是否已终止（有 stop_reason）。
     pub fn is_terminal(&self) -> bool {
         self.stop_reason.is_some()
@@ -94,7 +112,7 @@ impl AgentState {
 ///
 /// 节点通过发射 Effect 来变更状态，而非直接修改 `AgentState` 字段。
 /// Effect 是可序列化的、自包含的、不可变的。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AgentEffect {
     /// 追加一条消息到历史
     AppendMessage(Message),
@@ -188,5 +206,14 @@ impl AgentState {
     /// 从 serde_json::Value 反序列化（从 NodeContext 读取时使用）。
     pub fn from_value(v: serde_json::Value) -> Option<Self> {
         serde_json::from_value(v).ok()
+    }
+
+    /// 从 serde_json::Value 反序列化 AgentEffect 并应用到状态。
+    ///
+    /// 供 Effect 循环使用：consume_effects → apply_from_value。
+    pub fn apply_from_value(&mut self, v: serde_json::Value) -> Result<(), lellm_graph::WorkflowError> {
+        let effect = serde_json::from_value(v).map_err(|e| lellm_graph::WorkflowError::ApplyFailed(e.to_string()))?;
+        self.apply(effect);
+        Ok(())
     }
 }
