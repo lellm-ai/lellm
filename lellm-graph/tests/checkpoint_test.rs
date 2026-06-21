@@ -4,7 +4,7 @@
 
 use lellm_graph::{
     BarrierDecision, CheckpointPolicy, CheckpointStore, CheckpointTrigger, GraphBuilder,
-    GraphExecutor, InMemoryCheckpointStore, NodeContext, NodeKind, State, TaskNode,
+    GraphExecutor, InMemoryCheckpointStore, NodeContext, NodeKind, State, StateEffect, TaskNode,
 };
 use std::sync::Arc;
 
@@ -19,22 +19,22 @@ fn build_simple_graph() -> Arc<lellm_graph::Graph> {
     g.node(
         "a",
         NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-            ctx.set("step", 1u32);
+            ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!(1u32)));
             Ok(())
         })),
     );
     g.node(
         "b",
         NodeKind::Task(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
-            ctx.set("step", 2u32);
-            ctx.set("done", true);
+            ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!(2u32)));
+            ctx.emit_effect(StateEffect::Put("done".into(), serde_json::json!(true)));
             Ok(())
         })),
     );
     g.node(
         "c",
         NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-            ctx.set("final", true);
+            ctx.emit_effect(StateEffect::Put("final".into(), serde_json::json!(true)));
             Ok(())
         })),
     );
@@ -135,7 +135,7 @@ async fn test_checkpoint_barrier_resolved() {
     g.node(
         "a",
         NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-            ctx.set("step", 1u32);
+            ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!(1u32)));
             Ok(())
         })),
     );
@@ -143,7 +143,7 @@ async fn test_checkpoint_barrier_resolved() {
     g.node(
         "c",
         NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-            ctx.set("final", true);
+            ctx.emit_effect(StateEffect::Put("final".into(), serde_json::json!(true)));
             Ok(())
         })),
     );

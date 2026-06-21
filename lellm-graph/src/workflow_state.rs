@@ -16,7 +16,7 @@
 ///
 /// Effect 是不可变的、可序列化的、自包含的。
 /// 状态通过 `apply(effect)` 变更，而非直接修改。
-pub trait Effect: Sized {
+pub trait Effect: Sized + serde::Serialize + serde::de::DeserializeOwned {
     /// 将此 Effect 合并到另一个同类型 Effect 中（可选）。
     ///
     /// 用于批量场景：多个 Effect 合并为一个，减少 apply 次数。
@@ -87,6 +87,14 @@ pub trait WorkflowState: Clone + Send + Sync {
     /// `self` 是左侧分支，`other` 是右侧分支。
     /// 返回合并后的状态，或合并冲突错误。
     fn merge(self, other: Self) -> Result<Self, WorkflowError>;
+
+    /// 应用一个 BranchState 变更记录到状态（backward compat）。
+    ///
+    /// 默认实现：no-op（纯 Effect 驱动的状态不需要此方法）。
+    /// `State`（HashMap wrapper）覆盖此方法，将 ChangeRecord 转换为 StateEffect。
+    fn apply_branch_change(&mut self, _change: &crate::branch_state::ChangeRecord) {
+        // no-op — pure effect-driven states don't use BranchState changes
+    }
 
     /// 创建默认/初始状态。
     fn initial() -> Self

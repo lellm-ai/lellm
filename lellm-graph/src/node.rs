@@ -1,22 +1,22 @@
 //! 节点核心类型与模块。
 //!
-//! - `FlowNode` trait — trait-based 节点，Graph 不知道具体节点类型
-//! - `NextStep` 枚举，`StreamNodeResult` 枚举
-//! - `NodeKind` 节点类型枚举（Task, Condition, Barrier）
-//! - `TaskNode`, `ConditionNode`
+//! - `FlowNode<S>` trait — trait-based 节点，Graph 不知道具体节点类型
+//! - `NextAction` 枚举（v04 统一）
+//! - `NodeKind<S>` 节点类型枚举（Task, Condition, Barrier, Parallel, External）
+//! - `TaskNode<S>`, `ConditionNode<S>`
 //!
-//! AgentNode → AgentFlowNode（由 lellm-agent 提供，实现 FlowNode trait）
+//! v0.4+: 所有节点类型泛型化 `S: WorkflowState`，默认 `S = State`（向后兼容）。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::delta::StateDelta;
 use crate::error::{GraphError, ObservedError};
 use crate::event::BarrierId;
 use crate::ids::SpanId;
 use crate::node_context::NodeContext;
 use crate::state::State;
+use crate::workflow_state::WorkflowState;
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
@@ -38,29 +38,18 @@ pub enum NextStep {
 
 /// 节点执行输出 — 修改意图 + 下一步。
 ///
-/// 节点不再直接修改 State（`&mut State`），而是输出 `Vec<StateDelta>`。
-/// Executor 收集所有 Delta 后统一 apply 到 State。
+/// @deprecated v0.4+ 使用 NodeContext 替代。保留向后兼容。
 #[derive(Debug)]
 pub struct NodeOutput {
     /// 状态增量（节点对 State 的修改意图）
-    pub deltas: Vec<StateDelta>,
+    pub deltas: Vec<crate::delta::StateDelta>,
     /// 下一步路由
     pub next: NextStep,
-    /// 节点元数据（可选 — 用于 Adaptive Checkpoint 等）
-    pub metadata: Option<NodeMetadata>,
-}
-
-/// 节点执行元数据 — 提供给 Executor 的额外信息。
-#[derive(Debug, Clone, Default)]
-pub struct NodeMetadata {
-    /// Token 消耗成本（0.0 表示无 LLM 调用）
-    pub token_cost: f64,
-    /// 是否有外部副作用（如部署、发送消息）
-    pub has_side_effects: bool,
+    /// 节点元数据（可选）
+    pub metadata: Option<crate::node_context::NodeMetadata>,
 }
 
 impl NodeOutput {
-    /// 创建无 Delta 的输出。
     pub fn new(next: NextStep) -> Self {
         Self {
             deltas: Vec::new(),
@@ -69,25 +58,21 @@ impl NodeOutput {
         }
     }
 
-    /// 追加一个 Delta。
-    pub fn with_delta(mut self, delta: StateDelta) -> Self {
+    pub fn with_delta(mut self, delta: crate::delta::StateDelta) -> Self {
         self.deltas.push(delta);
         self
     }
 
-    /// 追加多个 Delta。
-    pub fn with_deltas(mut self, deltas: Vec<StateDelta>) -> Self {
+    pub fn with_deltas(mut self, deltas: Vec<crate::delta::StateDelta>) -> Self {
         self.deltas.extend(deltas);
         self
     }
 
-    /// 设置节点元数据。
-    pub fn with_metadata(mut self, metadata: NodeMetadata) -> Self {
+    pub fn with_metadata(mut self, metadata: crate::node_context::NodeMetadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// 设置 token 成本。
     pub fn with_token_cost(mut self, cost: f64) -> Self {
         self.metadata
             .get_or_insert_with(Default::default)
@@ -95,7 +80,6 @@ impl NodeOutput {
         self
     }
 
-    /// 标记有副作用。
     pub fn with_side_effects(mut self) -> Self {
         self.metadata
             .get_or_insert_with(Default::default)
@@ -104,47 +88,32 @@ impl NodeOutput {
     }
 }
 
+/// 节点执行元数据。
+pub use crate::node_context::NodeMetadata;
+
 /// 节点流式执行结果。
+///
+/// @deprecated v0.4+ 使用 NodeContext 替代。保留向后兼容。
 #[derive(Debug)]
 pub enum StreamNodeResult {
-    /// 节点正常完成（统一 Done + Observed）
     Continue {
-        /// 状态增量
-        deltas: Vec<StateDelta>,
-        /// 下一步
+        deltas: Vec<crate::delta::StateDelta>,
         next: NextStep,
-        /// 执行实例 ID
         span_id: SpanId,
-        /// 可选的观测错误（不影响 control flow）
         observed: Option<ObservedError>,
-        /// 节点元数据（可选 — 用于 Adaptive Checkpoint 等）
         metadata: Option<NodeMetadata>,
     },
-    /// Barrier 暂停，等待外部决策
     Pause {
-        /// 状态增量（Barrier 进入等待前的修改）
-        deltas: Vec<StateDelta>,
-        /// Barrier 审批请求 ID
+        deltas: Vec<crate::delta::StateDelta>,
         barrier_id: BarrierId,
-        /// 节点名称
         node_name: String,
-        /// 执行实例 ID
         span_id: SpanId,
-        /// 超时时间（None = 无限等待）
         timeout: Option<std::time::Duration>,
-        /// 超时默认行为
         default_action: BarrierDefaultAction,
     },
-    /// 节点主动声明走备用路径（控制流，非错误）。
-    ///
-    /// 与 `GraphError::Terminal` 不同：Fallback 是节点主动声明的降级策略，
-    /// executor 根据 fallback 边路由到备用节点。
     Fallback {
-        /// 状态增量（Fallback 前的修改）
-        deltas: Vec<StateDelta>,
-        /// 降级原因
+        deltas: Vec<crate::delta::StateDelta>,
         reason: String,
-        /// 节点名称
         node_name: String,
     },
 }
@@ -154,62 +123,56 @@ pub enum StreamNodeResult {
 /// v04 节点执行 trait — Context 驱动一切。
 ///
 /// 统一原则 — 节点不返回业务数据，只返回 `Result<(), GraphError>`：
-/// - State      → ctx.set() / ctx.append() / ctx.increment()
+/// - State      → ctx.state() / ctx.state_mut()
+/// - Effects    → ctx.emit_effect()
 /// - Stream     → ctx.emit()
 /// - Metadata   → ctx.set_token_cost()
 /// - Control    → ctx.goto() / ctx.end() / ctx.pause()
+///
+/// # 泛型参数
+///
+/// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[async_trait]
-pub trait FlowNode: Send + Sync {
+pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
     /// 执行节点逻辑。
-    ///
-    /// - `ctx` — 节点上下文，包含 State、StreamEmitter、控制信号
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError>;
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError>;
 }
 
 /// 节点类型枚举。
 ///
-/// 只包含 Graph 内置节点类型。Agent/LLM/Tool 节点由外部 crate 提供。
+/// # 泛型参数
 ///
-/// 注意：External 使用 Arc 以支持 Clone（Graph 需要 Clone 来构建）。
+/// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[derive(Clone)]
-pub enum NodeKind {
+pub enum NodeKind<S: WorkflowState = State> {
     /// 自定义逻辑
-    Task(TaskNode),
+    Task(TaskNode<S>),
     /// 条件分支
-    Condition(ConditionNode),
-    /// Human-in-the-loop 审批屏障（仅流式模式）
-    Barrier(BarrierNode),
-    /// 并行执行多个分支，合并 StateDelta
-    Parallel(ParallelNode),
+    Condition(ConditionNode<S>),
+    /// Human-in-the-loop 审批屏障
+    Barrier(BarrierNode<S>),
+    /// 并行执行多个分支
+    Parallel(ParallelNode<S>),
     /// 外部节点（由 lellm-agent 等 crate 提供）
-    ///
-    /// 使用 `Arc<dyn FlowNode>` 让 Graph 不知道具体节点类型，同时支持 Clone。
-    External(std::sync::Arc<dyn FlowNode>),
+    External(Arc<dyn FlowNode<S>>),
 }
 
 // ─── TaskNode ────────────────────────────────────────────────
 
 /// Task 节点回调类型别名。
-///
-/// 闭包接收 NodeContext，返回 `()` 作为修改意图。
-/// Arc 包装以支持 Clone。
-pub type TaskFn = Arc<dyn Fn(&mut NodeContext<'_>) -> Result<(), GraphError> + Send + Sync>;
-
-/// 条件分支回调类型别名。
-/// Arc 包装以支持 Clone。
-pub type BranchCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
+pub type TaskFn<S> = Arc<dyn Fn(&mut NodeContext<'_, S>) -> Result<(), GraphError> + Send + Sync>;
 
 /// 自定义逻辑节点。
 #[derive(Clone)]
-pub struct TaskNode {
+pub struct TaskNode<S: WorkflowState = State> {
     pub name: String,
-    pub func: TaskFn,
+    pub func: TaskFn<S>,
 }
 
-impl TaskNode {
+impl<S: WorkflowState> TaskNode<S> {
     pub fn new(
         name: impl Into<String>,
-        func: impl Fn(&mut NodeContext<'_>) -> Result<(), GraphError> + Send + Sync + 'static,
+        func: impl Fn(&mut NodeContext<'_, S>) -> Result<(), GraphError> + Send + Sync + 'static,
     ) -> Self {
         Self {
             name: name.into(),
@@ -219,26 +182,26 @@ impl TaskNode {
 }
 
 #[async_trait]
-impl FlowNode for TaskNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+impl<S: WorkflowState> FlowNode<S> for TaskNode<S> {
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
         (self.func)(ctx)
     }
 }
 
 // ─── ConditionNode ───────────────────────────────────────────
 
+/// 条件分支回调类型别名。
+pub type BranchCondition<S> = Arc<dyn Fn(&S) -> bool + Send + Sync>;
+
 /// 条件分支节点。
-///
-/// 按声明顺序求值分支条件，返回第一个匹配分支的 `NextStep::Goto(target)`。
-/// 无匹配时返回 `NextStep::GoToNext`，由 Graph 层的 `edge_fallback` 处理兜底路由。
 #[derive(Clone)]
-pub struct ConditionNode {
+pub struct ConditionNode<S: WorkflowState = State> {
     pub name: String,
-    pub branches: Vec<(String, BranchCondition)>,
+    pub branches: Vec<(String, BranchCondition<S>)>,
 }
 
-impl ConditionNode {
-    pub fn builder(name: impl Into<String>) -> ConditionNodeBuilder {
+impl<S: WorkflowState> ConditionNode<S> {
+    pub fn builder(name: impl Into<String>) -> ConditionNodeBuilder<S> {
         ConditionNodeBuilder {
             name: name.into(),
             branches: Vec::new(),
@@ -247,22 +210,22 @@ impl ConditionNode {
 }
 
 /// ConditionNode 构建器。
-pub struct ConditionNodeBuilder {
+pub struct ConditionNodeBuilder<S: WorkflowState = State> {
     name: String,
-    branches: Vec<(String, BranchCondition)>,
+    branches: Vec<(String, BranchCondition<S>)>,
 }
 
-impl ConditionNodeBuilder {
+impl<S: WorkflowState> ConditionNodeBuilder<S> {
     pub fn branch(
         mut self,
         target: impl Into<String>,
-        condition: impl Fn(&State) -> bool + Send + Sync + 'static,
+        condition: impl Fn(&S) -> bool + Send + Sync + 'static,
     ) -> Self {
         self.branches.push((target.into(), Arc::new(condition)));
         self
     }
 
-    pub fn build(self) -> ConditionNode {
+    pub fn build(self) -> ConditionNode<S> {
         ConditionNode {
             name: self.name,
             branches: self.branches,
@@ -271,17 +234,15 @@ impl ConditionNodeBuilder {
 }
 
 #[async_trait]
-impl FlowNode for ConditionNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        // 条件边需要完整状态快照来判断
-        let state = ctx.state().to_state();
+impl<S: WorkflowState> FlowNode<S> for ConditionNode<S> {
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
+        let state = ctx.state();
         for (target, condition) in &self.branches {
-            if condition(&state) {
+            if condition(state) {
                 ctx.goto(target);
                 return Ok(());
             }
         }
-        // 无匹配 → GoToNext，由 Graph 层 edge_fallback 处理兜底
         Ok(())
     }
 }
@@ -289,8 +250,8 @@ impl FlowNode for ConditionNode {
 // ─── NodeKind FlowNode impl ──────────────────────────────────
 
 #[async_trait]
-impl FlowNode for NodeKind {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+impl<S: WorkflowState> FlowNode<S> for NodeKind<S> {
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
         match self {
             Self::Task(n) => n.execute(ctx).await,
             Self::Condition(n) => n.execute(ctx).await,
@@ -304,6 +265,4 @@ impl FlowNode for NodeKind {
 // ─── Backward Compatibility Alias ─────────────────────────────
 
 /// 向后兼容别名 — `GraphNode` → `FlowNode`。
-///
-/// v0.2 代码使用 `GraphNode`，v0.3 统一为 `FlowNode`。
-pub type GraphNode = dyn FlowNode;
+pub type GraphNode<S> = dyn FlowNode<S>;

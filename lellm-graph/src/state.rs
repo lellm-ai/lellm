@@ -1,16 +1,122 @@
 //! State 和执行结果。
 //!
 //! 包含 Graph 共享状态的核心类型（从 lellm-runtime 合并）和 Graph 特有的执行结果类型。
+//!
+//! v0.4+: `State` 从 type alias 改为 struct wrapper，以便实现 `WorkflowState` trait。
+//! 通过 `Deref`/`DerefMut` 保持对 `HashMap<String, Value>` 的完全兼容。
 
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 // ─── State 类型 ─────────────────────────────────────────────────
 
-/// Graph 共享状态。
-pub type State = HashMap<String, Value>;
+/// Graph 共享状态 — struct wrapper，支持 `WorkflowState` trait。
+///
+/// 通过 `Deref`/`DerefMut` 完全兼容 `HashMap<String, Value>` API。
+/// 所有现有代码无需修改。
+#[derive(Debug, Clone, Default)]
+pub struct State {
+    inner: HashMap<String, Value>,
+}
+
+/// 手动实现 Serialize/Deserialize — 序列化底层 HashMap，保持兼容。
+impl serde::Serialize for State {
+    fn serialize<SER: serde::Serializer>(&self, serializer: SER) -> Result<SER::Ok, SER::Error> {
+        self.inner.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for State {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = HashMap::deserialize(deserializer)?;
+        Ok(State { inner: map })
+    }
+}
+
+impl State {
+    /// 创建空状态。
+    pub fn new() -> Self {
+        Self {
+            inner: HashMap::new(),
+        }
+    }
+}
+
+impl Deref for State {
+    type Target = HashMap<String, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for State {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl From<HashMap<String, Value>> for State {
+    fn from(map: HashMap<String, Value>) -> Self {
+        Self { inner: map }
+    }
+}
+
+impl From<State> for HashMap<String, Value> {
+    fn from(state: State) -> Self {
+        state.inner
+    }
+}
+
+// ─── WorkflowState for State ────────────────────────────────────
+
+/// State 的 Effect — HashMap 级别的变更。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum StateEffect {
+    /// 设置 key-value
+    Put(String, Value),
+    /// 删除 key
+    Delete(String),
+}
+
+impl crate::workflow_state::Effect for StateEffect {}
+
+impl crate::workflow_state::WorkflowState for State {
+    type Effect = StateEffect;
+
+    fn apply(&mut self, effect: Self::Effect) {
+        match effect {
+            StateEffect::Put(key, value) => {
+                self.inner.insert(key, value);
+            }
+            StateEffect::Delete(key) => {
+                self.inner.remove(&key);
+            }
+        }
+    }
+
+    fn merge(self, other: Self) -> Result<Self, crate::workflow_state::WorkflowError> {
+        let mut merged = self.inner;
+        for (key, value) in other.inner {
+            merged.insert(key, value);
+        }
+        Ok(State { inner: merged })
+    }
+
+    fn apply_branch_change(&mut self, change: &crate::branch_state::ChangeRecord) {
+        match change.operation {
+            crate::branch_state::ChangeOperation::Put => {
+                self.inner.insert(change.key.clone(), change.value.clone());
+            }
+            crate::branch_state::ChangeOperation::Delete => {
+                self.inner.remove(&change.key);
+            }
+        }
+    }
+}
 
 // ─── StateError ─────────────────────────────────────────────────
 
@@ -42,7 +148,7 @@ pub enum StateError {
 
 /// State 扩展方法 trait。
 ///
-/// 为 `State`（`HashMap<String, Value>`）提供类型安全的读写方法。
+/// 为 `State` 提供类型安全的读写方法。
 pub trait StateExt {
     fn get_str(&self, key: &str) -> Option<&str>;
     fn get_bool(&self, key: &str) -> Option<bool>;
@@ -77,23 +183,23 @@ pub trait StateExt {
 
 impl StateExt for State {
     fn get_str(&self, key: &str) -> Option<&str> {
-        self.get(key).and_then(|v| v.as_str())
+        self.inner.get(key).and_then(|v| v.as_str())
     }
 
     fn get_bool(&self, key: &str) -> Option<bool> {
-        self.get(key).and_then(|v| v.as_bool())
+        self.inner.get(key).and_then(|v| v.as_bool())
     }
 
     fn get_u64(&self, key: &str) -> Option<u64> {
-        self.get(key).and_then(|v| v.as_u64())
+        self.inner.get(key).and_then(|v| v.as_u64())
     }
 
     fn get_i64(&self, key: &str) -> Option<i64> {
-        self.get(key).and_then(|v| v.as_i64())
+        self.inner.get(key).and_then(|v| v.as_i64())
     }
 
     fn get_f64(&self, key: &str) -> Option<f64> {
-        self.get(key).and_then(|v| v.as_f64())
+        self.inner.get(key).and_then(|v| v.as_f64())
     }
 
     fn get_json<T>(&self, key: &str) -> Result<T, StateError>
@@ -101,6 +207,7 @@ impl StateExt for State {
         T: serde::de::DeserializeOwned,
     {
         let value = self
+            .inner
             .get(key)
             .ok_or_else(|| StateError::MissingKey(key.to_string()))?;
         serde_json::from_value(value.clone())
@@ -126,15 +233,15 @@ impl StateExt for State {
                 serde_json::Value::Null
             }
         };
-        HashMap::insert(self, key_str, json);
+        self.inner.insert(key_str, json);
     }
 
     fn remove(&mut self, key: &str) -> Option<serde_json::Value> {
-        HashMap::remove(self, key)
+        self.inner.remove(key)
     }
 
     fn contains(&self, key: &str) -> bool {
-        self.contains_key(key)
+        self.inner.contains_key(key)
     }
 
     fn reduce(
@@ -143,26 +250,26 @@ impl StateExt for State {
         value: serde_json::Value,
         reducer: &StateReducer,
     ) -> Result<(), String> {
-        if let Some(existing) = self.get(key) {
+        if let Some(existing) = self.inner.get(key) {
             let merged = reducer(existing, &value)?;
-            self.insert(key.to_string(), merged);
+            self.inner.insert(key.to_string(), merged);
         } else {
-            self.insert(key.to_string(), value);
+            self.inner.insert(key.to_string(), value);
         }
         Ok(())
     }
 
     fn append_array(&mut self, key: &str, items: serde_json::Value) -> Result<(), String> {
         let new_items = items.as_array().ok_or("append_array expects an array")?;
-        if let Some(existing) = self.get(key) {
+        if let Some(existing) = self.inner.get(key) {
             let mut arr = existing
                 .as_array()
                 .ok_or("append_array: existing value is not an array")?
                 .clone();
             arr.extend(new_items.iter().cloned());
-            self.insert(key.to_string(), serde_json::Value::Array(arr));
+            self.inner.insert(key.to_string(), serde_json::Value::Array(arr));
         } else {
-            self.insert(key.to_string(), items);
+            self.inner.insert(key.to_string(), items);
         }
         Ok(())
     }
@@ -241,8 +348,6 @@ impl ExecutionEntry {
 /// 将 Instant 转换为 ISO-8601 时间戳字符串。
 /// 使用 UNIX_EPOCH 近似计算，不依赖 chrono。
 fn instant_to_iso(instant: &Instant) -> String {
-    // Instant 无法直接转为 SystemTime，用 epoch 秒数近似
-    // 注意：这是近似值，仅用于日志和 Checkpoint 展示
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

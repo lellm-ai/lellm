@@ -15,8 +15,8 @@
 
 use lellm_core::{ChatResponse, LlmError, Message};
 use lellm_graph::{
-    SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS, State,
-    StateKeyExt,
+    FlowNode, SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS,
+    SK_TOTAL_TOOL_CALLS, State, StateKeyExt,
 };
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
@@ -337,9 +337,11 @@ impl ToolUseLoop {
 
     /// 非流式执行
     ///
-    /// v04: 内部构建 ReAct Graph，调用 graph.run_inline() 驱动循环
-    /// v0.4+: 使用 Typed State (AgentState) 替代 HashMap
+    /// v0.4+: Effect 驱动 — 维护 AgentState 生命周期，手动驱动 ReAct 循环。
+    /// 节点只 emit_effect(AgentEffect)，循环消费 Effect → apply 到 AgentState。
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
+        use lellm_graph::NextAction;
+
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
 
         // 构建 ReAct Graph
@@ -360,35 +362,83 @@ impl ToolUseLoop {
         let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
         let max_steps = self.config.max_iterations * 2 + 1;
 
-        // 构建 NodeContext + 初始化 AgentState
-        let mut branch = lellm_graph::BranchState::empty();
-        let mut ctx = lellm_graph::NodeContext::new(&mut branch, None);
+        // 初始化 AgentState
+        let mut agent_state = super::typed_state::AgentState::from_messages(initial_messages);
 
-        // 写入初始 Typed State
-        let agent_state = super::typed_state::AgentState::from_messages(initial_messages);
-        ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state);
+        // Effect 驱动的执行循环
+        let mut current = graph.start_node().to_string();
+        let mut step: usize = 0;
 
-        // 执行 ReAct Graph
-        graph.run_inline(&mut ctx, max_steps).await.map_err(|e| {
-            lellm_core::LlmError::Provider {
-                provider: "react_graph".to_string(),
-                status: None,
-                code: None,
-                message: e.to_string(),
+        loop {
+            step += 1;
+            if step > max_steps {
+                break;
             }
-        })?;
 
-        // 从动态 State 提取结果（run_inline 路径下，AgentState 未被 Effect 更新，
-        // 但 emit_and_set bridge 已将关键值写入动态 State）
-        let iterations: usize = ctx.get(super::react::SK_ITERATIONS).unwrap_or(0);
-        let total_tool_calls: usize = ctx.get(super::react::SK_TOTAL_TOOL_CALLS).unwrap_or(0);
-        let output_tokens: usize = ctx.get(super::react::SK_OUTPUT_TOKENS).unwrap_or(0);
-        let reasoning_tokens: usize = ctx.get(super::react::SK_REASONING_TOKENS).unwrap_or(0);
+            // 创建子 NodeContext
+            let mut child_state = lellm_graph::State::new();
 
-        // 从 Typed State 提取消息和响应
-        let agent_state: super::typed_state::AgentState = ctx
-            .get_state(super::typed_state::AGENT_STATE_KEY)
-            .unwrap_or_default();
+            // 写入 AgentState 到子 State
+            child_state.insert(
+                super::typed_state::AGENT_STATE_KEY.to_string(),
+                serde_json::to_value(&agent_state).unwrap(),
+            );
+
+            let mut branch = lellm_graph::BranchState::empty();
+            let mut child_ctx =
+                lellm_graph::NodeContext::new(&mut child_state, &mut branch, None);
+
+            // 执行节点
+            let node_ref: &lellm_graph::NodeKind = graph.node_map().get(&current).ok_or_else(|| {
+                lellm_core::LlmError::Provider {
+                    provider: "react_graph".into(),
+                    status: None,
+                    code: None,
+                    message: format!("node '{}' not found", current),
+                }
+            })?;
+            node_ref.execute(&mut child_ctx).await.map_err(|e| {
+                lellm_core::LlmError::Provider {
+                    provider: "react_graph".into(),
+                    status: None,
+                    code: None,
+                    message: e.to_string(),
+                }
+            })?;
+
+            // 消费 Effect → apply 到 AgentState
+            for v in child_ctx.consume_effects() {
+                agent_state.apply_from_value(v).map_err(|e| {
+                    lellm_core::LlmError::Provider {
+                        provider: "react_graph".into(),
+                        status: None,
+                        code: None,
+                        message: e.to_string(),
+                    }
+                })?;
+            }
+
+            // 提取控制信号 + 路由
+            let (next_action, _signal) = child_ctx.take_control();
+            match next_action {
+                NextAction::End => break,
+                NextAction::Goto(target) => current = target,
+                NextAction::Next => {
+                    if current == graph.end_node() {
+                        break;
+                    }
+                    // 从 child_state 路由（边条件读取 State HashMap）
+                    current = graph.resolve_next(&current, &child_state).ok_or_else(|| {
+                        lellm_core::LlmError::Provider {
+                            provider: "react_graph".into(),
+                            status: None,
+                            code: None,
+                            message: format!("node '{}' has no outgoing edge", current),
+                        }
+                    })?;
+                }
+            }
+        }
 
         let stop_reason = agent_state.stop_reason.unwrap_or(StopReason::Complete);
         let last_response = agent_state.last_response.unwrap_or_else(empty_response);
@@ -397,8 +447,8 @@ impl ToolUseLoop {
             stop_reason,
             response: last_response,
             messages: agent_state.messages,
-            iterations,
-            tool_calls_executed: total_tool_calls,
+            iterations: agent_state.iterations,
+            tool_calls_executed: agent_state.total_tool_calls,
         })
     }
 

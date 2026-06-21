@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 
-use lellm_graph::{FlowNode, Graph, GraphError, NodeContext, TerminalError};
+use lellm_graph::{FlowNode, Graph, GraphError, NodeContext, StateEffect, TerminalError};
 
 use crate::hook::{AgentHook, AgentHookContext, AgentHookSnapshot};
 use crate::runtime::{AgentEvent, ToolUseLoop, ToolUseResult};
@@ -90,9 +90,9 @@ impl AgentFlowNode {
         self
     }
 
-    /// 从 State 中提取输入消息。
+    /// 从 Typed State 中提取输入消息。
     fn extract_messages(&self, ctx: &NodeContext<'_>) -> Vec<lellm_core::Message> {
-        if let Some(value) = ctx.get_raw(&self.message_key) {
+        if let Some(value) = ctx.state().get(&self.message_key) {
             if let Some(arr) = value.as_array() {
                 let mut messages = Vec::new();
                 for v in arr {
@@ -111,7 +111,7 @@ impl AgentFlowNode {
         }
     }
 
-    /// 将执行结果写入 ctx。
+    /// 将执行结果以 StateEffect 写入 ctx。
     fn apply_result(&self, ctx: &mut NodeContext<'_>, result: &ToolUseResult) {
         let messages: Vec<serde_json::Value> = result
             .messages
@@ -119,19 +119,22 @@ impl AgentFlowNode {
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
 
-        ctx.set(&self.message_key, serde_json::json!(messages));
-        ctx.set(
+        ctx.emit_effect(StateEffect::Put(
+            self.message_key.clone(),
+            serde_json::json!(messages),
+        ));
+        ctx.emit_effect(StateEffect::Put(
             format!("{}_stop_reason", self.name),
-            format!("{:?}", result.stop_reason),
-        );
-        ctx.set(
+            serde_json::json!(format!("{:?}", result.stop_reason)),
+        ));
+        ctx.emit_effect(StateEffect::Put(
             format!("{}_iterations", self.name),
-            result.iterations as u64,
-        );
-        ctx.set(
+            serde_json::json!(result.iterations as u64),
+        ));
+        ctx.emit_effect(StateEffect::Put(
             format!("{}_tool_calls", self.name),
-            result.tool_calls_executed as u64,
-        );
+            serde_json::json!(result.tool_calls_executed as u64),
+        ));
     }
 
     /// 构建内部 ReAct Graph。
@@ -301,7 +304,7 @@ impl AgentFlowNode {
     /// v0.4+ Effect 模式：
     /// 1. 维护 AgentState 生命周期
     /// 2. 节点只 emit_effect，不直接改状态
-    /// 3. 循环消费 Effect → apply → 同步到 ctx（供边条件使用）
+    /// 3. 循环消费 Effect → apply 到 AgentState
     async fn execute_with_react_graph(
         &self,
         ctx: &mut NodeContext<'_>,
@@ -328,18 +331,20 @@ impl AgentFlowNode {
                 ));
             }
 
-            // 3a. 写入 AgentState 到 ctx（节点可读）
-            ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state.clone());
-
-            // 3b. 创建子 NodeContext（fork BranchState + 透传 StreamEmitter）
-            let mut branch = ctx.state().fork();
+            // 3a. 创建子 NodeContext
             let stream = ctx.stream();
-            let mut child_ctx = NodeContext::new(&mut branch, stream);
+            let mut child_state = lellm_graph::State::new();
 
-            // 3c. 写入 AgentState 到子 ctx
-            child_ctx.set_state(super::typed_state::AGENT_STATE_KEY, agent_state.clone());
+            // 写入 AgentState 到子 State（节点通过 state() 读取）
+            child_state.insert(
+                super::typed_state::AGENT_STATE_KEY.to_string(),
+                serde_json::to_value(&agent_state).unwrap(),
+            );
 
-            // 3d. 查找并执行节点
+            let mut branch = lellm_graph::BranchState::empty();
+            let mut child_ctx = NodeContext::new(&mut child_state, &mut branch, stream);
+
+            // 3b. 查找并执行节点
             let node_ref = graph
                 .node_map()
                 .get(&current)
@@ -348,7 +353,7 @@ impl AgentFlowNode {
                 })?;
             node_ref.execute(&mut child_ctx).await?;
 
-            // 3e. 消费 Effect → apply 到 AgentState
+            // 3d. 消费 Effect → apply 到 AgentState
             for v in child_ctx.consume_effects() {
                 agent_state.apply_from_value(v).map_err(|e| {
                     GraphError::Terminal(TerminalError::NodeExecutionFailed {
@@ -358,25 +363,14 @@ impl AgentFlowNode {
                 })?;
             }
 
-            // 3f. 提取控制信号
+            // 3e. 提取控制信号
             let (next_action, _signal) = child_ctx.take_control();
 
-            // 3g. 释放 child_ctx 对 branch 的借用
-            drop(child_ctx);
+            // 3f. 将 StateEffect 写入父 ctx（供边条件使用）
+            // child_ctx 的 State 已被 Effect 更新，将关键字段同步到父 ctx
+            self.sync_agent_state_effects(ctx, &agent_state);
 
-            // 3h. 将 BranchState 变更 apply 回父 ctx
-            for change in branch.changes() {
-                match change.operation {
-                    lellm_graph::ChangeOperation::Put => {
-                        ctx.set(&change.key, change.value.clone());
-                    }
-                    lellm_graph::ChangeOperation::Delete => {
-                        ctx.remove(&change.key);
-                    }
-                }
-            }
-
-            // 3h. 处理路由
+            // 3g. 处理路由
             match next_action {
                 NextAction::End => break,
                 NextAction::Goto(target) => {
@@ -386,11 +380,9 @@ impl AgentFlowNode {
                     if current == graph.end_node() {
                         break;
                     }
-                    // 同步 AgentState 关键字段到 ctx（供边条件使用）
-                    sync_agent_state_to_ctx(ctx, &agent_state);
-                    // 从 ctx 的 BranchState 获取完整 State 用于路由
-                    let full_state = ctx.state().to_state();
-                    current = graph.resolve_next(&current, &full_state).ok_or_else(|| {
+                    // 从父 ctx 的 State 路由（StateEffect 已写入）
+                    let full_state = ctx.state();
+                    current = graph.resolve_next(&current, full_state).ok_or_else(|| {
                         GraphError::Terminal(TerminalError::InvalidGraph(format!(
                             "node '{}' has no matching outgoing edge",
                             current
@@ -400,21 +392,8 @@ impl AgentFlowNode {
             }
         }
 
-        // 4. 从 Typed State 提取结果，传播到外层 State
-        if let Some(ref stop_reason) = agent_state.stop_reason {
-            ctx.set(
-                format!("{}_stop_reason", self.name),
-                format!("{:?}", stop_reason),
-            );
-        }
-        ctx.set(
-            format!("{}_iterations", self.name),
-            agent_state.iterations as u64,
-        );
-        ctx.set(
-            format!("{}_tool_calls", self.name),
-            agent_state.total_tool_calls as u64,
-        );
+        // 4. 从 Typed State 提取结果，以 StateEffect 传播到外层
+        self.write_agent_result(ctx, &agent_state);
 
         tracing::debug!(
             agent = %self.name,
@@ -425,19 +404,34 @@ impl AgentFlowNode {
 
         Ok(())
     }
-}
 
-/// 同步 AgentState 关键字段到 ctx（供边条件使用）。
-///
-/// 边条件（`edge_if`）直接读取 `State`（HashMap），不感知 AgentState。
-/// 此函数桥接 typed state → dynamic state。
-fn sync_agent_state_to_ctx(ctx: &mut NodeContext<'_>, state: &super::typed_state::AgentState) {
-    use crate::runtime::react::{
-        SK_COMPACT_COUNT, SK_ITERATIONS, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS,
-    };
-    ctx.set(SK_ITERATIONS, state.iterations as u64);
-    ctx.set(SK_TOTAL_TOOL_CALLS, state.total_tool_calls as u64);
-    ctx.set(SK_OUTPUT_TOKENS, state.output_tokens as u64);
-    ctx.set(SK_REASONING_TOKENS, state.reasoning_tokens as u64);
-    ctx.set(SK_COMPACT_COUNT, state.compact_count as u64);
+    /// 将 AgentState 关键字段以 StateEffect 写入 ctx（供边条件使用）。
+    fn sync_agent_state_effects(&self, ctx: &mut NodeContext<'_>, state: &super::typed_state::AgentState) {
+        use crate::runtime::react::{
+            SK_COMPACT_COUNT, SK_ITERATIONS, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS,
+        };
+        ctx.emit_effect(StateEffect::Put(SK_ITERATIONS.into(), serde_json::json!(state.iterations as u64)));
+        ctx.emit_effect(StateEffect::Put(SK_TOTAL_TOOL_CALLS.into(), serde_json::json!(state.total_tool_calls as u64)));
+        ctx.emit_effect(StateEffect::Put(SK_OUTPUT_TOKENS.into(), serde_json::json!(state.output_tokens as u64)));
+        ctx.emit_effect(StateEffect::Put(SK_REASONING_TOKENS.into(), serde_json::json!(state.reasoning_tokens as u64)));
+        ctx.emit_effect(StateEffect::Put(SK_COMPACT_COUNT.into(), serde_json::json!(state.compact_count as u64)));
+    }
+
+    /// 将 AgentState 最终结果以 StateEffect 写入 ctx。
+    fn write_agent_result(&self, ctx: &mut NodeContext<'_>, state: &super::typed_state::AgentState) {
+        if let Some(ref stop_reason) = state.stop_reason {
+            ctx.emit_effect(StateEffect::Put(
+                format!("{}_stop_reason", self.name),
+                serde_json::json!(format!("{:?}", stop_reason)),
+            ));
+        }
+        ctx.emit_effect(StateEffect::Put(
+            format!("{}_iterations", self.name),
+            serde_json::json!(state.iterations as u64),
+        ));
+        ctx.emit_effect(StateEffect::Put(
+            format!("{}_tool_calls", self.name),
+            serde_json::json!(state.total_tool_calls as u64),
+        ));
+    }
 }

@@ -4,7 +4,7 @@
 
 use lellm_graph::{
     CheckpointPolicy, CheckpointStore, CheckpointStoreError, GraphBuilder, GraphExecutor,
-    InMemoryCheckpointStore, NodeContext, NodeKind, State, TaskNode,
+    InMemoryCheckpointStore, NodeContext, NodeKind, State, StateEffect, TaskNode,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ fn make_set_node(name: &str, key: &str, value: &str) -> TaskNode {
     let k = key.to_string();
     let v = value.to_string();
     TaskNode::new(name, move |ctx: &mut NodeContext<'_>| {
-        ctx.set(&k, v.clone());
+        ctx.emit_effect(StateEffect::Put(k.clone(), serde_json::Value::String(v.clone())));
         Ok(())
     })
 }
@@ -194,7 +194,7 @@ async fn test_checkpoint_typed_state_roundtrip() {
     g.node(
         "write",
         NodeKind::Task(TaskNode::new("write", move |ctx: &mut NodeContext<'_>| {
-            ctx.set("typed_state", typed_json.clone());
+            ctx.emit_effect(StateEffect::Put("typed_state".into(), typed_json.clone()));
             Ok(())
         })),
     );
@@ -202,10 +202,10 @@ async fn test_checkpoint_typed_state_roundtrip() {
         "read",
         NodeKind::Task(TaskNode::new("read", |ctx: &mut NodeContext<'_>| {
             let restored: TestTypedState =
-                ctx.get("typed_state").expect("typed state should exist");
+                serde_json::from_value(ctx.state().get("typed_state").cloned().expect("typed state should exist")).expect("deserialize");
             assert_eq!(restored.counter, 42);
             assert_eq!(restored.messages.len(), 2);
-            ctx.set("verified", true);
+            ctx.emit_effect(StateEffect::Put("verified".into(), serde_json::json!(true)));
             Ok(())
         })),
     );
@@ -290,14 +290,14 @@ fn build_circular_graph() -> Arc<lellm_graph::Graph> {
     g.node(
         "increment",
         NodeKind::Task(TaskNode::new("increment", |ctx: &mut NodeContext<'_>| {
-            let counter: u32 = ctx.get("counter").unwrap_or(0);
+            let counter: u32 = ctx.state().get("counter").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(0);
             let new_count = counter + 1;
-            ctx.set("counter", new_count);
+            ctx.emit_effect(StateEffect::Put("counter".into(), serde_json::json!(new_count)));
             // 记录执行轨迹
-            let history: Vec<u32> = ctx.get("history").unwrap_or_default();
+            let history: Vec<u32> = ctx.state().get("history").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
             let mut history = history;
             history.push(new_count);
-            ctx.set("history", history);
+            ctx.emit_effect(StateEffect::Put("history".into(), serde_json::to_value(history).unwrap()));
             Ok(())
         })),
     );
@@ -306,8 +306,8 @@ fn build_circular_graph() -> Arc<lellm_graph::Graph> {
     g.node(
         "check",
         NodeKind::Task(TaskNode::new("check", |ctx: &mut NodeContext<'_>| {
-            let counter: u32 = ctx.get("counter").unwrap_or(0);
-            ctx.set("reached", counter >= 3);
+            let counter: u32 = ctx.state().get("counter").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(0);
+            ctx.emit_effect(StateEffect::Put("reached".into(), serde_json::json!(counter >= 3)));
             Ok(())
         })),
     );

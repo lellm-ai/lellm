@@ -2,9 +2,13 @@
 //!
 //! NodeContext 是 Runtime Handle（运行时句柄），节点只借用，不拥有。
 //! 节点通过 NodeContext 读写 State、发射数据面事件、发出控制信号。
+//!
+//! v0.4+: 泛型化 `NodeContext<'a, S>`，S: WorkflowState。
+//! 默认 `S = State`（HashMap）保持向后兼容。
 
 use crate::branch_state::BranchState;
 use crate::event::FlowEvent;
+use crate::state::State;
 use crate::stream_emitter::StreamEmitter;
 use crate::workflow_state::WorkflowState;
 
@@ -20,7 +24,7 @@ pub enum ExecutionSignal {
     },
 }
 
-// ─── NextStep ─────────────────────────────────────────────────
+// ─── NextAction ────────────────────────────────────────────────
 
 /// 节点执行后的下一步路由。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,8 +74,6 @@ impl ExecutionControl {
     }
 
     /// 获取最终的控制信号。
-    ///
-    /// 多次调用的语义：最后一次获胜（与 State 写入的"最后写入者胜"一致）。
     pub fn take(&mut self) -> (NextAction, Option<ExecutionSignal>) {
         let next = self.next.take().unwrap_or(NextAction::Next);
         let signal = self.signal.take();
@@ -94,35 +96,47 @@ pub struct NodeMetadata {
 
 /// 节点上下文 — Runtime Handle（运行时句柄）。
 ///
-/// NodeContext 是 Runtime Handle（运行时句柄），不是 Runtime State。
+/// # 泛型参数
+///
+/// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
+///
+/// # 设计原则
+///
+/// NodeContext 是 Runtime Handle，不是 Runtime State。
 /// - 节点只借用，不拥有。零复制透传给子组件
 /// - 禁止放入：RuntimeEventEmitter、TraceId、SpanId、GraphHandle、ExecutorConfig
 ///
 /// # Effects 缓冲（v0.4+）
 ///
 /// `effects` 字段收集节点产生的 Effect（领域事件），
-/// 供上层（如 Agent 的 ReAct 循环）统一 apply 到 Typed State。
-/// 传统 `ctx.set()` 路径仍然可用，向后兼容。
-pub struct NodeContext<'a> {
-    /// 执行状态 — 直接写
-    state: &'a mut BranchState,
+/// 供上层（如 Executor）统一 apply 到 Typed State。
+pub struct NodeContext<'a, S: WorkflowState = State> {
+    /// 类型化状态 — 直接读写
+    state: &'a mut S,
+    /// 底层分支状态 — 用于 fork 等操作（backward compat）
+    branch: &'a mut BranchState,
     /// 数据面发射器 — 可选（阻塞模式 = None）
     stream: Option<&'a StreamEmitter>,
     /// 控制信号 — 节点写入，Executor 读取
     control: ExecutionControl,
     /// 节点元数据 — 节点写入
     metadata: NodeMetadata,
-    /// Effect 缓冲 — 节点产生的领域事件（v0.4+ Typed State）
+    /// Effect 缓冲 — 节点产生的领域事件
     effects: Vec<serde_json::Value>,
-    /// FlowEvent 缓冲 — 节点产生的控制面事件（供 Executor 转发到 GraphEvent）
+    /// FlowEvent 缓冲 — 节点产生的控制面事件
     flow_events: Vec<FlowEvent>,
 }
 
-impl<'a> NodeContext<'a> {
+impl<'a, S: WorkflowState> NodeContext<'a, S> {
     /// 创建新的 NodeContext。
-    pub fn new(state: &'a mut BranchState, stream: Option<&'a StreamEmitter>) -> Self {
+    pub fn new(
+        state: &'a mut S,
+        branch: &'a mut BranchState,
+        stream: Option<&'a StreamEmitter>,
+    ) -> Self {
         Self {
             state,
+            branch,
             stream,
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
@@ -131,56 +145,24 @@ impl<'a> NodeContext<'a> {
         }
     }
 
-    // ─── State 读取 ─────────────────────────────────────────
-
-    /// 从 State 读取值（返回 clone）。
-    pub fn get<T: Clone + serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+    /// 获取类型化状态引用。
+    pub fn state(&self) -> &S {
         self.state
-            .get(key)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
-    /// 从 State 读取原始 Value。
-    pub fn get_raw(&self, key: &str) -> Option<&serde_json::Value> {
-        self.state.get_ref(key)
+    /// 获取类型化状态可变引用。
+    pub fn state_mut(&mut self) -> &mut S {
+        self.state
     }
 
-    // ─── State 写入 ─────────────────────────────────────────
-
-    /// 写入 State。
-    pub fn set<T: serde::Serialize>(&mut self, key: impl Into<String>, value: T) {
-        if let Ok(v) = serde_json::to_value(value) {
-            self.state.set(key.into(), v);
-        }
+    /// 获取底层 BranchState 引用（用于 fork 等操作）。
+    pub fn branch(&self) -> &BranchState {
+        self.branch
     }
 
-    /// 追加到数组。
-    pub fn append(&mut self, key: impl Into<String>, value: serde_json::Value) {
-        let key = key.into();
-        let current: Vec<serde_json::Value> = self
-            .state
-            .get_ref(&key)
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
-        let mut new = current;
-        new.push(value);
-        self.state.set(key, serde_json::Value::Array(new));
-    }
-
-    /// 递增数值。
-    pub fn increment(&mut self, key: impl Into<String>, delta: u64) {
-        let key = key.into();
-        let current: u64 = self
-            .state
-            .get_ref(&key)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        self.state.set(key, serde_json::json!(current + delta));
-    }
-
-    /// 删除 State key。
-    pub fn remove(&mut self, key: &str) {
-        self.state.remove(key);
+    /// 获取底层 BranchState 可变引用。
+    pub fn branch_mut(&mut self) -> &mut BranchState {
+        self.branch
     }
 
     // ─── 数据面发射 ─────────────────────────────────────────
@@ -233,18 +215,6 @@ impl<'a> NodeContext<'a> {
     // ─── Effects 缓冲（v0.4+ Typed State）───────────────────
 
     /// 发射一个 Effect（领域事件）到缓冲。
-    ///
-    /// 节点通过此方法产生 Effect，上层统一 apply 到 Typed State。
-    /// 传统 `ctx.set()` 路径仍然可用，向后兼容。
-    ///
-    /// # 示例
-    ///
-    /// ```rust,ignore
-    /// // Agent 节点发射 Effect
-    /// ctx.emit_effect(AgentEffect::AppendMessage(msg));
-    /// // 或者
-    /// ctx.emit_effect_json(serde_json::to_value(effect)?);
-    /// ```
     pub fn emit_effect<E: serde::Serialize>(&mut self, effect: E) {
         if let Ok(v) = serde_json::to_value(effect) {
             self.effects.push(v);
@@ -252,9 +222,6 @@ impl<'a> NodeContext<'a> {
     }
 
     /// 消费 Effect 缓冲（返回所有收集的 Effect）。
-    ///
-    /// 上层（如 ReAct 循环）调用此方法获取节点产生的 Effect，
-    /// 然后 apply 到 Typed State。
     pub fn consume_effects(&mut self) -> Vec<serde_json::Value> {
         std::mem::take(&mut self.effects)
     }
@@ -262,30 +229,6 @@ impl<'a> NodeContext<'a> {
     /// 获取已收集的 Effect 数量（不消费）。
     pub fn effects_len(&self) -> usize {
         self.effects.len()
-    }
-
-    // ─── Typed State 访问（v0.4+）───────────────────────────
-
-    /// 从 State 读取类型化值（WorkflowState）。
-    ///
-    /// 通过 key 获取存储的类型化状态对象。
-    /// 与 `get::<T>()` 的区别：此方法明确用于 WorkflowState 协议。
-    pub fn get_state<S: WorkflowState + serde::de::DeserializeOwned>(
-        &self,
-        key: &str,
-    ) -> Option<S> {
-        self.get(key)
-    }
-
-    /// 写入类型化值（WorkflowState）到 State。
-    ///
-    /// 通过 key 存储类型化状态对象。
-    pub fn set_state<S: WorkflowState + serde::Serialize>(
-        &mut self,
-        key: impl Into<String>,
-        state: S,
-    ) {
-        self.set(key, state);
     }
 
     // ─── 内部方法（供 Executor 使用）─────────────────────────
@@ -300,12 +243,7 @@ impl<'a> NodeContext<'a> {
         std::mem::take(&mut self.metadata)
     }
 
-    /// 获取状态引用（用于路由解析等）。
-    pub fn state(&self) -> &BranchState {
-        self.state
-    }
-
-    /// 获取数据面发射器引用（供 `run_inline()` 等嵌套场景透传给子节点）。
+    /// 获取数据面发射器引用。
     pub fn stream(&self) -> Option<&'a StreamEmitter> {
         self.stream
     }

@@ -30,7 +30,8 @@ pub use ids::{SpanId, TraceId};
 
 // ─── State ───────────────────────────────────────────────────
 pub use state::{
-    ExecutionEntry, GraphResult, State, StateError, StateExt, StateReducer, array_reducer,
+    ExecutionEntry, GraphResult, State, StateEffect, StateError, StateExt, StateReducer,
+    array_reducer,
 };
 
 // ─── Delta + Reducer ─────────────────────────────────────────
@@ -69,8 +70,8 @@ pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
 // ─── Nodes ───────────────────────────────────────────────────
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
-    FlowNode, NextStep, NodeKind, NodeOutput, ParallelErrorStrategy, ParallelNode, TaskFn,
-    TaskNode,
+    FlowNode, NextStep, NodeKind, NodeOutput, ParallelErrorStrategy, ParallelNode,
+    ParallelNodeBuilder, TaskFn, TaskNode,
 };
 
 // ─── Executor ────────────────────────────────────────────────

@@ -4,9 +4,9 @@
 
 use lellm_graph::{
     FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeContext,
-    NodeKind, ParallelErrorStrategy, ParallelNode, StateExt, TaskNode,
+    NodeKind, ParallelErrorStrategy, ParallelNode, StateEffect, StateExt, TaskNode,
 };
-use std::collections::HashMap;
+use lellm_graph::State;
 use std::sync::Arc;
 
 // ─── 基础并行执行 ───────────────────────────────────────────
@@ -17,14 +17,14 @@ async fn test_parallel_basic_two_branches() {
         .branch(
             "branch_a",
             Arc::new(TaskNode::new("branch_a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("a_result", serde_json::json!("from_a"));
+                ctx.emit_effect(StateEffect::Put("a_result".into(), serde_json::json!("from_a")));
                 Ok(())
             })),
         )
         .branch(
             "branch_b",
             Arc::new(TaskNode::new("branch_b", |ctx: &mut NodeContext<'_>| {
-                ctx.set("b_result", serde_json::json!("from_b"));
+                ctx.emit_effect(StateEffect::Put("b_result".into(), serde_json::json!("from_b")));
                 Ok(())
             })),
         )
@@ -37,7 +37,7 @@ async fn test_parallel_basic_two_branches() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -59,7 +59,7 @@ async fn test_parallel_single_branch() {
         .branch(
             "only",
             Arc::new(TaskNode::new("only", |ctx: &mut NodeContext<'_>| {
-                ctx.set("single", serde_json::json!(42));
+                ctx.emit_effect(StateEffect::Put("single".into(), serde_json::json!(42)));
                 Ok(())
             })),
         )
@@ -72,7 +72,7 @@ async fn test_parallel_single_branch() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -85,14 +85,14 @@ async fn test_parallel_reads_input_state() {
         .branch(
             "reader",
             Arc::new(TaskNode::new("reader", |ctx: &mut NodeContext<'_>| {
-                let base: u64 = ctx.get("base").unwrap_or(0);
-                ctx.set("computed", serde_json::json!(base * 2));
+                let base: u64 = ctx.state().get("base").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("computed".into(), serde_json::json!(base * 2)));
                 Ok(())
             })),
         )
         .build();
 
-    let mut initial_state = HashMap::new();
+    let mut initial_state = State::new();
     initial_state.set("base", 21u64);
 
     let mut g = GraphBuilder::new("parallel_read");
@@ -119,14 +119,14 @@ async fn test_parallel_different_keys_no_conflict() {
         .branch(
             "writer_x",
             Arc::new(TaskNode::new("writer_x", |ctx: &mut NodeContext<'_>| {
-                ctx.set("x", serde_json::json!(1));
+                ctx.emit_effect(StateEffect::Put("x".into(), serde_json::json!(1)));
                 Ok(())
             })),
         )
         .branch(
             "writer_y",
             Arc::new(TaskNode::new("writer_y", |ctx: &mut NodeContext<'_>| {
-                ctx.set("y", serde_json::json!(2));
+                ctx.emit_effect(StateEffect::Put("y".into(), serde_json::json!(2)));
                 Ok(())
             })),
         )
@@ -139,7 +139,7 @@ async fn test_parallel_different_keys_no_conflict() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -154,14 +154,14 @@ async fn test_parallel_same_key_conflict() {
         .branch(
             "writer_a",
             Arc::new(TaskNode::new("writer_a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("count", serde_json::json!(1));
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(1)));
                 Ok(())
             })),
         )
         .branch(
             "writer_b",
             Arc::new(TaskNode::new("writer_b", |ctx: &mut NodeContext<'_>| {
-                ctx.set("count", serde_json::json!(2));
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(2)));
                 Ok(())
             })),
         )
@@ -174,7 +174,7 @@ async fn test_parallel_same_key_conflict() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -184,25 +184,25 @@ async fn test_parallel_same_key_conflict() {
 
 #[tokio::test]
 async fn test_parallel_append_delta_merge() {
-    // 两个分支使用 ctx.set() 写入同一 key — 最后写入者胜
+    // 两个分支使用 ctx.emit_effect() 写入同一 key — 最后写入者胜
     let parallel = ParallelNode::builder()
         .branch(
             "appender_a",
             Arc::new(TaskNode::new("appender_a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("items", serde_json::json!([1, 2]));
+                ctx.emit_effect(StateEffect::Put("items".into(), serde_json::json!([1, 2])));
                 Ok(())
             })),
         )
         .branch(
             "appender_b",
             Arc::new(TaskNode::new("appender_b", |ctx: &mut NodeContext<'_>| {
-                ctx.set("items", serde_json::json!([3, 4]));
+                ctx.emit_effect(StateEffect::Put("items".into(), serde_json::json!([3, 4])));
                 Ok(())
             })),
         )
         .build();
 
-    let mut initial_state = HashMap::new();
+    let mut initial_state = State::new();
     initial_state.set("items", serde_json::json!([0]));
 
     let mut g = GraphBuilder::new("parallel_append");
@@ -232,7 +232,7 @@ async fn test_parallel_fail_fast() {
         .branch(
             "ok",
             Arc::new(TaskNode::new("ok", |ctx: &mut NodeContext<'_>| {
-                ctx.set("ok_result", serde_json::json!(true));
+                ctx.emit_effect(StateEffect::Put("ok_result".into(), serde_json::json!(true)));
                 Ok(())
             })),
         )
@@ -257,7 +257,7 @@ async fn test_parallel_fail_fast() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await;
 
     assert!(result.is_err(), "should fail due to failing branch");
@@ -269,7 +269,7 @@ async fn test_parallel_collect_all() {
         .branch(
             "ok",
             Arc::new(TaskNode::new("ok", |ctx: &mut NodeContext<'_>| {
-                ctx.set("ok_result", serde_json::json!(true));
+                ctx.emit_effect(StateEffect::Put("ok_result".into(), serde_json::json!(true)));
                 Ok(())
             })),
         )
@@ -294,7 +294,7 @@ async fn test_parallel_collect_all() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await;
 
     assert!(
@@ -326,7 +326,7 @@ async fn test_parallel_emits_events() {
     let graph = g.build().expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     drop(handle);
 
@@ -373,16 +373,16 @@ async fn test_parallel_in_pipeline() {
         .branch(
             "compute_a",
             Arc::new(TaskNode::new("compute_a", |ctx: &mut NodeContext<'_>| {
-                let base: u64 = ctx.get("base").unwrap_or(0);
-                ctx.set("result_a", serde_json::json!(base + 1));
+                let base: u64 = ctx.state().get("base").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("result_a".into(), serde_json::json!(base + 1)));
                 Ok(())
             })),
         )
         .branch(
             "compute_b",
             Arc::new(TaskNode::new("compute_b", |ctx: &mut NodeContext<'_>| {
-                let base: u64 = ctx.get("base").unwrap_or(0);
-                ctx.set("result_b", serde_json::json!(base * 2));
+                let base: u64 = ctx.state().get("base").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("result_b".into(), serde_json::json!(base * 2)));
                 Ok(())
             })),
         )
@@ -393,7 +393,7 @@ async fn test_parallel_in_pipeline() {
     let _ = g.node(
         "init",
         NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_>| {
-            ctx.set("base", serde_json::json!(10));
+            ctx.emit_effect(StateEffect::Put("base".into(), serde_json::json!(10)));
             Ok(())
         })),
     );
@@ -401,9 +401,9 @@ async fn test_parallel_in_pipeline() {
     let _ = g.node(
         "summary",
         NodeKind::Task(TaskNode::new("summary", |ctx: &mut NodeContext<'_>| {
-            let a: u64 = ctx.get("result_a").unwrap_or(0);
-            let b: u64 = ctx.get("result_b").unwrap_or(0);
-            ctx.set("total", serde_json::json!(a + b));
+            let a: u64 = ctx.state().get("result_a").and_then(|v| v.as_u64()).unwrap_or(0);
+            let b: u64 = ctx.state().get("result_b").and_then(|v| v.as_u64()).unwrap_or(0);
+            ctx.emit_effect(StateEffect::Put("total".into(), serde_json::json!(a + b)));
             Ok(())
         })),
     );
@@ -413,7 +413,7 @@ async fn test_parallel_in_pipeline() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -428,7 +428,7 @@ async fn test_parallel_in_pipeline() {
 #[test]
 #[should_panic(expected = "at least one branch")]
 fn test_parallel_no_branches_panics() {
-    let _ = ParallelNode::builder().build();
+    let _: ParallelNode = ParallelNode::builder().build();
 }
 
 #[tokio::test]
@@ -465,21 +465,21 @@ async fn test_parallel_three_branches() {
         .branch(
             "a",
             Arc::new(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("v", serde_json::json!("a"));
+                ctx.emit_effect(StateEffect::Put("v".into(), serde_json::json!("a")));
                 Ok(())
             })),
         )
         .branch(
             "b",
             Arc::new(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
-                ctx.set("w", serde_json::json!("b"));
+                ctx.emit_effect(StateEffect::Put("w".into(), serde_json::json!("b")));
                 Ok(())
             })),
         )
         .branch(
             "c",
             Arc::new(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-                ctx.set("x", serde_json::json!("c"));
+                ctx.emit_effect(StateEffect::Put("x".into(), serde_json::json!("c")));
                 Ok(())
             })),
         )
@@ -494,7 +494,7 @@ async fn test_parallel_three_branches() {
     let graph = g.build().expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 

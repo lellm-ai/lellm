@@ -26,8 +26,9 @@ use crate::ids::{SpanId, TraceId};
 use crate::node::{FlowNode, NodeKind};
 use crate::node_context::{ExecutionSignal, NextAction, NodeContext, NodeMetadata};
 use crate::runtime_event::RuntimeEvent;
-use crate::state::{ExecutionEntry, GraphResult, State};
+use crate::state::{ExecutionEntry, GraphResult, State, StateEffect};
 use crate::stream_emitter::StreamEmitter;
+use crate::workflow_state::WorkflowState;
 
 // ─── DecisionRegistry ─────────────────────────────────────────
 
@@ -680,27 +681,26 @@ impl GraphExecutor {
         let (tx, _rx) = mpsc::channel(64);
         let emitter = StreamEmitter::new(tx);
 
-        // 3. 创建 NodeContext
-        let mut ctx = NodeContext::new(&mut branch, Some(&emitter));
+        // 3. 创建 NodeContext（typed state + branch state）
+        let mut ctx = NodeContext::new(state, &mut branch, Some(&emitter));
 
         // 4. 执行节点
         node.execute(&mut ctx).await?;
 
-        // 5. 提取控制信号
+        // 5. 提取控制信号 + 消费 Effects
+        let effects = ctx.consume_effects();
         let (next_action, signal) = ctx.take_control();
         let metadata = ctx.take_metadata();
         let flow_events = ctx.take_flow_events();
 
-        // 6. 将 BranchState 变更 apply 回主 State
-        for change in branch.changes() {
-            match change.operation {
-                crate::branch_state::ChangeOperation::Put => {
-                    state.insert(change.key.clone(), change.value.clone());
-                }
-                crate::branch_state::ChangeOperation::Delete => {
-                    state.remove(&change.key);
-                }
-            }
+        // 5b. 消费 Effects → apply 到 typed state
+        for v in effects {
+            let effect: <State as crate::workflow_state::WorkflowState>::Effect =
+                match serde_json::from_value(v) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+            state.apply(effect);
         }
 
         Ok((next_action, signal, metadata, flow_events))
@@ -800,17 +800,15 @@ impl GraphExecutor {
         match node {
             NodeKind::Barrier(b) => {
                 let mut branch = BranchState::from_state(state.clone());
-                let mut ctx = NodeContext::new(&mut branch, None);
+                let mut ctx = NodeContext::new(state, &mut branch, None);
                 b.apply_decision_to_ctx(&mut ctx, decision);
                 let (next, _signal) = ctx.take_control();
-                for change in branch.changes() {
-                    match change.operation {
-                        crate::branch_state::ChangeOperation::Put => {
-                            state.insert(change.key.clone(), change.value.clone());
-                        }
-                        crate::branch_state::ChangeOperation::Delete => {
-                            state.remove(&change.key);
-                        }
+
+                // 消费 Effects → apply 到 typed state
+                let effects = ctx.consume_effects();
+                for v in effects {
+                    if let Ok(effect) = serde_json::from_value::<StateEffect>(v) {
+                        state.apply(effect);
                     }
                 }
 

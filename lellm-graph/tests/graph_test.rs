@@ -1,10 +1,9 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, Diagnostic,
     DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor,
-    NodeContext, NodeKind, SK_COUNT, SK_STEPS, State, StateExt, StateKey, TaskNode, TerminalError,
-    TraceId,
+    NodeContext, NodeKind, SK_COUNT, SK_STEPS, State, StateEffect, StateExt, StateKey, TaskNode,
+    TerminalError, TraceId,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,21 +24,21 @@ async fn test_linear_pipeline() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("step", serde_json::json!("a"));
+                ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!("a")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "b",
             NodeKind::Task(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
-                ctx.set("step", serde_json::json!("b"));
+                ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!("b")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "c",
             NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-                ctx.set("step", serde_json::json!("c"));
+                ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!("c")));
                 Ok(())
             })),
         );
@@ -50,7 +49,7 @@ async fn test_linear_pipeline() {
     })
     .expect("build should succeed");
 
-    let initial_state = HashMap::new();
+    let initial_state = State::new();
     let result = GraphExecutor::default()
         .execute(Arc::new(graph), initial_state)
         .await
@@ -68,7 +67,7 @@ async fn test_condition_branching() {
             "check",
             NodeKind::Condition(
                 lellm_graph::ConditionNode::builder("check")
-                    .branch("yes", |s| {
+                    .branch("yes", |s: &State| {
                         s.get("flag").and_then(|v| v.as_bool()).unwrap_or(false)
                     })
                     .branch("no", |_| true)
@@ -78,14 +77,14 @@ async fn test_condition_branching() {
         let _ = g.node(
             "yes",
             NodeKind::Task(TaskNode::new("yes", |ctx: &mut NodeContext<'_>| {
-                ctx.set("result", serde_json::json!("yes"));
+                ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("yes")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "no",
             NodeKind::Task(TaskNode::new("no", |ctx: &mut NodeContext<'_>| {
-                ctx.set("result", serde_json::json!("no"));
+                ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("no")));
                 Ok(())
             })),
         );
@@ -106,7 +105,7 @@ async fn test_condition_branching() {
     })
     .expect("build should succeed");
 
-    let mut initial_state = HashMap::new();
+    let mut initial_state = State::new();
     initial_state.insert("flag".into(), serde_json::json!(true));
     let result = GraphExecutor::default()
         .execute(Arc::new(graph), initial_state)
@@ -137,7 +136,7 @@ async fn test_task_node_error() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await;
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -178,8 +177,8 @@ async fn test_cyclic_graph_steps_exceeded() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -199,7 +198,7 @@ async fn test_cyclic_graph_steps_exceeded() {
     .expect("cyclic graph should build");
 
     let executor = GraphExecutor::new(5);
-    let result = executor.execute(Arc::new(graph), HashMap::new()).await;
+    let result = executor.execute(Arc::new(graph), State::new()).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -216,8 +215,8 @@ async fn test_cyclic_graph_with_edge_if_exit() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -243,7 +242,7 @@ async fn test_cyclic_graph_with_edge_if_exit() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -259,8 +258,8 @@ async fn test_condition_node_back_jump() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -291,7 +290,7 @@ async fn test_condition_node_back_jump() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -357,7 +356,7 @@ async fn test_execution_log() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -381,7 +380,7 @@ async fn test_barrier_blocked_mode_default_reject() {
 
     // execute() 内部 drop handle → decision_tx 关闭 → executor 使用默认 Reject
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await;
 
     // 新行为：handle 被 drop 后，executor 默认 Reject，然后正常完成
@@ -405,7 +404,7 @@ async fn test_barrier_approve() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -437,8 +436,8 @@ async fn test_barrier_reject_with_back_jump() {
         let _ = g.node(
             "task",
             NodeKind::Task(TaskNode::new("task", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -458,7 +457,7 @@ async fn test_barrier_reject_with_back_jump() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut reject_count = 0;
     loop {
@@ -512,7 +511,7 @@ async fn test_barrier_modify() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -565,7 +564,7 @@ async fn test_barrier_timeout() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -593,14 +592,14 @@ async fn test_barrier_reroute() {
         let _ = g.node(
             "path_a",
             NodeKind::Task(TaskNode::new("path_a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("path", serde_json::json!("A"));
+                ctx.emit_effect(StateEffect::Put("path".into(), serde_json::json!("A")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "path_b",
             NodeKind::Task(TaskNode::new("path_b", |ctx: &mut NodeContext<'_>| {
-                ctx.set("path", serde_json::json!("B"));
+                ctx.emit_effect(StateEffect::Put("path".into(), serde_json::json!("B")));
                 Ok(())
             })),
         );
@@ -618,7 +617,7 @@ async fn test_barrier_reroute() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -652,7 +651,7 @@ async fn test_double_barrier_sequential() {
         let _ = g.node(
             "before_a",
             NodeKind::Task(TaskNode::new("before_a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("steps", serde_json::json!(Vec::<String>::new()));
+                ctx.emit_effect(StateEffect::Put("steps".into(), serde_json::json!(Vec::<String>::new())));
                 Ok(())
             })),
         );
@@ -663,9 +662,9 @@ async fn test_double_barrier_sequential() {
         let _ = g.node(
             "between",
             NodeKind::Task(TaskNode::new("between", |ctx: &mut NodeContext<'_>| {
-                let mut steps: Vec<String> = ctx.get("steps").unwrap_or_default();
+                let mut steps: Vec<String> = ctx.state().get("steps").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 steps.push("passed_a".into());
-                ctx.set("steps", serde_json::to_value(steps).unwrap());
+                ctx.emit_effect(StateEffect::Put("steps".into(), serde_json::to_value(steps).unwrap()));
                 Ok(())
             })),
         );
@@ -676,9 +675,9 @@ async fn test_double_barrier_sequential() {
         let _ = g.node(
             "after_b",
             NodeKind::Task(TaskNode::new("after_b", |ctx: &mut NodeContext<'_>| {
-                let mut steps: Vec<String> = ctx.get("steps").unwrap_or_default();
+                let mut steps: Vec<String> = ctx.state().get("steps").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 steps.push("passed_b".into());
-                ctx.set("steps", serde_json::to_value(steps).unwrap());
+                ctx.emit_effect(StateEffect::Put("steps".into(), serde_json::to_value(steps).unwrap()));
                 Ok(())
             })),
         );
@@ -692,7 +691,7 @@ async fn test_double_barrier_sequential() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -811,8 +810,8 @@ async fn test_edge_analysis_no_runtime_interference() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -985,7 +984,7 @@ async fn test_stream_has_span_id() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut span_ids = Vec::new();
     loop {
@@ -1019,8 +1018,8 @@ async fn test_goto_edge_with_analysis() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -1052,7 +1051,7 @@ async fn test_goto_edge_with_analysis() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -1083,7 +1082,7 @@ async fn test_goto_missing_edge_error() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await;
 
     assert!(result.is_err());
@@ -1193,18 +1192,18 @@ async fn test_statekey_in_graph_execution() {
         let _ = g.node(
             "set",
             NodeKind::Task(TaskNode::new("set", |ctx: &mut NodeContext<'_>| {
-                ctx.set("count", serde_json::json!(0u64));
-                ctx.set("result", serde_json::json!("pending"));
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(0u64)));
+                ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("pending")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "increment",
             NodeKind::Task(TaskNode::new("increment", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get::<u64>("count").unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count: u64 = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 if count + 1 >= 3 {
-                    ctx.set("result", serde_json::json!("done"));
+                    ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("done")));
                 }
                 Ok(())
             })),
@@ -1223,7 +1222,7 @@ async fn test_statekey_in_graph_execution() {
         let _ = g.node(
             "end",
             NodeKind::Task(TaskNode::new("end", |ctx: &mut NodeContext<'_>| {
-                let result = ctx.get::<String>("result").unwrap();
+                let result = ctx.state().get("result").and_then(|v| v.as_str()).unwrap().to_string();
                 assert_eq!(result, "done");
                 Ok(())
             })),
@@ -1238,7 +1237,7 @@ async fn test_statekey_in_graph_execution() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -1270,7 +1269,7 @@ async fn test_trace_id_full_lifecycle() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut trace_id_from_start = None;
     let mut trace_ids_from_nodes = Vec::new();
@@ -1329,7 +1328,7 @@ async fn test_trace_id_blocking_mode() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 
@@ -1373,7 +1372,7 @@ async fn test_fallback_control_flow() {
         let _ = g.node(
             "fallback_target",
             NodeKind::Task(TaskNode::new("fallback_target", |ctx: &mut NodeContext<'_>| {
-                ctx.set("recovered", serde_json::json!(true));
+                ctx.emit_effect(StateEffect::Put("recovered".into(), serde_json::json!(true)));
                 Ok(())
             })),
         );
@@ -1485,7 +1484,7 @@ async fn test_graph_cancel() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     // 等待 BarrierWaiting 事件
     loop {
@@ -1539,7 +1538,7 @@ async fn test_decide_wildcard() {
         let _ = g.node(
             "before",
             NodeKind::Task(TaskNode::new("before", |ctx: &mut NodeContext<'_>| {
-                ctx.set("steps", serde_json::json!(Vec::<String>::new()));
+                ctx.emit_effect(StateEffect::Put("steps".into(), serde_json::json!(Vec::<String>::new())));
                 Ok(())
             })),
         );
@@ -1550,9 +1549,9 @@ async fn test_decide_wildcard() {
         let _ = g.node(
             "between",
             NodeKind::Task(TaskNode::new("between", |ctx: &mut NodeContext<'_>| {
-                let mut steps: Vec<String> = ctx.get("steps").unwrap_or_default();
+                let mut steps: Vec<String> = ctx.state().get("steps").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 steps.push("step1".into());
-                ctx.set("steps", serde_json::to_value(steps).unwrap());
+                ctx.emit_effect(StateEffect::Put("steps".into(), serde_json::to_value(steps).unwrap()));
                 Ok(())
             })),
         );
@@ -1564,9 +1563,9 @@ async fn test_decide_wildcard() {
         let _ = g.node(
             "done",
             NodeKind::Task(TaskNode::new("done", |ctx: &mut NodeContext<'_>| {
-                let mut steps: Vec<String> = ctx.get("steps").unwrap_or_default();
+                let mut steps: Vec<String> = ctx.state().get("steps").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 steps.push("step2".into());
-                ctx.set("steps", serde_json::to_value(steps).unwrap());
+                ctx.emit_effect(StateEffect::Put("steps".into(), serde_json::to_value(steps).unwrap()));
                 Ok(())
             })),
         );
@@ -1580,7 +1579,7 @@ async fn test_decide_wildcard() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut barrier_count = 0;
     loop {
@@ -1725,8 +1724,8 @@ async fn test_consumer_drop_cancels_execution() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                let count = ctx.get_raw("count").and_then(|v| v.as_u64()).unwrap_or(0);
-                ctx.set("count", serde_json::json!(count + 1));
+                let count = ctx.state().get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(count + 1)));
                 Ok(())
             })),
         );
@@ -1758,7 +1757,7 @@ async fn test_consumer_drop_cancels_execution() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), HashMap::new());
+    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     // 消费 GraphStart 和第一个 NodeStart 后，drop stream
     let mut received = 0;
@@ -1849,21 +1848,21 @@ async fn test_end_node_stops_execution() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                ctx.set("visited_a", serde_json::json!(true));
+                ctx.emit_effect(StateEffect::Put("visited_a".into(), serde_json::json!(true)));
                 Ok(())
             })),
         );
         let _ = g.node(
             "end",
             NodeKind::Task(TaskNode::new("end", |ctx: &mut NodeContext<'_>| {
-                ctx.set("visited_end", serde_json::json!(true));
+                ctx.emit_effect(StateEffect::Put("visited_end".into(), serde_json::json!(true)));
                 Ok(())
             })),
         );
         let _ = g.node(
             "unreachable",
             NodeKind::Task(TaskNode::new("unreachable", |ctx: &mut NodeContext<'_>| {
-                ctx.set("visited_unreachable", serde_json::json!(true));
+                ctx.emit_effect(StateEffect::Put("visited_unreachable".into(), serde_json::json!(true)));
                 Ok(())
             })),
         );
@@ -1875,7 +1874,7 @@ async fn test_end_node_stops_execution() {
     .expect("build should succeed");
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
 

@@ -1,6 +1,6 @@
 # LeLLM v0.4 架构演进
 
-> 版本：v0.4 | 日期：2026-06-19 | 状态：规划中
+> 版本：v0.4 | 日期：2026-06-21 | 状态：规划中（Grill Session 确认 Effect Only 路线）
 >
 > 本文档记录 v0.3 → v0.4 的设计决策和演进路线。
 
@@ -13,6 +13,7 @@
 - [五、Overlay State：StateSnapshot + BranchState](#五overlay-statestatesnapshot--branchstate)
 - [六、嵌套执行模型](#六嵌套执行模型)
 - [七、v0.4+ 终局：Typed State + Effect 事件溯源](#七v04-终局typed-state--effect-事件溯源)
+- [七补充、Effect Only 架构决策（2026-06-21 Grill Session）](#七补充effect-only-架构决策2026-06-21-grill-session-确认)
 - [八、架构演进路线图](#八架构演进路线图)
 - [九、关键设计决策](#九关键设计决策)
 
@@ -628,8 +629,184 @@ impl WorkflowState for AgentState {
 - [x] `ToolUseLoop::execute` 使用 Typed State 初始化 + 结果提取
 - [x] `AgentFlowNode::execute_with_react_graph` 使用 Typed State
 - [x] `StopReason` 加 serde derive（支持序列化）
-- [ ] Effect Log 持久化到 Checkpoint
+
+### v0.4+ 待做清单（2026-06-21 Grill 确认）
+
+- [ ] 消灭 dual-write（`emit_and_set` 消失），Effect 成为唯一状态变更来源
+- [ ] `NodeContext.effects` 从 `Vec<serde_json::Value>` 改为 `Vec<S::Effect>`（强类型）
+- [ ] `Graph<S>` 完全泛型化 + `NodeKind<S>` + `Edge<S>`
+- [ ] `NodeContext<S>` 一刀切 — 删除 `get/set/append/increment` 等 HashMap API
+- [ ] `FlowNode<S>` 泛型化 + 全链适配
+- [ ] `GraphExecutor<S>` 即时 apply Effects
+- [ ] `ParallelNode<S>` merge + `replace_state()`
+- [ ] `StateExtractor` trait + `AgentFlowNode<S, E>` 桥接
+- [ ] Effect Log Checkpoint（替代 State Snapshot）
+- [ ] Message Store（Effect 存 message_id，本体走外部存储）
 - [ ] 确定性重放测试
+
+---
+
+## 七补充、Effect Only 架构决策（2026-06-21 Grill Session 确认）
+
+### 决策总览
+
+| # | 决策 | 结论 |
+|---|------|------|
+| 1 | Effect Only | 消除 dual-write，Effect 是唯一状态变更来源 |
+| 2 | Executor 即时 apply | 节点纯函数（读 State → 产 Effect），Executor 消费 + apply |
+| 3 | Graph<S> 完全泛型 | 每个 Graph 有自己的 `S: WorkflowState` |
+| 4 | NodeContext<S> 一刀切 | 删除 HashMap API，只保留 `state()` + `emit_effect()` |
+| 5 | 纯 Effect | 节点不直接写 State。ParallelNode 例外：`replace_state()` 用于 merge |
+| 6 | StateExtractor trait | AgentFlowNode 桥接外部 State ↔ AgentState |
+| 7 | Effect Log Checkpoint | 只存 Effect 序列，不存 Snapshot。天然支持确定性重放 |
+| 8 | Message 引用 | Effect 存 message_id，Message 本体走外部 Store |
+
+### 目标架构
+
+```
+Graph<S: WorkflowState>
+  ├─ Edge<S>              — 条件闭包: &S -> bool
+  ├─ NodeKind<S>
+  │    ├─ External(Arc<dyn FlowNode<S>>)
+  │    ├─ Task(TaskNode<S>)
+  │    ├─ Condition(ConditionNode<S>)
+  │    ├─ Barrier(BarrierNode<S>)
+  │    └─ Parallel(ParallelNode<S>) — merge 后 replace_state()
+  │
+  ├─ NodeContext<'a, S>
+  │    ├─ state: &'a mut S
+  │    ├─ effects: Vec<S::Effect>    — 强类型，不序列化
+  │    ├─ stream: Option<&'a StreamEmitter>
+  │    ├─ control: ExecutionControl
+  │    └─ metadata: NodeMetadata
+  │
+  └─ GraphExecutor<S>
+       └─ step(): execute → consume_effects → apply_batch → checkpoint
+
+AgentFlowNode<S, E: StateExtractor<S>>
+  └─ 内部 Graph<AgentState> + run_inline(state: &mut AgentState)
+
+Checkpoint<S>
+  └─ Effect Log: Vec<(step, node_id, Effect)> + Message Store 引用
+```
+
+### 核心变更
+
+#### 1. 消灭 Dual-Write
+
+**之前（双写反模式）：**
+```rust
+fn emit_and_set(ctx: &mut NodeContext<'_>, effect: AgentEffect) {
+    ctx.emit_effect(effect.clone());  // ← 路径 A: Effect 驱动
+    match effect {
+        AgentEffect::IncrementIteration => {
+            let cur = ctx.get(SK_ITERATIONS);
+            ctx.set(SK_ITERATIONS, cur + 1);  // ← 路径 B: HashMap 直接写
+        }
+        // ... 每个 variant 都要 dual-write
+    }
+}
+```
+
+**之后（Effect Only）：**
+```rust
+// 节点只 emit Effect
+ctx.emit_effect(AgentEffect::IncrementIteration);
+
+// Executor 循环中即时 apply
+let effects = ctx.consume_effects();
+state.apply_batch(effects);
+```
+
+#### 2. Graph<S> 完全泛型
+
+**之前：**
+```rust
+pub type EdgeCondition = Arc<dyn Fn(&State) -> bool + Send + Sync>;
+//                              ^^^^^^ 固定为 HashMap<String, Value>
+```
+
+**之后：**
+```rust
+pub type EdgeCondition<S> = Arc<dyn Fn(&S) -> bool + Send + Sync>;
+pub struct Graph<S: WorkflowState> { ... }
+pub struct NodeKind<S: WorkflowState> { ... }
+pub trait FlowNode<S: WorkflowState> {
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError>;
+}
+```
+
+#### 3. NodeContext<S> 一刀切
+
+**之前：**
+```rust
+// HashMap API
+ctx.get::<Vec<Message>>("messages")  // 运行时类型检查
+ctx.set("iterations", n)             // 字符串 key
+ctx.append("messages", msg)          // 动态数组
+```
+
+**之后：**
+```rust
+// 强类型 API
+ctx.state().messages.clone()         // 编译期类型安全
+ctx.emit_effect(IncrementIteration)  // 语义清晰
+```
+
+#### 4. StateExtractor 桥接
+
+```rust
+pub trait StateExtractor<S: WorkflowState>: Send + Sync {
+    fn extract_messages(&self, state: &S) -> Vec<Message>;
+    fn inject_result(&self, state: &mut S, agent_state: &AgentState);
+}
+
+pub struct AgentFlowNode<S, E> {
+    extractor: E,
+    // ... Agent 配置
+}
+
+impl<S: WorkflowState, E: StateExtractor<S>> FlowNode<S> for AgentFlowNode<S, E> {
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
+        let messages = self.extractor.extract_messages(ctx.state());
+        let mut inner_state = AgentState::from_messages(messages);
+        
+        let react_graph = self.build_react_graph();
+        react_graph.run_inline(&mut inner_state, self.max_iterations).await?;
+        
+        self.extractor.inject_result(ctx.state(), &inner_state);
+        Ok(())
+    }
+}
+```
+
+#### 5. Effect Log Checkpoint
+
+**之前：** 序列化整个 `State = HashMap<String, Value>`
+**之后：** 追加 Effect 序列到 Log，恢复时重放
+
+```rust
+// 存储
+Checkpoint {
+    trace_id: TraceId,
+    effect_log: Vec<(step: usize, node_id: String, effect: serde_json::Value)>,
+    message_store_refs: Vec<message_id>,  // Message 本体走外部存储
+}
+
+// 恢复
+let state = S::initial();
+for (step, node_id, effect) in checkpoint.effect_log {
+    let effect = serde_json::from_value(effect)?;
+    state.apply(effect);
+}
+```
+
+#### 6. Message 引用
+
+`AppendMessage` Effect 只存 `message_id`（UUID），Message 本体存外部 Message Store。
+- 恢复时从 Effect Log + Message Store 重建 State
+- 天然支持 TTL、压缩、缓存
+- 与 Compaction 配合——旧 Message 自然 GC
 
 ---
 

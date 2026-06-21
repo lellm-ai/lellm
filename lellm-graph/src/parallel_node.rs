@@ -26,6 +26,8 @@ use crate::event::FlowEvent;
 use crate::ids::SpanId;
 use crate::node::FlowNode;
 use crate::node_context::NodeContext;
+use crate::state::State;
+use crate::workflow_state::WorkflowState;
 
 /// 并行节点 — 同时执行多个分支，合并 State。
 ///
@@ -43,13 +45,11 @@ use crate::node_context::NodeContext;
 /// graph.node("research", NodeKind::Parallel(parallel));
 /// ```
 #[derive(Clone)]
-pub struct ParallelNode {
-    /// 调试标签（可选）
+pub struct ParallelNode<S: WorkflowState = State> {
     label: Option<String>,
-    /// 并行分支 — (名称, 节点)
-    branches: Vec<(String, Arc<dyn FlowNode>)>,
-    /// 错误处理策略
+    branches: Vec<(String, Arc<dyn FlowNode<S>>)>,
     error_strategy: ParallelErrorStrategy,
+    _phantom: std::marker::PhantomData<S>,
 }
 
 /// 并行执行错误处理策略。
@@ -62,24 +62,20 @@ pub enum ParallelErrorStrategy {
     CollectAll,
 }
 
-impl ParallelNode {
-    /// 创建构建器。
-    pub fn builder() -> ParallelNodeBuilder {
+impl<S: WorkflowState> ParallelNode<S> {
+    pub fn builder() -> ParallelNodeBuilder<S> {
         ParallelNodeBuilder::new()
     }
 
-    /// 设置调试标签。
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
     }
 
-    /// 获取分支数量。
     pub fn branch_count(&self) -> usize {
         self.branches.len()
     }
 
-    /// 获取分支名称列表。
     pub fn branch_names(&self) -> Vec<&str> {
         self.branches
             .iter()
@@ -87,19 +83,16 @@ impl ParallelNode {
             .collect()
     }
 
-    /// 迭代所有分支（名称, 节点）引用。
-    pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode>)> {
+    pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode<S>>)> {
         self.branches
             .iter()
             .map(|(name, node)| (name.as_str(), node))
     }
 
-    /// 获取错误处理策略。
     pub fn error_strategy(&self) -> ParallelErrorStrategy {
         self.error_strategy
     }
 
-    /// 获取标签。
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
@@ -110,48 +103,39 @@ impl ParallelNode {
 }
 
 /// ParallelNode 构建器。
-pub struct ParallelNodeBuilder {
+pub struct ParallelNodeBuilder<S: WorkflowState = State> {
     label: Option<String>,
-    branches: Vec<(String, Arc<dyn FlowNode>)>,
+    branches: Vec<(String, Arc<dyn FlowNode<S>>)>,
     error_strategy: ParallelErrorStrategy,
+    _phantom: std::marker::PhantomData<S>,
 }
 
-impl ParallelNodeBuilder {
+impl<S: WorkflowState> ParallelNodeBuilder<S> {
     fn new() -> Self {
         Self {
             label: None,
             branches: Vec::new(),
             error_strategy: ParallelErrorStrategy::default(),
+            _phantom: std::marker::PhantomData,
         }
     }
 
-    /// 设置调试标签。
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
     }
 
-    /// 添加并行分支。
-    ///
-    /// - `name` — 分支名称（用于调试和事件标识）
-    /// - `node` — 分支执行的节点
-    pub fn branch(mut self, name: impl Into<String>, node: Arc<dyn FlowNode>) -> Self {
+    pub fn branch(mut self, name: impl Into<String>, node: Arc<dyn FlowNode<S>>) -> Self {
         self.branches.push((name.into(), node));
         self
     }
 
-    /// 设置错误处理策略。
     pub fn error_strategy(mut self, strategy: ParallelErrorStrategy) -> Self {
         self.error_strategy = strategy;
         self
     }
 
-    /// 构建 ParallelNode。
-    ///
-    /// # Panics
-    ///
-    /// 如果没有添加任何分支，则 panic。
-    pub fn build(self) -> ParallelNode {
+    pub fn build(self) -> ParallelNode<S> {
         if self.branches.is_empty() {
             panic!("ParallelNode must have at least one branch");
         }
@@ -159,11 +143,12 @@ impl ParallelNodeBuilder {
             label: self.label,
             branches: self.branches,
             error_strategy: self.error_strategy,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl std::fmt::Debug for ParallelNode {
+impl<S: WorkflowState> std::fmt::Debug for ParallelNode<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParallelNode")
             .field("label", &self.label)
@@ -181,44 +166,50 @@ impl std::fmt::Debug for ParallelNode {
 }
 
 #[async_trait::async_trait]
-impl FlowNode for ParallelNode {
-    /// 执行 — Fork state 给每个分支，收集变更后合并。
-    ///
-    /// 注意：真正的并行执行由 Executor::handle_parallel() 完成。
-    /// 此方法提供串行 fallback，确保直接调用也能工作。
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+impl<S: WorkflowState> FlowNode<S> for ParallelNode<S> {
+    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
         let start_time = Instant::now();
         let span_id = SpanId::new();
         let branch_count = self.branches.len();
 
-        // Emit ParallelStarted
         ctx.emit_flow_event(FlowEvent::ParallelStarted {
             node_id: self.display_name(),
             branch_count,
             span_id,
         });
 
-        // Fork state for each branch
-        let mut branch_states = Vec::new();
-        for _ in 0..self.branches.len() {
-            branch_states.push(ctx.state().fork());
-        }
+        // Clone typed state for each branch — each branch works on its own copy
+        let base_state = ctx.state().clone();
+        let mut branch_results: Vec<S> = Vec::with_capacity(self.branches.len());
 
         // Execute branches sequentially (serial fallback)
-        for ((name, node), branch_state) in self.branches.iter().zip(branch_states.iter_mut()) {
+        for (name, node) in &self.branches {
             let branch_start = Instant::now();
             let branch_span = SpanId::new();
-            let mut branch_ctx = NodeContext::new(branch_state, None);
+
+            // Each branch gets its own typed state clone + a forked BranchState
+            let mut branch_state = base_state.clone();
+            let mut branch_bs = ctx.branch().fork();
+            let mut branch_ctx = NodeContext::new(&mut branch_state, &mut branch_bs, None);
+
             let result = node.execute(&mut branch_ctx).await.map_err(|e| {
                 GraphError::Terminal(crate::error::TerminalError::NodeExecutionFailed {
                     node: format!("{}/{}", self.display_name(), name),
                     source: e.into(),
                 })
             });
+
+            // Consume effects → apply to branch's typed state
+            let effects = branch_ctx.consume_effects();
+            for v in effects {
+                if let Ok(effect) = serde_json::from_value::<S::Effect>(v) {
+                    branch_state.apply(effect);
+                }
+            }
+
             let branch_duration = branch_start.elapsed();
             let success = result.is_ok();
 
-            // Emit BranchCompleted
             ctx.emit_flow_event(FlowEvent::BranchCompleted {
                 branch_name: name.clone(),
                 node_id: self.display_name(),
@@ -230,24 +221,36 @@ impl FlowNode for ParallelNode {
             if !success {
                 return result;
             }
+
+            branch_results.push(branch_state);
         }
 
-        // Merge changes from all branches
-        // TODO: Use ReducerRegistry for merge
-        for branch_state in &branch_states {
-            for change in branch_state.changes() {
-                match change.operation {
-                    crate::branch_state::ChangeOperation::Put => {
-                        ctx.set(&change.key, change.value.clone());
-                    }
-                    crate::branch_state::ChangeOperation::Delete => {
-                        ctx.remove(&change.key);
+        // Merge all branch states using S::merge() — compiled-time merge rules
+        let merged = {
+            let mut iter = branch_results.into_iter();
+            let mut current = iter.next().expect("at least one branch");
+            for next_branch in iter {
+                match current.merge(next_branch) {
+                    Ok(result) => current = result,
+                    Err(e) => {
+                        // merge 失败意味着状态冲突。
+                        // State (HashMap) 和 AgentState 的 merge 永不失败。
+                        // 此分支仅用于未来自定义 State 的极端情况。
+                        return Err(GraphError::Terminal(
+                            crate::error::TerminalError::StateError(format!(
+                                "parallel merge conflict in {name}: {e}",
+                                name = self.display_name()
+                            )),
+                        ));
                     }
                 }
             }
-        }
+            current
+        };
 
-        // Emit ParallelCompleted
+        // Replace parent state with merged result
+        *ctx.state_mut() = merged;
+
         ctx.emit_flow_event(FlowEvent::ParallelCompleted {
             node_id: self.display_name(),
             span_id,
