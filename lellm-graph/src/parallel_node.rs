@@ -53,7 +53,8 @@ pub struct ParallelNode<S: WorkflowState = State, M: MergeStrategy<S> = StateMer
     label: Option<String>,
     branches: Vec<(String, Arc<dyn FlowNode<S>>)>,
     error_strategy: ParallelErrorStrategy,
-    merge_strategy: M,
+    /// Phantom — M 通过 `M::merge()` 静态调用，不需要实例。
+    _merge_strategy: std::marker::PhantomData<M>,
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> Clone for ParallelNode<S, M> {
@@ -62,7 +63,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Clone for ParallelNode<S, M> {
             label: self.label.clone(),
             branches: self.branches.clone(),
             error_strategy: self.error_strategy,
-            merge_strategy: M::default_instance(),
+            _merge_strategy: std::marker::PhantomData,
         }
     }
 }
@@ -125,19 +126,16 @@ pub struct ParallelNodeBuilder<S: WorkflowState = State, M: MergeStrategy<S> = S
     label: Option<String>,
     branches: Vec<(String, Arc<dyn FlowNode<S>>)>,
     error_strategy: ParallelErrorStrategy,
-    merge_strategy: M,
+    _phantom: std::marker::PhantomData<M>,
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
-    fn new() -> Self
-    where
-        M: Sized,
-    {
+    fn new() -> Self {
         Self {
             label: None,
             branches: Vec::new(),
             error_strategy: ParallelErrorStrategy::default(),
-            merge_strategy: M::default_instance(),
+            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -164,7 +162,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
             label: self.label,
             branches: self.branches,
             error_strategy: self.error_strategy,
-            merge_strategy: self.merge_strategy,
+            _merge_strategy: std::marker::PhantomData,
         }
     }
 
@@ -177,7 +175,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
             label: self.label,
             branches: self.branches,
             error_strategy: self.error_strategy,
-            merge_strategy: NM::default_instance(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }

@@ -116,7 +116,7 @@ impl Clone for GraphExecutor {
         Self {
             max_steps: self.max_steps,
             store: self.store.clone(),
-            policy: self.policy.clone(),
+            policy: self.policy,
             graph_hash: self.graph_hash.clone(),
             pending_reducers: self.pending_reducers.clone(),
         }
