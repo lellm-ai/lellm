@@ -237,8 +237,8 @@ impl AgentFlowNode {
             events.push(agent_event.clone());
 
             // 转发流式事件到 ctx.emit()
-            match &agent_event {
-                AgentEvent::Provider(provider_event) => match provider_event {
+            if let AgentEvent::Provider(provider_event) = &agent_event {
+                match provider_event {
                     lellm_provider::ProviderEvent::Token { token } => {
                         ctx.emit(lellm_graph::StreamChunk::Text(token.clone()));
                     }
@@ -246,8 +246,7 @@ impl AgentFlowNode {
                         ctx.emit(lellm_graph::StreamChunk::Thinking(thinking.clone()));
                     }
                     _ => {}
-                },
-                _ => {}
+                }
             }
 
             if is_terminal {

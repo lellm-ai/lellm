@@ -10,7 +10,6 @@ use tokio::sync::mpsc::Sender;
 
 use super::context::{AgentExecutionContext, ContextBudget, estimate_text};
 use super::event::AgentEvent;
-use super::fallback::{FallbackAction, FallbackContext, FallbackStrategy};
 use super::retry::RetryPolicy;
 use super::runtime::{
     ResolvedRound, build_result, get_iterations, state_add_output_from_content,
@@ -20,58 +19,6 @@ use super::tools::{ToolExecutor, ToolRegistration, ToolSnapshot};
 
 /// 工具映射类型别名
 type ToolMap = indexmap::IndexMap<String, ToolRegistration>;
-
-// ─── 带 Fallback 的执行器 ────────────────────────────────────────
-
-/// 带 Fallback 重试的通用操作执行器。
-///
-/// **职责划分：**
-/// - `FallbackContext` = 观察窗口（借用 `&LlmError`）
-/// - Retry Loop = 错误所有者（Abort 时直接返回 owned `err`）
-/// - `can_retry` = 重试门控（流式模式下 stream_started 后不可重试）
-pub async fn execute_with_fallback<T, F, Fut>(
-    fallback: &Arc<dyn FallbackStrategy>,
-    can_retry: impl Fn(&LlmError) -> bool,
-    mut op: F,
-    iteration: usize,
-    messages: &[Message],
-) -> Result<T, LlmError>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, LlmError>>,
-{
-    let mut attempt: usize = 1;
-
-    loop {
-        match op().await {
-            Ok(v) => return Ok(v),
-            Err(err) => {
-                if !can_retry(&err) {
-                    return Err(err);
-                }
-                tracing::warn!(
-                    attempt = attempt,
-                    error = %err,
-                    "provider operation failed, fallback handling"
-                );
-                let ctx = FallbackContext {
-                    error: &err,
-                    attempt,
-                    iterations: iteration,
-                    conversation: messages.to_vec().into(),
-                };
-                match fallback.handle(&ctx).await {
-                    FallbackAction::Retry => {
-                        attempt += 1;
-                    }
-                    FallbackAction::Abort => {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-    }
-}
 
 // ─── 流式辅助 ────────────────────────────────────────────────────
 

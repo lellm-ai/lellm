@@ -24,10 +24,11 @@ use lellm_agent::serde::Deserialize;
 use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel};
 use lellm_core::{Message, text_block};
 use lellm_derive::Tool;
-use lellm_graph::{GraphBuilder, GraphExecutor, NodeKind, StateDelta, TaskNode};
+use lellm_graph::{
+    GraphBuilder, GraphExecutor, NodeContext, NodeKind, State, StateEffect, TaskNode,
+};
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 // ─── 工具定义 ───────────────────────────────────────────────
@@ -79,13 +80,14 @@ fn build_graph() -> lellm_graph::Graph {
     // 初始化：写入用户问题
     g.node(
         "init",
-        NodeKind::Task(TaskNode::new("init", |_| {
-            Ok(vec![StateDelta::put(
-                "messages",
+        NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_, State>| {
+            ctx.emit_effect(StateEffect::Put(
+                "messages".into(),
                 serde_json::json!([Message::User {
                     content: text_block("3加4等于多少，然后再乘以2。".into()),
                 }]),
-            )])
+            ));
+            Ok(())
         })),
     );
 
@@ -98,32 +100,36 @@ fn build_graph() -> lellm_graph::Graph {
     // 后处理：打印结果
     g.node(
         "summary",
-        NodeKind::Task(TaskNode::new("summary", |state| {
-            println!("\n=== 结果 ===");
+        NodeKind::Task(TaskNode::new(
+            "summary",
+            |ctx: &mut NodeContext<'_, State>| {
+                println!("\n=== 结果 ===");
 
-            if let Some(msgs) = state.get("messages") {
-                let count = msgs.as_array().map_or(0, |a| a.len());
-                println!("消息数: {count}");
-            }
+                let state = ctx.state();
+                if let Some(msgs) = state.get("messages") {
+                    let count = msgs.as_array().map_or(0, |a| a.len());
+                    println!("消息数: {count}");
+                }
 
-            let reason = state
-                .get("agent_stop_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let iters = state
-                .get("agent_iterations")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let calls = state
-                .get("agent_tool_calls")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            println!("停止原因: {reason}");
-            println!("迭代次数: {iters}");
-            println!("工具调用: {calls}");
+                let reason = state
+                    .get("agent_stop_reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let iters = state
+                    .get("agent_iterations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let calls = state
+                    .get("agent_tool_calls")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!("停止原因: {reason}");
+                println!("迭代次数: {iters}");
+                println!("工具调用: {calls}");
 
-            Ok(vec![])
-        })),
+                Ok(())
+            },
+        )),
     );
 
     g.edge("init", "agent");
@@ -148,7 +154,7 @@ async fn main() {
     println!("节点: {:?}", graph.node_names());
 
     let result = GraphExecutor::default()
-        .execute(Arc::new(graph), HashMap::new())
+        .execute(Arc::new(graph), State::new())
         .await
         .expect("执行失败");
 
@@ -165,7 +171,7 @@ async fn main() {
     println!("总耗时: {}ms", result.duration.as_millis());
 
     println!("\n=== 最终状态 ===");
-    for (k, v) in &result.state {
+    for (k, v) in result.state.iter() {
         println!("  {k}: {v}");
     }
 }

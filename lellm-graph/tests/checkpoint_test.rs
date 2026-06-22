@@ -4,13 +4,13 @@
 
 use lellm_graph::{
     BarrierDecision, CheckpointPolicy, CheckpointStore, GraphBuilder, GraphExecutor,
-    InMemoryCheckpointStore, NodeContext, NodeKind, State, StateEffect, TaskNode,
+    InMemoryCheckpointStore, NodeContext, NodeKind, State, StateEffect, StateMerge, TaskNode,
 };
 use std::sync::Arc;
 
 /// 构建一个简单的 3 节点线性图：a → b → c
 fn build_simple_graph() -> Arc<lellm_graph::Graph> {
-    let mut g = GraphBuilder::new("test");
+    let mut g: GraphBuilder<State, StateMerge> = GraphBuilder::new("test");
     g.start("a").end("c");
     g.node(
         "a",
@@ -51,7 +51,7 @@ fn test_graph_hash_deterministic() {
 #[test]
 fn test_graph_hash_differs_on_structure_change() {
     let graph1 = build_simple_graph();
-    let mut g2 = GraphBuilder::new("diff");
+    let mut g2: GraphBuilder<State, StateMerge> = GraphBuilder::new("diff");
     g2.start("a").end("c");
     g2.node(
         "a",
@@ -116,7 +116,7 @@ async fn test_checkpoint_saved_event() {
 
 #[tokio::test]
 async fn test_checkpoint_barrier_only() {
-    let mut g = GraphBuilder::new("barrier_test");
+    let mut g: GraphBuilder<State, StateMerge> = GraphBuilder::new("barrier_test");
     g.start("a").end("c");
     g.node(
         "a",
