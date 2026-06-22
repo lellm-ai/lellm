@@ -61,3 +61,11 @@ path = "examples/weather_agent_prompt.rs"
 [[example]]
 name = "weather_agent"
 path = "examples/weather_agent.rs"
+
+[[example]]
+name = "calculator_graph"
+path = "examples/calculator_graph.rs"
+
+[[example]]
+name = "calculator_graph_mock"
+path = "examples/calculator_graph_mock.rs"

@@ -17,13 +17,3 @@ tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["serde"] }
-
-[dev-dependencies]
-lellm-agent = { workspace = true }
-lellm-derive = { workspace = true }
-lellm-provider = { workspace = true, features = ["mock", "openai-compat"] }
-schemars = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-futures-util = { workspace = true }
