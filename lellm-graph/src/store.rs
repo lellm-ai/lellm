@@ -1,17 +1,19 @@
-//! Checkpoint 存储后端实现 — 从 lellm-runtime 合并。
+//! Checkpoint 存储后端实现 — 内存后端。
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::checkpoint::{Checkpoint, CheckpointId, CheckpointStore, CheckpointStoreError};
-use crate::ids::TraceId;
+use crate::checkpoint::{Checkpoint, CheckpointId, CheckpointStore, CheckpointStoreError, TraceId};
 
 /// 基于内存的 Checkpoint 存储后端。
+///
+/// 通过 `save_with_trace()` 关联 trace_id，或在存储层组织关联。
 #[derive(Default)]
 pub struct InMemoryCheckpointStore {
     store: RwLock<HashMap<CheckpointId, Checkpoint>>,
+    /// trace_id → [CheckpointId] 索引（按时间正序）
     index: RwLock<HashMap<TraceId, Vec<CheckpointId>>>,
 }
 
@@ -31,17 +33,19 @@ impl InMemoryCheckpointStore {
 
 #[async_trait]
 impl CheckpointStore for InMemoryCheckpointStore {
-    async fn save(&self, checkpoint: &Checkpoint) -> Result<(), CheckpointStoreError> {
-        let ck = checkpoint.clone();
-        let id = ck.checkpoint_id.clone();
-        let trace = ck.parent_trace_id;
+    async fn save_with_trace(
+        &self,
+        trace_id: &TraceId,
+        checkpoint: &Checkpoint,
+    ) -> Result<(), CheckpointStoreError> {
+        let id = checkpoint.checkpoint_id.clone();
 
         {
             let mut store = self
                 .store
                 .write()
                 .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            store.insert(id.clone(), ck);
+            store.insert(id.clone(), checkpoint.clone());
         }
 
         {
@@ -49,7 +53,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
                 .index
                 .write()
                 .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            index.entry(trace).or_default().push(id);
+            index.entry(*trace_id).or_default().push(id);
         }
 
         Ok(())
@@ -91,30 +95,14 @@ impl CheckpointStore for InMemoryCheckpointStore {
     }
 
     async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError> {
-        let trace_id = {
-            let mut store = self
-                .store
-                .write()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            store.remove(id).map(|ck| ck.parent_trace_id)
-        };
-
-        match trace_id {
-            Some(trace) => {
-                let mut index = self
-                    .index
-                    .write()
-                    .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-                if let Some(ids) = index.get_mut(&trace) {
-                    ids.retain(|iid| iid != id);
-                    if ids.is_empty() {
-                        index.remove(&trace);
-                    }
-                }
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        let mut store = self
+            .store
+            .write()
+            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        store
+            .remove(id)
+            .map(|_| true)
+            .ok_or_else(|| CheckpointStoreError::Storage("failed to acquire write lock".into()))
     }
 
     async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError> {
@@ -141,16 +129,5 @@ impl CheckpointStore for InMemoryCheckpointStore {
         }
 
         Ok(to_delete.len())
-    }
-}
-
-/// Checkpoint 扩展 — 便捷读取物化状态中的值。
-pub trait CheckpointExt {
-    fn get_state_value(&self, key: &str) -> Option<u64>;
-}
-
-impl CheckpointExt for Checkpoint {
-    fn get_state_value(&self, key: &str) -> Option<u64> {
-        self.state.get(key).and_then(|v| v.as_u64())
     }
 }

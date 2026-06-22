@@ -11,10 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::barrier_node::BarrierDefaultAction;
 use crate::branch_state::BranchState;
-use crate::checkpoint::{
-    Checkpoint, CheckpointPolicy, CheckpointScore, CheckpointStore, CheckpointTrigger,
-    ExecutionMetadata, IncrementalSnapshotState,
-};
+use crate::checkpoint::{Checkpoint, CheckpointPolicy, CheckpointStore, TraceId};
 use crate::delta::ReducerRegistry;
 use crate::error::{GraphError, TerminalError};
 use crate::event::{
@@ -22,11 +19,11 @@ use crate::event::{
     GraphHandle,
 };
 use crate::graph::Graph;
-use crate::ids::{SpanId, TraceId};
+use crate::ids::SpanId;
 use crate::node::{FlowNode, NodeKind};
 use crate::node_context::{ExecutionSignal, NextAction, NodeContext, NodeMetadata};
 use crate::runtime_event::RuntimeEvent;
-use crate::state::{ExecutionEntry, GraphResult, State, StateEffect};
+use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::stream_emitter::StreamEmitter;
 use crate::workflow_state::WorkflowState;
 
@@ -112,9 +109,6 @@ pub struct GraphExecutor {
     policy: CheckpointPolicy,
     graph_hash: String,
     pending_reducers: Vec<(String, crate::delta::Reducer)>,
-    checkpoint_score: CheckpointScore,
-    last_checkpoint_state: Option<State>,
-    delta_compact_threshold: usize,
 }
 
 impl Clone for GraphExecutor {
@@ -125,9 +119,6 @@ impl Clone for GraphExecutor {
             policy: self.policy.clone(),
             graph_hash: self.graph_hash.clone(),
             pending_reducers: self.pending_reducers.clone(),
-            checkpoint_score: self.checkpoint_score.clone(),
-            last_checkpoint_state: self.last_checkpoint_state.clone(),
-            delta_compact_threshold: self.delta_compact_threshold,
         }
     }
 }
@@ -150,9 +141,6 @@ impl Default for GraphExecutor {
             policy: CheckpointPolicy::default(),
             graph_hash: String::new(),
             pending_reducers: Vec::new(),
-            checkpoint_score: CheckpointScore::default(),
-            last_checkpoint_state: None,
-            delta_compact_threshold: 20,
         }
     }
 }
@@ -220,9 +208,8 @@ impl GraphExecutor {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (decision_tx, decision_rx) = mpsc::channel(16);
         let (cancel_tx, cancel_rx) = mpsc::channel(1);
-        let (checkpoint_tx, checkpoint_rx) = mpsc::channel(8);
 
-        let handle = GraphHandle::new(decision_tx, cancel_tx, checkpoint_tx);
+        let handle = GraphHandle::new(decision_tx, cancel_tx);
 
         tokio::spawn(async move {
             executor
@@ -232,7 +219,6 @@ impl GraphExecutor {
                     event_tx,
                     decision_rx,
                     cancel_rx,
-                    checkpoint_rx,
                     None,
                     None,
                 )
@@ -246,9 +232,6 @@ impl GraphExecutor {
     }
 
     /// 内部：流式执行，支持指定起始节点和追踪 ID。
-    ///
-    /// - `start_node`: 覆盖图的起始节点（用于 Checkpoint 恢复）
-    /// - `trace_id`: 覆盖追踪 ID（用于 Checkpoint 恢复）
     fn execute_stream_with(
         &self,
         graph: Arc<Graph>,
@@ -260,9 +243,8 @@ impl GraphExecutor {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (decision_tx, decision_rx) = mpsc::channel(16);
         let (cancel_tx, cancel_rx) = mpsc::channel(1);
-        let (checkpoint_tx, checkpoint_rx) = mpsc::channel(8);
 
-        let handle = GraphHandle::new(decision_tx, cancel_tx, checkpoint_tx);
+        let handle = GraphHandle::new(decision_tx, cancel_tx);
 
         tokio::spawn(async move {
             executor
@@ -272,7 +254,6 @@ impl GraphExecutor {
                     event_tx,
                     decision_rx,
                     cancel_rx,
-                    checkpoint_rx,
                     start_node,
                     trace_id,
                 )
@@ -294,7 +275,6 @@ impl GraphExecutor {
         event_tx: mpsc::Sender<GraphEvent>,
         mut decision_rx: mpsc::Receiver<BarrierDecisionMessage>,
         mut cancel_rx: mpsc::Receiver<()>,
-        mut checkpoint_rx: mpsc::Receiver<()>,
         start_node: Option<String>,
         trace_id: Option<TraceId>,
     ) {
@@ -303,7 +283,6 @@ impl GraphExecutor {
         let mut execution_log = Vec::new();
         let mut decision_registry = DecisionRegistry::new();
         let mut _reducer_registry = ReducerRegistry::new();
-        let mut snapshot_state = IncrementalSnapshotState::new(self.delta_compact_threshold);
 
         for (key, reducer) in &self.pending_reducers {
             _reducer_registry.register(key, *reducer);
@@ -343,20 +322,6 @@ impl GraphExecutor {
                 )
                 .await;
                 return;
-            }
-
-            // ⚡ Manual checkpoint 信号检测
-            if checkpoint_rx.try_recv().is_ok() {
-                self.save_checkpoint_if_needed(
-                    &event_tx,
-                    &trace_id,
-                    &current,
-                    &state,
-                    step,
-                    CheckpointTrigger::Explicit,
-                    &mut snapshot_state,
-                )
-                .await;
             }
 
             step += 1;
@@ -459,23 +424,12 @@ impl GraphExecutor {
                         }
                     }
 
-                    // Adaptive Checkpoint
-                    if self.policy.has_adaptive_trigger() {
-                        let exec_metadata = ExecutionMetadata {
-                            duration_ms: duration.as_millis() as u64,
-                            token_cost: metadata.token_cost,
-                            has_side_effects: metadata.has_side_effects,
-                        };
-                        self.save_checkpoint_if_needed(
-                            &event_tx,
-                            &trace_id,
-                            &current,
-                            &state,
-                            step,
-                            CheckpointTrigger::Adaptive(exec_metadata),
-                            &mut snapshot_state,
-                        )
-                        .await;
+                    // Checkpoint — 根据策略决定是否保存
+                    if self.should_checkpoint(CheckpointPolicyTrigger::NodeExecuted {
+                        has_side_effects: metadata.has_side_effects,
+                    }) {
+                        self.save_checkpoint(&event_tx, &trace_id, &current, &state, step)
+                            .await;
                     }
 
                     // 发射 NodeCompleted (RuntimeEvent) + NodeEnd (GraphEvent)
@@ -533,16 +487,15 @@ impl GraphExecutor {
                                     .await;
                                 match outcome {
                                     StepOutcome::Continue(target) => {
-                                        self.save_checkpoint_if_needed(
-                                            &event_tx,
-                                            &trace_id,
-                                            &target,
-                                            &state,
-                                            step,
-                                            CheckpointTrigger::BarrierResolved,
-                                            &mut snapshot_state,
-                                        )
-                                        .await;
+                                        // Barrier 解决后，根据策略保存 Checkpoint
+                                        if self.should_checkpoint(
+                                            CheckpointPolicyTrigger::BarrierResolved,
+                                        ) {
+                                            self.save_checkpoint(
+                                                &event_tx, &trace_id, &target, &state, step,
+                                            )
+                                            .await;
+                                        }
                                         current = target;
                                     }
                                     StepOutcome::Break => {
@@ -552,7 +505,6 @@ impl GraphExecutor {
                                             &execution_log,
                                             start_time,
                                             trace_id,
-                                            &mut snapshot_state,
                                         )
                                         .await;
                                         return;
@@ -589,26 +541,27 @@ impl GraphExecutor {
 
                     match outcome {
                         StepOutcome::Continue(target) => {
-                            self.save_checkpoint_if_needed(
-                                &event_tx,
-                                &trace_id,
-                                &target,
-                                &state,
-                                step,
-                                CheckpointTrigger::Explicit,
-                                &mut snapshot_state,
-                            )
-                            .await;
                             current = target;
                         }
                         StepOutcome::Break => {
+                            // 完成前，根据策略保存最终 Checkpoint
+                            if self.should_checkpoint(CheckpointPolicyTrigger::GraphComplete) {
+                                self.save_checkpoint(
+                                    &event_tx,
+                                    &trace_id,
+                                    "__complete__",
+                                    &state,
+                                    step,
+                                )
+                                .await;
+                            }
+
                             self.send_graph_complete(
                                 &event_tx,
                                 &state,
                                 &execution_log,
                                 start_time,
                                 trace_id,
-                                &mut snapshot_state,
                             )
                             .await;
                             return;
@@ -665,8 +618,6 @@ impl GraphExecutor {
     // ─── 节点执行（核心）──────────────────────────────────────
 
     /// 使用 BranchState + NodeContext 执行单个节点。
-    ///
-    /// 返回 (NextAction, Option<ExecutionSignal>, NodeMetadata, Vec<FlowEvent>)。
     async fn execute_node(
         &self,
         node: &NodeKind,
@@ -682,34 +633,19 @@ impl GraphExecutor {
         ),
         GraphError,
     > {
-        // 1. 创建 BranchState（从当前 State）
         let mut branch = BranchState::from_state(state.clone());
-
-        // 2. 创建 StreamEmitter（数据面通道）
         let (tx, _rx) = mpsc::channel(64);
         let emitter = StreamEmitter::new(tx);
-
-        // 3. 创建 NodeContext（typed state + branch state）
         let mut ctx = NodeContext::new(state, &mut branch, Some(&emitter));
 
-        // 4. 执行节点
         node.execute(&mut ctx).await?;
 
-        // 5. 提取控制信号 + 消费 Effects
         let effects = ctx.consume_effects();
         let (next_action, signal) = ctx.take_control();
         let metadata = ctx.take_metadata();
         let flow_events = ctx.take_flow_events();
 
-        // 5b. 消费 Effects → apply 到 typed state
-        for v in effects {
-            let effect: <State as crate::workflow_state::WorkflowState>::Effect =
-                match serde_json::from_value(v) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-            state.apply(effect);
-        }
+        state.apply_batch(effects);
 
         Ok((next_action, signal, metadata, flow_events))
     }
@@ -734,7 +670,6 @@ impl GraphExecutor {
         node_start: Instant,
         trace_id: TraceId,
     ) -> StepOutcome {
-        // 发射 BarrierWaiting
         self.emit_runtime(
             event_tx,
             RuntimeEvent::BarrierWaiting {
@@ -758,7 +693,6 @@ impl GraphExecutor {
             return StepOutcome::Break;
         }
 
-        // 等待决策
         let decision = self
             .wait_barrier_decision(
                 decision_rx,
@@ -783,7 +717,6 @@ impl GraphExecutor {
             return StepOutcome::ErrorSent;
         }
 
-        // 发射 BarrierResolved
         self.emit_runtime(
             event_tx,
             RuntimeEvent::BarrierResolved {
@@ -804,7 +737,6 @@ impl GraphExecutor {
             return StepOutcome::Break;
         }
 
-        // 应用决策
         match node {
             NodeKind::Barrier(b) => {
                 let mut branch = BranchState::from_state(state.clone());
@@ -812,15 +744,9 @@ impl GraphExecutor {
                 b.apply_decision_to_ctx(&mut ctx, decision);
                 let (next, _signal) = ctx.take_control();
 
-                // 消费 Effects → apply 到 typed state
                 let effects = ctx.consume_effects();
-                for v in effects {
-                    if let Ok(effect) = serde_json::from_value::<StateEffect>(v) {
-                        state.apply(effect);
-                    }
-                }
+                state.apply_batch(effects);
 
-                // 记录日志
                 let end_time = Instant::now();
                 execution_log.push(ExecutionEntry {
                     step,
@@ -920,7 +846,6 @@ impl GraphExecutor {
         execution_log: &[ExecutionEntry],
         start_time: Instant,
         trace_id: TraceId,
-        snapshot_state: &mut IncrementalSnapshotState,
     ) {
         self.emit_runtime(
             event_tx,
@@ -930,39 +855,6 @@ impl GraphExecutor {
             },
         )
         .await;
-
-        if self.policy.should_checkpoint_on_completion() {
-            if let Some(store) = &self.store {
-                let (base, deltas, current) = snapshot_state.snapshot(state);
-                let ck = if let Some(base_state) = base {
-                    Checkpoint::with_snapshot(
-                        trace_id,
-                        &self.graph_hash,
-                        "__complete__",
-                        current,
-                        base_state,
-                        deltas,
-                    )
-                } else {
-                    Checkpoint::new(trace_id, &self.graph_hash, "__complete__", state.clone())
-                };
-                match store.save(&ck).await {
-                    Ok(()) => {
-                        let _ = self
-                            .send(
-                                event_tx,
-                                GraphEvent::CheckpointSaved {
-                                    checkpoint_id: ck.checkpoint_id.clone(),
-                                    node_name: "__complete__".to_string(),
-                                    step: execution_log.len(),
-                                },
-                            )
-                            .await;
-                    }
-                    Err(e) => tracing::warn!(error = %e, "final checkpoint save failed"),
-                }
-            }
-        }
 
         let _ = self
             .send(
@@ -1075,28 +967,24 @@ impl GraphExecutor {
             ))));
         }
 
-        // 1. 条件边
         for edge in &edges {
             if edge.is_conditional() && edge.condition.as_ref().is_some_and(|c| c(state)) {
                 return Ok(edge.to.clone());
             }
         }
 
-        // 2. 普通边
         for edge in &edges {
             if edge.is_normal() {
                 return Ok(edge.to.clone());
             }
         }
 
-        // 3. Fallback 边
         for edge in &edges {
             if edge.fallback {
                 return Ok(edge.to.clone());
             }
         }
 
-        // 4. 无匹配
         let attempted: Vec<crate::error::ConditionEval> = edges
             .iter()
             .map(|e| crate::error::ConditionEval {
@@ -1112,60 +1000,44 @@ impl GraphExecutor {
         }))
     }
 
-    // ─── Checkpoint ────────────────────────────────────────────
+    // ─── Checkpoint 策略判断 ───────────────────────────────────
 
-    async fn save_checkpoint_if_needed(
+    /// 根据当前策略和触发场景，判断是否需要保存 Checkpoint。
+    fn should_checkpoint(&self, trigger: CheckpointPolicyTrigger) -> bool {
+        match self.policy {
+            CheckpointPolicy::EveryNode => true,
+            CheckpointPolicy::BarrierOnly => matches!(
+                trigger,
+                CheckpointPolicyTrigger::BarrierResolved | CheckpointPolicyTrigger::GraphComplete
+            ),
+            CheckpointPolicy::Manual => false,
+        }
+    }
+
+    /// 保存 Checkpoint。
+    async fn save_checkpoint(
         &self,
         event_tx: &mpsc::Sender<GraphEvent>,
         trace_id: &TraceId,
-        next_node: &str,
+        node_name: &str,
         state: &State,
         step: usize,
-        trigger: CheckpointTrigger,
-        snapshot_state: &mut IncrementalSnapshotState,
     ) {
-        let should_save = match &trigger {
-            CheckpointTrigger::BarrierResolved => self.policy.should_checkpoint_on_barrier(),
-            CheckpointTrigger::ExecutionCompleted => self.policy.should_checkpoint_on_completion(),
-            CheckpointTrigger::HumanDecision => self.policy.should_checkpoint_on_human_decision(),
-            CheckpointTrigger::Explicit => self.policy.should_checkpoint_on_explicit(),
-            CheckpointTrigger::Adaptive(metadata) => {
-                self.checkpoint_score.should_checkpoint(metadata)
-            }
-        };
-
-        if !should_save {
-            return;
-        }
         let store = match &self.store {
             Some(s) => s,
             None => return,
         };
 
-        let (base, deltas, current) = snapshot_state.snapshot(state);
-        let ck = if let Some(base_state) = base {
-            Checkpoint::with_snapshot(
-                *trace_id,
-                &self.graph_hash,
-                next_node,
-                current,
-                base_state,
-                deltas,
-            )
-        } else {
-            Checkpoint::new(*trace_id, &self.graph_hash, next_node, state.clone())
-        };
+        let ck = Checkpoint::new(node_name, state.clone());
 
-        match store.save(&ck).await {
+        match store.save_with_trace(trace_id, &ck).await {
             Ok(()) => {
-                snapshot_state.base_state = Some(state.clone());
-                snapshot_state.clear_pending();
                 let _ = self
                     .send(
                         event_tx,
                         GraphEvent::CheckpointSaved {
                             checkpoint_id: ck.checkpoint_id.clone(),
-                            node_name: next_node.to_string(),
+                            node_name: node_name.to_string(),
                             step,
                         },
                     )
@@ -1174,6 +1046,8 @@ impl GraphExecutor {
             Err(e) => tracing::warn!(error = %e, "checkpoint save failed"),
         }
     }
+
+    // ─── Resume ────────────────────────────────────────────────
 
     pub async fn resume_from(
         &self,
@@ -1199,12 +1073,9 @@ impl GraphExecutor {
 
         let initial_state = checkpoint.state.clone();
 
-        // 解析恢复节点：如果 current_node 是图的合法节点则从中恢复，
-        // 否则从 start_node 开始（如 Checkpoint 记录的是 "__complete__"）。
         let resume_node = {
             let cn = checkpoint.current_node.0.as_str();
             if cn == "__complete__" || cn == graph.end_node() {
-                // 图已完成或停在终点 — 从起点重新开始
                 tracing::warn!(
                     trace_id = %trace_id,
                     current_node = %cn,
@@ -1230,9 +1101,21 @@ impl GraphExecutor {
             }
         };
 
-        // 从 Checkpoint 记录的 current_node 恢复执行（如果有效）
         let execution =
             self.execute_stream_with(graph.clone(), initial_state, resume_node, Some(*trace_id));
         Ok(execution)
     }
+}
+
+// ─── CheckpointPolicyTrigger ───────────────────────────────────────
+
+/// Checkpoint 保存触发场景（内部使用，不暴露）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointPolicyTrigger {
+    /// 普通节点执行完成
+    NodeExecuted { has_side_effects: bool },
+    /// Barrier 决策解决
+    BarrierResolved,
+    /// 图执行完成
+    GraphComplete,
 }

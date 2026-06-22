@@ -121,8 +121,8 @@ pub struct NodeContext<'a, S: WorkflowState = State> {
     control: ExecutionControl,
     /// 节点元数据 — 节点写入
     metadata: NodeMetadata,
-    /// Effect 缓冲 — 节点产生的领域事件
-    effects: Vec<serde_json::Value>,
+    /// Effect 缓冲 — 节点产生的强类型领域事件
+    effects: Vec<S::Effect>,
     /// FlowEvent 缓冲 — 节点产生的控制面事件
     flow_events: Vec<FlowEvent>,
 }
@@ -214,15 +214,15 @@ impl<'a, S: WorkflowState> NodeContext<'a, S> {
 
     // ─── Effects 缓冲（v0.4+ Typed State）───────────────────
 
-    /// 发射一个 Effect（领域事件）到缓冲。
-    pub fn emit_effect<E: serde::Serialize>(&mut self, effect: E) {
-        if let Ok(v) = serde_json::to_value(effect) {
-            self.effects.push(v);
-        }
+    /// 发射一个 Effect（强类型领域事件）到缓冲。
+    ///
+    /// 零序列化开销 — 直接存储 `S::Effect`。
+    pub fn emit_effect(&mut self, effect: S::Effect) {
+        self.effects.push(effect);
     }
 
     /// 消费 Effect 缓冲（返回所有收集的 Effect）。
-    pub fn consume_effects(&mut self) -> Vec<serde_json::Value> {
+    pub fn consume_effects(&mut self) -> Vec<S::Effect> {
         std::mem::take(&mut self.effects)
     }
 

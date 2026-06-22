@@ -166,7 +166,6 @@ pub struct GraphExecution {
 pub struct GraphHandle {
     decision_tx: tokio::sync::mpsc::Sender<BarrierDecisionMessage>,
     cancel_tx: tokio::sync::mpsc::Sender<()>,
-    checkpoint_tx: tokio::sync::mpsc::Sender<()>,
 }
 
 /// 决策消息 — 支持精确匹配和通配匹配。
@@ -186,12 +185,10 @@ impl GraphHandle {
     pub(crate) fn new(
         decision_tx: tokio::sync::mpsc::Sender<BarrierDecisionMessage>,
         cancel_tx: tokio::sync::mpsc::Sender<()>,
-        checkpoint_tx: tokio::sync::mpsc::Sender<()>,
     ) -> Self {
         Self {
             decision_tx,
             cancel_tx,
-            checkpoint_tx,
         }
     }
 
@@ -233,13 +230,5 @@ impl GraphHandle {
 
     pub fn cancel(&self) {
         let _ = self.cancel_tx.try_send(());
-    }
-
-    pub async fn checkpoint(&self) -> Result<(), GraphError> {
-        self.checkpoint_tx.send(()).await.map_err(|_| {
-            GraphError::Terminal(crate::error::TerminalError::BarrierCancelled {
-                node: "checkpoint channel closed".into(),
-            })
-        })
     }
 }

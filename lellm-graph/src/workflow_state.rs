@@ -16,7 +16,7 @@
 ///
 /// Effect 是不可变的、可序列化的、自包含的。
 /// 状态通过 `apply(effect)` 变更，而非直接修改。
-pub trait Effect: Sized + serde::Serialize + serde::de::DeserializeOwned {
+pub trait Effect: Sized + Send + Sync + serde::Serialize + serde::de::DeserializeOwned {
     /// 将此 Effect 合并到另一个同类型 Effect 中（可选）。
     ///
     /// 用于批量场景：多个 Effect 合并为一个，减少 apply 次数。

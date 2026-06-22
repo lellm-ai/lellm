@@ -238,13 +238,9 @@ impl<S: WorkflowState, M: MergeStrategy<S>> FlowNode<S> for ParallelNode<S, M> {
                 })
             });
 
-            // Consume effects → apply to branch's typed state
+            // Consume effects → apply to branch's typed state（零序列化）
             let effects = branch_ctx.consume_effects();
-            for v in effects {
-                if let Ok(effect) = serde_json::from_value::<S::Effect>(v) {
-                    branch_state.apply(effect);
-                }
-            }
+            branch_state.apply_batch(effects);
 
             let branch_duration = branch_start.elapsed();
             let success = result.is_ok();

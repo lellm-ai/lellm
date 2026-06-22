@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::checkpoint::StateSnapshot;
 use crate::state::State;
 
 // ─── ChangeRecord ─────────────────────────────────────────────
@@ -76,29 +75,6 @@ impl BranchState {
         }
     }
 
-    /// 从 StateSnapshot 创建 BranchState。
-    pub fn from_snapshot(snapshot: &StateSnapshot) -> Self {
-        Self {
-            base: Arc::new(snapshot.base_snapshot.clone()),
-            local: HashMap::new(),
-            changes: snapshot
-                .recent_deltas
-                .iter()
-                .map(|d| {
-                    let op = match d.op {
-                        crate::delta::DeltaOp::Put => ChangeOperation::Put,
-                        crate::delta::DeltaOp::Delete => ChangeOperation::Delete,
-                    };
-                    ChangeRecord {
-                        key: d.key.to_string(),
-                        operation: op,
-                        value: d.value.clone(),
-                    }
-                })
-                .collect(),
-        }
-    }
-
     /// 创建新的基态 BranchState（空状态）。
     pub fn empty() -> Self {
         Self::from_state(State::new())
@@ -149,51 +125,25 @@ impl BranchState {
 
     /// Fork 当前状态为新的 BranchState。
     ///
-    /// 会先 apply changes 到 base，生成新的 snapshot，然后创建新的 Overlay。
+    /// 将当前物化状态作为新的 base，清空 overlay 和变更日志。
     pub fn fork(&self) -> BranchState {
-        // 先生成快照
-        let snapshot = self.to_snapshot();
-        // 创建新的 BranchState
+        let state = self.to_state();
         BranchState {
-            base: Arc::new(snapshot.base_snapshot.clone()),
+            base: Arc::new(state),
             local: HashMap::new(),
-            changes: snapshot
-                .recent_deltas
-                .into_iter()
-                .map(|d| {
-                    let op = match d.op {
-                        crate::delta::DeltaOp::Put => ChangeOperation::Put,
-                        crate::delta::DeltaOp::Delete => ChangeOperation::Delete,
-                    };
-                    ChangeRecord {
-                        key: d.key.to_string(),
-                        operation: op,
-                        value: d.value.clone(),
-                    }
-                })
-                .collect(),
+            changes: Vec::new(),
         }
     }
 
     // ─── 快照导出 ─────────────────────────────────────────
 
-    /// 生成 StateSnapshot（用于 Checkpoint）。
-    pub fn to_snapshot(&self) -> StateSnapshot {
-        let mut current = self.base.as_ref().clone();
-        for change in &self.changes {
-            match change.operation {
-                ChangeOperation::Put => {
-                    current.insert(change.key.clone(), change.value.clone());
-                }
-                ChangeOperation::Delete => {
-                    current.remove(&change.key);
-                }
-            }
+    /// 物化当前状态（base + local changes），用于 Checkpoint。
+    pub fn to_state(&self) -> State {
+        let mut state = self.base.as_ref().clone();
+        for (key, value) in &self.local {
+            state.insert(key.clone(), value.clone());
         }
-        StateSnapshot {
-            base_snapshot: current,
-            recent_deltas: Vec::new(),
-        }
+        state
     }
 
     /// 获取变更日志。
@@ -225,16 +175,5 @@ impl BranchState {
     /// 获取 base 引用。
     pub fn base(&self) -> &State {
         &self.base
-    }
-
-    /// 获取当前状态的完整快照（base + local changes）。
-    ///
-    /// 用于条件边判断等需要完整状态的场景。
-    pub fn to_state(&self) -> State {
-        let mut state = self.base.as_ref().clone();
-        for (key, value) in &self.local {
-            state.insert(key.clone(), value.clone());
-        }
-        state
     }
 }

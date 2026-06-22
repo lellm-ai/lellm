@@ -32,7 +32,7 @@ pub struct BarrierNode<S: WorkflowState = State> {
     _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S: WorkflowState> BarrierNode<S> {
+impl<S: WorkflowState<Effect = StateEffect>> BarrierNode<S> {
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {

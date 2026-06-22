@@ -3,15 +3,12 @@
 //! 验证 Checkpoint 能正确保存和恢复 Agent 中间状态。
 
 use lellm_graph::{
-    CheckpointPolicy, CheckpointStore, CheckpointStoreError, GraphBuilder, GraphExecutor,
-    InMemoryCheckpointStore, NodeContext, NodeKind, State, StateEffect, TaskNode,
+    Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore, CheckpointStoreError,
+    GraphBuilder, GraphExecutor, InMemoryCheckpointStore, NodeContext, NodeKind, State,
+    StateEffect, TaskNode, TraceId,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-
-fn to_store(s: Arc<InMemoryCheckpointStore>) -> Arc<dyn lellm_graph::CheckpointStore> {
-    s
-}
+use std::sync::Arc;
 
 /// 自定义节点 — 使用 NodeContext API 写入状态
 fn make_set_node(name: &str, key: &str, value: &str) -> TaskNode {
@@ -44,19 +41,15 @@ fn build_linear_graph() -> Arc<lellm_graph::Graph> {
 async fn test_checkpoint_save_and_load() {
     let graph = build_linear_graph();
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
-    let executor = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     let result = executor.execute(graph.clone(), State::new()).await.unwrap();
 
     // 图执行完成，step 应为 c
     assert_eq!(result.state.get("step").and_then(|v| v.as_str()), Some("c"));
 
-    // 至少有一个 Checkpoint 被保存（ExecutionCompleted 触发）
+    // 至少有一个 Checkpoint 被保存
     assert!(
         !mem_store.is_empty(),
         "should have saved at least one checkpoint"
@@ -67,12 +60,8 @@ async fn test_checkpoint_save_and_load() {
 async fn test_checkpoint_state_preserved() {
     let graph = build_linear_graph();
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
-    let executor = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     let mut state = State::new();
     state.insert("input".into(), serde_json::json!("test_value"));
@@ -99,26 +88,18 @@ async fn test_checkpoint_state_preserved() {
 async fn test_resume_from_checkpoint() {
     let graph = build_linear_graph();
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
-    let executor = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     // 第一次执行
     let result1 = executor.execute(graph.clone(), State::new()).await.unwrap();
 
     // 从 Checkpoint 恢复
-    let executor2 = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor2 =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     let mut result2 = executor2
-        .resume_from(mem_store.as_ref(), &result1.trace_id, &graph)
+        .resume_from(&*mem_store, &result1.trace_id, &graph)
         .await
         .unwrap();
 
@@ -148,12 +129,8 @@ async fn test_checkpoint_state_consistency() {
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
 
     // 有 Checkpoint 执行
-    let executor1 = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor1 =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
     let result1 = executor1
         .execute(graph.clone(), State::new())
         .await
@@ -221,12 +198,8 @@ async fn test_checkpoint_typed_state_roundtrip() {
     let graph = Arc::new(g.build().expect("build"));
 
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
-    let executor = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     let result = executor.execute(graph.clone(), State::new()).await.unwrap();
 
@@ -261,29 +234,24 @@ async fn test_checkpoint_typed_state_roundtrip() {
 async fn test_checkpoint_list_ordering() {
     let graph = build_linear_graph();
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
-    let executor = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     let result = executor.execute(graph.clone(), State::new()).await.unwrap();
 
     // 列出该 trace 的所有 Checkpoint
     let ids = mem_store.list(&result.trace_id).await.unwrap();
 
-    // 至少有一个（ExecutionCompleted）
+    // 至少有一个（EveryNode 模式，每个节点后都保存）
     assert!(!ids.is_empty(), "should have checkpoints for this trace");
 
     // 能逐个加载
     for id in &ids {
-        let ck = mem_store
+        let _ck = mem_store
             .load(id)
             .await
             .unwrap()
             .expect("checkpoint exists");
-        assert_eq!(ck.parent_trace_id, result.trace_id);
     }
 }
 
@@ -370,12 +338,8 @@ fn build_circular_graph() -> Arc<lellm_graph::Graph> {
 async fn test_circular_graph_checkpoint_and_resume() {
     let graph = build_circular_graph();
     let mem_store = Arc::new(InMemoryCheckpointStore::new());
-    let executor = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    let executor =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     // 第一次执行 — 循环 3 次后结束
     let result1 = executor.execute(graph.clone(), State::new()).await.unwrap();
@@ -400,16 +364,12 @@ async fn test_circular_graph_checkpoint_and_resume() {
     // 验证 Checkpoint 被保存
     assert!(!mem_store.is_empty(), "should have checkpoints");
 
-    // 从 Checkpoint 恢复 — 因为图已完成（__complete__），应从 start_node 重新开始
-    let executor2 = GraphExecutor::with_checkpoint(
-        50,
-        to_store(mem_store.clone()),
-        CheckpointPolicy::conservative(),
-        &graph,
-    );
+    // 从 Checkpoint 恢复 — 因为图已完成，应从 start_node 重新开始
+    let executor2 =
+        GraphExecutor::with_checkpoint(50, mem_store.clone(), CheckpointPolicy::EveryNode, &graph);
 
     let mut result2 = executor2
-        .resume_from(mem_store.as_ref(), &result1.trace_id, &graph)
+        .resume_from(&*mem_store, &result1.trace_id, &graph)
         .await
         .unwrap();
 
@@ -434,13 +394,13 @@ async fn test_circular_graph_checkpoint_and_resume() {
 
 /// 模拟一个总是失败的 CheckpointStore
 struct FailingStore {
-    call_count: Mutex<usize>,
+    call_count: std::sync::Mutex<usize>,
 }
 
 impl FailingStore {
     fn new() -> Self {
         Self {
-            call_count: Mutex::new(0),
+            call_count: std::sync::Mutex::new(0),
         }
     }
 
@@ -451,9 +411,10 @@ impl FailingStore {
 
 #[async_trait::async_trait]
 impl CheckpointStore for FailingStore {
-    async fn save(
+    async fn save_with_trace(
         &self,
-        _checkpoint: &lellm_graph::Checkpoint,
+        _trace_id: &TraceId,
+        _checkpoint: &Checkpoint,
     ) -> Result<(), CheckpointStoreError> {
         let mut count = self.call_count.lock().unwrap();
         *count += 1;
@@ -462,34 +423,28 @@ impl CheckpointStore for FailingStore {
         ))
     }
 
-    async fn load(
-        &self,
-        _id: &lellm_graph::CheckpointId,
-    ) -> Result<Option<lellm_graph::Checkpoint>, CheckpointStoreError> {
+    async fn load(&self, _id: &CheckpointId) -> Result<Option<Checkpoint>, CheckpointStoreError> {
         Ok(None)
     }
 
     async fn load_latest(
         &self,
-        _trace_id: &lellm_graph::TraceId,
-    ) -> Result<Option<lellm_graph::Checkpoint>, CheckpointStoreError> {
+        _trace_id: &TraceId,
+    ) -> Result<Option<Checkpoint>, CheckpointStoreError> {
         Ok(None)
     }
 
-    async fn list(
-        &self,
-        _trace_id: &lellm_graph::TraceId,
-    ) -> Result<Vec<lellm_graph::CheckpointId>, CheckpointStoreError> {
+    async fn list(&self, _trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError> {
         Ok(Vec::new())
     }
 
-    async fn delete(&self, _id: &lellm_graph::CheckpointId) -> Result<bool, CheckpointStoreError> {
+    async fn delete(&self, _id: &CheckpointId) -> Result<bool, CheckpointStoreError> {
         Ok(false)
     }
 
     async fn prune(
         &self,
-        _trace_id: &lellm_graph::TraceId,
+        _trace_id: &TraceId,
         _keep: usize,
     ) -> Result<usize, CheckpointStoreError> {
         Ok(0)
@@ -505,7 +460,7 @@ async fn test_checkpoint_store_failure_graceful_degradation() {
     let executor = GraphExecutor::with_checkpoint(
         50,
         failing_store.clone() as Arc<dyn CheckpointStore>,
-        CheckpointPolicy::conservative(),
+        CheckpointPolicy::EveryNode,
         &graph,
     );
 

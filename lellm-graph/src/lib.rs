@@ -1,8 +1,6 @@
 //! lellm-graph — Graph/Node/Edge 编排层 + 状态管理 + Checkpoint。
 //!
 //! 通用工作流引擎（类似 LangGraph / Temporal / Prefect）。
-//! 吸收了原 lellm-runtime，包含 State/StateDelta/Checkpoint 等基础设施。
-//! 依赖 `lellm-core`，不依赖 agent/provider。
 
 pub mod barrier_node;
 pub mod branch_state;
@@ -26,7 +24,8 @@ pub mod stream_emitter;
 pub mod workflow_state;
 
 // ─── IDs ─────────────────────────────────────────────────────
-pub use ids::{SpanId, TraceId};
+pub use checkpoint::TraceId;
+pub use ids::SpanId;
 
 // ─── State ───────────────────────────────────────────────────
 pub use state::{
@@ -45,9 +44,7 @@ pub use statekey::{
 
 // ─── Checkpoint ──────────────────────────────────────────────
 pub use checkpoint::{
-    BarrierDecisionRecord, Checkpoint, CheckpointId, CheckpointPolicy, CheckpointScore,
-    CheckpointStore, CheckpointStoreError, CheckpointTrigger, ExecutionMetadata, ExecutionTrace,
-    GraphHashMode, IncrementalSnapshotState, NodeId, StateSnapshot,
+    Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore, CheckpointStoreError, NodeId,
 };
 
 // ─── Store ───────────────────────────────────────────────────
@@ -87,3 +84,9 @@ pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::StreamChunk;
 pub use stream_emitter::StreamEmitter;
 pub use workflow_state::{Effect, LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};
+
+// ─── Trace ───────────────────────────────────────────────────
+pub mod trace;
+pub use trace::{
+    ExecutionTrace, ExportedTrace, ExportedTraceStep, MemoryTraceSink, TraceSink, TraceStep,
+};

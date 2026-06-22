@@ -282,16 +282,9 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             // 执行节点
             node.execute(ctx).await?;
 
-            // 消费 Effects → apply 到 typed state
+            // 消费 Effects → apply 到 typed state（零序列化）
             let effects = ctx.consume_effects();
-            for v in effects {
-                // 反序列化后 apply
-                let effect: S::Effect = match serde_json::from_value(v) {
-                    Ok(e) => e,
-                    Err(_) => continue, // 跳过无法反序列化的 effect
-                };
-                ctx.state_mut().apply(effect);
-            }
+            ctx.state_mut().apply_batch(effects);
 
             // 提取控制信号
             let (next_action, _signal) = ctx.take_control();
