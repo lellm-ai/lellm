@@ -24,3 +24,4 @@ thiserror.workspace = true
 [features]
 default = ["stdio"]
 stdio = []
+bridge = []

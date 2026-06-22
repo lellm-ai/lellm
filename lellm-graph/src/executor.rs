@@ -27,6 +27,40 @@ use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::stream_emitter::StreamEmitter;
 use crate::workflow_state::WorkflowState;
 
+// ─── RunLoopContext ─────────────────────────────────────────────
+
+/// run_loop 的参数封装，消除 too_many_arguments clippy warning。
+struct RunLoopContext {
+    graph: Arc<Graph>,
+    initial_state: State,
+    event_tx: mpsc::Sender<GraphEvent>,
+    decision_rx: mpsc::Receiver<BarrierDecisionMessage>,
+    cancel_rx: mpsc::Receiver<()>,
+    start_node: Option<String>,
+    trace_id: Option<TraceId>,
+}
+
+// ─── BarrierHandlerContext ──────────────────────────────────────
+
+/// handle_barrier_signal 的参数封装。
+struct BarrierHandlerContext<'a> {
+    event_tx: &'a mpsc::Sender<GraphEvent>,
+    graph: &'a Graph,
+    decision_rx: &'a mut mpsc::Receiver<BarrierDecisionMessage>,
+    decision_registry: &'a mut DecisionRegistry,
+    cancel_rx: &'a mut mpsc::Receiver<()>,
+    node: &'a NodeKind,
+    current: &'a str,
+    state: &'a mut State,
+    execution_log: &'a mut Vec<ExecutionEntry>,
+    barrier_name: &'a str,
+    barrier_id: BarrierId,
+    timeout: Option<std::time::Duration>,
+    step: usize,
+    node_start: Instant,
+    trace_id: TraceId,
+}
+
 // ─── DecisionRegistry ─────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -213,15 +247,15 @@ impl GraphExecutor {
 
         tokio::spawn(async move {
             executor
-                .run_loop(
+                .run_loop(RunLoopContext {
                     graph,
                     initial_state,
                     event_tx,
                     decision_rx,
                     cancel_rx,
-                    None,
-                    None,
-                )
+                    start_node: None,
+                    trace_id: None,
+                })
                 .await;
         });
 
@@ -248,7 +282,7 @@ impl GraphExecutor {
 
         tokio::spawn(async move {
             executor
-                .run_loop(
+                .run_loop(RunLoopContext {
                     graph,
                     initial_state,
                     event_tx,
@@ -256,7 +290,7 @@ impl GraphExecutor {
                     cancel_rx,
                     start_node,
                     trace_id,
-                )
+                })
                 .await;
         });
 
@@ -268,16 +302,16 @@ impl GraphExecutor {
 
     // ─── 主执行循环 ────────────────────────────────────────────
 
-    async fn run_loop(
-        &self,
-        graph: Arc<Graph>,
-        initial_state: State,
-        event_tx: mpsc::Sender<GraphEvent>,
-        mut decision_rx: mpsc::Receiver<BarrierDecisionMessage>,
-        mut cancel_rx: mpsc::Receiver<()>,
-        start_node: Option<String>,
-        trace_id: Option<TraceId>,
-    ) {
+    async fn run_loop(&self, ctx: RunLoopContext) {
+        let RunLoopContext {
+            graph,
+            initial_state,
+            event_tx,
+            mut decision_rx,
+            mut cancel_rx,
+            start_node,
+            trace_id,
+        } = ctx;
         let start_time = Instant::now();
         let mut state = initial_state;
         let mut execution_log = Vec::new();
@@ -467,23 +501,23 @@ impl GraphExecutor {
                                 timeout,
                             } => {
                                 let outcome = self
-                                    .handle_barrier_signal(
-                                        &event_tx,
-                                        &graph,
-                                        &mut decision_rx,
-                                        &mut decision_registry,
-                                        &mut cancel_rx,
+                                    .handle_barrier_signal(BarrierHandlerContext {
+                                        event_tx: &event_tx,
+                                        graph: &graph,
+                                        decision_rx: &mut decision_rx,
+                                        decision_registry: &mut decision_registry,
+                                        cancel_rx: &mut cancel_rx,
                                         node,
-                                        &current,
-                                        &mut state,
-                                        &mut execution_log,
-                                        &node_name,
+                                        current: &current,
+                                        state: &mut state,
+                                        execution_log: &mut execution_log,
+                                        barrier_name: &node_name,
                                         barrier_id,
                                         timeout,
                                         step,
                                         node_start,
                                         trace_id,
-                                    )
+                                    })
                                     .await;
                                 match outcome {
                                     StepOutcome::Continue(target) => {
@@ -652,24 +686,24 @@ impl GraphExecutor {
 
     // ─── Barrier 处理 ──────────────────────────────────────────
 
-    async fn handle_barrier_signal(
-        &self,
-        event_tx: &mpsc::Sender<GraphEvent>,
-        graph: &Graph,
-        decision_rx: &mut mpsc::Receiver<BarrierDecisionMessage>,
-        decision_registry: &mut DecisionRegistry,
-        cancel_rx: &mut mpsc::Receiver<()>,
-        node: &NodeKind,
-        current: &str,
-        state: &mut State,
-        execution_log: &mut Vec<ExecutionEntry>,
-        barrier_name: &str,
-        barrier_id: BarrierId,
-        timeout: Option<std::time::Duration>,
-        step: usize,
-        node_start: Instant,
-        trace_id: TraceId,
-    ) -> StepOutcome {
+    async fn handle_barrier_signal(&self, ctx: BarrierHandlerContext<'_>) -> StepOutcome {
+        let BarrierHandlerContext {
+            event_tx,
+            graph,
+            decision_rx,
+            decision_registry,
+            cancel_rx,
+            node,
+            current,
+            state,
+            execution_log,
+            barrier_name,
+            barrier_id,
+            timeout,
+            step,
+            node_start,
+            trace_id,
+        } = ctx;
         self.emit_runtime(
             event_tx,
             RuntimeEvent::BarrierWaiting {

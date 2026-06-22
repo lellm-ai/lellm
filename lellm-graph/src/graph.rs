@@ -516,8 +516,12 @@ pub struct GraphBuilder<S: WorkflowState = State, M: MergeStrategy<S> = StateMer
     end: Option<String>,
 }
 
-impl GraphBuilder {
-    /// 创建 GraphBuilder，使用默认类型参数 `State` + `StateMerge`。
+impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
+    /// 创建 GraphBuilder。
+    ///
+    /// 类型参数由调用方推断或显式指定。
+    /// - 默认: `GraphBuilder::new("name")` → `GraphBuilder<State, StateMerge>`
+    /// - 自定义: `GraphBuilder::<AgentState, _>::new("name")`
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -527,9 +531,6 @@ impl GraphBuilder {
             end: None,
         }
     }
-}
-
-impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
     pub fn start(&mut self, node: impl Into<String>) -> &mut Self {
         self.start = Some(node.into());
         self

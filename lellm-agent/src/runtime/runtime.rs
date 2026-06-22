@@ -15,8 +15,8 @@
 
 use lellm_core::{ChatResponse, LlmError, Message};
 use lellm_graph::{
-    FlowNode, SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS,
-    SK_TOTAL_TOOL_CALLS, State, StateKeyExt,
+    SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS, State,
+    StateKeyExt,
 };
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
@@ -337,14 +337,12 @@ impl ToolUseLoop {
 
     /// 非流式执行
     ///
-    /// v0.4+: Effect 驱动 — 维护 AgentState 生命周期，手动驱动 ReAct 循环。
-    /// 节点只 emit_effect(AgentEffect)，循环消费 Effect → apply 到 AgentState。
+    /// v0.4+: AgentState 驱动 — 使用 `Graph<AgentState>.run_inline()` 执行 ReAct 循环。
+    /// 零序列化，编译期类型安全。
     pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
-        use lellm_graph::NextAction;
-
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
 
-        // 构建 ReAct Graph
+        // 构建 ReAct Graph (Graph<AgentState, AgentStateMerge>)
         let llm_node = super::react::LLMNode::new(
             "llm",
             self.model.clone(),
@@ -365,82 +363,23 @@ impl ToolUseLoop {
         // 初始化 AgentState
         let mut agent_state = super::typed_state::AgentState::from_messages(initial_messages);
 
-        // Effect 驱动的执行循环
-        let mut current = graph.start_node().to_string();
-        let mut step: usize = 0;
+        // 创建 NodeContext<AgentState> 并调用 run_inline
+        let mut branch = lellm_graph::BranchState::empty();
+        let mut agent_ctx = lellm_graph::NodeContext::<super::typed_state::AgentState>::new(
+            &mut agent_state,
+            &mut branch,
+            None,
+        );
 
-        loop {
-            step += 1;
-            if step > max_steps {
-                break;
-            }
-
-            // 创建子 NodeContext
-            let mut child_state = lellm_graph::State::new();
-
-            // 写入 AgentState 到子 State
-            child_state.insert(
-                super::typed_state::AGENT_STATE_KEY.to_string(),
-                serde_json::to_value(&agent_state).unwrap(),
-            );
-
-            let mut branch = lellm_graph::BranchState::empty();
-            let mut child_ctx = lellm_graph::NodeContext::new(&mut child_state, &mut branch, None);
-
-            // 执行节点
-            let node_ref: &lellm_graph::NodeKind =
-                graph
-                    .node_map()
-                    .get(&current)
-                    .ok_or_else(|| lellm_core::LlmError::Provider {
-                        provider: "react_graph".into(),
-                        status: None,
-                        code: None,
-                        message: format!("node '{}' not found", current),
-                    })?;
-            node_ref
-                .execute(&mut child_ctx)
-                .await
-                .map_err(|e| lellm_core::LlmError::Provider {
-                    provider: "react_graph".into(),
-                    status: None,
-                    code: None,
-                    message: e.to_string(),
-                })?;
-
-            // 消费 Effect → apply 到 AgentState
-            for v in child_ctx.consume_effects() {
-                agent_state
-                    .apply_from_value(v)
-                    .map_err(|e| lellm_core::LlmError::Provider {
-                        provider: "react_graph".into(),
-                        status: None,
-                        code: None,
-                        message: e.to_string(),
-                    })?;
-            }
-
-            // 提取控制信号 + 路由
-            let (next_action, _signal) = child_ctx.take_control();
-            match next_action {
-                NextAction::End => break,
-                NextAction::Goto(target) => current = target,
-                NextAction::Next => {
-                    if current == graph.end_node() {
-                        break;
-                    }
-                    // 从 child_state 路由（边条件读取 State HashMap）
-                    current = graph.resolve_next(&current, &child_state).ok_or_else(|| {
-                        lellm_core::LlmError::Provider {
-                            provider: "react_graph".into(),
-                            status: None,
-                            code: None,
-                            message: format!("node '{}' has no outgoing edge", current),
-                        }
-                    })?;
-                }
-            }
-        }
+        graph
+            .run_inline(&mut agent_ctx, max_steps)
+            .await
+            .map_err(|e| lellm_core::LlmError::Provider {
+                provider: "react_graph".into(),
+                status: None,
+                code: None,
+                message: e.to_string(),
+            })?;
 
         let stop_reason = agent_state.stop_reason.unwrap_or(StopReason::Complete);
         let last_response = agent_state.last_response.unwrap_or_else(empty_response);

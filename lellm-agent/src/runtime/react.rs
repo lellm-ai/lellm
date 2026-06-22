@@ -19,8 +19,7 @@ use futures_util::StreamExt;
 
 use lellm_core::{ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock, ToolCall};
 use lellm_graph::{
-    FlowNode, Graph, GraphBuilder, GraphError, NodeContext, NodeKind, StateEffect, TaskNode,
-    TerminalError,
+    FlowNode, Graph, GraphBuilder, GraphError, NodeContext, NodeKind, TaskNode, TerminalError,
 };
 use lellm_provider::ProviderEvent;
 
@@ -32,65 +31,8 @@ use super::context::{
 use super::event::StopReason;
 use super::runtime::ResolvedRound;
 use super::tools::{ToolExecutor, execute_batch_with};
-use super::typed_state::{AGENT_STATE_KEY, AgentState};
+use super::typed_state::{AgentEffect, AgentState, AgentStateMerge};
 use lellm_provider::ResolvedModel;
-
-// ─── State Keys（边条件等仍需要字符串 key）──────────────────
-
-pub(crate) const SK_MESSAGES: &str = "messages";
-pub(crate) const SK_ITERATIONS: &str = "iterations";
-pub(crate) const SK_TOTAL_TOOL_CALLS: &str = "total_tool_calls";
-pub(crate) const SK_OUTPUT_TOKENS: &str = "output_tokens";
-pub(crate) const SK_REASONING_TOKENS: &str = "reasoning_tokens";
-pub(crate) const SK_HAS_TOOL_CALLS: &str = "has_tool_calls";
-pub(crate) const SK_STOP_REASON: &str = "stop_reason";
-pub(crate) const SK_LAST_RESPONSE: &str = "last_response";
-pub(crate) const SK_COMPACT_COUNT: &str = "compact_count";
-
-// ─── Typed State 辅助函数 ──────────────────────────────────────
-
-/// 从 NodeContext 的 Typed State 中获取 AgentState。不存在则创建空状态。
-fn get_agent_state(ctx: &NodeContext<'_>) -> AgentState {
-    ctx.state()
-        .get(AGENT_STATE_KEY)
-        .and_then(|v| AgentState::from_value(v.clone()))
-        .unwrap_or_default()
-}
-
-/// Effect Only：节点只 emit_effect，不直接写 State。
-/// Executor / run_inline 消费 Effects → apply 到 Typed State。
-fn emit_effect(ctx: &mut NodeContext<'_>, effect: super::typed_state::AgentEffect) {
-    ctx.emit_effect(effect);
-}
-
-/// 将 AgentState 关键字段以 StateEffect 写入 State（HashMap），
-/// 供边条件（edge_if）读取。边条件闭包接收 &State，无法直接读 AgentState。
-fn emit_state_bridge(ctx: &mut NodeContext<'_>, state: &AgentState) {
-    ctx.emit_effect(StateEffect::Put(
-        SK_ITERATIONS.into(),
-        serde_json::json!(state.iterations),
-    ));
-    ctx.emit_effect(StateEffect::Put(
-        SK_OUTPUT_TOKENS.into(),
-        serde_json::json!(state.output_tokens),
-    ));
-    ctx.emit_effect(StateEffect::Put(
-        SK_REASONING_TOKENS.into(),
-        serde_json::json!(state.reasoning_tokens),
-    ));
-    ctx.emit_effect(StateEffect::Put(
-        SK_TOTAL_TOOL_CALLS.into(),
-        serde_json::json!(state.total_tool_calls),
-    ));
-    ctx.emit_effect(StateEffect::Put(
-        SK_COMPACT_COUNT.into(),
-        serde_json::json!(state.compact_count),
-    ));
-    ctx.emit_effect(StateEffect::Put(
-        SK_LAST_RESPONSE.into(),
-        serde_json::json!(state.last_response),
-    ));
-}
 
 /// 分离 output / reasoning token
 fn split_output_tokens(content: &[lellm_core::ContentBlock]) -> (usize, usize) {
@@ -156,29 +98,23 @@ impl LLMNode {
 }
 
 #[async_trait]
-impl FlowNode for LLMNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        use super::typed_state::AgentEffect;
-
-        // 1. 获取 AgentState（只读）
-        let state = get_agent_state(ctx);
+impl FlowNode<AgentState> for LLMNode {
+    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+        // 1. 获取 AgentState（直接读取，零序列化）
+        let state = ctx.state().clone();
         let mut exec_ctx = AgentExecutionContext::new(state.messages_ref());
 
         // 2. 检查最大迭代
         if state.reached_max(self.config.max_iterations) {
-            emit_effect(
-                ctx,
-                AgentEffect::SetStopReason(StopReason::MaxIterationsReached),
-            );
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
             let last_response = state.last_response.clone().unwrap_or_else(empty_response);
-            emit_effect(ctx, AgentEffect::SetLastResponse(last_response));
-            emit_state_bridge(ctx, &state);
+            ctx.emit_effect(AgentEffect::SetLastResponse(last_response));
             ctx.end();
             return Ok(());
         }
 
         // 3. Emit 迭代递增 Effect
-        emit_effect(ctx, AgentEffect::IncrementIteration);
+        ctx.emit_effect(AgentEffect::IncrementIteration);
 
         // 4. 获取工具定义
         let round = ResolvedRound::new(self.executor.snapshot().await);
@@ -281,47 +217,25 @@ impl FlowNode for LLMNode {
                     max_reasoning_tokens = limit,
                     "single-round reasoning budget exceeded"
                 );
-                emit_effect(ctx, AgentEffect::AddOutputTokens(output_tokens));
-                emit_effect(ctx, AgentEffect::AddReasoningTokens(reasoning_tokens));
-                emit_effect(
-                    ctx,
-                    AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded),
-                );
-                emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
-                // Emit state bridge for edge conditions
-                let bridged = AgentState {
-                    iterations: state.iterations + 1,
-                    output_tokens: state.output_tokens + output_tokens,
-                    reasoning_tokens: state.reasoning_tokens + reasoning_tokens,
-                    stop_reason: Some(StopReason::ReasoningBudgetExceeded),
-                    last_response: Some(response.clone()),
-                    ..state
-                };
-                emit_state_bridge(ctx, &bridged);
+                ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
+                ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
+                ctx.emit_effect(AgentEffect::SetStopReason(
+                    StopReason::ReasoningBudgetExceeded,
+                ));
+                ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
                 ctx.end();
                 return Ok(());
             }
         }
 
-        // 9. Emit Token Effects (dual-write)
-        emit_effect(ctx, AgentEffect::AddOutputTokens(output_tokens));
-        emit_effect(ctx, AgentEffect::AddReasoningTokens(reasoning_tokens));
+        // 9. Emit Token Effects
+        ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
+        ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
 
         // 10. 检查总输出预算（用本地累加判断，因为 Effect 还未 apply）
         if state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens) {
-            emit_effect(
-                ctx,
-                AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded),
-            );
-            emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
-            let bridged = AgentState {
-                iterations: state.iterations + 1,
-                output_tokens: state.output_tokens + output_tokens,
-                reasoning_tokens: state.reasoning_tokens + reasoning_tokens,
-                stop_reason: Some(StopReason::OutputBudgetExceeded),
-                ..state
-            };
-            emit_state_bridge(ctx, &bridged);
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
+            ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
             ctx.end();
             return Ok(());
         }
@@ -330,19 +244,10 @@ impl FlowNode for LLMNode {
         if state
             .exceeded_reasoning_with_extra(self.config.max_total_reasoning_tokens, reasoning_tokens)
         {
-            emit_effect(
-                ctx,
-                AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded),
-            );
-            emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
-            let bridged = AgentState {
-                iterations: state.iterations + 1,
-                output_tokens: state.output_tokens + output_tokens,
-                reasoning_tokens: state.reasoning_tokens + reasoning_tokens,
-                stop_reason: Some(StopReason::ReasoningBudgetExceeded),
-                ..state
-            };
-            emit_state_bridge(ctx, &bridged);
+            ctx.emit_effect(AgentEffect::SetStopReason(
+                StopReason::ReasoningBudgetExceeded,
+            ));
+            ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
             ctx.end();
             return Ok(());
         }
@@ -350,39 +255,21 @@ impl FlowNode for LLMNode {
         // 12. Emit 消息追加 Effect
         let content = response.content.clone();
         let msg = Message::Assistant { content };
-        emit_effect(ctx, AgentEffect::AppendMessage(msg));
+        ctx.emit_effect(AgentEffect::AppendMessage(msg));
 
         // 13. 检查是否有 tool_calls
         let has_tool_calls = response.has_tool_calls();
 
         if has_tool_calls {
-            emit_effect(ctx, AgentEffect::AddToolCalls(tool_calls_count));
-            // Emit state bridge for edge conditions
-            let bridged = AgentState {
-                iterations: state.iterations + 1,
-                output_tokens: state.output_tokens + output_tokens,
-                reasoning_tokens: state.reasoning_tokens + reasoning_tokens,
-                total_tool_calls: state.total_tool_calls + tool_calls_count,
-                ..state
-            };
-            emit_state_bridge(ctx, &bridged);
+            ctx.emit_effect(AgentEffect::AddToolCalls(tool_calls_count));
             tracing::debug!(
                 iteration = state.iterations + 1,
                 tool_calls = tool_calls_count,
                 "LLM call completed, executing tools"
             );
         } else {
-            emit_effect(ctx, AgentEffect::SetStopReason(StopReason::Complete));
-            emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
-            let bridged = AgentState {
-                iterations: state.iterations + 1,
-                output_tokens: state.output_tokens + output_tokens,
-                reasoning_tokens: state.reasoning_tokens + reasoning_tokens,
-                stop_reason: Some(StopReason::Complete),
-                last_response: Some(response),
-                ..state
-            };
-            emit_state_bridge(ctx, &bridged);
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::Complete));
+            ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
             ctx.end();
             tracing::debug!(
                 iteration = state.iterations + 1,
@@ -428,13 +315,11 @@ impl ToolNode {
 }
 
 #[async_trait]
-impl FlowNode for ToolNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        use super::typed_state::AgentEffect;
-
+impl FlowNode<AgentState> for ToolNode {
+    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
         // 1. 获取工具调用
         let round = ResolvedRound::new(self.executor.snapshot().await);
-        let state = get_agent_state(ctx);
+        let state = ctx.state().clone();
         let last_response = state.last_response.unwrap_or_else(empty_response);
         let tool_calls: Vec<ToolCall> = last_response.tool_calls().cloned().collect();
 
@@ -529,9 +414,9 @@ impl ReactCondition {
 }
 
 #[async_trait]
-impl FlowNode for ReactCondition {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let state = get_agent_state(ctx);
+impl FlowNode<AgentState> for ReactCondition {
+    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+        let state = ctx.state();
         // 从最后一条 Assistant 消息判断是否有 tool_calls
         let has_tool_calls = state
             .messages
@@ -598,11 +483,9 @@ impl CompactorNode {
 }
 
 #[async_trait]
-impl FlowNode for CompactorNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        use super::typed_state::AgentEffect;
-
-        let state = get_agent_state(ctx);
+impl FlowNode<AgentState> for CompactorNode {
+    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+        let state = ctx.state();
 
         if !self.budget.should_compact(state.output_tokens) {
             return Ok(());
@@ -649,9 +532,9 @@ impl BudgetCondition {
 }
 
 #[async_trait]
-impl FlowNode for BudgetCondition {
-    async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
-        let state = get_agent_state(ctx);
+impl FlowNode<AgentState> for BudgetCondition {
+    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+        let state = ctx.state();
 
         if self.budget.should_compact(state.output_tokens) {
             ctx.goto("compactor");
@@ -677,15 +560,18 @@ impl FlowNode for BudgetCondition {
 ///    --has_tool_calls--> [tool] → [budget_check] (循环)
 ///    --no_tool_calls--> [end]
 /// ```
+///
+/// 使用 `Graph<AgentState>` — 节点直接读写强类型 AgentState，零序列化。
 pub fn build_react_graph(
     llm_node: LLMNode,
     tool_node: ToolNode,
     compactor_node: CompactorNode,
-) -> Graph {
+) -> Graph<AgentState, AgentStateMerge> {
     let llm_name = llm_node.name.clone();
     let budget = llm_node.config.context_budget.clone();
 
-    let mut builder = GraphBuilder::new(format!("react_{}", llm_name));
+    let mut builder =
+        GraphBuilder::<AgentState, AgentStateMerge>::new(format!("react_{}", llm_name));
     builder.start("budget_check");
     builder.end("end");
 
@@ -703,25 +589,18 @@ pub fn build_react_graph(
         "budget_check",
         NodeKind::External(Arc::new(BudgetCondition::new(
             format!("{}_budget", llm_name),
-            budget.clone(),
+            budget,
         ))),
     );
     builder.node("compactor", NodeKind::External(Arc::new(compactor_node)));
     // End 节点 — no-op 终端节点（LLMNode 通过 ctx.end() 终止，实际不会执行到此）
-    builder.node("end", NodeKind::Task(TaskNode::new("end", |_| Ok(()))));
+    builder.node(
+        "end",
+        NodeKind::Task(TaskNode::<AgentState>::new("end", |_| Ok(()))),
+    );
 
-    // budget_check → llm (预算充足，直接走 LLM)
-    let budget_clone = budget.clone();
-    builder.edge_if("budget_check", "llm", move |state| {
-        let tokens: usize = state
-            .get(SK_OUTPUT_TOKENS)
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(0);
-        !budget_clone.should_compact(tokens)
-    });
-
-    // budget_check → compactor (需要压缩)
+    // budget_check → llm / compactor (由 BudgetCondition 节点的 goto() 控制)
+    builder.edge("budget_check", "llm");
     builder.edge_fallback("budget_check", "compactor");
 
     // compactor → llm (压缩完直接到 LLM)
@@ -730,15 +609,8 @@ pub fn build_react_graph(
     // llm → tool_decision
     builder.edge("llm", "tool_decision");
 
-    // tool_decision → tool (有 tool_calls)
-    builder.edge_if("tool_decision", "tool", |state| {
-        state
-            .get(SK_HAS_TOOL_CALLS)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-    });
-
-    // tool_decision → end (无 tool_calls)
+    // tool_decision → tool / end (由 ReactCondition 节点的 goto()/end() 控制)
+    builder.edge("tool_decision", "tool");
     builder.edge_fallback("tool_decision", "end");
 
     // tool → budget_check (工具执行完，回到预算检查，形成循环)
