@@ -30,8 +30,8 @@ pub use ids::{SpanId, TraceId};
 
 // ─── State ───────────────────────────────────────────────────
 pub use state::{
-    ExecutionEntry, GraphResult, State, StateEffect, StateError, StateExt, StateReducer,
-    array_reducer,
+    ExecutionEntry, GraphResult, State, StateEffect, StateError, StateExt, StateMerge,
+    StateReducer, array_reducer,
 };
 
 // ─── Delta + Reducer ─────────────────────────────────────────
@@ -86,4 +86,4 @@ pub use node_context::{ExecutionControl, ExecutionSignal, NextAction, NodeContex
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::StreamChunk;
 pub use stream_emitter::StreamEmitter;
-pub use workflow_state::{Effect, WorkflowError, WorkflowState};
+pub use workflow_state::{Effect, LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};

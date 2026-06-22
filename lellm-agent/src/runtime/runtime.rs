@@ -385,37 +385,39 @@ impl ToolUseLoop {
             );
 
             let mut branch = lellm_graph::BranchState::empty();
-            let mut child_ctx =
-                lellm_graph::NodeContext::new(&mut child_state, &mut branch, None);
+            let mut child_ctx = lellm_graph::NodeContext::new(&mut child_state, &mut branch, None);
 
             // 执行节点
-            let node_ref: &lellm_graph::NodeKind = graph.node_map().get(&current).ok_or_else(|| {
-                lellm_core::LlmError::Provider {
-                    provider: "react_graph".into(),
-                    status: None,
-                    code: None,
-                    message: format!("node '{}' not found", current),
-                }
-            })?;
-            node_ref.execute(&mut child_ctx).await.map_err(|e| {
-                lellm_core::LlmError::Provider {
+            let node_ref: &lellm_graph::NodeKind =
+                graph
+                    .node_map()
+                    .get(&current)
+                    .ok_or_else(|| lellm_core::LlmError::Provider {
+                        provider: "react_graph".into(),
+                        status: None,
+                        code: None,
+                        message: format!("node '{}' not found", current),
+                    })?;
+            node_ref
+                .execute(&mut child_ctx)
+                .await
+                .map_err(|e| lellm_core::LlmError::Provider {
                     provider: "react_graph".into(),
                     status: None,
                     code: None,
                     message: e.to_string(),
-                }
-            })?;
+                })?;
 
             // 消费 Effect → apply 到 AgentState
             for v in child_ctx.consume_effects() {
-                agent_state.apply_from_value(v).map_err(|e| {
-                    lellm_core::LlmError::Provider {
+                agent_state
+                    .apply_from_value(v)
+                    .map_err(|e| lellm_core::LlmError::Provider {
                         provider: "react_graph".into(),
                         status: None,
                         code: None,
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
             }
 
             // 提取控制信号 + 路由

@@ -16,8 +16,8 @@ use indexmap::IndexMap;
 use crate::error::{BuildError, BuildErrors, DiagnosticCategory, GraphDiagnostics};
 use crate::node::{FlowNode, NodeKind};
 use crate::node_context::NodeContext;
-use crate::state::State;
-use crate::workflow_state::WorkflowState;
+use crate::state::{State, StateMerge};
+use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── Edge ──────────────────────────────────────────────────────
 
@@ -72,15 +72,15 @@ pub struct EdgeAnalysis {
 
 /// 图（Graph）— 允许有环，循环保护由 GraphExecutor::max_steps 运行时熔断提供。
 #[derive(Clone)]
-pub struct Graph<S: WorkflowState = State> {
+pub struct Graph<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     pub(crate) name: String,
-    pub(crate) nodes: IndexMap<String, NodeKind<S>>,
+    pub(crate) nodes: IndexMap<String, NodeKind<S, M>>,
     pub(crate) edges: Vec<Edge<S>>,
     pub(crate) start: String,
     pub(crate) end: String,
 }
 
-impl<S: WorkflowState> Graph<S> {
+impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -132,7 +132,7 @@ impl<S: WorkflowState> Graph<S> {
     }
 
     /// 获取节点映射表引用。
-    pub fn node_map(&self) -> &IndexMap<String, NodeKind<S>> {
+    pub fn node_map(&self) -> &IndexMap<String, NodeKind<S, M>> {
         &self.nodes
     }
 
@@ -313,7 +313,11 @@ impl<S: WorkflowState> Graph<S> {
     }
 
     /// 内联路由解析。
-    fn resolve_next_inline(&self, current: &str, state: &S) -> Result<String, crate::error::GraphError> {
+    fn resolve_next_inline(
+        &self,
+        current: &str,
+        state: &S,
+    ) -> Result<String, crate::error::GraphError> {
         let edges = self.edges_from(current);
 
         if edges.is_empty() {
@@ -494,13 +498,13 @@ impl CycleAnalysis {
 // ─── PendingEdge ──────────────────────────────────────────────
 
 /// 待完成的边 — 链式调用的中间句柄。
-pub struct PendingEdge<'a, S: WorkflowState = State> {
-    builder: &'a mut GraphBuilder<S>,
+pub struct PendingEdge<'a, S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
+    builder: &'a mut GraphBuilder<S, M>,
     edge_index: usize,
 }
 
-impl<'a, S: WorkflowState> PendingEdge<'a, S> {
-    pub fn max_visits(self, n: usize) -> &'a mut GraphBuilder<S> {
+impl<'a, S: WorkflowState, M: MergeStrategy<S>> PendingEdge<'a, S, M> {
+    pub fn max_visits(self, n: usize) -> &'a mut GraphBuilder<S, M> {
         self.builder.edges[self.edge_index].analysis = Some(EdgeAnalysis {
             max_visits: Some(n),
         });
@@ -511,15 +515,16 @@ impl<'a, S: WorkflowState> PendingEdge<'a, S> {
 // ─── GraphBuilder ─────────────────────────────────────────────
 
 /// Graph 构建器。
-pub struct GraphBuilder<S: WorkflowState = State> {
+pub struct GraphBuilder<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     name: String,
-    nodes: IndexMap<String, NodeKind<S>>,
+    nodes: IndexMap<String, NodeKind<S, M>>,
     edges: Vec<Edge<S>>,
     start: Option<String>,
     end: Option<String>,
 }
 
-impl<S: WorkflowState> GraphBuilder<S> {
+impl GraphBuilder {
+    /// 创建 GraphBuilder，使用默认类型参数 `State` + `StateMerge`。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -529,7 +534,9 @@ impl<S: WorkflowState> GraphBuilder<S> {
             end: None,
         }
     }
+}
 
+impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
     pub fn start(&mut self, node: impl Into<String>) -> &mut Self {
         self.start = Some(node.into());
         self
@@ -540,12 +547,16 @@ impl<S: WorkflowState> GraphBuilder<S> {
         self
     }
 
-    pub fn node(&mut self, name: impl Into<String>, kind: NodeKind<S>) -> &mut Self {
+    pub fn node(&mut self, name: impl Into<String>, kind: NodeKind<S, M>) -> &mut Self {
         self.nodes.insert(name.into(), kind);
         self
     }
 
-    pub fn edge(&mut self, from: impl Into<String>, to: impl Into<String>) -> PendingEdge<'_, S> {
+    pub fn edge(
+        &mut self,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> PendingEdge<'_, S, M> {
         let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
@@ -565,7 +576,7 @@ impl<S: WorkflowState> GraphBuilder<S> {
         from: impl Into<String>,
         to: impl Into<String>,
         condition: impl Fn(&S) -> bool + Send + Sync + 'static,
-    ) -> PendingEdge<'_, S> {
+    ) -> PendingEdge<'_, S, M> {
         let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
@@ -584,7 +595,7 @@ impl<S: WorkflowState> GraphBuilder<S> {
         &mut self,
         from: impl Into<String>,
         to: impl Into<String>,
-    ) -> PendingEdge<'_, S> {
+    ) -> PendingEdge<'_, S, M> {
         let edge_index = self.edges.len();
         self.edges.push(Edge {
             from: from.into(),
@@ -599,7 +610,7 @@ impl<S: WorkflowState> GraphBuilder<S> {
         }
     }
 
-    pub fn build(self) -> Result<Graph<S>, BuildErrors> {
+    pub fn build(self) -> Result<Graph<S, M>, BuildErrors> {
         let mut errors = BuildErrors::new();
 
         let start = match self.start {
@@ -673,8 +684,8 @@ fn format_cycle(cycle: &[String]) -> String {
     cycle.join(" → ")
 }
 
-fn check_fallback_in_cycles<S: WorkflowState>(
-    graph: &Graph<S>,
+fn check_fallback_in_cycles<S: WorkflowState, M: MergeStrategy<S>>(
+    graph: &Graph<S, M>,
     cycles: &[Vec<String>],
     diag: &mut GraphDiagnostics,
 ) {
@@ -710,8 +721,8 @@ fn check_fallback_in_cycles<S: WorkflowState>(
     }
 }
 
-fn check_unreachable_nodes<S: WorkflowState>(
-    graph: &Graph<S>,
+fn check_unreachable_nodes<S: WorkflowState, M: MergeStrategy<S>>(
+    graph: &Graph<S, M>,
     adj: &std::collections::HashMap<String, Vec<String>>,
     diag: &mut GraphDiagnostics,
 ) {
@@ -744,7 +755,10 @@ fn check_unreachable_nodes<S: WorkflowState>(
     }
 }
 
-fn check_end_node_outgoing<S: WorkflowState>(graph: &Graph<S>, diag: &mut GraphDiagnostics) {
+fn check_end_node_outgoing<S: WorkflowState, M: MergeStrategy<S>>(
+    graph: &Graph<S, M>,
+    diag: &mut GraphDiagnostics,
+) {
     let outgoing: Vec<&Edge<S>> = graph.edges.iter().filter(|e| e.from == graph.end).collect();
 
     if !outgoing.is_empty() {
@@ -753,7 +767,9 @@ fn check_end_node_outgoing<S: WorkflowState>(graph: &Graph<S>, diag: &mut GraphD
             DiagnosticCategory::EndNodeOutgoing,
             format!(
                 "end node '{}' has {} outgoing edge(s) to: {:?}",
-                graph.end, outgoing.len(), targets
+                graph.end,
+                outgoing.len(),
+                targets
             ),
         );
     }

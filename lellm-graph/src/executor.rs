@@ -673,7 +673,15 @@ impl GraphExecutor {
         state: &mut State,
         _node_name: &str,
         _span_id: SpanId,
-    ) -> Result<(NextAction, Option<ExecutionSignal>, NodeMetadata, Vec<FlowEvent>), GraphError> {
+    ) -> Result<
+        (
+            NextAction,
+            Option<ExecutionSignal>,
+            NodeMetadata,
+            Vec<FlowEvent>,
+        ),
+        GraphError,
+    > {
         // 1. 创建 BranchState（从当前 State）
         let mut branch = BranchState::from_state(state.clone());
 

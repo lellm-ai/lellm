@@ -69,12 +69,18 @@ impl<S: WorkflowState> BarrierNode<S> {
         match decision {
             BarrierDecision::Approve => {
                 tracing::info!(barrier = %self.name, "approved");
-                ctx.emit_effect(StateEffect::Put(self.approve_key.clone(), serde_json::json!(true)));
+                ctx.emit_effect(StateEffect::Put(
+                    self.approve_key.clone(),
+                    serde_json::json!(true),
+                ));
                 ctx.emit_effect(StateEffect::Delete(self.reject_key.clone()));
             }
             BarrierDecision::Reject { reason } => {
                 tracing::warn!(barrier = %self.name, reason = %reason, "rejected");
-                ctx.emit_effect(StateEffect::Put(self.reject_key.clone(), serde_json::json!(reason)));
+                ctx.emit_effect(StateEffect::Put(
+                    self.reject_key.clone(),
+                    serde_json::json!(reason),
+                ));
                 ctx.emit_effect(StateEffect::Delete(self.approve_key.clone()));
             }
             BarrierDecision::Modify { key, value } => {

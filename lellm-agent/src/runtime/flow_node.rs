@@ -326,9 +326,9 @@ impl AgentFlowNode {
         loop {
             step += 1;
             if step > max_steps {
-                return Err(GraphError::Terminal(
-                    TerminalError::StepsExceeded { limit: max_steps },
-                ));
+                return Err(GraphError::Terminal(TerminalError::StepsExceeded {
+                    limit: max_steps,
+                }));
             }
 
             // 3a. 创建子 NodeContext
@@ -345,12 +345,9 @@ impl AgentFlowNode {
             let mut child_ctx = NodeContext::new(&mut child_state, &mut branch, stream);
 
             // 3b. 查找并执行节点
-            let node_ref = graph
-                .node_map()
-                .get(&current)
-                .ok_or_else(|| {
-                    GraphError::Terminal(TerminalError::NodeNotFound(current.clone()))
-                })?;
+            let node_ref = graph.node_map().get(&current).ok_or_else(|| {
+                GraphError::Terminal(TerminalError::NodeNotFound(current.clone()))
+            })?;
             node_ref.execute(&mut child_ctx).await?;
 
             // 3d. 消费 Effect → apply 到 AgentState
@@ -406,19 +403,43 @@ impl AgentFlowNode {
     }
 
     /// 将 AgentState 关键字段以 StateEffect 写入 ctx（供边条件使用）。
-    fn sync_agent_state_effects(&self, ctx: &mut NodeContext<'_>, state: &super::typed_state::AgentState) {
+    fn sync_agent_state_effects(
+        &self,
+        ctx: &mut NodeContext<'_>,
+        state: &super::typed_state::AgentState,
+    ) {
         use crate::runtime::react::{
-            SK_COMPACT_COUNT, SK_ITERATIONS, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS, SK_TOTAL_TOOL_CALLS,
+            SK_COMPACT_COUNT, SK_ITERATIONS, SK_OUTPUT_TOKENS, SK_REASONING_TOKENS,
+            SK_TOTAL_TOOL_CALLS,
         };
-        ctx.emit_effect(StateEffect::Put(SK_ITERATIONS.into(), serde_json::json!(state.iterations as u64)));
-        ctx.emit_effect(StateEffect::Put(SK_TOTAL_TOOL_CALLS.into(), serde_json::json!(state.total_tool_calls as u64)));
-        ctx.emit_effect(StateEffect::Put(SK_OUTPUT_TOKENS.into(), serde_json::json!(state.output_tokens as u64)));
-        ctx.emit_effect(StateEffect::Put(SK_REASONING_TOKENS.into(), serde_json::json!(state.reasoning_tokens as u64)));
-        ctx.emit_effect(StateEffect::Put(SK_COMPACT_COUNT.into(), serde_json::json!(state.compact_count as u64)));
+        ctx.emit_effect(StateEffect::Put(
+            SK_ITERATIONS.into(),
+            serde_json::json!(state.iterations as u64),
+        ));
+        ctx.emit_effect(StateEffect::Put(
+            SK_TOTAL_TOOL_CALLS.into(),
+            serde_json::json!(state.total_tool_calls as u64),
+        ));
+        ctx.emit_effect(StateEffect::Put(
+            SK_OUTPUT_TOKENS.into(),
+            serde_json::json!(state.output_tokens as u64),
+        ));
+        ctx.emit_effect(StateEffect::Put(
+            SK_REASONING_TOKENS.into(),
+            serde_json::json!(state.reasoning_tokens as u64),
+        ));
+        ctx.emit_effect(StateEffect::Put(
+            SK_COMPACT_COUNT.into(),
+            serde_json::json!(state.compact_count as u64),
+        ));
     }
 
     /// 将 AgentState 最终结果以 StateEffect 写入 ctx。
-    fn write_agent_result(&self, ctx: &mut NodeContext<'_>, state: &super::typed_state::AgentState) {
+    fn write_agent_result(
+        &self,
+        ctx: &mut NodeContext<'_>,
+        state: &super::typed_state::AgentState,
+    ) {
         if let Some(ref stop_reason) = state.stop_reason {
             ctx.emit_effect(StateEffect::Put(
                 format!("{}_stop_reason", self.name),

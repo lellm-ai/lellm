@@ -166,7 +166,10 @@ impl FlowNode for LLMNode {
 
         // 2. 检查最大迭代
         if state.reached_max(self.config.max_iterations) {
-            emit_effect(ctx, AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
+            emit_effect(
+                ctx,
+                AgentEffect::SetStopReason(StopReason::MaxIterationsReached),
+            );
             let last_response = state.last_response.clone().unwrap_or_else(empty_response);
             emit_effect(ctx, AgentEffect::SetLastResponse(last_response));
             emit_state_bridge(ctx, &state);
@@ -280,7 +283,10 @@ impl FlowNode for LLMNode {
                 );
                 emit_effect(ctx, AgentEffect::AddOutputTokens(output_tokens));
                 emit_effect(ctx, AgentEffect::AddReasoningTokens(reasoning_tokens));
-                emit_effect(ctx, AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded));
+                emit_effect(
+                    ctx,
+                    AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded),
+                );
                 emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
                 // Emit state bridge for edge conditions
                 let bridged = AgentState {
@@ -302,11 +308,11 @@ impl FlowNode for LLMNode {
         emit_effect(ctx, AgentEffect::AddReasoningTokens(reasoning_tokens));
 
         // 10. 检查总输出预算（用本地累加判断，因为 Effect 还未 apply）
-        if state.exceeded_output_with_extra(
-            self.config.max_total_output_tokens,
-            output_tokens,
-        ) {
-            emit_effect(ctx, AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
+        if state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens) {
+            emit_effect(
+                ctx,
+                AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded),
+            );
             emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
             let bridged = AgentState {
                 iterations: state.iterations + 1,
@@ -321,11 +327,13 @@ impl FlowNode for LLMNode {
         }
 
         // 11. 检查总推理预算
-        if state.exceeded_reasoning_with_extra(
-            self.config.max_total_reasoning_tokens,
-            reasoning_tokens,
-        ) {
-            emit_effect(ctx, AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded));
+        if state
+            .exceeded_reasoning_with_extra(self.config.max_total_reasoning_tokens, reasoning_tokens)
+        {
+            emit_effect(
+                ctx,
+                AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded),
+            );
             emit_effect(ctx, AgentEffect::SetLastResponse(response.clone()));
             let bridged = AgentState {
                 iterations: state.iterations + 1,
@@ -525,13 +533,22 @@ impl FlowNode for ReactCondition {
     async fn execute(&self, ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
         let state = get_agent_state(ctx);
         // 从最后一条 Assistant 消息判断是否有 tool_calls
-        let has_tool_calls = state.messages.iter().rev().find_map(|m| {
-            if let Message::Assistant { content } = m {
-                Some(content.iter().any(|b| matches!(b, ContentBlock::ToolCall(_))))
-            } else {
-                None
-            }
-        }).unwrap_or(false);
+        let has_tool_calls = state
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| {
+                if let Message::Assistant { content } = m {
+                    Some(
+                        content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolCall(_))),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false);
 
         if has_tool_calls {
             ctx.goto("tool");

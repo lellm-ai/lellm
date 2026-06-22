@@ -7,7 +7,7 @@
 //!
 //! - `AgentState` 是强类型 struct，不是 `HashMap<String, Value>`
 //! - 状态变更通过 `AgentEffect`（领域事件），不是直接修改字段
-//! - 合并规则在编译期确定（`merge` 方法）
+//! - 并行合并由 Graph 层的 [`AgentStateMerge`]（`MergeStrategy`）决定
 //! - 零 JSON 序列化开销（节点直接操作 typed state）
 
 use lellm_core::{ChatResponse, Message};
@@ -177,18 +177,47 @@ impl WorkflowState for AgentState {
             }
         }
     }
+}
 
-    fn merge(self, other: Self) -> Result<Self, lellm_graph::WorkflowError> {
-        Ok(Self {
-            messages: self.messages.into_iter().chain(other.messages).collect(),
-            iterations: self.iterations.max(other.iterations),
-            total_tool_calls: self.total_tool_calls.max(other.total_tool_calls),
-            output_tokens: self.output_tokens + other.output_tokens,
-            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
-            compact_count: self.compact_count + other.compact_count,
-            stop_reason: other.stop_reason.or(self.stop_reason),
-            last_response: other.last_response.or(self.last_response),
-        })
+/// AgentState 的默认合并策略。
+///
+/// - messages: 所有分支拼接（chain）
+/// - iterations: 取最大值
+/// - total_tool_calls: 取最大值
+/// - output_tokens: 累加
+/// - reasoning_tokens: 累加
+/// - compact_count: 累加
+/// - stop_reason: 优先取后者
+/// - last_response: 优先取后者
+pub struct AgentStateMerge;
+
+impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {
+    fn merge(branches: Vec<AgentState>) -> Result<AgentState, lellm_graph::WorkflowError> {
+        let mut iter = branches.into_iter();
+        let mut merged = iter.next().ok_or_else(|| {
+            lellm_graph::WorkflowError::MergeConflict("no branches to merge".into())
+        })?;
+
+        for branch in iter {
+            merged.messages.extend(branch.messages);
+            merged.iterations = merged.iterations.max(branch.iterations);
+            merged.total_tool_calls = merged.total_tool_calls.max(branch.total_tool_calls);
+            merged.output_tokens += branch.output_tokens;
+            merged.reasoning_tokens += branch.reasoning_tokens;
+            merged.compact_count += branch.compact_count;
+            if merged.stop_reason.is_none() {
+                merged.stop_reason = branch.stop_reason;
+            }
+            if merged.last_response.is_none() {
+                merged.last_response = branch.last_response;
+            }
+        }
+
+        Ok(merged)
+    }
+
+    fn default_instance() -> Self {
+        AgentStateMerge
     }
 }
 
@@ -211,8 +240,12 @@ impl AgentState {
     /// 从 serde_json::Value 反序列化 AgentEffect 并应用到状态。
     ///
     /// 供 Effect 循环使用：consume_effects → apply_from_value。
-    pub fn apply_from_value(&mut self, v: serde_json::Value) -> Result<(), lellm_graph::WorkflowError> {
-        let effect = serde_json::from_value(v).map_err(|e| lellm_graph::WorkflowError::ApplyFailed(e.to_string()))?;
+    pub fn apply_from_value(
+        &mut self,
+        v: serde_json::Value,
+    ) -> Result<(), lellm_graph::WorkflowError> {
+        let effect = serde_json::from_value(v)
+            .map_err(|e| lellm_graph::WorkflowError::ApplyFailed(e.to_string()))?;
         self.apply(effect);
         Ok(())
     }

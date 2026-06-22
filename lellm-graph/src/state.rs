@@ -98,14 +98,6 @@ impl crate::workflow_state::WorkflowState for State {
         }
     }
 
-    fn merge(self, other: Self) -> Result<Self, crate::workflow_state::WorkflowError> {
-        let mut merged = self.inner;
-        for (key, value) in other.inner {
-            merged.insert(key, value);
-        }
-        Ok(State { inner: merged })
-    }
-
     fn apply_branch_change(&mut self, change: &crate::branch_state::ChangeRecord) {
         match change.operation {
             crate::branch_state::ChangeOperation::Put => {
@@ -115,6 +107,25 @@ impl crate::workflow_state::WorkflowState for State {
                 self.inner.remove(&change.key);
             }
         }
+    }
+}
+
+/// State 的默认合并策略 — 逐 key 合并，后续分支覆盖同 key。
+pub struct StateMerge;
+
+impl crate::workflow_state::MergeStrategy<State> for StateMerge {
+    fn merge(branches: Vec<State>) -> Result<State, crate::workflow_state::WorkflowError> {
+        let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for state in branches {
+            merged.extend(state.inner);
+        }
+        Ok(State {
+            inner: merged.into_iter().collect(),
+        })
+    }
+
+    fn default_instance() -> Self {
+        StateMerge
     }
 }
 
@@ -267,7 +278,8 @@ impl StateExt for State {
                 .ok_or("append_array: existing value is not an array")?
                 .clone();
             arr.extend(new_items.iter().cloned());
-            self.inner.insert(key.to_string(), serde_json::Value::Array(arr));
+            self.inner
+                .insert(key.to_string(), serde_json::Value::Array(arr));
         } else {
             self.inner.insert(key.to_string(), items);
         }

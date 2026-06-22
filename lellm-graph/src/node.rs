@@ -15,13 +15,15 @@ use crate::error::{GraphError, ObservedError};
 use crate::event::BarrierId;
 use crate::ids::SpanId;
 use crate::node_context::NodeContext;
-use crate::state::State;
-use crate::workflow_state::WorkflowState;
+use crate::state::{State, StateMerge};
+use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
 pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
-pub use crate::parallel_node::{ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder};
+pub use crate::parallel_node::{
+    ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder, ParallelNodeBuilderWithMerge,
+};
 
 // ─── 核心类型 ──────────────────────────────────────────────────
 
@@ -143,8 +145,8 @@ pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
 /// # 泛型参数
 ///
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
-#[derive(Clone)]
-pub enum NodeKind<S: WorkflowState = State> {
+/// - `M` — 并行合并策略（仅 `Parallel` 变体使用，默认 [`StateMerge`]）
+pub enum NodeKind<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     /// 自定义逻辑
     Task(TaskNode<S>),
     /// 条件分支
@@ -152,9 +154,21 @@ pub enum NodeKind<S: WorkflowState = State> {
     /// Human-in-the-loop 审批屏障
     Barrier(BarrierNode<S>),
     /// 并行执行多个分支
-    Parallel(ParallelNode<S>),
+    Parallel(ParallelNode<S, M>),
     /// 外部节点（由 lellm-agent 等 crate 提供）
     External(Arc<dyn FlowNode<S>>),
+}
+
+impl<S: WorkflowState, M: MergeStrategy<S>> Clone for NodeKind<S, M> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Task(n) => Self::Task(n.clone()),
+            Self::Condition(n) => Self::Condition(n.clone()),
+            Self::Barrier(n) => Self::Barrier(n.clone()),
+            Self::Parallel(n) => Self::Parallel(n.clone()),
+            Self::External(n) => Self::External(n.clone()),
+        }
+    }
 }
 
 // ─── TaskNode ────────────────────────────────────────────────
@@ -250,7 +264,7 @@ impl<S: WorkflowState> FlowNode<S> for ConditionNode<S> {
 // ─── NodeKind FlowNode impl ──────────────────────────────────
 
 #[async_trait]
-impl<S: WorkflowState> FlowNode<S> for NodeKind<S> {
+impl<S: WorkflowState, M: MergeStrategy<S>> FlowNode<S> for NodeKind<S, M> {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
         match self {
             Self::Task(n) => n.execute(ctx).await,
