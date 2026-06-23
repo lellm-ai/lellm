@@ -565,8 +565,16 @@ pub fn build_react_graph(
     );
 
     // 注意：以下 edges 仅用于静态分析（analyze/diagnostics），运行时不使用。
-    // BudgetCondition、PostLLMGuard 通过 ctx.goto()/ctx.end() 控制路由，
-    // executor 的 NextAction::Goto 优先于 edge 解析。
+    // 条件节点通过 ctx.goto()/ctx.end() 控制路由，NextAction::Goto 优先于 edge 解析。
+    //
+    // 静态边与运行时路由的对应关系：
+    //   budget_check → llm          (BudgetCondition: 预算充足时 goto("llm"))
+    //   budget_check → compactor    (BudgetCondition: 需要压缩时 goto("compactor"))
+    //   compactor → llm             (CompactorNode: 压缩后走下一步，无显式 goto)
+    //   llm → post_llm_check        (LLMNode: 调用完走下一步，无显式 goto)
+    //   post_llm_check → tool       (PostLLMGuard: 有 tool_calls 时 goto("tool"))
+    //   post_llm_check → end        (PostLLMGuard: 无 tool_calls 或 budget 超限时 end())
+    //   tool → budget_check         (ToolNode: 执行完走下一步，无显式 goto)
     builder.edge("budget_check", "llm");
     builder.edge_fallback("budget_check", "compactor");
     builder.edge("compactor", "llm");
