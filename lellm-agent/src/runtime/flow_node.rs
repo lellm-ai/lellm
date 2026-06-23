@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use lellm_graph::{FlowNode, Graph, GraphError, NodeContext, StateEffect, TerminalError};
 
 use crate::hook::{AgentHook, AgentHookContext, AgentHookSnapshot};
-use crate::runtime::{AgentEvent, ToolUseLoop, ToolUseResult};
+use crate::runtime::{AgentEvent, StopReason, ToolUseLoop, ToolUseResult};
 
 /// Agent 在 Graph 中的节点包装。
 ///
@@ -330,7 +330,32 @@ impl AgentFlowNode {
 
         graph.run_inline(&mut agent_ctx, max_steps).await?;
 
-        // 4. 将最终结果写入父 ctx
+        // 4. 调用 after_agent hooks
+        let result = super::ToolUseResult {
+            stop_reason: agent_state
+                .stop_reason
+                .clone()
+                .unwrap_or(StopReason::Complete),
+            response: agent_state.last_response.clone().unwrap_or_else(|| {
+                lellm_core::ChatResponse::new(
+                    lellm_core::text_block(String::new()),
+                    lellm_core::TokenUsage::default(),
+                    serde_json::Value::Null,
+                )
+            }),
+            messages: agent_state.messages.clone(),
+            iterations: agent_state.iterations,
+            tool_calls_executed: agent_state.total_tool_calls,
+        };
+        let snapshot = AgentHookSnapshot {
+            result: result.clone(),
+            events: Vec::new(),
+        };
+        for hook in &self.hooks {
+            hook.after_agent(&snapshot);
+        }
+
+        // 5. 将最终结果写入父 ctx
         self.write_agent_result(ctx, &agent_state);
 
         tracing::debug!(
