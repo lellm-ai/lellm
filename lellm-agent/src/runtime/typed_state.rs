@@ -13,6 +13,7 @@
 use lellm_core::{ChatResponse, Message};
 use lellm_graph::WorkflowState;
 
+use super::context::estimate_tokens;
 use super::event::StopReason;
 
 // ─── AgentState ─────────────────────────────────────────────────
@@ -33,6 +34,10 @@ pub struct AgentState {
     pub output_tokens: usize,
     /// 累计推理 Token 数（Thinking，不含 Text）
     pub reasoning_tokens: usize,
+    /// 上下文估算 Token 数（初始消息 + 所有追加的 Assistant/Tool 消息）
+    /// 用于 BudgetCondition 判断是否需要压缩。
+    #[serde(default)]
+    pub context_tokens: usize,
     /// 累计压缩次数
     pub compact_count: usize,
     /// 停止原因（终态）
@@ -45,6 +50,7 @@ impl AgentState {
     /// 从初始消息列表创建 AgentState。
     pub fn from_messages(messages: Vec<Message>) -> Self {
         Self {
+            context_tokens: estimate_tokens(&messages),
             messages,
             iterations: 0,
             total_tool_calls: 0,
@@ -126,6 +132,10 @@ pub enum AgentEffect {
     AddOutputTokens(usize),
     /// 记录推理 Token
     AddReasoningTokens(usize),
+    /// 累计上下文 Token（供 BudgetCondition 判断压缩）
+    AddContextTokens(usize),
+    /// 设置上下文 Token（压缩后重置）
+    SetContextTokens(usize),
     /// 记录一次压缩
     IncrementCompactCount,
     /// 替换消息历史（压缩场景）
@@ -163,6 +173,12 @@ impl WorkflowState for AgentState {
             AgentEffect::AddReasoningTokens(n) => {
                 self.reasoning_tokens += n;
             }
+            AgentEffect::AddContextTokens(n) => {
+                self.context_tokens += n;
+            }
+            AgentEffect::SetContextTokens(n) => {
+                self.context_tokens = n;
+            }
             AgentEffect::IncrementCompactCount => {
                 self.compact_count += 1;
             }
@@ -186,6 +202,7 @@ impl WorkflowState for AgentState {
 /// - total_tool_calls: 取最大值
 /// - output_tokens: 累加
 /// - reasoning_tokens: 累加
+/// - context_tokens: 累加
 /// - compact_count: 累加
 /// - stop_reason: 优先取后者
 /// - last_response: 优先取后者
@@ -204,6 +221,7 @@ impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {
             merged.total_tool_calls = merged.total_tool_calls.max(branch.total_tool_calls);
             merged.output_tokens += branch.output_tokens;
             merged.reasoning_tokens += branch.reasoning_tokens;
+            merged.context_tokens += branch.context_tokens;
             merged.compact_count += branch.compact_count;
             if merged.stop_reason.is_none() {
                 merged.stop_reason = branch.stop_reason;
