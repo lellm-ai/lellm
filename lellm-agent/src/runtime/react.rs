@@ -58,24 +58,13 @@ fn split_output_tokens(content: &[lellm_core::ContentBlock]) -> (usize, usize) {
 /// # Typed State
 ///
 /// 从 ctx 获取 `AgentState`，直接操作 typed 字段，写回 ctx。
+#[derive(Clone)]
 pub struct LLMNode {
     pub name: String,
     pub model: ResolvedModel,
     pub executor: ToolExecutor,
     pub config: ToolUseConfig,
     pub deps: ToolUseDeps,
-}
-
-impl Clone for LLMNode {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            model: self.model.clone(),
-            executor: self.executor.clone(),
-            config: self.config.clone(),
-            deps: self.deps.clone(),
-        }
-    }
 }
 
 impl LLMNode {
@@ -280,20 +269,11 @@ impl FlowNode<AgentState> for LLMNode {
 /// # Typed State
 ///
 /// 从 ctx 获取 `AgentState`，执行工具，追加结果到消息历史。
+#[derive(Clone)]
 pub struct ToolNode {
     pub name: String,
     pub executor: ToolExecutor,
     pub config: ToolUseConfig,
-}
-
-impl Clone for ToolNode {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            executor: self.executor.clone(),
-            config: self.config.clone(),
-        }
-    }
 }
 
 impl ToolNode {
