@@ -103,22 +103,13 @@ impl FlowNode<AgentState> for LLMNode {
         let state = ctx.state().clone();
         let mut exec_ctx = AgentExecutionContext::new(state.messages_ref());
 
-        // 2. 检查最大迭代
-        if state.reached_max(self.config.max_iterations) {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
-            let last_response = state.last_response.clone().unwrap_or_else(empty_response);
-            ctx.emit_effect(AgentEffect::SetLastResponse(last_response));
-            ctx.end();
-            return Ok(());
-        }
-
-        // 3. Emit 迭代递增 Effect
+        // 2. Emit 迭代递增 Effect
         ctx.emit_effect(AgentEffect::IncrementIteration);
 
-        // 4. 获取工具定义
+        // 3. 获取工具定义
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
-        // 5. 构建 LLM 请求（使用新迭代数）
+        // 4. 构建 LLM 请求（使用新迭代数）
         let req = build_request_inner_with_round(
             &self.model,
             &state.messages,
@@ -128,7 +119,7 @@ impl FlowNode<AgentState> for LLMNode {
             &round.definitions,
         );
 
-        // 6. 执行 LLM 流式调用（v04: 真正的流式输出）
+        // 5. 执行 LLM 流式调用（v04: 真正的流式输出）
         let mut stream = self.model.provider.stream(&req).await.map_err(|e| {
             GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: self.name.clone(),
@@ -196,11 +187,15 @@ impl FlowNode<AgentState> for LLMNode {
             raw: serde_json::json!(null),
         };
 
-        // 7. 分离 output / reasoning token
+        // 6. 分离 output / reasoning token
         let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
         exec_ctx.add_tokens(output_tokens + reasoning_tokens);
 
-        // 8. 检查 reasoning budget（单轮）
+        // 7. Emit Token Effects
+        ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
+        ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
+
+        // 8. 检查 reasoning budget（单轮）→ emit stop_reason，路由交给 PostLLMGuard
         if let Some(limit) = self.config.request_options.max_reasoning_tokens {
             let round_reasoning: usize = response
                 .content
@@ -216,65 +211,49 @@ impl FlowNode<AgentState> for LLMNode {
                     max_reasoning_tokens = limit,
                     "single-round reasoning budget exceeded"
                 );
-                ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
-                ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
                 ctx.emit_effect(AgentEffect::SetStopReason(
                     StopReason::ReasoningBudgetExceeded,
                 ));
-                ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
-                ctx.end();
-                return Ok(());
             }
         }
 
-        // 9. Emit Token Effects
-        ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
-        ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
-
-        // 10. 检查总输出预算（用本地累加判断，因为 Effect 还未 apply）
-        if state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens) {
+        // 9. 检查总输出预算 → emit stop_reason，路由交给 PostLLMGuard
+        if state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens)
+            && state.stop_reason.is_none()
+        {
             ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
-            ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
-            ctx.end();
-            return Ok(());
         }
 
-        // 11. 检查总推理预算
+        // 10. 检查总推理预算 → emit stop_reason，路由交给 PostLLMGuard
         if state
             .exceeded_reasoning_with_extra(self.config.max_total_reasoning_tokens, reasoning_tokens)
+            && state.stop_reason.is_none()
         {
             ctx.emit_effect(AgentEffect::SetStopReason(
                 StopReason::ReasoningBudgetExceeded,
             ));
-            ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
-            ctx.end();
-            return Ok(());
         }
 
-        // 12. Emit 消息追加 Effect
+        // 11. Emit 消息追加 Effect
         let content = response.content.clone();
         let msg = Message::Assistant { content };
         ctx.emit_effect(AgentEffect::AppendMessage(msg));
 
-        // 13. 检查是否有 tool_calls
-        let has_tool_calls = response.has_tool_calls();
-
-        if has_tool_calls {
+        // 12. 记录是否有 tool_calls（在 move response 之前）
+        let has_tools = response.has_tool_calls();
+        if has_tools {
             ctx.emit_effect(AgentEffect::AddToolCalls(tool_calls_count));
-            tracing::debug!(
-                iteration = state.iterations + 1,
-                tool_calls = tool_calls_count,
-                "LLM call completed, executing tools"
-            );
-        } else {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::Complete));
-            ctx.emit_effect(AgentEffect::SetLastResponse(response.clone()));
-            ctx.end();
-            tracing::debug!(
-                iteration = state.iterations + 1,
-                "LLM call completed, no tool calls"
-            );
         }
+
+        // 13. Emit LastResponse（供 PostLLMGuard 检查）
+        ctx.emit_effect(AgentEffect::SetLastResponse(response));
+
+        // 路由决策全部交给 PostLLMGuard，此处不调用 ctx.goto()/ctx.end()
+        tracing::debug!(
+            iteration = state.iterations + 1,
+            has_tool_calls = has_tools,
+            "LLM call completed"
+        );
 
         Ok(())
     }
@@ -396,49 +375,50 @@ impl FlowNode<AgentState> for ToolNode {
     }
 }
 
-// ─── ReactCondition ───────────────────────────────────────────
+// ─── PostLLMGuard ─────────────────────────────────────────────
 
-/// ReAct 循环条件 — 检查 tool_calls 是否为空。
+/// LLM 调用后的后置检查节点 — 统一处理所有终止条件与路由。
 ///
-/// 有 tool_calls → Goto("tool")
-/// 无 tool_calls → End
-pub struct ReactCondition {
+/// 从 `LLMNode` 提取出来，确保 LLMNode 职责单一（只负责调用）。
+///
+/// 检查顺序：
+/// 1. 已终止（stop_reason 已设置）→ End
+/// 2. 有 tool_calls → Goto("tool")
+/// 3. 无 tool_calls → End（正常完成）
+pub struct PostLLMGuard {
     pub name: String,
 }
 
-impl ReactCondition {
+impl PostLLMGuard {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
 }
 
 #[async_trait]
-impl FlowNode<AgentState> for ReactCondition {
+impl FlowNode<AgentState> for PostLLMGuard {
     async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
         let state = ctx.state();
-        // 从最后一条 Assistant 消息判断是否有 tool_calls
-        let has_tool_calls = state
-            .messages
-            .iter()
-            .rev()
-            .find_map(|m| {
-                if let Message::Assistant { content } = m {
-                    Some(
-                        content
-                            .iter()
-                            .any(|b| matches!(b, ContentBlock::ToolCall(_))),
-                    )
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(false);
 
-        if has_tool_calls {
-            ctx.goto("tool");
-        } else {
+        // 1. LLMNode 已设置 stop_reason（budget 超限等）→ 终止
+        if state.stop_reason.is_some() {
             ctx.end();
+            return Ok(());
         }
+
+        // 2. 有 tool_calls → 去执行工具
+        if state
+            .last_response
+            .as_ref()
+            .is_some_and(|r| r.has_tool_calls())
+        {
+            ctx.goto("tool");
+            return Ok(());
+        }
+
+        // 3. 无 tool_calls → 正常完成
+        ctx.emit_effect(AgentEffect::SetStopReason(StopReason::Complete));
+        ctx.end();
 
         Ok(())
     }
@@ -546,7 +526,8 @@ impl FlowNode<AgentState> for BudgetCondition {
 /// budget_check --budget_ok--> [llm]
 ///          --need_compact--> [compactor] → [llm]
 ///
-/// [llm] → [tool_decision]
+/// [llm] → [post_llm_check]
+///    --budget_exceeded--> [end]
 ///    --has_tool_calls--> [tool] → [budget_check] (循环)
 ///    --no_tool_calls--> [end]
 /// ```
@@ -569,9 +550,9 @@ pub fn build_react_graph(
     builder.node("llm", NodeKind::External(Arc::new(llm_node)));
     builder.node("tool", NodeKind::External(Arc::new(tool_node)));
     builder.node(
-        "tool_decision",
-        NodeKind::External(Arc::new(ReactCondition::new(format!(
-            "{}_tool_decision",
+        "post_llm_check",
+        NodeKind::External(Arc::new(PostLLMGuard::new(format!(
+            "{}_post_llm",
             llm_name
         )))),
     );
@@ -583,27 +564,21 @@ pub fn build_react_graph(
         ))),
     );
     builder.node("compactor", NodeKind::External(Arc::new(compactor_node)));
-    // End 节点 — no-op 终端节点（LLMNode 通过 ctx.end() 终止，实际不会执行到此）
+    // End 节点 — no-op 终端节点
     builder.node(
         "end",
         NodeKind::Task(TaskNode::<AgentState>::new("end", |_| Ok(()))),
     );
 
-    // budget_check → llm / compactor (由 BudgetCondition 节点的 goto() 控制)
+    // 注意：以下 edges 仅用于静态分析（analyze/diagnostics），运行时不使用。
+    // BudgetCondition、PostLLMGuard 通过 ctx.goto()/ctx.end() 控制路由，
+    // executor 的 NextAction::Goto 优先于 edge 解析。
     builder.edge("budget_check", "llm");
     builder.edge_fallback("budget_check", "compactor");
-
-    // compactor → llm (压缩完直接到 LLM)
     builder.edge("compactor", "llm");
-
-    // llm → tool_decision
-    builder.edge("llm", "tool_decision");
-
-    // tool_decision → tool / end (由 ReactCondition 节点的 goto()/end() 控制)
-    builder.edge("tool_decision", "tool");
-    builder.edge_fallback("tool_decision", "end");
-
-    // tool → budget_check (工具执行完，回到预算检查，形成循环)
+    builder.edge("llm", "post_llm_check");
+    builder.edge("post_llm_check", "tool");
+    builder.edge_fallback("post_llm_check", "end");
     builder.edge("tool", "budget_check");
 
     builder.build().expect("ReAct graph should be valid")
