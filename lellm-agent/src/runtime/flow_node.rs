@@ -376,6 +376,17 @@ impl AgentFlowNode {
         ctx: &mut NodeContext<'_>,
         state: &super::typed_state::AgentState,
     ) {
+        // 写入消息历史（与 apply_result 保持一致）
+        let messages: Vec<serde_json::Value> = state
+            .messages
+            .iter()
+            .filter_map(|m| serde_json::to_value(m).ok())
+            .collect();
+        ctx.emit_effect(StateEffect::Put(
+            self.message_key.clone(),
+            serde_json::json!(messages),
+        ));
+
         if let Some(ref stop_reason) = state.stop_reason {
             ctx.emit_effect(StateEffect::Put(
                 format!("{}_stop_reason", self.name),
