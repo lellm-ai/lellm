@@ -349,6 +349,8 @@ impl AgentFlowNode {
         };
         let snapshot = AgentHookSnapshot {
             result: result.clone(),
+            // TODO(react-graph): run_inline 不产生 AgentEvent 流，暂传空数组。
+            // 后续需要在 LLMNode/ToolNode 中收集 AgentEvent 并传递。
             events: Vec::new(),
         };
         for hook in &self.hooks {
