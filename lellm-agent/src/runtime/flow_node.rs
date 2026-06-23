@@ -173,7 +173,7 @@ impl AgentFlowNode {
 
         let compactor_node = crate::runtime::react::CompactorNode::new(
             format!("{}_compactor", self.name),
-            Box::new(crate::runtime::LocalCompactor::new()),
+            std::sync::Arc::new(crate::runtime::LocalCompactor::new()),
             config.context_budget.clone(),
         );
 

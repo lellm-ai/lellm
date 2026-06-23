@@ -25,8 +25,7 @@ use lellm_provider::ProviderEvent;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
 use super::context::{
-    AgentExecutionContext, ContextBudget, ContextCompactor, LocalCompactor,
-    estimate_reasoning_block, estimate_text,
+    AgentExecutionContext, ContextBudget, ContextCompactor, estimate_reasoning_block, estimate_text,
 };
 use super::event::StopReason;
 use super::runtime::ResolvedRound;
@@ -452,26 +451,17 @@ impl FlowNode<AgentState> for ReactCondition {
 /// # Typed State
 ///
 /// 从 AgentState 获取消息历史，压缩后替换。
+#[derive(Clone)]
 pub struct CompactorNode {
     pub name: String,
-    pub compactor: Box<dyn ContextCompactor>,
+    pub compactor: Arc<dyn ContextCompactor>,
     pub budget: ContextBudget,
-}
-
-impl Clone for CompactorNode {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            compactor: Box::new(LocalCompactor::new()),
-            budget: self.budget.clone(),
-        }
-    }
 }
 
 impl CompactorNode {
     pub fn new(
         name: impl Into<String>,
-        compactor: Box<dyn ContextCompactor>,
+        compactor: Arc<dyn ContextCompactor>,
         budget: ContextBudget,
     ) -> Self {
         Self {

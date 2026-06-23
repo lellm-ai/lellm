@@ -354,7 +354,7 @@ impl ToolUseLoop {
             super::react::ToolNode::new("tool", self.executor.clone(), self.config.clone());
         let compactor_node = super::react::CompactorNode::new(
             "compactor",
-            Box::new(LocalCompactor::new()),
+            Arc::new(LocalCompactor::new()),
             self.config.context_budget.clone(),
         );
         let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
