@@ -318,7 +318,9 @@ impl AgentFlowNode {
 
         // 2. 构建内部 ReAct Graph (Graph<AgentState, AgentStateMerge>)
         let graph = self.build_react_graph();
-        let max_steps = self.loop_.config().max_iterations * 2 + 1;
+        // 最坏情况：每次迭代 5 steps（budget_check → compactor → llm → post_llm_check → tool）
+        // 最后 3 steps（budget_check → llm → post_llm_check）
+        let max_steps = self.loop_.config().max_iterations * 5 + 3;
 
         // 3. 创建 NodeContext<AgentState> 并调用 run_inline
         let stream = ctx.stream();

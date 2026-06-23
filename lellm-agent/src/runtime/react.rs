@@ -101,9 +101,18 @@ impl FlowNode<AgentState> for LLMNode {
     async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
         // 1. 获取 AgentState（直接读取，零序列化）
         let state = ctx.state().clone();
+
+        // 2. 检查最大迭代 — 超限则 emit stop_reason，由 PostLLMGuard 路由到 End
+        if state.reached_max(self.config.max_iterations) {
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
+            let last_response = state.last_response.clone().unwrap_or_else(empty_response);
+            ctx.emit_effect(AgentEffect::SetLastResponse(last_response));
+            return Ok(());
+        }
+
         let mut exec_ctx = AgentExecutionContext::new(state.messages_ref());
 
-        // 2. Emit 迭代递增 Effect
+        // 3. Emit 迭代递增 Effect
         ctx.emit_effect(AgentEffect::IncrementIteration);
 
         // 3. 获取工具定义
