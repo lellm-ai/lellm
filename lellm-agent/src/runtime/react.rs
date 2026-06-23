@@ -204,7 +204,10 @@ impl FlowNode<AgentState> for LLMNode {
         ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
         ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
 
-        // 8. 检查 reasoning budget（单轮）→ emit stop_reason，路由交给 PostLLMGuard
+        // 8. Budget 检查 — 本地跟踪 stop_reason 优先级，避免重复 emit
+        // 优先级：reasoning（单轮）> output（总计）> reasoning（总计）
+        let mut stopped = false;
+
         if let Some(limit) = self.config.request_options.max_reasoning_tokens {
             let round_reasoning: usize = response
                 .content
@@ -223,20 +226,22 @@ impl FlowNode<AgentState> for LLMNode {
                 ctx.emit_effect(AgentEffect::SetStopReason(
                     StopReason::ReasoningBudgetExceeded,
                 ));
+                stopped = true;
             }
         }
 
-        // 9. 检查总输出预算 → emit stop_reason，路由交给 PostLLMGuard
-        if state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens)
-            && state.stop_reason.is_none()
+        if !stopped
+            && state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens)
         {
             ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
+            stopped = true;
         }
 
-        // 10. 检查总推理预算 → emit stop_reason，路由交给 PostLLMGuard
-        if state
-            .exceeded_reasoning_with_extra(self.config.max_total_reasoning_tokens, reasoning_tokens)
-            && state.stop_reason.is_none()
+        if !stopped
+            && state.exceeded_reasoning_with_extra(
+                self.config.max_total_reasoning_tokens,
+                reasoning_tokens,
+            )
         {
             ctx.emit_effect(AgentEffect::SetStopReason(
                 StopReason::ReasoningBudgetExceeded,
