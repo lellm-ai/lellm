@@ -24,10 +24,7 @@ use lellm_graph::{
 use lellm_provider::ProviderEvent;
 
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
-use super::context::{
-    AgentExecutionContext, ContextBudget, ContextCompactor, estimate_reasoning_block,
-    estimate_text,
-};
+use super::context::{ContextBudget, ContextCompactor, estimate_reasoning_block, estimate_text};
 use super::event::StopReason;
 use super::runtime::ResolvedRound;
 use super::tools::{ToolExecutor, execute_batch_with};
@@ -50,11 +47,23 @@ fn split_output_tokens(content: &[lellm_core::ContentBlock]) -> (usize, usize) {
     (output_tokens, reasoning_tokens)
 }
 
+/// 估算单轮响应中的推理 Token 数。
+fn estimate_round_reasoning_tokens(content: &[ContentBlock]) -> usize {
+    content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Thinking(th) => Some(estimate_reasoning_block(th)),
+            _ => None,
+        })
+        .sum()
+}
+
 // ─── LLMNode ──────────────────────────────────────────────────
 
 /// LLM 调用节点 — 执行单次 LLM 调用。
 ///
-/// 职责单一：只负责 LLM 调用，不感知 Compaction。
+/// **职责单一：** 只负责"调用 LLM + 收集流式响应 + emit Effects"。
+/// 不感知 Budget、Compaction、Iteration Limit 等运行时策略。
 ///
 /// # Typed State
 ///
@@ -89,26 +98,15 @@ impl LLMNode {
 #[async_trait]
 impl FlowNode<AgentState> for LLMNode {
     async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
-        // 1. 获取 AgentState（直接读取，零序列化）
+        // 1. 获取 AgentState
         let state = ctx.state().clone();
 
-        // 2. 检查最大迭代 — 超限则 emit stop_reason，由 PostLLMGuard 路由到 End
-        if state.reached_max(self.config.max_iterations) {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
-            let last_response = state.last_response.clone().unwrap_or_else(empty_response);
-            ctx.emit_effect(AgentEffect::SetLastResponse(last_response));
-            return Ok(());
-        }
-
-        let mut exec_ctx = AgentExecutionContext::new(state.messages_ref());
-
-        // 3. Emit 迭代递增 Effect
+        // 2. Emit 迭代递增 Effect
         ctx.emit_effect(AgentEffect::IncrementIteration);
 
-        // 3. 获取工具定义
+        // 3. 获取工具定义 & 构建 LLM 请求
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
-        // 4. 构建 LLM 请求（使用新迭代数）
         let req = build_request_inner_with_round(
             &self.model,
             &state.messages,
@@ -118,7 +116,7 @@ impl FlowNode<AgentState> for LLMNode {
             &round.definitions,
         );
 
-        // 5. 执行 LLM 流式调用（v04: 真正的流式输出）
+        // 4. 执行 LLM 流式调用
         let mut stream = self.model.provider.stream(&req).await.map_err(|e| {
             GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: self.name.clone(),
@@ -186,70 +184,23 @@ impl FlowNode<AgentState> for LLMNode {
             raw: serde_json::json!(null),
         };
 
-        // 6. 分离 output / reasoning token
+        // 5. 分离 output / reasoning token，Emit Token Effects
         let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
-        exec_ctx.add_tokens(output_tokens + reasoning_tokens);
-
-        // 7. Emit Token Effects
         ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
         ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
 
-        // 8. Budget 检查 — 本地跟踪 stop_reason 优先级，避免重复 emit
-        // 优先级：reasoning（单轮）> output（总计）> reasoning（总计）
-        let mut stopped = false;
-
-        if let Some(limit) = self.config.request_options.max_reasoning_tokens {
-            let round_reasoning: usize = response
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    lellm_core::ContentBlock::Thinking(th) => Some(estimate_reasoning_block(th)),
-                    _ => None,
-                })
-                .sum();
-            if round_reasoning > limit as usize {
-                tracing::warn!(
-                    round_reasoning,
-                    max_reasoning_tokens = limit,
-                    "single-round reasoning budget exceeded"
-                );
-                ctx.emit_effect(AgentEffect::SetStopReason(
-                    StopReason::ReasoningBudgetExceeded,
-                ));
-                stopped = true;
-            }
-        }
-
-        if !stopped
-            && state.exceeded_output_with_extra(self.config.max_total_output_tokens, output_tokens)
-        {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
-            stopped = true;
-        }
-
-        if !stopped
-            && state.exceeded_reasoning_with_extra(
-                self.config.max_total_reasoning_tokens,
-                reasoning_tokens,
-            )
-        {
-            ctx.emit_effect(AgentEffect::SetStopReason(
-                StopReason::ReasoningBudgetExceeded,
-            ));
-        }
-
-        // 11. Emit 消息追加 Effect
+        // 6. Emit 消息追加 Effect
         let content = response.content.clone();
         let msg = Message::Assistant { content };
         ctx.emit_effect(AgentEffect::AppendMessage(msg));
 
-        // 12. 记录是否有 tool_calls（在 move response 之前）
+        // 7. 记录 tool_calls
         let has_tools = response.has_tool_calls();
         if has_tools {
             ctx.emit_effect(AgentEffect::AddToolCalls(tool_calls_count));
         }
 
-        // 13. Emit LastResponse（供 PostLLMGuard 检查）
+        // 8. Emit LastResponse（供 PostLLMGuard 检查）
         ctx.emit_effect(AgentEffect::SetLastResponse(response));
 
         // 路由决策全部交给 PostLLMGuard，此处不调用 ctx.goto()/ctx.end()
@@ -371,48 +322,128 @@ impl FlowNode<AgentState> for ToolNode {
     }
 }
 
+// ─── StopConfig ───────────────────────────────────────────────
+
+/// 终止条件配置 — 从 LLMNode 提取的运行时策略。
+///
+/// 由 PostLLMGuard 持有，LLMNode 完全不知道这些概念。
+#[derive(Debug, Clone)]
+pub struct StopConfig {
+    /// 最大迭代轮次
+    pub max_iterations: usize,
+    /// 单轮推理 Token 上限
+    pub max_reasoning_tokens: Option<u32>,
+    /// 总输出 Token 上限
+    pub max_total_output_tokens: Option<u32>,
+    /// 总推理 Token 上限
+    pub max_total_reasoning_tokens: Option<u32>,
+}
+
+impl StopConfig {
+    pub fn from_tool_use_config(config: &ToolUseConfig) -> Self {
+        Self {
+            max_iterations: config.max_iterations,
+            max_reasoning_tokens: config.request_options.max_reasoning_tokens,
+            max_total_output_tokens: config.max_total_output_tokens,
+            max_total_reasoning_tokens: config.max_total_reasoning_tokens,
+        }
+    }
+}
+
 // ─── PostLLMGuard ─────────────────────────────────────────────
 
 /// LLM 调用后的后置检查节点 — 统一处理所有终止条件与路由。
 ///
-/// 从 `LLMNode` 提取出来，确保 LLMNode 职责单一（只负责调用）。
+/// 从 `LLMNode` 提取的全部运行时策略：
+/// - 最大迭代检查
+/// - Budget 检查（单轮推理 / 总输出 / 总推理）
+/// - 路由决策（Tool / End）
 ///
 /// 检查顺序：
 /// 1. 已终止（stop_reason 已设置）→ End
-/// 2. 有 tool_calls → Goto("tool")
-/// 3. 无 tool_calls → End（正常完成）
+/// 2. 超过最大迭代 → End
+/// 3. 单轮推理超限 → End
+/// 4. 总输出超限 → End
+/// 5. 总推理超限 → End
+/// 6. 有 tool_calls → Goto("tool")
+/// 7. 无 tool_calls → End（正常完成）
 pub struct PostLLMGuard {
     pub name: String,
+    pub stop_config: StopConfig,
 }
 
 impl PostLLMGuard {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+    pub fn new(name: impl Into<String>, stop_config: StopConfig) -> Self {
+        Self {
+            name: name.into(),
+            stop_config,
+        }
     }
 }
 
 #[async_trait]
 impl FlowNode<AgentState> for PostLLMGuard {
     async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
-        let state = ctx.state();
+        let state = ctx.state().clone();
 
-        // 1. LLMNode 已设置 stop_reason（budget 超限等）→ 终止
+        // 1. 已终止（前置节点已设置 stop_reason）→ End
         if state.stop_reason.is_some() {
             ctx.end();
             return Ok(());
         }
 
-        // 2. 有 tool_calls → 去执行工具
-        if state
-            .last_response
-            .as_ref()
-            .is_some_and(|r| r.has_tool_calls())
+        // 2. 超过最大迭代 → End
+        if state.reached_max(self.stop_config.max_iterations) {
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
+            ctx.end();
+            return Ok(());
+        }
+
+        // 3-5. Budget 检查（优先级：单轮推理 > 总输出 > 总推理）
+        let last_response = state.last_response.clone().unwrap_or_else(empty_response);
+        let mut stopped = false;
+
+        // 3. 单轮推理 Token 超限
+        if let Some(limit) = self.stop_config.max_reasoning_tokens {
+            let round_reasoning = estimate_round_reasoning_tokens(&last_response.content);
+            if round_reasoning > limit as usize {
+                tracing::warn!(
+                    round_reasoning,
+                    max_reasoning_tokens = limit,
+                    "single-round reasoning budget exceeded"
+                );
+                ctx.emit_effect(AgentEffect::SetStopReason(
+                    StopReason::ReasoningBudgetExceeded,
+                ));
+                stopped = true;
+            }
+        }
+
+        // 4. 总输出 Token 超限
+        if !stopped
+            && state.exceeded_output(self.stop_config.max_total_output_tokens)
         {
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
+            stopped = true;
+        }
+
+        // 5. 总推理 Token 超限
+        if !stopped && state.exceeded_reasoning(self.stop_config.max_total_reasoning_tokens) {
+            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded));
+        }
+
+        if stopped {
+            ctx.end();
+            return Ok(());
+        }
+
+        // 6. 有 tool_calls → 去执行工具
+        if last_response.has_tool_calls() {
             ctx.goto("tool");
             return Ok(());
         }
 
-        // 3. 无 tool_calls → 正常完成
+        // 7. 无 tool_calls → 正常完成
         ctx.emit_effect(AgentEffect::SetStopReason(StopReason::Complete));
         ctx.end();
 
@@ -536,6 +567,7 @@ pub fn build_react_graph(
 ) -> Graph<AgentState, AgentStateMerge> {
     let llm_name = llm_node.name.clone();
     let budget = llm_node.config.context_budget.clone();
+    let stop_config = StopConfig::from_tool_use_config(&llm_node.config);
 
     let mut builder =
         GraphBuilder::<AgentState, AgentStateMerge>::new(format!("react_{}", llm_name));
@@ -547,10 +579,10 @@ pub fn build_react_graph(
     builder.node("tool", NodeKind::External(Arc::new(tool_node)));
     builder.node(
         "post_llm_check",
-        NodeKind::External(Arc::new(PostLLMGuard::new(format!(
-            "{}_post_llm",
-            llm_name
-        )))),
+        NodeKind::External(Arc::new(PostLLMGuard::new(
+            format!("{}_post_llm", llm_name),
+            stop_config,
+        ))),
     );
     builder.node(
         "budget_check",
