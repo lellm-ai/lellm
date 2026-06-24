@@ -26,7 +26,7 @@ use lellm_provider::ProviderEvent;
 use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
 use super::context::{
     AgentExecutionContext, ContextBudget, ContextCompactor, estimate_reasoning_block,
-    estimate_text, estimate_tokens,
+    estimate_text,
 };
 use super::event::StopReason;
 use super::runtime::ResolvedRound;
@@ -193,10 +193,6 @@ impl FlowNode<AgentState> for LLMNode {
         // 7. Emit Token Effects
         ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
         ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
-        // 上下文增长 = 本次 LLM 响应的总 token（供 BudgetCondition 判断压缩）
-        ctx.emit_effect(AgentEffect::AddContextTokens(
-            output_tokens + reasoning_tokens,
-        ));
 
         // 8. Budget 检查 — 本地跟踪 stop_reason 优先级，避免重复 emit
         // 优先级：reasoning（单轮）> output（总计）> reasoning（总计）
@@ -365,11 +361,8 @@ impl FlowNode<AgentState> for ToolNode {
             }
         }
 
-        // 5. 估算工具结果的上下文增长
-        let result_tokens = estimate_tokens(&results);
-        ctx.emit_effect(AgentEffect::AddContextTokens(result_tokens));
-
-        // 6. Emit 消息追加 Effect（不直接改 state）
+        // 5. Emit 消息追加 Effect（不直接改 state）
+        // context_tokens 由 estimated_context_tokens() 实时派生，无需手动累加
         ctx.emit_effect(AgentEffect::AppendMessages(results));
 
         tracing::debug!(tool_calls = tool_calls.len(), "tool execution completed");
@@ -460,7 +453,7 @@ impl FlowNode<AgentState> for CompactorNode {
     async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
         let state = ctx.state();
 
-        if !self.budget.should_compact(state.context_tokens) {
+        if !self.budget.should_compact(state.estimated_context_tokens()) {
             return Ok(());
         }
 
@@ -469,7 +462,6 @@ impl FlowNode<AgentState> for CompactorNode {
         // 只有实际压缩了才 emit Effects
         if result.removed_messages > 0 {
             ctx.emit_effect(AgentEffect::ReplaceMessages(result.messages));
-            ctx.emit_effect(AgentEffect::SetContextTokens(result.after_tokens));
             ctx.emit_effect(AgentEffect::IncrementCompactCount);
 
             tracing::debug!(
@@ -510,7 +502,7 @@ impl FlowNode<AgentState> for BudgetCondition {
     async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
         let state = ctx.state();
 
-        if self.budget.should_compact(state.context_tokens) {
+        if self.budget.should_compact(state.estimated_context_tokens()) {
             ctx.goto("compactor");
         } else {
             ctx.goto("llm");
