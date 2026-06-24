@@ -40,6 +40,7 @@ pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{ResolvedRound, ToolUseLoop, ToolUseResult};
 pub use typed_state::{AgentEffect, AgentState};
+pub use react::StopConfig;
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};
