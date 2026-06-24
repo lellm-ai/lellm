@@ -205,12 +205,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", SYSTEM_PROMPT);
     println!();
 
-    let state = lellm_agent::initial_state(
-        vec![Message::User {
-            content: text_block(question.clone()),
-        }],
-        "messages",
-    );
-    let stream = agent.execute_stream(state, "messages");
+    let stream = agent.execute_stream(vec![Message::User {
+        content: text_block(question.clone()),
+    }]);
     shared::observe_react_loop(stream, &question).await
 }
