@@ -420,16 +420,16 @@ impl FlowNode<AgentState> for PostLLMGuard {
         }
 
         // 4. 总输出 Token 超限
-        if !stopped
-            && state.exceeded_output(self.stop_config.max_total_output_tokens)
-        {
+        if !stopped && state.exceeded_output(self.stop_config.max_total_output_tokens) {
             ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
             stopped = true;
         }
 
         // 5. 总推理 Token 超限
         if !stopped && state.exceeded_reasoning(self.stop_config.max_total_reasoning_tokens) {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::ReasoningBudgetExceeded));
+            ctx.emit_effect(AgentEffect::SetStopReason(
+                StopReason::ReasoningBudgetExceeded,
+            ));
         }
 
         if stopped {

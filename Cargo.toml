@@ -11,18 +11,18 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
 # Internal
-lellm-core = { path = "lellm-core", version = "0.3" }
-lellm-provider = { path = "lellm-provider", version = "0.3" }
-lellm-agent = { path = "lellm-agent", version = "0.3" }
-lellm-derive = { path = "lellm-derive", version = "0.3" }
-lellm-mcp = { path = "lellm-mcp", version = "0.3" }
-lellm-graph = { path = "lellm-graph", version = "0.3" }
+lellm-core = { path = "lellm-core", version = "0.4" }
+lellm-provider = { path = "lellm-provider", version = "0.4" }
+lellm-agent = { path = "lellm-agent", version = "0.4" }
+lellm-derive = { path = "lellm-derive", version = "0.4" }
+lellm-mcp = { path = "lellm-mcp", version = "0.4" }
+lellm-graph = { path = "lellm-graph", version = "0.4" }
 
 # Common
 async-trait = "0.1"

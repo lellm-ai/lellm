@@ -8,7 +8,7 @@ Build production AI systems in Rust with predictable runtime behavior, provider 
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-green)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-green)](./CHANGELOG.md)
 
 ```bash
 cargo add lellm
@@ -188,16 +188,16 @@ All features are opt-in (`default = []`), keeping `lellm-core` zero-runtime-depe
 ```toml
 [dependencies]
 # Protocol types only (zero runtime dependencies)
-lellm = { version = "0.2", features = ["core"] }
+lellm = { version = "0.4", features = ["core"] }
 
 # Protocol + Provider adapter layer
-lellm = { version = "0.2", features = ["provider"] }
+lellm = { version = "0.4", features = ["provider"] }
 
 # Protocol + Provider + Agent runtime
-lellm = { version = "0.2", features = ["agent"] }
+lellm = { version = "0.4", features = ["agent"] }
 
 # Everything
-lellm = { version = "0.2", features = ["full"] }
+lellm = { version = "0.4", features = ["full"] }
 ```
 
 ### Initialize a Provider
@@ -383,7 +383,9 @@ lellm/
 |---|---|---|
 | **v0.1** | Provider abstraction, streaming, tool execution, budget enforcement, context compaction | ✅ Done |
 | **v0.2** | Graph orchestration, provider extension API, memory architecture, more provider compatibility | ✅ Done |
-| **v0.3+** | Distributed execution, visual observability, multi-agent coordination | 🔜 Planned |
+| **v0.3** | Agent graph runtime — ReAct loop, barriers, multi-agent coordination | ✅ Done |
+| **v0.4** | ReAct Graph mode, post-agent hooks, stop config export | ✅ Done |
+| **v0.5+** | Distributed execution, visual observability | 🔜 Planned |
 
 ---
 
