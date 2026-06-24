@@ -228,32 +228,7 @@ impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {
     }
 }
 
-// ─── 序列化辅助（用于与 NodeContext 桥接）────────────────────────
-
-/// AgentState 序列化 key（与 NodeContext 桥接时使用）。
-pub const AGENT_STATE_KEY: &str = "__agent_state__";
-
-impl AgentState {
-    /// 序列化为 serde_json::Value（用于存储到 NodeContext）。
-    pub fn to_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_default()
-    }
-
-    /// 从 serde_json::Value 反序列化（从 NodeContext 读取时使用）。
-    pub fn from_value(v: serde_json::Value) -> Option<Self> {
-        serde_json::from_value(v).ok()
-    }
-
-    /// 从 serde_json::Value 反序列化 AgentEffect 并应用到状态。
-    ///
-    /// 供 Effect 循环使用：consume_effects → apply_from_value。
-    pub fn apply_from_value(
-        &mut self,
-        v: serde_json::Value,
-    ) -> Result<(), lellm_graph::WorkflowError> {
-        let effect = serde_json::from_value(v)
-            .map_err(|e| lellm_graph::WorkflowError::ApplyFailed(e.to_string()))?;
-        self.apply(effect);
-        Ok(())
-    }
-}
+// ─── NOTE: 序列化桥接已删除 ─────────────────────────
+// to_value() / from_value() / apply_from_value() / AGENT_STATE_KEY
+// 已删除 — Graph 层只做 Node → Effect → State 管道，不经过 JSON。
+// 如需 Checkpoint 持久化，由 Checkpoint 层直接序列化 AgentState。
