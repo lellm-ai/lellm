@@ -1,6 +1,6 @@
-# LeLLM v0.3 产品蓝图
+# LeLLM v0.4 产品蓝图
 
-> 版本：v0.3 | 日期：2026-06-18 | 状态：代码已对齐
+> 版本：v0.4 | 日期：2026-06-25 | 状态：ReAct Graph 已实现，Typed State 已落地
 > 设计决策详见 [DESIGN.md](./DESIGN.md) / [v03-architecture-evolution.md](./v03-architecture-evolution.md)
 
 ## 一、项目愿景
@@ -163,6 +163,6 @@ let result = agent.execute(messages).await?;
 | **v0.1** | core + provider + agent + macros + MCP (Tools only) |
 | **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 |
 | **v0.3** | 6 crate 架构重构 + StateDelta + Checkpoint + ParallelNode + MCP + 消灭 LoopState + 统一 StateKey |
-| **v0.4** | ReAct = 有环图 + Typed State + Effect 事件溯源 + Workflow\<S\> |
+| **v0.4** | ✅ ReAct = 有环图 + Typed State (AgentState/AgentEffect) + Effect 事件溯源 + Workflow\<S\> + PostLLMGuard + BudgetCondition + CompactorNode |
 | **v0.5** | Multi-Agent Orchestration + Durable Execution + Agent↔Agent via MCP |
 | **v0.6** | Sampling |

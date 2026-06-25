@@ -43,8 +43,8 @@ cd "$PROJECT_DIR"
 
 if [[ $# -gt 0 ]]; then
     echo "[INFO] Running weather_agent with address: $*"
-    cargo run --example weather_agent -- "$@"
+    cargo run -p lellm-agent --example weather_agent -- "$@"
 else
     echo "[INFO] Running weather_agent with default addresses"
-    cargo run --example weather_agent
+    cargo run -p lellm-agent --example weather_agent
 fi

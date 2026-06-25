@@ -87,5 +87,7 @@ State 始终满足 step 边界提交，与 LangGraph / Pregel 一致。
 
 ## 版本状态
 
-- **v0.4** — 当前。ReAct Graph 已实现（非流式路径），Typed State 框架已建立
-- **流式迁移** — `ToolUseLoop::execute_stream()` 仍使用手写 while 循环（legacy 路径），待迁移到 ReAct Graph driver + StreamSink 抽象
+- **v0.4** — 当前。ReAct Graph 已实现（含流式路径），Typed State 框架已建立
+- **ReAct Graph** — `AgentFlowNode` 支持 `use_react_graph` 开关，内部构建 `Graph<AgentState>` 驱动 LLM→Tool→LLM 循环
+- **流式** — LLMNode 内部使用 `stream()` + `StreamExt` 收集事件，同时 emit StreamChunk 到 ctx
+- **待完善** — ReAct Graph 模式的 `run_inline` 不产生 `AgentEvent` 流（hook snapshot 传空数组），待后续补充
