@@ -93,11 +93,24 @@ LeLLM 为用 Rust 构建 AI 系统的工程师设计。
 
 ### 组合优于框架锁定
 
-组件可独立使用，按需组合：
+钻石架构 —— `lellm-graph` 和 `lellm-provider` 是平等层，都构建于 `lellm-core` 之上。
+`lellm-agent` 位于顶层，组合两者：
 
 ```
-lellm-core → lellm-provider → lellm-agent → lellm-graph
+              lellm-core（协议类型）
+             /                \
+            /                  \
+  lellm-provider           lellm-graph
+  （LLM 适配器）            （工作流引擎）
+            \                  /
+             \                /
+      lellm-agent（ReAct 循环 = 内部 Graph）
 ```
+
+- **lellm-core** — 零运行时协议类型（`Message`、`ChatRequest`、`LlmError`）。可独立使用。
+- **lellm-provider** — 仅 Provider 适配器。无 Graph、无 Agent。与 core 搭配独立使用。
+- **lellm-graph** — 通用工作流引擎（节点、边、Barrier、并行、Checkpoint）。无 LLM 依赖。与 core 搭配独立使用。
+- **lellm-agent** — 组合 provider + graph。ReAct 循环是一个内部 Graph（`LLMNode → ToolNode → …`）。
 
 ### Provider 协议 ≠ 运行时逻辑
 
@@ -109,22 +122,34 @@ Provider 集成分离为三个关注点：`ChatCodec + ModelCapabilities + Provi
 
 ### 安装
 
-默认开启 `provider`（core + provider 适配层）。其他 feature 按需开启：
+默认开启 `provider`（包含 core + provider 适配器）。其他 feature 按需开启：
 
 ```toml
 [dependencies]
-# 默认：core + provider
+# 默认：core + provider 适配器（直接调用 LLM）
 lellm = "0.4"
 
-# Agent 运行时
-lellm = { version = "0.4", features = ["agent"] }
-
-# Graph 编排
+# 仅 Graph 编排（工作流引擎，不依赖 LLM）
 lellm = { version = "0.4", features = ["graph"] }
 
-# 全部启用
+# Agent 运行时（包含 core + graph + provider + agent）
+lellm = { version = "0.4", features = ["agent"] }
+
+# 全部启用（graph + provider + agent + mcp + derive）
 lellm = { version = "0.4", features = ["full"] }
 ```
+
+**Feature 依赖矩阵：**
+
+| Feature | 包含 |
+|---|---|
+| `core` | lellm-core |
+| `provider` | core + lellm-provider |
+| `graph` | core + lellm-graph |
+| `agent` | core + graph + provider + lellm-agent |
+| `mcp` | core + graph + lellm-mcp |
+| `derive` | lellm-derive |
+| `full` | graph + provider + agent + mcp + derive |
 
 ### 初始化 Provider
 
@@ -262,12 +287,74 @@ let tool = GetWeatherArgs::safe(|args| async move {
 ```
 lellm/
 ├── lellm/               # 门面 crate —— 统一入口
-├── lellm-core/          # 协议对象（Message, ChatRequest, LlmError 等）
-├── lellm-provider/      # Provider 适配层
-├── lellm-agent/         # Agent 运行时（ToolUseLoop, Executor 等）
-├── lellm-graph/         # Graph 编排（Node, Edge, Barrier, Multi-Agent）
-├── lellm-derive/        # 派生宏 + 属性宏
+├── lellm-core/          # 协议类型（Message, ChatRequest, LlmError）
+│   └── deps: serde, serde_json, schemars, thiserror
+├── lellm-provider/      # Provider 适配器（OpenAI, Anthropic, Google 等）
+│   └── deps: lellm-core + reqwest + tokio
+├── lellm-graph/         # 通用工作流引擎（无 LLM 依赖）
+│   └── deps: lellm-core + tokio
+├── lellm-agent/         # Agent 运行时（组合 provider + graph）
+│   └── deps: lellm-core + lellm-provider + lellm-graph
+├── lellm-derive/        # 派生宏 + 属性宏（proc-macro，无内部依赖）
 └── lellm-mcp/           # MCP（Model Context Protocol）客户端/服务端
+    └── deps: lellm-core + optional lellm-agent
+```
+
+### Graph 编排
+
+`lellm-graph` 是一个通用工作流引擎 —— 定位类似 LangGraph / Temporal / Prefect。
+对 LLM **零依赖**，仅依赖 `lellm-core` 的协议类型。
+
+**节点类型：**
+
+| 节点 | 用途 |
+|---|---|
+| `TaskNode` | 简单函数节点（`fn(&mut State) -> Result`） |
+| `External` | 自定义 `FlowNode<S>` 实现（如 LLMNode、AgentFlowNode） |
+| `ConditionNode` | 条件分支 —— 根据状态路由到不同目标 |
+| `BarrierNode` | 人工介入 —— 暂停执行，等待外部决策 |
+| `ParallelNode` | 扇出/扇入 —— 并行分支 + MergeStrategy 合并 |
+
+**边模型 —— 三层路由优先级：**
+
+| 边类型 | 优先级 | 行为 |
+|---|---|---|
+| 条件边 | 最高 | 条件函数匹配状态时路由 |
+| 普通边 | 中等 | 无条件匹配时的默认路径 |
+| Fallback 边 | 最低 | 最终兜底 —— 捕获未路由状态 |
+
+**类型化状态系统：**
+
+```
+State (HashMap<String, Value>) — 向后兼容，动态访问
+AgentState (强类型 struct) — 编译期类型安全，零序列化
+
+节点发出类型化 Effect → NodeContext 缓冲 → Executor 统一应用到 State。
+并行分支克隆基态，独立执行，通过 MergeStrategy 合并。
+```
+
+**执行模式：**
+
+- **阻塞** — `executor.execute(graph, state)` → `GraphResult`
+- **流式** - `executor.execute_stream(graph, state)` → `GraphExecution`（channel 事件流）
+- **内联** - `graph.run_inline(&mut ctx, max_steps)` — ReAct 循环使用（无 channel 开销）
+
+**Checkpoint 与恢复：**
+
+- `CheckpointStore` trait —— 在节点边界持久化状态
+- `CheckpointPolicy` —— `EveryNode` / `BarrierOnly` / `Manual`
+- `executor.resume_from(store, trace_id, graph)` —— 从最后 Checkpoint 恢复
+
+**ReAct 内部 Graph：**
+
+Agent 的工具调用循环不是手写的 while 循环 —— 而是构建一个内部 Graph：
+
+```
+START → budget_check ──(充足)──→ [llm] → [post_llm_check]
+         │                          │              │
+      (压缩) → [compactor]         │       有工具 → [tool] → budget_check (循环)
+                                   │       无工具 → [end]
+                              (思考输出)
 ```
 
 ### Provider 三权分立

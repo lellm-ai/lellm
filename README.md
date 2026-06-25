@@ -95,11 +95,24 @@ Retries, streaming, budgets, and memory policies remain observable and configura
 
 ### Composition Over Framework Lock-In
 
-Components can run independently. Use only what you need:
+Diamond architecture — `lellm-graph` and `lellm-provider` are peer layers, both built on `lellm-core`.
+`lellm-agent` sits on top, composing both:
 
 ```
-lellm-core → lellm-provider → lellm-agent → lellm-graph
+              lellm-core (protocol types)
+             /                \
+            /                  \
+  lellm-provider         lellm-graph
+  (LLM adapters)         (workflow engine)
+            \                  /
+             \                /
+              lellm-agent (ReAct loop = internal graph)
 ```
+
+- **lellm-core** — Zero-runtime protocol types (`Message`, `ChatRequest`, `LlmError`). Standalone.
+- **lellm-provider** — Provider adapters only. No graph, no agent. Standalone with core.
+- **lellm-graph** — Generic workflow engine (nodes, edges, barriers, parallel, checkpoints). No LLM dependency. Standalone with core.
+- **lellm-agent** — Composes provider + graph. ReAct loop is an internal graph (`LLMNode → ToolNode → …`).
 
 ### Provider Protocol ≠ Runtime Logic
 
@@ -111,22 +124,34 @@ Provider integration is separated into three concerns: `ChatCodec + ModelCapabil
 
 ### Install
 
-Default feature: `provider` (core + provider adapter layer). Opt-in for more:
+Default feature: `provider` (includes core + provider adapters). Opt-in for more:
 
 ```toml
 [dependencies]
-# Default: core + provider
+# Default: core + provider adapters (call LLMs directly)
 lellm = "0.4"
 
-# Agent runtime
-lellm = { version = "0.4", features = ["agent"] }
-
-# Graph orchestration
+# Graph orchestration only (workflow engine, no LLM dependency)
 lellm = { version = "0.4", features = ["graph"] }
 
-# Everything
+# Agent runtime (includes core + graph + provider + agent)
+lellm = { version = "0.4", features = ["agent"] }
+
+# Everything (graph + provider + agent + mcp + derive)
 lellm = { version = "0.4", features = ["full"] }
 ```
+
+**Feature dependency matrix:**
+
+| Feature | Includes |
+|---|---|
+| `core` | lellm-core |
+| `provider` | core + lellm-provider |
+| `graph` | core + lellm-graph |
+| `agent` | core + graph + provider + lellm-agent |
+| `mcp` | core + graph + lellm-mcp |
+| `derive` | lellm-derive |
+| `full` | graph + provider + agent + mcp + derive |
 
 ### Initialize a Provider
 
@@ -264,12 +289,74 @@ let tool = GetWeatherArgs::safe(|args| async move {
 ```
 lellm/
 ├── lellm/               # Facade — unified entry point
-├── lellm-core/          # Protocol (Message, ChatRequest, LlmError, ...)
-├── lellm-provider/      # Provider adapter layer
-├── lellm-agent/         # Agent runtime (ToolUseLoop, Executor, ...)
-├── lellm-graph/         # Graph orchestration (Node, Edge, Barrier, Multi-Agent)
-├── lellm-derive/        # Derive + attribute macros
+├── lellm-core/          # Protocol types (Message, ChatRequest, LlmError)
+│   └── deps: serde, serde_json, schemars, thiserror
+├── lellm-provider/      # Provider adapters (OpenAI, Anthropic, Google, ...)
+│   └── deps: lellm-core + reqwest + tokio
+├── lellm-graph/         # Generic workflow engine (NO LLM dependency)
+│   └── deps: lellm-core + tokio
+├── lellm-agent/         # Agent runtime (composes provider + graph)
+│   └── deps: lellm-core + lellm-provider + lellm-graph
+├── lellm-derive/        # Derive + attribute macros (proc-macro, no internal deps)
 └── lellm-mcp/           # MCP (Model Context Protocol) client/server
+    └── deps: lellm-core + optional lellm-agent
+```
+
+### Graph Orchestration
+
+`lellm-graph` is a generic workflow engine — similar in scope to LangGraph / Temporal / Prefect.
+It has **zero LLM dependency**, only depending on `lellm-core` for protocol types.
+
+**Node Types:**
+
+| Node | Purpose |
+|---|---|
+| `TaskNode` | Simple function node (`fn(&mut State) -> Result`) |
+| `External` | Custom `FlowNode<S>` impl (e.g. LLMNode, AgentFlowNode) |
+| `ConditionNode` | Conditional branching — routes to different targets by state |
+| `BarrierNode` | Human-in-the-loop — pauses execution, awaits external decision |
+| `ParallelNode` | Fan-out/fan-in — parallel branches with MergeStrategy |
+
+**Edge Model — Three-Tier Routing:**
+
+| Edge Type | Priority | Behavior |
+|---|---|---|
+| Conditional | Highest | Routes when condition function matches state |
+| Normal | Middle | Default path when no condition matches |
+| Fallback | Lowest | Final safety net — catches unrouted states |
+
+**Typed State System:**
+
+```
+State (HashMap<String, Value>) — backward compatible, dynamic
+AgentState (strongly-typed struct) — compile-time safe, zero serialization
+
+Nodes emit typed Effects → NodeContext buffers → Executor applies to State.
+Parallel branches clone base state, execute independently, merge via MergeStrategy.
+```
+
+**Execution Modes:**
+
+- **Blocking** — `executor.execute(graph, state)` → `GraphResult`
+- **Streaming** — `executor.execute_stream(graph, state)` → `GraphExecution` (channel-based events)
+- **Inline** — `graph.run_inline(&mut ctx, max_steps)` — used by ReAct loop (no channel overhead)
+
+**Checkpoint & Resume:**
+
+- `CheckpointStore` trait — persist state at node boundaries
+- `CheckpointPolicy` — `EveryNode` / `BarrierOnly` / `Manual`
+- `executor.resume_from(store, trace_id, graph)` — restore from last checkpoint
+
+**ReAct as Internal Graph:**
+
+The Agent's tool-use loop is NOT a hand-rolled while loop — it builds an internal graph:
+
+```
+START → budget_check ──(ok)──→ [llm] → [post_llm_check]
+         │                         │              │
+      (compact) → [compactor]     │       has_tools → [tool] → budget_check (loop)
+                                   │       no_tools  → [end]
+                              (thinking)
 ```
 
 ### Provider Three-Way Split
