@@ -19,7 +19,6 @@ pub use runtime::{
     StaticCatalog, StopReason, ToolArgs, ToolCatalog, ToolCategory, ToolError, ToolErrorKind,
     ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
     ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
-    initial_state,
 };
 
 // ─── 糖衣 API（第三层原型） ───

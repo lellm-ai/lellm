@@ -3,7 +3,6 @@ use lellm_agent::serde::Deserialize;
 use lellm_agent::{
     AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety, StaticCatalog,
     ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
-    initial_state,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
 use lellm_derive::Tool;

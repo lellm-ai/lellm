@@ -15,7 +15,6 @@ pub mod request_opts;
 pub mod retry;
 #[allow(clippy::module_inception)]
 pub mod runtime;
-pub mod state;
 pub mod tools;
 pub mod typed_state;
 
@@ -41,7 +40,6 @@ pub use react::StopConfig;
 pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{ResolvedRound, ToolUseLoop, ToolUseResult};
-pub use state::initial_state;
 pub use typed_state::{AgentEffect, AgentState};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
