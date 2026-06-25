@@ -41,13 +41,10 @@ async fn main() {
     println!("=== 流式 Agent 执行 ===\n");
 
     // ─── 流式执行 ───
-    let state = lellm_agent::initial_state(
-        vec![Message::User {
-            content: lellm_core::text_block("介绍一下 LeLLM。".to_string()),
-        }],
-        "messages",
-    );
-    let mut stream = agent.execute_stream(state, "messages");
+    let messages = vec![Message::User {
+        content: lellm_core::text_block("介绍一下 LeLLM。".to_string()),
+    }];
+    let mut stream = agent.execute_stream(messages);
 
     let mut has_tool_calls = false;
 

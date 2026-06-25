@@ -45,14 +45,10 @@ async fn main() {
 
     // ─── 非流式执行 ───
     println!("=== 非流式执行 ===");
-    let mut state = lellm_agent::initial_state(
-        vec![Message::User {
-            content: lellm_core::text_block("请介绍一下自己。".to_string()),
-        }],
-        "messages",
-    );
     let result = agent
-        .execute(&mut state, "messages")
+        .execute(vec![Message::User {
+            content: lellm_core::text_block("请介绍一下自己。".to_string()),
+        }])
         .await
         .expect("Agent 执行失败");
 

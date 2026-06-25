@@ -134,11 +134,11 @@ impl FlowNode<AgentState> for LLMNode {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(ProviderEvent::Token { token }) => {
-                    ctx.emit(lellm_graph::StreamChunk::Text(token.clone()));
+                    ctx.emit(lellm_graph::StreamChunk::TextDelta(token.clone()));
                     current_text.push_str(&token);
                 }
                 Ok(ProviderEvent::ThinkingDelta { thinking, .. }) => {
-                    ctx.emit(lellm_graph::StreamChunk::Thinking(thinking.clone()));
+                    ctx.emit(lellm_graph::StreamChunk::ThinkingDelta(thinking.clone()));
                     current_thinking.push_str(&thinking);
                 }
                 Ok(ProviderEvent::ResponseComplete {
@@ -304,10 +304,12 @@ impl FlowNode<AgentState> for ToolNode {
                     })
                     .collect::<Vec<_>>()
                     .join("");
-                ctx.emit(lellm_graph::StreamChunk::ToolResult {
-                    id: tool_call_id.clone(),
+                ctx.emit(lellm_graph::StreamChunk::ToolOutput {
+                    call_id: tool_call_id.clone(),
+                    tool_name: "".to_string(),
                     content: content_str,
                     is_error: *is_error,
+                    duration: std::time::Duration::ZERO,
                 });
             }
         }

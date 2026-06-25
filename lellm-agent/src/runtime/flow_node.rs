@@ -240,10 +240,10 @@ impl AgentFlowNode {
             if let AgentEvent::Provider(provider_event) = &agent_event {
                 match provider_event {
                     lellm_provider::ProviderEvent::Token { token } => {
-                        ctx.emit(lellm_graph::StreamChunk::Text(token.clone()));
+                        ctx.emit(lellm_graph::StreamChunk::TextDelta(token.clone()));
                     }
                     lellm_provider::ProviderEvent::ThinkingDelta { thinking, .. } => {
-                        ctx.emit(lellm_graph::StreamChunk::Thinking(thinking.clone()));
+                        ctx.emit(lellm_graph::StreamChunk::ThinkingDelta(thinking.clone()));
                     }
                     _ => {}
                 }
@@ -325,8 +325,13 @@ impl AgentFlowNode {
         // 3. 创建 NodeContext<AgentState> 并调用 run_inline
         let stream = ctx.stream();
         let mut branch = lellm_graph::BranchState::empty();
-        let mut agent_ctx =
-            GCtx::<super::typed_state::AgentState>::new(&mut agent_state, &mut branch, stream);
+        let cancel = lellm_graph::CancellationToken::new();
+        let mut agent_ctx = GCtx::<super::typed_state::AgentState>::new(
+            &mut agent_state,
+            &mut branch,
+            stream,
+            cancel,
+        );
 
         graph.run_inline(&mut agent_ctx, max_steps).await?;
 

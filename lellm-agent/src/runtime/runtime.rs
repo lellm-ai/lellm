@@ -365,10 +365,12 @@ impl ToolUseLoop {
 
         // 创建 NodeContext<AgentState> 并调用 run_inline
         let mut branch = lellm_graph::BranchState::empty();
+        let cancel = lellm_graph::CancellationToken::new();
         let mut agent_ctx = lellm_graph::NodeContext::<super::typed_state::AgentState>::new(
             &mut agent_state,
             &mut branch,
             None,
+            cancel,
         );
 
         graph

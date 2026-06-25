@@ -24,7 +24,8 @@ use crate::node::{FlowNode, NodeKind};
 use crate::node_context::{ExecutionSignal, NextAction, NodeContext, NodeMetadata};
 use crate::runtime_event::RuntimeEvent;
 use crate::state::{ExecutionEntry, GraphResult, State};
-use crate::stream_emitter::StreamEmitter;
+use crate::stream_emitter::NoopSink;
+use tokio_util::sync::CancellationToken;
 use crate::workflow_state::WorkflowState;
 
 // ─── RunLoopContext ─────────────────────────────────────────────
@@ -668,9 +669,9 @@ impl GraphExecutor {
         GraphError,
     > {
         let mut branch = BranchState::from_state(state.clone());
-        let (tx, _rx) = mpsc::channel(64);
-        let emitter = StreamEmitter::new(tx);
-        let mut ctx = NodeContext::new(state, &mut branch, Some(&emitter));
+        let cancel = CancellationToken::new();
+        let noop_sink = NoopSink;
+        let mut ctx = NodeContext::new(state, &mut branch, Some(&noop_sink), cancel);
 
         node.execute(&mut ctx).await?;
 
@@ -774,7 +775,8 @@ impl GraphExecutor {
         match node {
             NodeKind::Barrier(b) => {
                 let mut branch = BranchState::from_state(state.clone());
-                let mut ctx = NodeContext::new(state, &mut branch, None);
+                let cancel = CancellationToken::new();
+                let mut ctx = NodeContext::new(state, &mut branch, None, cancel);
                 b.apply_decision_to_ctx(&mut ctx, decision);
                 let (next, _signal) = ctx.take_control();
 

@@ -216,14 +216,10 @@ async fn main() {
     let agent = create_agent(all_tools);
 
     println!("\n=== 执行 Agent ===");
-    let mut state = lellm_agent::initial_state(
-        vec![Message::User {
-            content: lellm_core::text_block("搜索一下 Rust 编程语言。".to_string()),
-        }],
-        "messages",
-    );
     let result = agent
-        .execute(&mut state, "messages")
+        .execute(vec![Message::User {
+            content: lellm_core::text_block("搜索一下 Rust 编程语言。".to_string()),
+        }])
         .await
         .expect("Agent 执行失败");
 

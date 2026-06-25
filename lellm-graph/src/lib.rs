@@ -81,8 +81,11 @@ pub use hook::{AgentHook, NoOpHook, TracingHook};
 pub use branch_state::{BranchState, ChangeOperation, ChangeRecord};
 pub use node_context::{ExecutionControl, ExecutionSignal, NextAction, NodeContext, NodeMetadata};
 pub use runtime_event::RuntimeEvent;
-pub use stream_chunk::StreamChunk;
-pub use stream_emitter::StreamEmitter;
+pub use stream_chunk::{StreamChunk, ToolPhase};
+pub use stream_emitter::{
+    spawn_forward_task, BufferedSink, ChannelSink, NoopSink, StreamSink, noop_sink, sink_arc,
+};
+pub use tokio_util::sync::CancellationToken;
 pub use workflow_state::{Effect, LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};
 
 // ─── Trace ───────────────────────────────────────────────────

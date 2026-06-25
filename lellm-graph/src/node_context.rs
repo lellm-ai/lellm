@@ -1,4 +1,4 @@
-//! NodeContext + ExecutionControl + StreamEmitter — v04 核心类型。
+//! NodeContext + ExecutionControl — v04 核心类型。
 //!
 //! NodeContext 是 Runtime Handle（运行时句柄），节点只借用，不拥有。
 //! 节点通过 NodeContext 读写 State、发射数据面事件、发出控制信号。
@@ -6,10 +6,13 @@
 //! v0.4+: 泛型化 `NodeContext<'a, S>`，S: WorkflowState。
 //! 默认 `S = State`（HashMap）保持向后兼容。
 
+use tokio_util::sync::CancellationToken;
+
 use crate::branch_state::BranchState;
 use crate::event::FlowEvent;
 use crate::state::State;
-use crate::stream_emitter::StreamEmitter;
+use crate::stream_chunk::StreamChunk;
+use crate::stream_emitter::StreamSink;
 use crate::workflow_state::WorkflowState;
 
 // ─── ExecutionSignal ──────────────────────────────────────────
@@ -116,7 +119,9 @@ pub struct NodeContext<'a, S: WorkflowState = State> {
     /// 底层分支状态 — 用于 fork 等操作（backward compat）
     branch: &'a mut BranchState,
     /// 数据面发射器 — 可选（阻塞模式 = None）
-    stream: Option<&'a StreamEmitter>,
+    stream: Option<&'a dyn StreamSink>,
+    /// 取消令牌 — 消费者断开时触发
+    cancel: CancellationToken,
     /// 控制信号 — 节点写入，Executor 读取
     control: ExecutionControl,
     /// 节点元数据 — 节点写入
@@ -132,12 +137,14 @@ impl<'a, S: WorkflowState> NodeContext<'a, S> {
     pub fn new(
         state: &'a mut S,
         branch: &'a mut BranchState,
-        stream: Option<&'a StreamEmitter>,
+        stream: Option<&'a dyn StreamSink>,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             state,
             branch,
             stream,
+            cancel,
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
             effects: Vec::new(),
@@ -168,7 +175,7 @@ impl<'a, S: WorkflowState> NodeContext<'a, S> {
     // ─── 数据面发射 ─────────────────────────────────────────
 
     /// 发射数据面事件（无 stream 则静默丢弃）。
-    pub fn emit(&self, chunk: crate::stream_chunk::StreamChunk) {
+    pub fn emit(&self, chunk: StreamChunk) {
         if let Some(stream) = &self.stream {
             stream.emit(chunk);
         }
@@ -177,6 +184,18 @@ impl<'a, S: WorkflowState> NodeContext<'a, S> {
     /// 发射控制面 FlowEvent（缓冲到 NodeContext，供 Executor 收集转发）。
     pub fn emit_flow_event(&mut self, event: FlowEvent) {
         self.flow_events.push(event);
+    }
+
+    // ─── 取消检查 ────────────────────────────────────────────
+
+    /// 检查是否已取消。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// 获取取消令牌引用。
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel
     }
 
     // ─── 控制信号 ─────────────────────────────────────────
@@ -244,7 +263,7 @@ impl<'a, S: WorkflowState> NodeContext<'a, S> {
     }
 
     /// 获取数据面发射器引用。
-    pub fn stream(&self) -> Option<&'a StreamEmitter> {
+    pub fn stream(&self) -> Option<&'a dyn StreamSink> {
         self.stream
     }
 

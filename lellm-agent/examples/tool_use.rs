@@ -203,14 +203,10 @@ async fn main() {
 
     println!("=== ReAct 工具调用循环 ===\n");
 
-    let mut state = lellm_agent::initial_state(
-        vec![Message::User {
-            content: lellm_core::text_block("找出当前最受欢迎的无线耳机并检查其库存".to_string()),
-        }],
-        "messages",
-    );
     let result = agent
-        .execute(&mut state, "messages")
+        .execute(vec![Message::User {
+            content: lellm_core::text_block("找出当前最受欢迎的无线耳机并检查其库存".to_string()),
+        }])
         .await
         .expect("Agent 执行失败");
 
