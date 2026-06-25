@@ -16,7 +16,7 @@ cargo add lellm
 
 ```rust
 use lellm::agent::AgentBuilder;
-use lellm::core::{Message, text_block};
+use lellm::core::Message;
 
 let agent = AgentBuilder::new(model)
     .system_prompt("你是一个有用的助手。".into())
@@ -24,11 +24,7 @@ let agent = AgentBuilder::new(model)
     .max_iterations(10)
     .build();
 
-let result = agent
-    .execute(vec![Message::User {
-        content: text_block("今天上海天气如何？".into()),
-    }])
-    .await?;
+let result = agent.execute(vec![Message::user_text("今天上海天气如何？")]).await?;
 ```
 
 ---
@@ -253,7 +249,7 @@ for block in &response.content {
 
 ```rust
 use lellm::agent::{AgentBuilder, StopReason};
-use lellm::core::{Message, text_block};
+use lellm::core::Message;
 use lellm::provider::ResolvedModel;
 use std::sync::Arc;
 
@@ -273,11 +269,7 @@ let agent = AgentBuilder::new(model)
     .build();
 
 // 执行
-let result = agent
-    .execute(vec![Message::User {
-        content: text_block("今天上海天气如何？".into()),
-    }])
-    .await?;
+let result = agent.execute(vec![Message::user_text("今天上海天气如何？")]).await?;
 
 match result.stop_reason {
     StopReason::Complete => println!("完成，共 {} 轮", result.iterations),
