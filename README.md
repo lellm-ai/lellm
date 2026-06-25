@@ -2,9 +2,9 @@
 
 > LeLLM 传递快乐。人嘛，最重要的就是开心。
 
-Type-safe LLM application framework for Rust.
+Rust 类型安全的 LLM 应用框架。
 
-Build production AI systems in Rust with predictable runtime behavior, provider abstraction, streaming pipelines, and agent execution — without rebuilding the same infrastructure every time.
+用 Rust 构建生产级 AI 系统——可预测的运行时行为、Provider 抽象、流式管道、Agent 执行、Graph 编排。
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -19,205 +19,88 @@ use lellm::agent::AgentBuilder;
 use lellm::core::Message;
 
 let agent = AgentBuilder::new(model)
-    .system_prompt("You are a helpful assistant.".into())
+    .system_prompt("你是一个有用的助手。".into())
     .tool(weather_tool)
     .max_iterations(10)
     .build();
 
-let result = agent.execute(vec![Message::user_text("What's the weather in Shanghai?")]).await?;
+let result = agent.execute(vec![Message::user_text("今天上海天气如何？")]).await?;
 ```
 
 ---
 
-## Why LeLLM
+## 为什么需要 LeLLM
 
-Most AI frameworks optimize for speed of prototyping.
+大多数 AI 框架优化的是原型速度。**LeLLM 优化的是生产可靠性。**
 
-**LeLLM optimizes for production reliability.**
+构建真实的 AI 系统时，困难的部分很少是调 API。真正棘手的是：
 
-When building real AI systems, the hard parts are rarely calling an API. They are:
+- Provider 差异（OpenAI / Anthropic / Gemini / OpenRouter）
+- 流式输出与部分失败
+- 工具执行与重试
+- Token 预算与失控循环
+- 上下文增长与内存压力
+- 运行时可观测性
 
-- Provider differences (OpenAI / Anthropic / Gemini / OpenRouter)
-- Streaming and partial failures
-- Tool execution and retries
-- Token budgets and runaway loops
-- Context growth and memory pressure
-- Runtime observability
-
-LeLLM provides these as composable runtime primitives.
+LeLLM 将这些能力提供为可组合的运行时原语。
 
 ---
 
-## Who LeLLM Is For
+## 设计原则
 
-LeLLM is designed for engineers building AI systems in Rust.
+### 类型安全优先
 
-### Good fit
+无效状态尽可能在编译期报错。
 
-- Backend and infrastructure engineers
-- Agent and workflow platform builders
-- Teams requiring deterministic runtime behavior
-- Edge / embedded / low-resource deployments
-- Rust users who want compile-time guarantees
+### 显式优于魔法
 
-**Typical workloads:**
+重试、流式、预算、内存策略保持可观测、可配置。
 
-- AI APIs and gateways
-- Internal copilots
-- Agent runtimes
-- Multi-provider orchestration
-- Real-time streaming applications
-- Long-running autonomous workflows
+### 组合优于框架锁定
 
-### Probably not for you
-
-- Notebook-first experimentation
-- Prompt engineering only
-- No-code workflows
-- Simple one-off API calls
-- Learning Rust through AI
-
-If your application is `HTTP → LLM → return`, `reqwest` + `serde` is probably enough.
-
-LeLLM starts paying off when orchestration complexity appears.
-
----
-
-## What Problems LeLLM Solves
-
-| Without LeLLM | With LeLLM |
-|---|---|
-| Provider integration → repeated HTTP/SSE work | Provider abstraction |
-| Tool orchestration → custom control loops | Agent loop execution |
-| Retry & fallback → edge cases everywhere | Retry & fallback |
-| Context management → memory growth | Context compaction |
-| Budget enforcement → difficult to retrofit | Token budget protection |
-
-**Pipeline:** `Provider → Agent → Tool → Stream → Runtime`
-
-**Included:**
-
-- Provider abstraction
-- Streaming pipeline
-- Agent loop execution
-- Tool system
-- Retry & fallback
-- Token budget protection
-- Context compaction
-- Typed errors
-
----
-
-## Design Principles
-
-LeLLM intentionally prefers explicitness over magic.
-
-### Type Safety First
-
-Invalid states should fail at compile time whenever possible.
-
-### Runtime Control Over Automation
-
-Retries, streaming, budgets, and memory policies remain observable and configurable.
-
-### Composition Over Framework Lock-In
-
-LeLLM components can run independently. Use only what you need.
+组件可独立使用，按需组合：
 
 ```
-lellm-core
-    ↓
-lellm-provider
-    ↓
-lellm-agent
+lellm-core → lellm-provider → lellm-agent → lellm-graph
 ```
 
-### Provider Protocol ≠ Runtime Logic
+### Provider 协议 ≠ 运行时逻辑
 
-Provider integration is separated into three concerns:
-
-```
-ChatCodec + ModelCapabilities + ProviderMeta
-```
-
-This separation allows protocol evolution without rewriting execution logic.
+Provider 集成分离为三个关注点：`ChatCodec + ModelCapabilities + ProviderMeta`
 
 ---
 
-## Where LeLLM Fits
+## 快速开始
 
-| Use Case | Fit |
-|---|---|
-| AI API backend | Excellent |
-| Agent runtime | Excellent |
-| Multi-provider routing | Excellent |
-| Streaming applications | Excellent |
-| Edge deployment | Strong |
-| Rapid notebook iteration | Weak |
-| Visual workflow builders | Not focus |
+### 安装
 
----
-
-## Comparison
-
-| | LeLLM | Python Agent Frameworks |
-|---|---|---|
-| Language | Rust | Python |
-| Type Safety | Compile-time | Runtime |
-| Runtime Control | High | Medium |
-| Streaming | Native | Framework dependent |
-| Provider Abstraction | Built-in | Varies |
-| Budget Enforcement | Built-in | Usually external |
-| Context Management | Built-in | Partial |
-| Ecosystem | Early | Mature |
-
-LeLLM is not trying to replace Python. It exists for teams that already chose Rust.
-
----
-
-## Quick Start
-
-### Install
-
-All features are opt-in (`default = []`), keeping `lellm-core` zero-runtime-dependency:
+默认开启 `provider`（core + provider 适配层）。其他 feature 按需开启：
 
 ```toml
 [dependencies]
-# Protocol types only (zero runtime dependencies)
-lellm = { version = "0.4", features = ["core"] }
+# 默认：core + provider
+lellm = "0.4"
 
-# Protocol + Provider adapter layer
-lellm = { version = "0.4", features = ["provider"] }
-
-# Protocol + Provider + Agent runtime
+# Agent 运行时
 lellm = { version = "0.4", features = ["agent"] }
 
-# Everything
+# Graph 编排
+lellm = { version = "0.4", features = ["graph"] }
+
+# 全部启用
 lellm = { version = "0.4", features = ["full"] }
 ```
 
-### Initialize a Provider
+### 初始化 Provider
 
 ```rust
 use lellm::provider::{CodecProvider, OpenAICompatCodec};
 
-// Auto-load from OPENAI_BASE_URL + OPENAI_API_KEY
+// 自动读取 OPENAI_BASE_URL + OPENAI_API_KEY
 let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
 ```
 
-**Via OpenRouter** (aggregation gateway):
-
-```rust
-use lellm::provider::{CodecProvider, OpenAICompatCodec, AnthropicCodec};
-
-// Load from OPENROUTER_API_KEY
-let provider = CodecProvider::openrouter(OpenAICompatCodec::openai())?;
-
-// Switch protocol by swapping the codec
-let anthropic_via_openrouter = CodecProvider::openrouter(AnthropicCodec)?;
-```
-
-**Supported providers:**
+**支持的 Provider：**
 
 | Provider | Codec |
 |---|---|
@@ -228,13 +111,13 @@ let anthropic_via_openrouter = CodecProvider::openrouter(AnthropicCodec)?;
 | NVIDIA | `OpenAICompatCodec::nvidia()` |
 | vLLM / LLaMA | `OpenAICompatCodec::vllm()` / `::llama()` |
 
-### Single Message Call
+### 单条消息调用
 
 ```rust
 use lellm::core::{ChatRequest, ContentBlock};
 use lellm::provider::LlmProvider;
 
-let request = ChatRequest::user_prompt("Why do parrots have colorful feathers?".into())
+let request = ChatRequest::user_prompt("为什么鹦鹉有五颜六色的羽毛？".into())
     .with_temperature(0.7);
 
 let response = provider.call(&request).await?;
@@ -245,39 +128,37 @@ for block in &response.content {
 }
 ```
 
-### Agent Loop with Tools
+### Agent 循环与工具调用
 
 ```rust
 use lellm::agent::{AgentBuilder, StopReason};
 use lellm::core::Message;
 use lellm::provider::ResolvedModel;
+use std::sync::Arc;
 
-// Resolve a model from the provider
 let model = ResolvedModel {
     provider: Arc::new(provider),
     model: "gpt-4o".into(),
     context_window: None,
 };
 
-// Build the agent
 let agent = AgentBuilder::new(model)
-    .system_prompt("You are a helpful assistant.".into())
+    .system_prompt("你是一个有用的助手。".into())
     .tool(search_tool)
     .max_iterations(10)
     .max_output_tokens(8000)
     .build();
 
-// Execute
-let result = agent.execute(vec![Message::user_text("What's the weather in Shanghai?")]).await?;
+let result = agent.execute(vec![Message::user_text("今天上海天气如何？")]).await?;
 
 match result.stop_reason {
-    StopReason::Complete => println!("Done in {} iterations", result.iterations),
-    StopReason::MaxIterationsReached => eprintln!("Max iterations reached"),
-    _ => eprintln!("Stopped: {:?}", result.stop_reason),
+    StopReason::Complete => println!("完成，共 {} 轮", result.iterations),
+    StopReason::MaxIterationsReached => eprintln!("达到最大轮次"),
+    _ => eprintln!("停止原因: {:?}", result.stop_reason),
 }
 ```
 
-### Streaming Output
+### 流式输出
 
 ```rust
 use futures_util::StreamExt;
@@ -290,7 +171,7 @@ while let Some(event) = stream.next().await {
         ProviderEvent::Token { token } => print!("{}", token),
         ProviderEvent::ResponseComplete { usage, .. } => {
             if let Some(u) = usage {
-                eprintln!("\nTokens: {}", u.total_tokens);
+                eprintln!("\nToken: {}", u.total_tokens);
             }
         }
         _ => {}
@@ -298,102 +179,112 @@ while let Some(event) = stream.next().await {
 }
 ```
 
-### Tool Definition with Macros
+### 工具定义
+
+**方式一：`#[tool]` 函数宏（推荐，95% 场景）**
 
 ```rust
-use lellm_agent::{ToolArgs, ToolRegistration};
-use lellm_macros::Tool;
-use lellm_core::{ToolError, ToolErrorKind};
+use lellm::core::ToolResult;
+use lellm::derive::tool;
+
+#[tool(name = "get_weather", description = "获取指定城市的天气")]
+async fn get_weather(city: String) -> ToolResult {
+    Ok(serde_json::json!({"city": city, "temp": 25}))
+}
+
+// 注册：
+builder.tool(get_weather_tool());
+```
+
+**方式二：`#[derive(Tool)]` struct 宏**
+
+```rust
+use lellm::derive::Tool;
+use lellm::agent::ToolArgs;
+use lellm::core::ToolResult;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 #[derive(Deserialize, JsonSchema, Tool)]
-#[tool(
-    name = "get_weather",
-    description = "Get the current weather for a city"
-)]
+#[tool(name = "get_weather", description = "获取指定城市的天气")]
 struct GetWeatherArgs {
+    /// 城市名称
     city: String,
 }
 
-// Register with .safe() — errors are caught and returned as ToolError
-let tool = ToolRegistration::safe(
-    GetWeatherArgs::tool_definition(),
-    |args| async move {
-        let city = args.get("city").unwrap().as_str().unwrap().to_string();
-        // ... tool logic ...
-        Ok(format!("Weather for {}", city))
-    },
-);
+// 注册 —— 闭包接收反序列化后的 struct：
+let tool = GetWeatherArgs::safe(|args| async move {
+    Ok(serde_json::json!({"city": args.city, "temp": 25}))
+});
 ```
 
 ---
 
-## Architecture
+## 架构
 
-### Provider Three-Way Split
-
-```
-User → LlmProvider (public API)
-       → CodecProvider<C> (framework internal)
-          → ProviderExtension (ecosystem SPI)
-              ├── ChatCodec (protocol encoding/decoding)
-              ├── ModelCapabilities (capability matrix)
-              └── ProviderMeta (connection metadata)
-```
-
-### Decoupled Streaming Pipeline
-
-`stream/` knows nothing about `reqwest` or `tokio channels`:
-
-```
-CodecProvider (HTTP, channels)
-       ↓
-process_stream (Stream<Item=Result<Bytes>>, EventSink)
-       ↓
-SseParser + Codec + Accumulator (pure logic, no IO)
-```
-
-### Crate Layout
+### Crate 布局
 
 ```
 lellm/
-├── lellm/               # Facade — unified entry point
-├── lellm-core/          # Protocol (Message, ChatRequest, LlmError, ...)
-├── lellm-provider/      # Provider adapter layer
-├── lellm-agent/         # Agent runtime (ToolUseLoop, Executor, ...)
-├── lellm-macros/        # Derive + attribute macros
-├── lellm-mcp/           # MCP (Model Context Protocol) client/server
-└── lellm-graph/         # Graph orchestration (Node, Edge, Barrier, Multi-Agent)
+├── lellm/               # 门面 crate —— 统一入口
+├── lellm-core/          # 协议对象（Message, ChatRequest, LlmError 等）
+├── lellm-provider/      # Provider 适配层
+├── lellm-agent/         # Agent 运行时（ToolUseLoop, Executor 等）
+├── lellm-graph/         # Graph 编排（Node, Edge, Barrier, Multi-Agent）
+├── lellm-derive/        # 派生宏 + 属性宏
+└── lellm-mcp/           # MCP（Model Context Protocol）客户端/服务端
+```
+
+### Provider 三权分立
+
+```
+用户 → LlmProvider（公开 API）
+       → CodecProvider<C>（框架内部）
+          → ProviderExtension（生态扩展 SPI）
+              ├── ChatCodec（协议编解码）
+              ├── ModelCapabilities（能力矩阵）
+              └── ProviderMeta（连接元数据）
+```
+
+### 解耦的流式管道
+
+`stream/` 完全不知道 `reqwest` 或 `tokio channel`：
+
+```
+CodecProvider（HTTP, channel）
+       ↓
+process_stream（Stream<Item=Result<Bytes>>, EventSink）
+       ↓
+SseParser + Codec + Accumulator（纯逻辑，无 IO）
 ```
 
 ---
 
-## Roadmap
+## 路线图
 
-| Version | Scope | Status |
+| 版本 | 范围 | 状态 |
 |---|---|---|
-| **v0.1** | Provider abstraction, streaming, tool execution, budget enforcement, context compaction | ✅ Done |
-| **v0.2** | Graph orchestration, provider extension API, memory architecture, more provider compatibility | ✅ Done |
-| **v0.3** | Agent graph runtime — ReAct loop, barriers, multi-agent coordination | ✅ Done |
-| **v0.4** | ReAct Graph mode, post-agent hooks, stop config export | ✅ Done |
-| **v0.5+** | Distributed execution, visual observability | 🔜 Planned |
+| **v0.1** | Provider 抽象、流式执行、工具执行、预算控制、上下文压缩 | ✅ 已完成 |
+| **v0.2** | Graph 编排、Provider 扩展 API、内存架构、更多 Provider 兼容 | ✅ 已完成 |
+| **v0.3** | Agent graph runtime — ReAct loop, barriers, multi-agent | ✅ 已完成 |
+| **v0.4** | ReAct Graph mode, post-agent hooks, stop config export | ✅ 已完成 |
+| **v0.5+** | 分布式执行、可视化可观测 | 🔜 计划中 |
 
 ---
 
-## Philosophy
+## 理念
 
-Build AI systems the same way we build databases, gateways, and distributed services:
+像构建数据库、网关、分布式服务一样构建 AI 系统：
 
-**explicit, observable, type-safe.**
+**显式、可观测、类型安全。**
 
 ---
 
-## Links
+## 相关链接
 
-- [Blueprint](./docs/BLUEPRINT.md) — Product blueprint and API contracts
-- [Design Doc](./docs/DESIGN.md) — Key design decisions and rationale
+- [产品蓝图](./docs/BLUEPRINT.md) —— 产品蓝图与核心 API 契约
+- [设计文档](./docs/DESIGN.md) —— 关键设计决策的为什么与如何实现
 
-## License
+## 许可证
 
 MIT
