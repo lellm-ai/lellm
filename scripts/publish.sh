@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-CRATES="lellm-core lellm-macros lellm-provider lellm-agent lellm-mcp lellm-graph lellm"
+CRATES="lellm-core lellm-derive lellm-provider lellm-graph lellm-mcp lellm-agent lellm"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # 读取 workspace version
@@ -103,7 +103,7 @@ for crate in $CRATES; do
 
     # 执行 publish（使用官方 crates.io，跳过验证避免下载旧版本依赖）
     log_info "[$crate] cargo publish $PUBLISH_FLAG ..."
-    if cargo publish $PUBLISH_FLAG --registry crates-io --no-verify 2>&1; then
+    if cargo publish $PUBLISH_FLAG --registry crates-io --no-verify --allow-dirty 2>&1; then
         if [ "$PUBLISH_FLAG" = "--dry-run" ]; then
             log_ok "[$crate] v$version 模拟发布通过"
         else
