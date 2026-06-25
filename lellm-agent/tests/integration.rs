@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[tokio::test]
 async fn test_tool_use_loop_no_tool_calls() {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("hello".to_string())],
+        vec![ContentBlock::text("hello")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -25,9 +25,7 @@ async fn test_tool_use_loop_no_tool_calls() {
         model: "test-model".to_string(),
     };
 
-    let messages = vec![Message::User {
-        content: lellm_core::text_block("test".to_string()),
-    }];
+    let messages = vec![Message::user_text("test")];
 
     let result = AgentBuilder::new(model)
         .max_iterations(5)
@@ -269,7 +267,7 @@ async fn test_tool_safe_execution() {
 #[tokio::test]
 async fn test_builder_basic_build() {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("done".to_string())],
+        vec![ContentBlock::text("done")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -282,9 +280,7 @@ async fn test_builder_basic_build() {
 
     let agent = AgentBuilder::new(model).build();
 
-    let messages = vec![Message::User {
-        content: lellm_core::text_block("hello".to_string()),
-    }];
+    let messages = vec![Message::user_text("hello")];
     let result = agent.execute(messages).await.unwrap();
 
     assert_eq!(result.iterations, 1);
@@ -294,7 +290,7 @@ async fn test_builder_basic_build() {
 #[tokio::test]
 async fn test_builder_with_config() {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("done".to_string())],
+        vec![ContentBlock::text("done")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -310,9 +306,7 @@ async fn test_builder_with_config() {
         .max_iterations(20)
         .build();
 
-    let messages = vec![Message::User {
-        content: lellm_core::text_block("hello".to_string()),
-    }];
+    let messages = vec![Message::user_text("hello")];
     let result = agent.execute(messages).await.unwrap();
 
     assert!(result.is_success());
@@ -340,7 +334,7 @@ async fn test_builder_with_tool() {
     });
 
     let response = ChatResponse::new(
-        vec![ContentBlock::text("ok".to_string())],
+        vec![ContentBlock::text("ok")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -360,7 +354,7 @@ async fn test_builder_with_tool() {
 fn test_builder_chain_api() {
     // 测试链式调用 API 的编译正确性
     let response = ChatResponse::new(
-        vec![ContentBlock::text("ok".to_string())],
+        vec![ContentBlock::text("ok")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -392,7 +386,7 @@ fn test_builder_chain_api() {
 #[tokio::test]
 async fn test_create_agent() {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("hi".to_string())],
+        vec![ContentBlock::text("hi")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -404,9 +398,7 @@ async fn test_create_agent() {
     };
 
     let agent = lellm_agent::create_agent(model);
-    let messages = vec![Message::User {
-        content: lellm_core::text_block("hello".to_string()),
-    }];
+    let messages = vec![Message::user_text("hello")];
     let result = agent.execute(messages).await.unwrap();
 
     assert!(result.is_success());
@@ -433,7 +425,7 @@ async fn test_create_agent_with_tools() {
     });
 
     let response = ChatResponse::new(
-        vec![ContentBlock::text("done".to_string())],
+        vec![ContentBlock::text("done")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -451,7 +443,7 @@ async fn test_create_agent_with_tools() {
 #[tokio::test]
 async fn test_create_agent_with_system() {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("ok".to_string())],
+        vec![ContentBlock::text("ok")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -464,9 +456,7 @@ async fn test_create_agent_with_system() {
 
     let agent = lellm_agent::create_agent_with_system(model, "你是助手".to_string());
 
-    let messages = vec![Message::User {
-        content: lellm_core::text_block("hi".to_string()),
-    }];
+    let messages = vec![Message::user_text("hi")];
     let result = agent.execute(messages).await.unwrap();
 
     assert!(result.is_success());
@@ -475,7 +465,7 @@ async fn test_create_agent_with_system() {
 #[test]
 fn test_create_agent_full() {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("ok".to_string())],
+        vec![ContentBlock::text("ok")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -502,9 +492,7 @@ fn test_create_agent_full() {
 #[test]
 fn test_estimate_tokens_ascii() {
     // "Hello World" ≈ 11/4 ≈ 2 tokens + 4 overhead = ~6
-    let msg = Message::User {
-        content: lellm_core::text_block("Hello World".to_string()),
-    };
+    let msg = Message::user_text("Hello World");
     let tokens = estimate_message(&msg);
     assert!(tokens >= 4 && tokens <= 10);
 }
@@ -512,9 +500,7 @@ fn test_estimate_tokens_ascii() {
 #[test]
 fn test_estimate_tokens_chinese() {
     // "你好世界" ≈ 4 * 1.5 = 6 tokens + 4 overhead = ~10
-    let msg = Message::User {
-        content: lellm_core::text_block("你好世界".to_string()),
-    };
+    let msg = Message::user_text("你好世界");
     let tokens = estimate_message(&msg);
     assert!(tokens >= 6 && tokens <= 15);
 }
@@ -573,18 +559,10 @@ fn test_local_compactor_no_op_when_under_limit() {
 
     // 只有 2 个 turn，不需要压缩
     let messages = vec![
-        Message::User {
-            content: lellm_core::text_block("turn 1 user".to_string()),
-        },
-        Message::Assistant {
-            content: lellm_core::text_block("turn 1 assistant".to_string()),
-        },
-        Message::User {
-            content: lellm_core::text_block("turn 2 user".to_string()),
-        },
-        Message::Assistant {
-            content: lellm_core::text_block("turn 2 assistant".to_string()),
-        },
+        Message::user_text("turn 1 user"),
+        Message::assistant_text("turn 1 assistant"),
+        Message::user_text("turn 2 user"),
+        Message::assistant_text("turn 2 assistant"),
     ];
 
     let compactor = LocalCompactor::new();
@@ -605,12 +583,11 @@ fn test_local_compactor_compresses_old_turns() {
     let mut messages = Vec::new();
     // 创建 3 个 turns（6 条消息）
     for i in 1..=3 {
-        messages.push(Message::User {
-            content: lellm_core::text_block(format!("user {}", i)),
-        });
-        messages.push(Message::Assistant {
-            content: lellm_core::text_block(format!("assistant {}", i)),
-        });
+        messages.push(Message::user(lellm_core::text_block(format!("user {}", i))));
+        messages.push(Message::assistant(lellm_core::text_block(format!(
+            "assistant {}",
+            i
+        ))));
     }
 
     let compactor = LocalCompactor::new();

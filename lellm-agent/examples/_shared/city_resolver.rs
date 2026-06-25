@@ -186,9 +186,7 @@ pub async fn resolve_via_llm(provider: &Arc<dyn LlmProvider>, address: &str) -> 
 
     let req = ChatRequest {
         model: "Qwen3.6".to_string(),
-        messages: vec![lellm_core::Message::User {
-            content: text_block(prompt),
-        }],
+        messages: vec![lellm_core::Message::user(text_block(prompt))],
         tools: None,
         temperature: Some(0.0),
         max_tokens: Some(1000),

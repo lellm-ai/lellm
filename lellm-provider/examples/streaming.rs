@@ -17,7 +17,7 @@ use lellm_provider::{LlmProvider, ProviderEvent};
 async fn main() -> Result<(), LlmError> {
     let provider = common::create_openai_provider();
 
-    let request = ChatRequest::user_prompt("用三句话介绍 Rust 编程语言。".into());
+    let request = ChatRequest::user_prompt("用三句话介绍 Rust 编程语言。");
 
     // ─── 流式调用 ───
     let mut stream = provider.stream(&request).await?;

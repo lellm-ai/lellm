@@ -66,7 +66,7 @@ impl MockProvider {
         *r += 1;
         self.responses.get(idx).cloned().unwrap_or_else(|| {
             ChatResponse::new(
-                vec![ContentBlock::text("Done.".into())],
+                vec![ContentBlock::text("Done.")],
                 TokenUsage::default(),
                 serde_json::json!(null),
             )
@@ -137,9 +137,7 @@ fn build_graph() -> lellm_graph::Graph {
         ),
         // 第 3 轮：返回最终答案
         ChatResponse::new(
-            vec![ContentBlock::text(
-                "3 + 4 = 7，7 × 2 = 14。答案是 14。".into(),
-            )],
+            vec![ContentBlock::text("3 + 4 = 7，7 × 2 = 14。答案是 14。")],
             TokenUsage {
                 prompt_tokens: 300,
                 completion_tokens: 40,
@@ -156,7 +154,7 @@ fn build_graph() -> lellm_graph::Graph {
     };
 
     let agent = AgentBuilder::new(model)
-        .system_prompt("你是一个数学助手。".into())
+        .system_prompt("你是一个数学助手。".to_string())
         .tools([
             AddArgs::safe(|args| async move { Ok(serde_json::json!(args.a + args.b)) }),
             MultiplyArgs::safe(|args| async move { Ok(serde_json::json!(args.a * args.b)) }),
@@ -174,7 +172,7 @@ fn build_graph() -> lellm_graph::Graph {
             ctx.emit_effect(StateEffect::Put(
                 "messages".into(),
                 serde_json::json!([Message::User {
-                    content: lellm_core::text_block("3加4等于多少，然后再乘以2。".into()),
+                    content: lellm_core::text_block("3加4等于多少，然后再乘以2。"),
                 }]),
             ));
             Ok(())

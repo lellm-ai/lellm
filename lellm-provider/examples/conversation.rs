@@ -27,19 +27,19 @@ async fn main() -> Result<(), LlmError> {
     let messages: Vec<Message> = vec![
         // 系统提示
         Message::System {
-            content: text_block("你是一个将英语翻译成法语的助手。".into()),
+            content: text_block("你是一个将英语翻译成法语的助手。"),
         },
         // 第一轮用户
         Message::User {
-            content: text_block("翻译: I like programming.".into()),
+            content: text_block("翻译: I like programming."),
         },
         // 第一轮助手回复
         Message::Assistant {
-            content: text_block("J'aime la programmation.".into()),
+            content: text_block("J'aime la programmation."),
         },
         // 第二轮用户
         Message::User {
-            content: text_block("翻译: I like building apps.".into()),
+            content: text_block("翻译: I like building apps."),
         },
     ];
 

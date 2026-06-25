@@ -205,8 +205,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", SYSTEM_PROMPT);
     println!();
 
-    let stream = agent.execute_stream(vec![Message::User {
-        content: text_block(question.clone()),
-    }]);
+    let stream = agent.execute_stream(vec![Message::user(text_block(question.clone()))]);
     shared::observe_react_loop(stream, &question).await
 }

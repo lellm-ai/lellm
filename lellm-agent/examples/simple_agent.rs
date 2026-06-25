@@ -46,9 +46,7 @@ async fn main() {
     // ─── 非流式执行 ───
     println!("=== 非流式执行 ===");
     let result = agent
-        .execute(vec![Message::User {
-            content: lellm_core::text_block("请介绍一下自己。".to_string()),
-        }])
+        .execute(vec![Message::user_text("请介绍一下自己。")])
         .await
         .expect("Agent 执行失败");
 

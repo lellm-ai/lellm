@@ -112,7 +112,7 @@ fn register_level2() -> Vec<ToolRegistration> {
 /// 构建带工具的 Agent
 fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
     let response = ChatResponse::new(
-        vec![ContentBlock::text("已完成所有操作。".to_string())],
+        vec![ContentBlock::text("已完成所有操作。")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -217,9 +217,7 @@ async fn main() {
 
     println!("\n=== 执行 Agent ===");
     let result = agent
-        .execute(vec![Message::User {
-            content: lellm_core::text_block("搜索一下 Rust 编程语言。".to_string()),
-        }])
+        .execute(vec![Message::user_text("搜索一下 Rust 编程语言。")])
         .await
         .expect("Agent 执行失败");
 

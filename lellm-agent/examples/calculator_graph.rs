@@ -65,7 +65,7 @@ fn build_graph() -> lellm_graph::Graph {
     };
 
     let agent = AgentBuilder::new(model)
-        .system_prompt("你是一个数学助手。当用户问数学问题时，使用工具计算。".into())
+        .system_prompt("你是一个数学助手。当用户问数学问题时，使用工具计算。".to_string())
         .tools([
             AddArgs::safe(|args| async move { Ok(serde_json::json!(args.a + args.b)) }),
             MultiplyArgs::safe(|args| async move { Ok(serde_json::json!(args.a * args.b)) }),
@@ -84,7 +84,7 @@ fn build_graph() -> lellm_graph::Graph {
             ctx.emit_effect(StateEffect::Put(
                 "messages".into(),
                 serde_json::json!([Message::User {
-                    content: text_block("3加4等于多少，然后再乘以2。".into()),
+                    content: text_block("3加4等于多少，然后再乘以2。"),
                 }]),
             ));
             Ok(())

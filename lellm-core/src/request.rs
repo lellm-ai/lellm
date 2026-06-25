@@ -46,7 +46,7 @@ pub struct ChatRequest {
 
 impl ChatRequest {
     /// 便捷构造：单条用户消息
-    pub fn user_prompt(prompt: String) -> Self {
+    pub fn user_prompt(prompt: impl Into<String>) -> Self {
         Self {
             messages: vec![crate::Message::User {
                 content: crate::text_block(prompt),

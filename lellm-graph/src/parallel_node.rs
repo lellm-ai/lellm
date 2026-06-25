@@ -228,8 +228,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> FlowNode<S> for ParallelNode<S, M> {
             let mut branch_state = base_state.clone();
             let mut branch_bs = ctx.branch().fork();
             let cancel = tokio_util::sync::CancellationToken::new();
-            let mut branch_ctx =
-                NodeContext::new(&mut branch_state, &mut branch_bs, None, cancel);
+            let mut branch_ctx = NodeContext::new(&mut branch_state, &mut branch_bs, None, cancel);
 
             let result = node.execute(&mut branch_ctx).await.map_err(|e| {
                 GraphError::Terminal(crate::error::TerminalError::NodeExecutionFailed {

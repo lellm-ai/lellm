@@ -25,8 +25,8 @@ use crate::node_context::{ExecutionSignal, NextAction, NodeContext, NodeMetadata
 use crate::runtime_event::RuntimeEvent;
 use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::stream_emitter::NoopSink;
-use tokio_util::sync::CancellationToken;
 use crate::workflow_state::WorkflowState;
+use tokio_util::sync::CancellationToken;
 
 // ─── RunLoopContext ─────────────────────────────────────────────
 

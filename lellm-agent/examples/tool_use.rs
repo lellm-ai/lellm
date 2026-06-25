@@ -101,7 +101,7 @@ impl lellm_provider::LlmProvider for ReActMockProvider {
         } else {
             // 兜底：返回最终答案
             Ok(ChatResponse::new(
-                vec![ContentBlock::text("已完成。".to_string())],
+                vec![ContentBlock::text("已完成。")],
                 TokenUsage::default(),
                 serde_json::json!(null),
             ))
@@ -204,9 +204,9 @@ async fn main() {
     println!("=== ReAct 工具调用循环 ===\n");
 
     let result = agent
-        .execute(vec![Message::User {
-            content: lellm_core::text_block("找出当前最受欢迎的无线耳机并检查其库存".to_string()),
-        }])
+        .execute(vec![Message::user_text(
+            "找出当前最受欢迎的无线耳机并检查其库存",
+        )])
         .await
         .expect("Agent 执行失败");
 

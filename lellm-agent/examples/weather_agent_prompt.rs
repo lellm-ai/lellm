@@ -155,9 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
 
-    let messages = vec![Message::User {
-        content: text_block(question.clone()),
-    }];
+    let messages = vec![Message::user(text_block(question.clone()))];
     let stream = agent.execute_stream(messages);
     shared::observe_react_loop(stream, &question).await
 }

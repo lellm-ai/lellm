@@ -74,9 +74,7 @@ async fn main() {
     let agent = create_agent_with_builder();
 
     let result = agent
-        .execute(vec![Message::User {
-            content: lellm_core::text_block("介绍一下 LeLLM 项目。".to_string()),
-        }])
+        .execute(vec![Message::user_text("介绍一下 LeLLM 项目。")])
         .await
         .expect("执行失败");
 
@@ -107,9 +105,7 @@ async fn main() {
     let agent2 = create_agent_simple();
 
     let result2 = agent2
-        .execute(vec![Message::User {
-            content: lellm_core::text_block("LeLLM 是什么？".to_string()),
-        }])
+        .execute(vec![Message::user_text("LeLLM 是什么？")])
         .await
         .expect("执行失败");
 
@@ -138,7 +134,7 @@ async fn main() {
     println!("\n=== 示例 3: 无系统提示（从消息推断任务）===\n");
 
     let response3 = ChatResponse::new(
-        vec![ContentBlock::text("好的，我来帮你。".to_string())],
+        vec![ContentBlock::text("好的，我来帮你。")],
         TokenUsage::default(),
         serde_json::json!(null),
     );
@@ -153,11 +149,9 @@ async fn main() {
     let agent3 = AgentBuilder::new(model3).build();
 
     let result3 = agent3
-        .execute(vec![Message::User {
-            content: lellm_core::text_block(
-                "你是一个翻译助手。请将以下句子翻译成英文：你好世界".to_string(),
-            ),
-        }])
+        .execute(vec![Message::user_text(
+            "你是一个翻译助手。请将以下句子翻译成英文：你好世界",
+        )])
         .await
         .expect("执行失败");
 

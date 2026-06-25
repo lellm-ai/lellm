@@ -83,7 +83,7 @@ pub use node_context::{ExecutionControl, ExecutionSignal, NextAction, NodeContex
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::{StreamChunk, ToolPhase};
 pub use stream_emitter::{
-    spawn_forward_task, BufferedSink, ChannelSink, NoopSink, StreamSink, noop_sink, sink_arc,
+    BufferedSink, ChannelSink, NoopSink, StreamSink, noop_sink, sink_arc, spawn_forward_task,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use workflow_state::{Effect, LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};

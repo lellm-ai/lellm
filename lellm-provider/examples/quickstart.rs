@@ -24,8 +24,7 @@ async fn main() -> Result<(), LlmError> {
     let provider = common::create_openai_provider();
 
     // ─── 2. 单条消息调用 ───
-    let request =
-        ChatRequest::user_prompt("为什么鹦鹉有五颜六色的羽毛？".into()).with_temperature(0.7);
+    let request = ChatRequest::user_prompt("为什么鹦鹉有五颜六色的羽毛？").with_temperature(0.7);
 
     let response = provider.call(&request).await?;
     println!("--- 响应 ---");

@@ -14,7 +14,7 @@ fn main() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         // ─── 1. 构造预设响应 ───
         let response = ChatResponse::new(
-            text_block("Hello from MockProvider!".into()),
+            text_block("Hello from MockProvider!"),
             TokenUsage {
                 prompt_tokens: 10,
                 completion_tokens: 8,
@@ -26,7 +26,7 @@ fn main() {
         let provider = MockProvider::reply_with(response);
 
         // ─── 2. 非流式调用 ───
-        let request = ChatRequest::user_prompt("你好".into());
+        let request = ChatRequest::user_prompt("你好");
         let resp: lellm_core::ChatResponse = provider.call(&request).await.expect("call failed");
 
         println!("provider_id = {}", provider.provider_id());

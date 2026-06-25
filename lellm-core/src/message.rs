@@ -63,9 +63,10 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-    pub fn text(s: String) -> Self {
+    /// 创建纯文本块。接受 `&str`、`String`。
+    pub fn text(s: impl Into<String>) -> Self {
         ContentBlock::Text(TextBlock {
-            text: s,
+            text: s.into(),
             cache_control: None,
         })
     }
@@ -108,6 +109,88 @@ pub enum Message {
 }
 
 impl Message {
+    // =======================================================================
+    // 便捷构造方法 — 纯文本（最常见用法）
+    // =======================================================================
+
+    /// 便捷构造：纯文本 System 消息。
+    ///
+    /// ```
+    /// use lellm_core::Message;
+    ///
+    /// // 之前：
+    /// // Message::System { content: lellm_core::text_block("you are helpful".to_string()) }
+    ///
+    /// // 现在：
+    /// let msg = Message::system_text("you are helpful");
+    /// ```
+    pub fn system_text(s: &str) -> Self {
+        Message::System {
+            content: text_block(s.to_string()),
+        }
+    }
+
+    /// 便捷构造：纯文本 User 消息。
+    ///
+    /// ```
+    /// use lellm_core::Message;
+    ///
+    /// let msg = Message::user_text("hello");
+    /// ```
+    pub fn user_text(s: &str) -> Self {
+        Message::User {
+            content: text_block(s.to_string()),
+        }
+    }
+
+    /// 便捷构造：纯文本 Assistant 消息。
+    pub fn assistant_text(s: &str) -> Self {
+        Message::Assistant {
+            content: text_block(s.to_string()),
+        }
+    }
+
+    // =======================================================================
+    // 便捷构造方法 — 自定义内容块
+    // =======================================================================
+
+    /// 便捷构造：System 消息（自定义 ContentBlock）。
+    pub fn system(content: Vec<ContentBlock>) -> Self {
+        Message::System { content }
+    }
+
+    /// 便捷构造：User 消息（自定义 ContentBlock）。
+    pub fn user(content: Vec<ContentBlock>) -> Self {
+        Message::User { content }
+    }
+
+    /// 便捷构造：Assistant 消息（自定义 ContentBlock）。
+    pub fn assistant(content: Vec<ContentBlock>) -> Self {
+        Message::Assistant { content }
+    }
+
+    /// 便捷构造：ToolResult 消息（成功）。
+    pub fn tool_result_ok(call_id: impl Into<String>, content: String) -> Self {
+        Message::ToolResult {
+            tool_call_id: call_id.into(),
+            is_error: false,
+            content: text_block(content),
+        }
+    }
+
+    /// 便捷构造：ToolResult 消息（失败）。
+    pub fn tool_error(call_id: impl Into<String>, error: String) -> Self {
+        Message::ToolResult {
+            tool_call_id: call_id.into(),
+            is_error: true,
+            content: text_block(error),
+        }
+    }
+
+    // =======================================================================
+    // 访问器
+    // =======================================================================
+
     /// 返回内容块的引用（用于 provider 适配器序列化）
     pub fn content(&self) -> &Vec<ContentBlock> {
         match self {
@@ -229,7 +312,7 @@ impl Message {
 }
 
 /// 便捷函数：创建纯文本块
-pub fn text_block(s: String) -> Vec<ContentBlock> {
+pub fn text_block(s: impl Into<String>) -> Vec<ContentBlock> {
     vec![ContentBlock::text(s)]
 }
 
@@ -239,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_content_block_text() {
-        let block = ContentBlock::text("hello".to_string());
+        let block = ContentBlock::text("hello");
         assert_eq!(block.as_text(), Some("hello"));
     }
 
@@ -255,9 +338,7 @@ mod tests {
 
     #[test]
     fn test_message_content() {
-        let msg = Message::User {
-            content: text_block("hello world".to_string()),
-        };
+        let msg = Message::user_text("hello world");
         assert_eq!(msg.content().len(), 1);
         assert_eq!(msg.content()[0].as_text(), Some("hello world"));
     }
@@ -371,5 +452,79 @@ mod tests {
             content: text_block("you are helpful".to_string()),
         };
         assert!(msg.validate().is_ok());
+    }
+
+    // ─── 便捷构造方法测试 ───
+
+    #[test]
+    fn test_convenience_system_text() {
+        let msg = Message::system_text("you are helpful");
+        assert!(matches!(msg, Message::System { .. }));
+        assert_eq!(msg.content()[0].as_text(), Some("you are helpful"));
+    }
+
+    #[test]
+    fn test_convenience_user_text() {
+        let msg = Message::user_text("hello");
+        assert!(matches!(msg, Message::User { .. }));
+        assert_eq!(msg.content()[0].as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_convenience_assistant_text() {
+        let msg = Message::assistant_text("the answer is 42");
+        assert!(matches!(msg, Message::Assistant { .. }));
+        assert_eq!(msg.content()[0].as_text(), Some("the answer is 42"));
+    }
+
+    #[test]
+    fn test_convenience_system_content() {
+        let msg = Message::system(vec![ContentBlock::text("prompt")]);
+        assert!(matches!(msg, Message::System { .. }));
+        assert_eq!(msg.content()[0].as_text(), Some("prompt"));
+    }
+
+    #[test]
+    fn test_convenience_user_content() {
+        let msg = Message::user(vec![ContentBlock::text("question")]);
+        assert!(matches!(msg, Message::User { .. }));
+        assert_eq!(msg.content()[0].as_text(), Some("question"));
+    }
+
+    #[test]
+    fn test_convenience_tool_result_ok() {
+        let msg = Message::tool_result_ok("call_1", "result data".to_string());
+        assert!(matches!(msg, Message::ToolResult { .. }));
+        assert!(!msg.is_tool_error());
+        assert_eq!(msg.tool_call_id(), "call_1");
+    }
+
+    #[test]
+    fn test_convenience_tool_error() {
+        let msg = Message::tool_error("call_2", "something failed".to_string());
+        assert!(matches!(msg, Message::ToolResult { .. }));
+        assert!(msg.is_tool_error());
+        assert_eq!(msg.tool_call_id(), "call_2");
+    }
+
+    #[test]
+    fn test_content_block_text_with_string() {
+        let s = String::from("dynamic");
+        let block = ContentBlock::text(s);
+        assert_eq!(block.as_text(), Some("dynamic"));
+    }
+
+    #[test]
+    fn test_text_block_with_str() {
+        let blocks = text_block("hello");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_text_block_with_string() {
+        let blocks = text_block(String::from("hello"));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].as_text(), Some("hello"));
     }
 }

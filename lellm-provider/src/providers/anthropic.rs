@@ -571,7 +571,7 @@ mod tests {
         let req = ChatRequest {
             model: "claude-3".into(),
             messages: vec![Message::System {
-                content: vec![ContentBlock::text("system prompt".into())],
+                content: vec![ContentBlock::text("system prompt")],
             }],
             max_tokens: Some(1024),
             ..Default::default()
