@@ -13,7 +13,7 @@ LangGraph（以 Python/JS 为代表的动态语言图生态）与 LeLLM（以 Ru
 
 | 维度 | LangGraph (Python/JS) | LeLLM (Rust) |
 |------|----------------------|--------------|
-| **状态管理** | `TypedDict` / `zod` schema + `operator.add` reducer | 双层：`State`（`HashMap<String, Value>`，向后兼容）+ `WorkflowState<T>` trait（编译期类型安全，Effect 驱动）；`StateKey<T>` 编译期类型安全的键；`BranchState` 一层 Overlay 模型 |
+| **状态管理** | `TypedDict` / `zod` schema + `operator.add` reducer | 双层：`State`（`HashMap<String, Value>`，向后兼容）+ `WorkflowState` trait（编译期类型安全，Effect 驱动，`Self` 为类型化状态）；`StateKey<T>` 编译期类型安全的键；`BranchState` 一层 Overlay 模型 |
 | **状态变更** | 节点直接修改 State dict | `StateEffect` 领域事件 + `NodeContext::emit_effect()` → Executor 批量 `apply_batch()`；节点不直接写 State |
 | **工具定义** | `@tool` decorator / `tool()` + zod schema | `#[derive(Tool)]` macro + `ToolRegistration` + `ToolCatalog` 动态发现 + `CompositeCatalog` 多源合并 |
 | **Agent 循环** | 手动构建 `llm_node → tool_node → condition → back` | 双模式：(1) `ToolUseLoop` 内置 ReAct 循环（黑盒封装）；(2) `use_react_graph(true)` 内部构建 `Graph<AgentState>` ReAct 有环图（LLMNode → BudgetCondition → CompactorNode → ToolNode → PostLLMGuard） |
@@ -22,7 +22,7 @@ LangGraph（以 Python/JS 为代表的动态语言图生态）与 LeLLM（以 Ru
 | **构建校验** | fail-fast（遇错即停） | 多错误收集 + `GraphDiagnostics` 诊断（非致命变体）+ 重复节点检测 + Fallback 自环检测 |
 | **执行** | `agent.invoke({messages: [...]})` | `GraphExecutor::execute()` (阻塞，消费 Stream) / `execute_stream()` (流式，返回 `GraphExecution{stream, handle}`) / `run_inline()` (内联，无 RuntimeEvent) |
 | **循环支持** | 天然支持（边可回环） | 允许有环图 + `max_steps` 运行时熔断 + `CycleAnalysis` 静态诊断 + `max_visits` 边级保护 |
-| **错误分类** | Exception 机制 | 三分法：`TerminalError`（不可恢复）/ `RecoverableError`（触发 fallback 边）/ `ObservedError`（可观测，不影响控制流）|
+| **错误分类** | Exception 机制 | 二分法：`TerminalError`（不可恢复，终止执行）/ `ObservedError`（可观测，不影响控制流）；Fallback 通过 `edge_fallback()` 构建期边配置 + `StreamNodeResult::Fallback` 控制流（非错误变体）|
 | **Human-in-the-loop** | `InterruptBefore` + `update_state` / `restart` | `BarrierNode` + `GraphHandle::decide()` — 支持 Approve/Reject/Modify/Reroute + 超时 + wildcard 决策 + CancellationToken |
 | **流式输出** | `astream()` 返回检查点变更事件 | `GraphStream` (`mpsc::Receiver<GraphEvent>`) — 全链路事件（GraphStart/End, NodeStart/End, FlowEvent, BarrierWaiting/Resolved, CheckpointSaved）+ TraceId/SpanId + `RuntimeEvent` 可观测层 |
 | **持久化** | Checkpointing（SQLite/PostgreSQL/Shallow） | `CheckpointStore` trait + `Checkpoint<S>` 泛型 + `CheckpointPolicy` (EveryNode/BarrierOnly/Manual) + `GraphExecutor::with_checkpoint()` — **已实现** |
@@ -108,9 +108,14 @@ v0.4 引入了完整的 Effect 驱动架构：
 
 ```rust
 // 节点通过 Effect 声明状态变更意图（不直接写 State）
+// StateEffect 只有 Put / Delete 两个变体
 ctx.emit_effect(StateEffect::Put("messages", json!(messages)));
-ctx.emit_effect(StateEffect::Append("steps", json!("approved")));
+ctx.emit_effect(StateEffect::Put("steps", json!("approved")));
 ctx.emit_effect(StateEffect::Delete("temp_key"));
+
+// 类型化 State 使用自定义 Effect enum（零序列化）
+// 例如 AgentEffect::AppendMessage, AgentEffect::IncrementIteration 等
+ctx.emit_effect(AgentEffect::AppendMessage(msg));
 
 // Executor 统一消费 Effects → apply 到 typed state（零序列化）
 let effects = ctx.consume_effects();
@@ -127,7 +132,7 @@ BranchState
 
 读取 = O(1)：最多查两层（local + base）
 写入 = 自动记 ChangeRecord
-fork = O(1)：深拷贝 base snapshot
+fork = O(n)：materialize(base + local) → 新 base（n = key 数量）
 ```
 
 **WorkflowState trait — 编译期类型安全：**
@@ -137,19 +142,20 @@ pub trait WorkflowState: Clone + Send + Sync + Serialize + DeserializeOwned {
     type Effect: Effect;
     fn apply(&mut self, effect: Self::Effect);
     fn apply_batch(&mut self, effects: impl IntoIterator<Item = Self::Effect>);
+    fn apply_branch_change(&mut self, change: &ChangeRecord); // backward compat, default no-op
     fn initial() -> Self where Self: Default;
 }
 
 // AgentState 直接 impl，零序列化
 impl WorkflowState for AgentState {
-    type Effect = AgentEffect;
+    type Effect = AgentEffect;  // AppendMessage, IncrementIteration, AddOutputTokens, ...
     fn apply(&mut self, effect: AgentEffect) { ... }
 }
 ```
 
 **MergeStrategy — 并行合并职责剥离：**
 
-并行合并规则由 Graph 层的 `MergeStrategy<S>` 决定，而非 State 内建属性。`StateMerge`（默认，last-write-wins）、`LastWriteWins`、自定义合并策略。
+并行合并规则由 Graph 层的 `MergeStrategy<S>` 决定，而非 State 内建属性。`StateMerge`（默认，逐 key 合并，后续分支覆盖同 key）、`LastWriteWins`（最后一个分支整体获胜）、自定义合并策略。
 
 **优势：**
 - 显式高于隐式 — 哪个节点、何时、以什么规则修改 State，完全可追踪
@@ -263,21 +269,21 @@ let diag = graph.analyze();
 
 ---
 
-### 5. 错误处理：Exception vs 三分法
+### 5. 错误处理：Exception vs 二分法 + Fallback 控制流
 
 #### LangGraph — Exception
 
 LangGraph 依赖 Python 的 exception 机制。任何未捕获的异常都会中断图执行，需要外部 try/catch 处理。
 
-#### LeLLM — 三分法
+#### LeLLM — 二分法 + Fallback 控制流
 
-LeLLM 将错误分为三个正交的类别：
+LeLLM 将错误分为两个正交的类别，Fallback 通过控制流而非错误变体实现：
 
 ```rust
-// GraphError 枚举
+// GraphError — 只有 Terminal 变体
+// Fallback 通过 StreamNodeResult::Fallback 控制流实现（非错误变体）
 pub enum GraphError {
     Terminal(TerminalError),   // 不可恢复，终止执行
-    Recoverable(...),          // 可恢复，触发 fallback 边
 }
 
 // TerminalError — 变体丰富
@@ -287,18 +293,18 @@ pub enum TerminalError {
     MissingEdge { from, to },
     NodeExecutionFailed { node, source },
     StepsExceeded { limit },
-    Unrouted { node },
+    LoopLimitExceeded { limit },
+    Unrouted { node, attempted_conditions },
     StateError(String),
-    BarrierTimeout { node },
+    BarrierTimeout { node, timeout },
     BarrierCancelled { node },
-    ...
 }
 
 // ObservedError — 不影响控制流，仅发射 GraphEvent::ObservedError
 pub enum ObservedError {
-    Warning(String),
-    Degraded(String),
-    PartialFailure(String),
+    Warning { node, message },
+    Degraded { node, message },
+    PartialFailure { node, succeeded, failed, message },
 }
 ```
 
@@ -324,9 +330,10 @@ let graph = GraphBuilder::new("resilient")
 
 ```rust
 // 定义 Barrier 节点
+// default_action 接受 BarrierDefaultAction（Reject/Approve/Skip）
 let barrier = BarrierNode::new("approval")
     .timeout(Duration::from_secs(300))
-    .default_action(BarrierDecision::Reject { reason: "超时未审批" })
+    .default_action(BarrierDefaultAction::Reject)
     .reject_key("rejected")
     .approve_key("approved");
 
@@ -334,10 +341,11 @@ let barrier = BarrierNode::new("approval")
 .node("approval", NodeKind::Barrier(Box::new(barrier)))
 
 // 执行时通过 Handle 提交决策
+// BarrierDecision 包含 Approve/Reject/Modify/Reroute
 handle.decide(barrier_id, BarrierDecision::Approve)?;
 handle.decide(barrier_id, BarrierDecision::Modify { key: "result", value: ... })?;
 handle.decide(barrier_id, BarrierDecision::Reroute { target: "review" })?;
-// 支持 wildcard 决策 — 对未指定 barrier_id 的 Barrier 统一处理
+// 支持 wildcard 决策 — 对指定 node_id 的 Barrier 统一处理
 handle.decide_wildcard("approval", BarrierDecision::Approve)?;
 
 // 取消执行
@@ -416,12 +424,18 @@ let executor = GraphExecutor::with_checkpoint(
 
 ```rust
 // 构建 ParallelNode
+// ParallelNodeBuilder 默认使用 StateMerge（逐 key 合并）
 let parallel = ParallelNode::builder()
     .branch("search_web", search_node)
     .branch("search_docs", docs_node)
     .branch("search_code", code_node)
-    .merge_strategy(StateMerge::default())  // last-write-wins
     .error_strategy(ParallelErrorStrategy::FailFast)
+    .build();
+
+// 如需切换合并策略，使用 merge_strategy() 返回新类型构建器
+let parallel = ParallelNode::builder()
+    .branch("search_web", search_node)
+    .merge_strategy::<LastWriteWins>()  // 最后一个分支获胜
     .build();
 
 // 图中使用
@@ -477,11 +491,11 @@ graph.run_inline(ctx, max_steps).await?;
 
 ### 2. Effect 驱动的状态变更
 
-节点通过 `emit_effect()` 声明变更意图，Executor 统一 `apply_batch()`。状态变更完全可追踪（`StateDelta` 记录来源），`BranchState` 的 Overlay 模型提供 O(1) fork 和增量审计。
+节点通过 `emit_effect()` 声明变更意图，Executor 统一 `apply_batch()`。状态变更完全可追踪（`StateDelta` 记录来源），`BranchState` 的 Overlay 模型提供增量审计（fork = O(n)，n 为 key 数量）。
 
 ### 3. 编译期类型安全
 
-`WorkflowState<T>` trait + `StateKey<T>` + `MergeStrategy<S>` 构成编译期类型安全的三角。`Graph<AgentState>` 的节点直接读写强类型 struct，零序列化。
+`WorkflowState` trait（`Clone + Send + Sync + Serialize + DeserializeOwned`）+ `StateKey<T>` + `MergeStrategy<S>` 构成编译期类型安全的三角。`Graph<AgentState>` 的节点直接读写强类型 struct，零序列化。
 
 ### 4. 正交的控制流设计
 
@@ -489,7 +503,7 @@ graph.run_inline(ctx, max_steps).await?;
 
 ### 5. Stream-First 设计
 
-`execute()` 内部消费 `execute_stream()` 的流 — 流式是首要的执行模式，阻塞模式是派生。全链路 `GraphEvent` 配合 `TraceId`/`SpanId` 贯穿，`RuntimeEvent` 提供可观测性钩子，开箱即用的可观测性。
+`execute()` 内部消费 `execute_stream()` 的流 — 流式是首要的执行模式，阻塞模式是派生。全链路 `GraphEvent` 配合 `TraceId`/`SpanId` 贯穿；独立 `RuntimeEvent` enum（`ExecutionStarted`/`NodeStarted`/`NodeCompleted`/`NodeFailed`/`BarrierWaiting`/`BarrierResolved`/`ExecutionCompleted`）通过 `emit_runtime()` 发射，提供可观测性钩子（`AgentHook` trait），开箱即用的可观测性。
 
 ### 6. 构建期校验 — 多错误收集
 
