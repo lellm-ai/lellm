@@ -151,6 +151,41 @@ impl Message {
     }
 
     // =======================================================================
+    // 便捷构造方法 — 多模态
+    // =======================================================================
+
+    /// 便捷构造：带图片的 User 消息（文本 + 图片）。
+    ///
+    /// ```
+    /// use lellm_core::Message;
+    ///
+    /// let msg = Message::user_text_image(
+    ///     "what's in this image?",
+    ///     "image/png".to_string(),
+    ///     "base64_encoded_data".to_string(),
+    /// );
+    /// ```
+    pub fn user_text_image(text: &str, media_type: String, data: String) -> Self {
+        Message::User {
+            content: vec![
+                ContentBlock::text(text),
+                ContentBlock::Image {
+                    source: ImageSource { data, media_type },
+                },
+            ],
+        }
+    }
+
+    /// 便捷构造：仅图片的 User 消息。
+    pub fn user_image(media_type: String, data: String) -> Self {
+        Message::User {
+            content: vec![ContentBlock::Image {
+                source: ImageSource { data, media_type },
+            }],
+        }
+    }
+
+    // =======================================================================
     // 便捷构造方法 — 自定义内容块
     // =======================================================================
 
@@ -526,5 +561,36 @@ mod tests {
         let blocks = text_block(String::from("hello"));
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].as_text(), Some("hello"));
+    }
+
+    // ─── 多模态便捷构造测试 ───
+
+    #[test]
+    fn test_convenience_user_text_image() {
+        let msg = Message::user_text_image("what's this?", "image/png".into(), "base64data".into());
+        assert!(matches!(msg, Message::User { .. }));
+        assert_eq!(msg.content().len(), 2);
+        assert_eq!(msg.content()[0].as_text(), Some("what's this?"));
+        match &msg.content()[1] {
+            ContentBlock::Image { source } => {
+                assert_eq!(source.media_type, "image/png");
+                assert_eq!(source.data, "base64data");
+            }
+            _ => panic!("expected Image block"),
+        }
+    }
+
+    #[test]
+    fn test_convenience_user_image() {
+        let msg = Message::user_image("image/jpeg".into(), "jpgdata".into());
+        assert!(matches!(msg, Message::User { .. }));
+        assert_eq!(msg.content().len(), 1);
+        match &msg.content()[0] {
+            ContentBlock::Image { source } => {
+                assert_eq!(source.media_type, "image/jpeg");
+                assert_eq!(source.data, "jpgdata");
+            }
+            _ => panic!("expected Image block"),
+        }
     }
 }
