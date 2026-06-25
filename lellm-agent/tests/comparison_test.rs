@@ -581,14 +581,14 @@ async fn compare_provider_requests_equivalent() {
 
 // ─── Test 7: 最大迭代次数截断 ─────────────────────────────────
 
-/// 验证两条路径都不会无限循环。
+/// 验证两条路径在持续工具调用时，都正确返回 MaxIterationsReached。
 ///
-/// 注意：新路径 `execute()` 使用 `max_steps = max_iterations * 2 + 1` 作为 graph step 上限，
-/// 在持续工具调用的场景下，step limit 可能先于 max_iterations 检测触发。
-/// 这是新路径的一个已知限制（公式偏保守），核心行为等价：循环被截断。
+/// 新路径 `execute()` 使用 `max_steps = max_iterations * 4 + 1` 作为 graph step 上限，
+/// 确保 PostLLMGuard 的 `reached_max()` 检测优先于 step limit 触发。
+/// 两条路径的 StopReason 完全一致。
 #[tokio::test]
 async fn compare_max_iterations_reached() {
-    // Need enough responses for the loop to hit max_iterations
+    // 20 个 tool call responses — 足够让循环跑满 max_iterations
     let responses: Vec<ChatResponse> = (0..20)
         .map(|i| {
             ChatResponse::new(
@@ -619,12 +619,12 @@ async fn compare_max_iterations_reached() {
 
     let messages = vec![Message::user_text("loop forever")];
 
-    // 新路径 — 可能因为 graph step limit 返回错误
+    // 新路径 — max_steps = 3*4+1 = 13, PostLLMGuard 在第 3 次 LLM 后设置 MaxIterationsReached
     let agent_new = AgentBuilder::new(model_new)
         .tool(loop_reg.clone())
         .max_iterations(3)
         .build();
-    let result_new = agent_new.execute(messages.clone()).await;
+    let result_new = agent_new.execute(messages.clone()).await.unwrap();
 
     // 旧路径 — 明确返回 MaxIterationsReached
     let agent_old = AgentBuilder::new(model_old)
@@ -636,34 +636,32 @@ async fn compare_max_iterations_reached() {
         .await
         .expect("stream ended without LoopEnd");
 
-    // 核心等价：两条路径都正确截断了循环
-    // 旧路径明确返回 MaxIterationsReached
+    // ✅ 核心等价：两条路径都返回 MaxIterationsReached
     assert_eq!(
-        result_old.stop_reason,
-        lellm_agent::StopReason::MaxIterationsReached,
-        "old path should reach max iterations"
+        result_new.stop_reason, result_old.stop_reason,
+        "stop_reason mismatch"
     );
-    assert!(
-        result_old.tool_calls_executed < 10,
-        "old: should execute limited tool calls, got {}",
-        result_old.tool_calls_executed
+    assert_eq!(
+        result_new.stop_reason,
+        lellm_agent::StopReason::MaxIterationsReached,
+        "both should return MaxIterationsReached"
     );
 
-    // 新路径：要么成功返回（执行了有限次），要么返回 step limit 错误
-    // 两种情况都证明了循环被截断
-    match result_new {
-        Ok(r) => {
-            assert!(r.tool_calls_executed < 10, "new: limited tool calls");
-            assert!(r.tool_calls_executed >= 1, "new: at least 1 tool call");
-        }
-        Err(e) => {
-            // graph step limit 触发了截断 — 同样证明了循环被终止
-            let msg = e.to_string();
-            assert!(
-                msg.contains("step limit") || msg.contains("terminal"),
-                "new: should terminate with step limit error, got: {}",
-                msg
-            );
-        }
-    }
+    // iterations 一致
+    assert_eq!(
+        result_new.iterations, result_old.iterations,
+        "iterations mismatch"
+    );
+    assert_eq!(result_new.iterations, 3, "should be exactly 3 iterations");
+
+    // tool_calls 一致且有限
+    assert_eq!(
+        result_new.tool_calls_executed, result_old.tool_calls_executed,
+        "tool_calls_executed mismatch"
+    );
+    assert!(
+        result_new.tool_calls_executed >= 1 && result_new.tool_calls_executed < 10,
+        "new: should execute limited tool calls, got {}",
+        result_new.tool_calls_executed
+    );
 }

@@ -358,7 +358,10 @@ impl ToolUseLoop {
             self.config.context_budget.clone(),
         );
         let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
-        let max_steps = self.config.max_iterations * 2 + 1;
+        // 每轮 ReAct 迭代最坏 4 steps: budget_check + llm + post_llm_check + tool
+        // N 轮最坏: 4*(N-1) + 3 = 4N-1 (最后一轮无 tool)
+        // +1 buffer 应对 edge cases
+        let max_steps = self.config.max_iterations * 4 + 1;
 
         // 初始化 AgentState
         let mut agent_state = super::typed_state::AgentState::from_messages(initial_messages);
