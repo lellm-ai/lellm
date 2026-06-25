@@ -16,7 +16,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use lellm_core::{ChatRequest, ContentBlock, LlmError, Message, text_block};
+use lellm_core::{ChatRequest, ContentBlock, LlmError, Message};
 use lellm_provider::LlmProvider;
 
 #[tokio::main]
@@ -26,21 +26,13 @@ async fn main() -> Result<(), LlmError> {
     // ─── 构建对话历史 ───
     let messages: Vec<Message> = vec![
         // 系统提示
-        Message::System {
-            content: text_block("你是一个将英语翻译成法语的助手。"),
-        },
+        Message::system_text("你是一个将英语翻译成法语的助手。"),
         // 第一轮用户
-        Message::User {
-            content: text_block("翻译: I like programming."),
-        },
+        Message::user_text("翻译: I like programming."),
         // 第一轮助手回复
-        Message::Assistant {
-            content: text_block("J'aime la programmation."),
-        },
+        Message::assistant_text("J'aime la programmation."),
         // 第二轮用户
-        Message::User {
-            content: text_block("翻译: I like building apps."),
-        },
+        Message::user_text("翻译: I like building apps."),
     ];
 
     // ─── 发送请求 ───

@@ -17,7 +17,7 @@ mod common;
 
 use std::sync::Arc;
 
-use lellm_core::{ChatRequest, LlmError, text_block};
+use lellm_core::{ChatRequest, LlmError};
 use lellm_provider::{ModelRouter, ProviderRegistry, ResolvedModel, TaskLevel};
 
 #[tokio::main]
@@ -75,9 +75,7 @@ async fn main() -> Result<(), LlmError> {
 
         let request = ChatRequest {
             model: resolved.model.clone(),
-            messages: vec![lellm_core::Message::User {
-                content: text_block((*prompt).to_string()),
-            }],
+            messages: vec![lellm_core::Message::user_text(prompt)],
             ..Default::default()
         };
 

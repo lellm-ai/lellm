@@ -16,7 +16,7 @@ cargo add lellm
 
 ```rust
 use lellm::agent::AgentBuilder;
-use lellm::core::{Message, text_block};
+use lellm::core::Message;
 
 let agent = AgentBuilder::new(model)
     .system_prompt("You are a helpful assistant.".into())
@@ -24,11 +24,7 @@ let agent = AgentBuilder::new(model)
     .max_iterations(10)
     .build();
 
-let result = agent
-    .execute(vec![Message::User {
-        content: text_block("What's the weather in Shanghai?".into()),
-    }])
-    .await?;
+let result = agent.execute(vec![Message::user_text("What's the weather in Shanghai?")]).await?;
 ```
 
 ---
@@ -253,7 +249,7 @@ for block in &response.content {
 
 ```rust
 use lellm::agent::{AgentBuilder, StopReason};
-use lellm::core::{Message, text_block};
+use lellm::core::Message;
 use lellm::provider::ResolvedModel;
 
 // Resolve a model from the provider
@@ -272,11 +268,7 @@ let agent = AgentBuilder::new(model)
     .build();
 
 // Execute
-let result = agent
-    .execute(vec![Message::User {
-        content: text_block("What's the weather in Shanghai?".into()),
-    }])
-    .await?;
+let result = agent.execute(vec![Message::user_text("What's the weather in Shanghai?")]).await?;
 
 match result.stop_reason {
     StopReason::Complete => println!("Done in {} iterations", result.iterations),

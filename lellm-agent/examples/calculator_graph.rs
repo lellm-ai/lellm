@@ -22,7 +22,7 @@
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel};
-use lellm_core::{Message, text_block};
+use lellm_core::Message;
 use lellm_derive::Tool;
 use lellm_graph::{
     GraphBuilder, GraphExecutor, NodeContext, NodeKind, State, StateEffect, TaskNode,
@@ -83,9 +83,7 @@ fn build_graph() -> lellm_graph::Graph {
         NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_, State>| {
             ctx.emit_effect(StateEffect::Put(
                 "messages".into(),
-                serde_json::json!([Message::User {
-                    content: text_block("3加4等于多少，然后再乘以2。"),
-                }]),
+                serde_json::json!([Message::user_text("3加4等于多少，然后再乘以2。")]),
             ));
             Ok(())
         })),

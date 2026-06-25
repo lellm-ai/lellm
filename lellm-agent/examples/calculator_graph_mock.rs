@@ -171,9 +171,7 @@ fn build_graph() -> lellm_graph::Graph {
         NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_, State>| {
             ctx.emit_effect(StateEffect::Put(
                 "messages".into(),
-                serde_json::json!([Message::User {
-                    content: lellm_core::text_block("3加4等于多少，然后再乘以2。"),
-                }]),
+                serde_json::json!([Message::user_text("3加4等于多少，然后再乘以2。")]),
             ));
             Ok(())
         })),
