@@ -231,6 +231,7 @@ mod tests {
         });
 
         // Queued 被忽略，channel 应为空
+        drop(sink);
         assert!(rx.blocking_recv().is_none());
     }
 
@@ -246,6 +247,7 @@ mod tests {
         });
 
         // Finished 被忽略，channel 应为空
+        drop(sink);
         assert!(rx.blocking_recv().is_none());
     }
 }
