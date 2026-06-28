@@ -10,7 +10,6 @@ pub mod error;
 pub mod event;
 pub mod executor;
 pub mod graph;
-pub mod hook;
 pub mod ids;
 pub mod node;
 pub mod node_context;
@@ -74,8 +73,6 @@ pub use node::{
 // ─── Executor ────────────────────────────────────────────────
 pub use executor::GraphExecutor;
 
-// ─── Hooks ───────────────────────────────────────────────────
-pub use hook::{AgentHook, NoOpHook, TracingHook};
 
 // ─── v04: NodeContext + BranchState + Stream ──────────────────
 pub use branch_state::{BranchState, ChangeOperation, ChangeRecord};
