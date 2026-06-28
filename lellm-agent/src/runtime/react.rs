@@ -23,13 +23,13 @@ use lellm_graph::{
 };
 use lellm_provider::ProviderEvent;
 
-use super::config::{ToolUseConfig, ToolUseDeps, build_request_inner_with_round, empty_response};
+use super::config::{ToolUseConfig, build_request_inner_with_round, empty_response};
 use super::context::{ContextBudget, ContextCompactor, estimate_reasoning_block, estimate_text};
 use super::event::StopReason;
+use super::invoker::LlmInvoker;
 use super::runtime::ResolvedRound;
 use super::tools::ToolExecutor;
 use super::typed_state::{AgentMutation, AgentState, AgentStateMerge};
-use lellm_provider::ResolvedModel;
 
 /// 分离 output / reasoning token
 fn split_output_tokens(content: &[lellm_core::ContentBlock]) -> (usize, usize) {
@@ -65,32 +65,42 @@ fn estimate_round_reasoning_tokens(content: &[ContentBlock]) -> usize {
 /// **职责单一：** 只负责"调用 LLM + 收集流式响应 + emit Effects"。
 /// 不感知 Budget、Compaction、Iteration Limit 等运行时策略。
 ///
+/// # 分层
+///
+/// ```text
+/// LLMNode  — 只负责 State ↔ Request ↔ Effects
+///    │
+/// LlmInvoker — 只负责防御策略（retry, fallback, stream state machine）
+///    │
+/// LlmProvider — 只负责 protocol adapter（stateless）
+/// ```
+///
 /// # Typed State
 ///
 /// 从 ctx 获取 `AgentState`，直接操作 typed 字段，写回 ctx。
 #[derive(Clone)]
 pub struct LLMNode {
     pub name: String,
-    pub model: ResolvedModel,
+    /// LLM 调用器 — 封装 retry/fallback/stream state machine
+    pub invoker: Arc<LlmInvoker>,
+    /// 工具执行器 — 用于获取工具定义
     pub executor: ToolExecutor,
+    /// 配置 — 用于构建请求
     pub config: ToolUseConfig,
-    pub deps: ToolUseDeps,
 }
 
 impl LLMNode {
     pub fn new(
         name: impl Into<String>,
-        model: ResolvedModel,
+        invoker: Arc<LlmInvoker>,
         executor: ToolExecutor,
         config: ToolUseConfig,
-        deps: ToolUseDeps,
     ) -> Self {
         Self {
             name: name.into(),
-            model,
+            invoker,
             executor,
             config,
-            deps,
         }
     }
 }
@@ -108,7 +118,7 @@ impl FlowNode<AgentState> for LLMNode {
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
         let req = build_request_inner_with_round(
-            &self.model,
+            self.invoker.model(),
             &state.messages,
             self.config.max_output_tokens,
             &self.config.request_options,
@@ -116,8 +126,8 @@ impl FlowNode<AgentState> for LLMNode {
             &round.definitions,
         );
 
-        // 4. 执行 LLM 流式调用
-        let mut stream = self.model.provider.stream(&req).await.map_err(|e| {
+        // 4. 通过 LlmInvoker 执行流式调用（自动处理 retry/fallback）
+        let mut stream = self.invoker.invoke_stream(&req, &state.messages, state.iterations).await.map_err(|e| {
             GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: self.name.clone(),
                 source: e.into(),

@@ -153,16 +153,18 @@ impl AgentFlowNode {
         &self,
     ) -> Graph<super::typed_state::AgentState, super::typed_state::AgentStateMerge> {
         let config = self.loop_.config().clone();
-        let model = self.loop_.model().clone();
         let executor = self.loop_.executor().clone();
-        let deps = self.loop_.deps().clone();
+        let invoker = std::sync::Arc::new(crate::runtime::invoker::LlmInvoker::from_config(
+            self.loop_.model().clone(),
+            self.loop_.config(),
+            self.loop_.deps().fallback.clone(),
+        ));
 
         let llm_node = crate::runtime::react::LLMNode::new(
             format!("{}_llm", self.name),
-            model,
+            invoker,
             executor.clone(),
             config.clone(),
-            deps,
         );
 
         let tool_node = crate::runtime::react::ToolNode::new(

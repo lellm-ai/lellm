@@ -66,6 +66,16 @@ impl RetryPolicy {
         }
     }
 
+    /// 获取总尝试次数。
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// 获取退避策略引用。
+    pub fn backoff(&self) -> &BackoffStrategy {
+        &self.backoff
+    }
+
     /// 执行工具函数并自动重试可重试的错误。
     ///
     /// `max_attempts` = 总尝试次数（初始执行 + 重试），与 AWS SDK / reqwest 等语义一致。
