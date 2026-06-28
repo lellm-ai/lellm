@@ -4,7 +4,7 @@
 
 use lellm_graph::{
     BarrierDecision, CheckpointPolicy, CheckpointStore, GraphBuilder, GraphExecutor,
-    InMemoryCheckpointStore, NodeContext, NodeKind, State, StateEffect, StateMerge, TaskNode,
+    InMemoryCheckpointStore, NodeContext, NodeKind, State, StateMutation, StateMerge, TaskNode,
 };
 use std::sync::Arc;
 
@@ -15,22 +15,22 @@ fn build_simple_graph() -> Arc<lellm_graph::Graph> {
     g.node(
         "a",
         NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!(1u32)));
+            ctx.record(StateMutation::Put("step".into(), serde_json::json!(1u32)));
             Ok(())
         })),
     );
     g.node(
         "b",
         NodeKind::Task(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!(2u32)));
-            ctx.emit_effect(StateEffect::Put("done".into(), serde_json::json!(true)));
+            ctx.record(StateMutation::Put("step".into(), serde_json::json!(2u32)));
+            ctx.record(StateMutation::Put("done".into(), serde_json::json!(true)));
             Ok(())
         })),
     );
     g.node(
         "c",
         NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("final".into(), serde_json::json!(true)));
+            ctx.record(StateMutation::Put("final".into(), serde_json::json!(true)));
             Ok(())
         })),
     );
@@ -121,7 +121,7 @@ async fn test_checkpoint_barrier_only() {
     g.node(
         "a",
         NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!(1u32)));
+            ctx.record(StateMutation::Put("step".into(), serde_json::json!(1u32)));
             Ok(())
         })),
     );
@@ -129,7 +129,7 @@ async fn test_checkpoint_barrier_only() {
     g.node(
         "c",
         NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("final".into(), serde_json::json!(true)));
+            ctx.record(StateMutation::Put("final".into(), serde_json::json!(true)));
             Ok(())
         })),
     );

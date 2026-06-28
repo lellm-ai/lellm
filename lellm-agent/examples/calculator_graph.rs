@@ -25,7 +25,7 @@ use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel};
 use lellm_core::Message;
 use lellm_derive::Tool;
 use lellm_graph::{
-    GraphBuilder, GraphExecutor, NodeContext, NodeKind, State, StateEffect, TaskNode,
+    GraphBuilder, GraphExecutor, NodeContext, NodeKind, State, StateMutation, TaskNode,
 };
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
@@ -81,7 +81,7 @@ fn build_graph() -> lellm_graph::Graph {
     g.node(
         "init",
         NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_, State>| {
-            ctx.emit_effect(StateEffect::Put(
+            ctx.record(StateMutation::Put(
                 "messages".into(),
                 serde_json::json!([Message::user_text("3加4等于多少，然后再乘以2。")]),
             ));

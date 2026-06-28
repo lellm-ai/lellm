@@ -29,7 +29,7 @@ pub use ids::SpanId;
 
 // ─── State ───────────────────────────────────────────────────
 pub use state::{
-    ExecutionEntry, GraphResult, State, StateEffect, StateError, StateExt, StateMerge,
+    ExecutionEntry, GraphResult, State, StateMutation, StateError, StateExt, StateMerge,
     StateReducer, array_reducer,
 };
 
@@ -79,14 +79,16 @@ pub use hook::{AgentHook, NoOpHook, TracingHook};
 
 // ─── v04: NodeContext + BranchState + Stream ──────────────────
 pub use branch_state::{BranchState, ChangeOperation, ChangeRecord};
-pub use node_context::{ExecutionControl, ExecutionSignal, NextAction, NodeContext, NodeMetadata};
+pub use node_context::{
+    ExecutionContext, ExecutionControl, ExecutionSignal, NextAction, NodeContext, NodeMetadata,
+};
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::{StreamChunk, ToolPhase};
 pub use stream_emitter::{
     BufferedSink, ChannelSink, NoopSink, StreamSink, noop_sink, sink_arc, spawn_forward_task,
 };
 pub use tokio_util::sync::CancellationToken;
-pub use workflow_state::{Effect, LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};
+pub use workflow_state::{LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};
 
 // ─── Trace ───────────────────────────────────────────────────
 pub mod trace;

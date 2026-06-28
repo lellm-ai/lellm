@@ -125,8 +125,9 @@ pub enum StreamNodeResult {
 /// v04 节点执行 trait — Context 驱动一切。
 ///
 /// 统一原则 — 节点不返回业务数据，只返回 `Result<(), GraphError>`：
-/// - State      → ctx.state() / ctx.state_mut()
-/// - Effects    → ctx.emit_effect()
+/// - State      → ctx.state()（只读）
+/// - Mutation   → ctx.record()（唯一写入口）
+/// - 组合节点   → ctx.replace_state() / ctx.fork_branch()
 /// - Stream     → ctx.emit()
 /// - Metadata   → ctx.set_token_cost()
 /// - Control    → ctx.goto() / ctx.end() / ctx.pause()

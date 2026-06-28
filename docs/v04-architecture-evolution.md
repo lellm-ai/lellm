@@ -1,6 +1,6 @@
 # LeLLM v0.4 架构演进
 
-> 版本：v0.4 | 日期：2026-06-21 | 状态：规划中（Grill Session 确认 Effect Only 路线）
+> 版本：v0.4 | 日期：2026-06-21 | 状态：规划中（Grill Session 确认 Mutation Only 路线）
 >
 > 本文档记录 v0.3 → v0.4 的设计决策和演进路线。
 
@@ -12,8 +12,8 @@
 - [四、NodeContext + StateStore](#四nodecontext--statestore)
 - [五、Overlay State：StateSnapshot + BranchState](#五overlay-statestatesnapshot--branchstate)
 - [六、嵌套执行模型](#六嵌套执行模型)
-- [七、v0.4+ 终局：Typed State + Effect 事件溯源](#七v04-终局typed-state--effect-事件溯源)
-- [七补充、Effect Only 架构决策（2026-06-21 Grill Session）](#七补充effect-only-架构决策2026-06-21-grill-session-确认)
+- [七、v0.4+ 终局：Typed State + Mutation 事件溯源](#七v04-终局typed-state--mutation-事件溯源)
+- [七补充、Mutation Only 架构决策（2026-06-21 Grill Session）](#七补充mutation-only-架构决策2026-06-21-grill-session-确认)
 - [八、架构演进路线图](#八架构演进路线图)
 - [九、关键设计决策](#九关键设计决策)
 
@@ -556,19 +556,19 @@ pub enum AgentDebugEvent {
 
 ---
 
-## 七、v0.4+ 终局：Typed State + Effect 事件溯源
+## 七、v0.4+ 终局：Typed State + Mutation 事件溯源
 
 ### 问题
 
 v0.3 的 `HashMap<String, Value>` 是动态的、弱类型的。
 `StateKey<T>` 和 `ReducerRegistry` 是补丁——在边界处做运行时类型检查。
 
-### 终局愿景：Workflow<S> + Effect<S>
+### 终局愿景：Workflow<S> + Mutation<S>
 
-#### 核心 1：节点返回 Effect 而非 Delta — ✅ 已实现
+#### 核心 1：节点返回 Mutation 而非 Delta — ✅ 已实现
 
 ```rust
-pub enum AgentEffect {
+pub enum AgentMutation {
     AppendMessage(Message),
     AppendMessages(Vec<Message>),
     IncrementIteration,
@@ -582,12 +582,12 @@ pub enum AgentEffect {
 }
 
 impl WorkflowState for AgentState {
-    type Effect = AgentEffect;
+    type Mutation = AgentMutation;
 
-    fn apply(&mut self, effect: Self::Effect) {
-        match effect {
-            AgentEffect::AppendMessage(msg) => self.messages.push(msg),
-            AgentEffect::IncrementIteration => self.iterations += 1,
+    fn apply(&mut self, mutation: Self::Mutation) {
+        match mutation {
+            AgentMutation::AppendMessage(msg) => self.messages.push(msg),
+            AgentMutation::IncrementIteration => self.iterations += 1,
             // ...
         }
     }
@@ -613,18 +613,18 @@ impl WorkflowState for AgentState {
 
 **零运行时字符串匹配开销。** 合并规则在编译期确定。
 
-#### 核心 3：Checkpoint = Effect Log — 📋 规划中
+#### 核心 3：Checkpoint = Mutation Log — 📋 规划中
 
-- **持久化**：追加轻量级 Effect（如 `IncrementIteration`）到数据库，而非序列化几百 KB 的 JSON State
-- **恢复**：重放 Effect Log，天然支持确定性重放测试（Deterministic Replay Testing）
-- **可观测性**：每个 Effect 都是领域事件，天然可审计
+- **持久化**：追加轻量级 Mutation（如 `IncrementIteration`）到数据库，而非序列化几百 KB 的 JSON State
+- **恢复**：重放 Mutation Log，天然支持确定性重放测试（Deterministic Replay Testing）
+- **可观测性**：每个 Mutation 都是领域事件，天然可审计
 
 ### 已完成的工作（2026-06-20）
 
-- [x] `WorkflowState` trait + `Effect` trait（`lellm-graph/src/workflow_state.rs`）
-- [x] `NodeContext` 添加 effects 缓冲（`emit_effect` / `consume_effects`）
+- [x] `WorkflowState` trait + `Mutation` trait（`lellm-graph/src/workflow_state.rs`）
+- [x] `NodeContext` 添加 mutations 缓冲（`emit_mutation` / `consume_mutations`）
 - [x] `NodeContext` 添加 typed 访问（`get_state` / `set_state`）
-- [x] `AgentState` struct + `AgentEffect` enum（`lellm-agent/src/runtime/typed_state.rs`）
+- [x] `AgentState` struct + `AgentMutation` enum（`lellm-agent/src/runtime/typed_state.rs`）
 - [x] ReAct 节点全面重构 — 消除 `create_state_from_ctx` / `sync_state_to_ctx`
 - [x] `ToolUseLoop::execute` 使用 Typed State 初始化 + 结果提取
 - [x] `AgentFlowNode::execute_with_react_graph` 使用 Typed State
@@ -632,34 +632,34 @@ impl WorkflowState for AgentState {
 
 ### v0.4+ 待做清单（2026-06-21 Grill 确认）
 
-- [ ] 消灭 dual-write（`emit_and_set` 消失），Effect 成为唯一状态变更来源
-- [ ] `NodeContext.effects` 从 `Vec<serde_json::Value>` 改为 `Vec<S::Effect>`（强类型）
+- [ ] 消灭 dual-write（`emit_and_set` 消失），Mutation 成为唯一状态变更来源
+- [ ] `NodeContext.mutations` 从 `Vec<serde_json::Value>` 改为 `Vec<S::Mutation>`（强类型）
 - [ ] `Graph<S>` 完全泛型化 + `NodeKind<S>` + `Edge<S>`
 - [ ] `NodeContext<S>` 一刀切 — 删除 `get/set/append/increment` 等 HashMap API
 - [ ] `FlowNode<S>` 泛型化 + 全链适配
 - [ ] `GraphExecutor<S>` 即时 apply Effects
 - [ ] `ParallelNode<S>` merge + `replace_state()`
 - [ ] `StateExtractor` trait + `AgentFlowNode<S, E>` 桥接
-- [ ] Effect Log Checkpoint（替代 State Snapshot）
-- [ ] Message Store（Effect 存 message_id，本体走外部存储）
+- [ ] Mutation Log Checkpoint（替代 State Snapshot）
+- [ ] Message Store（Mutation 存 message_id，本体走外部存储）
 - [ ] 确定性重放测试
 
 ---
 
-## 七补充、Effect Only 架构决策（2026-06-21 Grill Session 确认）
+## 七补充、Mutation Only 架构决策（2026-06-21 Grill Session 确认）
 
 ### 决策总览
 
 | # | 决策 | 结论 |
 |---|------|------|
-| 1 | Effect Only | 消除 dual-write，Effect 是唯一状态变更来源 |
-| 2 | Executor 即时 apply | 节点纯函数（读 State → 产 Effect），Executor 消费 + apply |
+| 1 | Mutation Only | 消除 dual-write，Mutation 是唯一状态变更来源 |
+| 2 | Executor 即时 apply | 节点纯函数（读 State → 产 Mutation），Executor 消费 + apply |
 | 3 | Graph<S> 完全泛型 | 每个 Graph 有自己的 `S: WorkflowState` |
-| 4 | NodeContext<S> 一刀切 | 删除 HashMap API，只保留 `state()` + `emit_effect()` |
-| 5 | 纯 Effect | 节点不直接写 State。ParallelNode 例外：`replace_state()` 用于 merge |
+| 4 | NodeContext<S> 一刀切 | 删除 HashMap API，只保留 `state()` + `emit_mutation()` |
+| 5 | 纯 Mutation | 节点不直接写 State。ParallelNode 例外：`replace_state()` 用于 merge |
 | 6 | StateExtractor trait | AgentFlowNode 桥接外部 State ↔ AgentState |
-| 7 | Effect Log Checkpoint | 只存 Effect 序列，不存 Snapshot。天然支持确定性重放 |
-| 8 | Message 引用 | Effect 存 message_id，Message 本体走外部 Store |
+| 7 | Mutation Log Checkpoint | 只存 Mutation 序列，不存 Snapshot。天然支持确定性重放 |
+| 8 | Message 引用 | Mutation 存 message_id，Message 本体走外部 Store |
 
 ### 目标架构
 
@@ -675,19 +675,19 @@ Graph<S: WorkflowState>
   │
   ├─ NodeContext<'a, S>
   │    ├─ state: &'a mut S
-  │    ├─ effects: Vec<S::Effect>    — 强类型，不序列化
+  │    ├─ mutations: Vec<S::Mutation>    — 强类型，不序列化
   │    ├─ stream: Option<&'a StreamEmitter>
   │    ├─ control: ExecutionControl
   │    └─ metadata: NodeMetadata
   │
   └─ GraphExecutor<S>
-       └─ step(): execute → consume_effects → apply_batch → checkpoint
+       └─ step(): execute → consume_mutations → apply_batch → checkpoint
 
 AgentFlowNode<S, E: StateExtractor<S>>
   └─ 内部 Graph<AgentState> + run_inline(state: &mut AgentState)
 
 Checkpoint<S>
-  └─ Effect Log: Vec<(step, node_id, Effect)> + Message Store 引用
+  └─ Mutation Log: Vec<(step, node_id, Mutation)> + Message Store 引用
 ```
 
 ### 核心变更
@@ -696,10 +696,10 @@ Checkpoint<S>
 
 **之前（双写反模式）：**
 ```rust
-fn emit_and_set(ctx: &mut NodeContext<'_>, effect: AgentEffect) {
-    ctx.emit_effect(effect.clone());  // ← 路径 A: Effect 驱动
-    match effect {
-        AgentEffect::IncrementIteration => {
+fn emit_and_set(ctx: &mut NodeContext<'_>, mutation: AgentMutation) {
+    ctx.emit_mutation(mutation.clone());  // ← 路径 A: Mutation 驱动
+    match mutation {
+        AgentMutation::IncrementIteration => {
             let cur = ctx.get(SK_ITERATIONS);
             ctx.set(SK_ITERATIONS, cur + 1);  // ← 路径 B: HashMap 直接写
         }
@@ -708,14 +708,14 @@ fn emit_and_set(ctx: &mut NodeContext<'_>, effect: AgentEffect) {
 }
 ```
 
-**之后（Effect Only）：**
+**之后（Mutation Only）：**
 ```rust
-// 节点只 emit Effect
-ctx.emit_effect(AgentEffect::IncrementIteration);
+// 节点只 emit Mutation
+ctx.emit_mutation(AgentMutation::IncrementIteration);
 
 // Executor 循环中即时 apply
-let effects = ctx.consume_effects();
-state.apply_batch(effects);
+let mutations = ctx.consume_mutations();
+state.apply_batch(mutations);
 ```
 
 #### 2. Graph<S> 完全泛型
@@ -750,7 +750,7 @@ ctx.append("messages", msg)          // 动态数组
 ```rust
 // 强类型 API
 ctx.state().messages.clone()         // 编译期类型安全
-ctx.emit_effect(IncrementIteration)  // 语义清晰
+ctx.emit_mutation(IncrementIteration)  // 语义清晰
 ```
 
 #### 4. StateExtractor 桥接
@@ -780,31 +780,31 @@ impl<S: WorkflowState, E: StateExtractor<S>> FlowNode<S> for AgentFlowNode<S, E>
 }
 ```
 
-#### 5. Effect Log Checkpoint
+#### 5. Mutation Log Checkpoint
 
 **之前：** 序列化整个 `State = HashMap<String, Value>`
-**之后：** 追加 Effect 序列到 Log，恢复时重放
+**之后：** 追加 Mutation 序列到 Log，恢复时重放
 
 ```rust
 // 存储
 Checkpoint {
     trace_id: TraceId,
-    effect_log: Vec<(step: usize, node_id: String, effect: serde_json::Value)>,
+    effect_log: Vec<(step: usize, node_id: String, mutation: serde_json::Value)>,
     message_store_refs: Vec<message_id>,  // Message 本体走外部存储
 }
 
 // 恢复
 let state = S::initial();
-for (step, node_id, effect) in checkpoint.effect_log {
-    let effect = serde_json::from_value(effect)?;
-    state.apply(effect);
+for (step, node_id, mutation) in checkpoint.effect_log {
+    let mutation = serde_json::from_value(mutation)?;
+    state.apply(mutation);
 }
 ```
 
 #### 6. Message 引用
 
-`AppendMessage` Effect 只存 `message_id`（UUID），Message 本体存外部 Message Store。
-- 恢复时从 Effect Log + Message Store 重建 State
+`AppendMessage` Mutation 只存 `message_id`（UUID），Message 本体存外部 Message Store。
+- 恢复时从 Mutation Log + Message Store 重建 State
 - 天然支持 TTL、压缩、缓存
 - 与 Compaction 配合——旧 Message 自然 GC
 
@@ -828,7 +828,7 @@ for (step, node_id, effect) in checkpoint.effect_log {
                                     ▼
   v0.4+ (强类型领域)
   [砸碎 HashMap] ──> [Workflow<S>]
-  [Effect 事件溯源] ──> [编译期 Merge]
+  [Mutation 事件溯源] ──> [编译期 Merge]
                                     │
                                     ▼
   v0.5 (多智能体时代)
@@ -859,4 +859,4 @@ for (step, node_id, effect) in checkpoint.effect_log {
 | 嵌套执行 | 内部不产生 RuntimeEvent | 防止递归嵌套和路径地狱 |
 | Graph 执行模式 | run_inline() + Executor::execute() | 区分内联与完整执行 |
 | v0.4 TypedState 时机 | v0.4+ 专门 grill | 范围大，需要独立规划 |
-| Effect vs Delta | v0.4+ 用 Effect 取代 Delta | 事件溯源 > 状态补丁 |
+| Mutation vs Delta | v0.4+ 用 Mutation 取代 Delta | 事件溯源 > 状态补丁 |

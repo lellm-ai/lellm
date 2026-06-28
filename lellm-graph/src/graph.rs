@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 
 use crate::error::{BuildError, BuildErrors, DiagnosticCategory, GraphDiagnostics};
 use crate::node::{FlowNode, NodeKind};
-use crate::node_context::NodeContext;
+use crate::node_context::ExecutionContext;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -255,9 +255,23 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
     // ─── 内联执行 ────────────────────────────────────────────
 
     /// 内联执行 — 不产生 RuntimeEvent，不 Checkpoint。
+    ///
+    /// 接收 [`ExecutionContext`]（拥有者），内部循环构建 [`NodeContext`]（能力视图）
+    /// 供节点使用。执行完毕后通过 `take_*` 消费 Mutation 和控制信号。
+    ///
+    /// 数据流：
+    /// ```text
+    /// ExecutionContext
+    ///   → build_node_context()  → NodeContext<'_, S>
+    ///   → node.execute(ctx)     → 节点 record() Mutations
+    ///   → drop(ctx)             → 释放借用
+    ///   → take_mutations()      → 消费 Mutation 缓冲
+    ///   → state.apply_batch()   → apply 到 State
+    ///   → take_control()        → 获取路由信号
+    /// ```
     pub async fn run_inline(
         &self,
-        ctx: &mut NodeContext<'_, S>,
+        exec_ctx: &mut ExecutionContext<S>,
         max_steps: usize,
     ) -> Result<(), crate::error::GraphError> {
         use crate::node_context::NextAction;
@@ -279,15 +293,19 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                 ))
             })?;
 
-            // 执行节点
-            node.execute(ctx).await?;
+            // 构建节点能力视图并执行
+            {
+                let mut ctx = exec_ctx.build_node_context();
+                node.execute(&mut ctx).await?;
+                // ctx 在此作用域结束时 drop，释放所有借用
+            }
 
-            // 消费 Effects → apply 到 typed state（零序列化）
-            let effects = ctx.consume_effects();
-            ctx.state_mut().apply_batch(effects);
+            // 消费 Mutation 缓冲 → apply 到 typed state（零序列化）
+            let mutations = exec_ctx.take_mutations();
+            exec_ctx.state_mut().apply_batch(mutations);
 
             // 提取控制信号
-            let (next_action, _signal) = ctx.take_control();
+            let (next_action, _signal) = exec_ctx.take_control();
 
             // 处理路由
             match next_action {
@@ -299,7 +317,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                     if current == self.end_node() {
                         return Ok(());
                     }
-                    current = self.resolve_next_inline(&current, ctx.state())?;
+                    current = self.resolve_next_inline(&current, exec_ctx.state())?;
                 }
             }
         }

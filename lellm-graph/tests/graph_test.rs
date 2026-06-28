@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, Diagnostic,
     DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor,
-    NodeContext, NodeKind, SK_COUNT, SK_STEPS, State, StateEffect, StateExt, StateKey, TaskNode,
+    NodeContext, NodeKind, SK_COUNT, SK_STEPS, State, StateMutation, StateExt, StateKey, TaskNode,
     TerminalError, TraceId,
 };
 use std::sync::Arc;
@@ -24,21 +24,21 @@ async fn test_linear_pipeline() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!("a")));
+                ctx.record(StateMutation::Put("step".into(), serde_json::json!("a")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "b",
             NodeKind::Task(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!("b")));
+                ctx.record(StateMutation::Put("step".into(), serde_json::json!("b")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "c",
             NodeKind::Task(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("step".into(), serde_json::json!("c")));
+                ctx.record(StateMutation::Put("step".into(), serde_json::json!("c")));
                 Ok(())
             })),
         );
@@ -77,14 +77,14 @@ async fn test_condition_branching() {
         let _ = g.node(
             "yes",
             NodeKind::Task(TaskNode::new("yes", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("yes")));
+                ctx.record(StateMutation::Put("result".into(), serde_json::json!("yes")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "no",
             NodeKind::Task(TaskNode::new("no", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("no")));
+                ctx.record(StateMutation::Put("result".into(), serde_json::json!("no")));
                 Ok(())
             })),
         );
@@ -185,7 +185,7 @@ async fn test_cyclic_graph_steps_exceeded() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -230,7 +230,7 @@ async fn test_cyclic_graph_with_edge_if_exit() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -280,7 +280,7 @@ async fn test_condition_node_back_jump() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -468,7 +468,7 @@ async fn test_barrier_reject_with_back_jump() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -626,14 +626,14 @@ async fn test_barrier_reroute() {
         let _ = g.node(
             "path_a",
             NodeKind::Task(TaskNode::new("path_a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("path".into(), serde_json::json!("A")));
+                ctx.record(StateMutation::Put("path".into(), serde_json::json!("A")));
                 Ok(())
             })),
         );
         let _ = g.node(
             "path_b",
             NodeKind::Task(TaskNode::new("path_b", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("path".into(), serde_json::json!("B")));
+                ctx.record(StateMutation::Put("path".into(), serde_json::json!("B")));
                 Ok(())
             })),
         );
@@ -685,7 +685,7 @@ async fn test_double_barrier_sequential() {
         let _ = g.node(
             "before_a",
             NodeKind::Task(TaskNode::new("before_a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "steps".into(),
                     serde_json::json!(Vec::<String>::new()),
                 ));
@@ -705,7 +705,7 @@ async fn test_double_barrier_sequential() {
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
                 steps.push("passed_a".into());
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "steps".into(),
                     serde_json::to_value(steps).unwrap(),
                 ));
@@ -725,7 +725,7 @@ async fn test_double_barrier_sequential() {
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
                 steps.push("passed_b".into());
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "steps".into(),
                     serde_json::to_value(steps).unwrap(),
                 ));
@@ -866,7 +866,7 @@ async fn test_edge_analysis_no_runtime_interference() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -1081,7 +1081,7 @@ async fn test_goto_edge_with_analysis() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -1257,8 +1257,8 @@ async fn test_statekey_in_graph_execution() {
         let _ = g.node(
             "set",
             NodeKind::Task(TaskNode::new("set", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(0u64)));
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put("count".into(), serde_json::json!(0u64)));
+                ctx.record(StateMutation::Put(
                     "result".into(),
                     serde_json::json!("pending"),
                 ));
@@ -1273,12 +1273,12 @@ async fn test_statekey_in_graph_execution() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
                 if count + 1 >= 3 {
-                    ctx.emit_effect(StateEffect::Put("result".into(), serde_json::json!("done")));
+                    ctx.record(StateMutation::Put("result".into(), serde_json::json!("done")));
                 }
                 Ok(())
             })),
@@ -1454,7 +1454,7 @@ async fn test_fallback_control_flow() {
             NodeKind::Task(TaskNode::new(
                 "fallback_target",
                 |ctx: &mut NodeContext<'_>| {
-                    ctx.emit_effect(StateEffect::Put(
+                    ctx.record(StateMutation::Put(
                         "recovered".into(),
                         serde_json::json!(true),
                     ));
@@ -1624,7 +1624,7 @@ async fn test_decide_wildcard() {
         let _ = g.node(
             "before",
             NodeKind::Task(TaskNode::new("before", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "steps".into(),
                     serde_json::json!(Vec::<String>::new()),
                 ));
@@ -1644,7 +1644,7 @@ async fn test_decide_wildcard() {
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
                 steps.push("step1".into());
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "steps".into(),
                     serde_json::to_value(steps).unwrap(),
                 ));
@@ -1665,7 +1665,7 @@ async fn test_decide_wildcard() {
                     .and_then(|v| serde_json::from_value(v.clone()).ok())
                     .unwrap_or_default();
                 steps.push("step2".into());
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "steps".into(),
                     serde_json::to_value(steps).unwrap(),
                 ));
@@ -1832,7 +1832,7 @@ async fn test_consumer_drop_cancels_execution() {
                     .get("count")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "count".into(),
                     serde_json::json!(count + 1),
                 ));
@@ -1960,7 +1960,7 @@ async fn test_end_node_stops_execution() {
         let _ = g.node(
             "a",
             NodeKind::Task(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "visited_a".into(),
                     serde_json::json!(true),
                 ));
@@ -1970,7 +1970,7 @@ async fn test_end_node_stops_execution() {
         let _ = g.node(
             "end",
             NodeKind::Task(TaskNode::new("end", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "visited_end".into(),
                     serde_json::json!(true),
                 ));
@@ -1980,7 +1980,7 @@ async fn test_end_node_stops_execution() {
         let _ = g.node(
             "unreachable",
             NodeKind::Task(TaskNode::new("unreachable", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "visited_unreachable".into(),
                     serde_json::json!(true),
                 ));

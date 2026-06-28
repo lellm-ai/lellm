@@ -5,7 +5,7 @@
 //! 调用 `Graph::run_inline()` 驱动循环。
 //!
 //! v0.4+ Typed State: 节点使用 `AgentState` 替代 `HashMap<String, Value>`，
-//! 通过 `AgentEffect` 描述状态转换。
+//! 通过 `AgentMutation` 描述状态转换。
 //!
 //! ```text
 //! [LLM] --有tool_calls--> [Tool] --(自环)--> [LLM]
@@ -28,7 +28,7 @@ use super::context::{ContextBudget, ContextCompactor, estimate_reasoning_block, 
 use super::event::StopReason;
 use super::runtime::ResolvedRound;
 use super::tools::ToolExecutor;
-use super::typed_state::{AgentEffect, AgentState, AgentStateMerge};
+use super::typed_state::{AgentMutation, AgentState, AgentStateMerge};
 use lellm_provider::ResolvedModel;
 
 /// 分离 output / reasoning token
@@ -101,8 +101,8 @@ impl FlowNode<AgentState> for LLMNode {
         // 1. 获取 AgentState
         let state = ctx.state().clone();
 
-        // 2. Emit 迭代递增 Effect
-        ctx.emit_effect(AgentEffect::IncrementIteration);
+        // 2. Emit 迭代递增 Mutation
+        ctx.record(AgentMutation::IncrementIteration);
 
         // 3. 获取工具定义 & 构建 LLM 请求
         let round = ResolvedRound::new(self.executor.snapshot().await);
@@ -186,22 +186,22 @@ impl FlowNode<AgentState> for LLMNode {
 
         // 5. 分离 output / reasoning token，Emit Token Effects
         let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
-        ctx.emit_effect(AgentEffect::AddOutputTokens(output_tokens));
-        ctx.emit_effect(AgentEffect::AddReasoningTokens(reasoning_tokens));
+        ctx.record(AgentMutation::AddOutputTokens(output_tokens));
+        ctx.record(AgentMutation::AddReasoningTokens(reasoning_tokens));
 
-        // 6. Emit 消息追加 Effect
+        // 6. Emit 消息追加 Mutation
         let content = response.content.clone();
         let msg = Message::Assistant { content };
-        ctx.emit_effect(AgentEffect::AppendMessage(msg));
+        ctx.record(AgentMutation::AppendMessage(msg));
 
         // 7. 记录 tool_calls
         let has_tools = response.has_tool_calls();
         if has_tools {
-            ctx.emit_effect(AgentEffect::AddToolCalls(tool_calls_count));
+            ctx.record(AgentMutation::AddToolCalls(tool_calls_count));
         }
 
         // 8. Emit LastResponse（供 PostLLMGuard 检查）
-        ctx.emit_effect(AgentEffect::SetLastResponse(response));
+        ctx.record(AgentMutation::SetLastResponse(response));
 
         // 路由决策全部交给 PostLLMGuard，此处不调用 ctx.goto()/ctx.end()
         tracing::debug!(
@@ -349,8 +349,8 @@ impl FlowNode<AgentState> for ToolNode {
             tracing::warn!("tool batch task panicked — error results filled");
         }
 
-        // 5. Emit 消息追加 Effect
-        ctx.emit_effect(AgentEffect::AppendMessages(
+        // 5. Emit 消息追加 Mutation
+        ctx.record(AgentMutation::AppendMessages(
             results.into_iter().flatten().collect(),
         ));
 
@@ -485,7 +485,7 @@ impl FlowNode<AgentState> for PostLLMGuard {
 
         // 2. 超过最大迭代 → End
         if state.reached_max(self.stop_config.max_iterations) {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::MaxIterationsReached));
+            ctx.record(AgentMutation::SetStopReason(StopReason::MaxIterationsReached));
             ctx.end();
             return Ok(());
         }
@@ -503,7 +503,7 @@ impl FlowNode<AgentState> for PostLLMGuard {
                     max_reasoning_tokens = limit,
                     "single-round reasoning budget exceeded"
                 );
-                ctx.emit_effect(AgentEffect::SetStopReason(
+                ctx.record(AgentMutation::SetStopReason(
                     StopReason::ReasoningBudgetExceeded,
                 ));
                 stopped = true;
@@ -512,13 +512,13 @@ impl FlowNode<AgentState> for PostLLMGuard {
 
         // 4. 总输出 Token 超限
         if !stopped && state.exceeded_output(self.stop_config.max_total_output_tokens) {
-            ctx.emit_effect(AgentEffect::SetStopReason(StopReason::OutputBudgetExceeded));
+            ctx.record(AgentMutation::SetStopReason(StopReason::OutputBudgetExceeded));
             stopped = true;
         }
 
         // 5. 总推理 Token 超限
         if !stopped && state.exceeded_reasoning(self.stop_config.max_total_reasoning_tokens) {
-            ctx.emit_effect(AgentEffect::SetStopReason(
+            ctx.record(AgentMutation::SetStopReason(
                 StopReason::ReasoningBudgetExceeded,
             ));
         }
@@ -535,7 +535,7 @@ impl FlowNode<AgentState> for PostLLMGuard {
         }
 
         // 7. 无 tool_calls → 正常完成
-        ctx.emit_effect(AgentEffect::SetStopReason(StopReason::Complete));
+        ctx.record(AgentMutation::SetStopReason(StopReason::Complete));
         ctx.end();
 
         Ok(())
@@ -583,8 +583,8 @@ impl FlowNode<AgentState> for CompactorNode {
 
         // 只有实际压缩了才 emit Effects
         if result.removed_messages > 0 {
-            ctx.emit_effect(AgentEffect::ReplaceMessages(result.messages));
-            ctx.emit_effect(AgentEffect::IncrementCompactCount);
+            ctx.record(AgentMutation::ReplaceMessages(result.messages));
+            ctx.record(AgentMutation::IncrementCompactCount);
 
             tracing::debug!(
                 agent = %self.name,

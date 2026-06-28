@@ -8,7 +8,7 @@ use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId};
 use crate::node::FlowNode;
 use crate::node_context::NodeContext;
-use crate::state::{State, StateEffect};
+use crate::state::{State, StateMutation};
 use crate::workflow_state::WorkflowState;
 
 /// Barrier 超时后的默认行为。
@@ -32,7 +32,7 @@ pub struct BarrierNode<S: WorkflowState = State> {
     _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S: WorkflowState<Effect = StateEffect>> BarrierNode<S> {
+impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -69,23 +69,23 @@ impl<S: WorkflowState<Effect = StateEffect>> BarrierNode<S> {
         match decision {
             BarrierDecision::Approve => {
                 tracing::info!(barrier = %self.name, "approved");
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     self.approve_key.clone(),
                     serde_json::json!(true),
                 ));
-                ctx.emit_effect(StateEffect::Delete(self.reject_key.clone()));
+                ctx.record(StateMutation::Delete(self.reject_key.clone()));
             }
             BarrierDecision::Reject { reason } => {
                 tracing::warn!(barrier = %self.name, reason = %reason, "rejected");
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     self.reject_key.clone(),
                     serde_json::json!(reason),
                 ));
-                ctx.emit_effect(StateEffect::Delete(self.approve_key.clone()));
+                ctx.record(StateMutation::Delete(self.approve_key.clone()));
             }
             BarrierDecision::Modify { key, value } => {
                 tracing::info!(barrier = %self.name, key = %key, "state modified");
-                ctx.emit_effect(StateEffect::Put(key, value));
+                ctx.record(StateMutation::Put(key, value));
             }
             BarrierDecision::Reroute { target } => {
                 tracing::info!(barrier = %self.name, target = %target, "rerouted");

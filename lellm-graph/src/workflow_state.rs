@@ -1,25 +1,40 @@
-//! WorkflowState + Effect + MergeStrategy — Typed State 框架。
+//! WorkflowState + Mutation + MergeStrategy — Typed State 框架。
 //!
 //! v0.4+ 终局：砸碎 `HashMap<String, Value>`，引入编译期类型安全。
 //!
 //! 核心原则：
 //! - 状态是强类型 struct，不是动态 HashMap
-//! - 状态变更通过 Effect（领域事件），不是节点直接写
+//! - 状态变更通过 Mutation（确定性命令），不是节点直接写
+//! - Mutation 自己知道如何修改 State（CQRS / Event Sourcing 职责划分）
 //! - 并行合并规则由 Graph 层的 MergeStrategy 决定，不是 State 内建属性
-//! - Checkpoint = Effect Log，支持确定性重放
+//! - Checkpoint = Mutation Log，支持确定性重放
 //!
-//! Graph 层提供 trait 框架，各业务层（agent/mcp/...）定义自己的 State + Effect。
+//! Graph 层提供 trait 框架，各业务层（agent/mcp/...）定义自己的 State + Mutation。
 
-// ─── Effect ─────────────────────────────────────────────────────
+use std::fmt::Debug;
 
-/// 效果 — 描述一次状态转换的领域事件。
+// ─── StateMutation ──────────────────────────────────────────────
+
+/// 状态变更命令 — 描述一次对 State 的确定性修改。
 ///
-/// Effect 是不可变的、可序列化的、自包含的。
-/// 状态通过 `apply(effect)` 变更，而非直接修改。
-pub trait Effect: Sized + Send + Sync + serde::Serialize + serde::de::DeserializeOwned {
-    /// 将此 Effect 合并到另一个同类型 Effect 中（可选）。
+/// Mutation 自己知道如何修改对应的 State（`apply(self, &mut S)`）。
+/// State 只是数据，Mutation 是变更逻辑，Executor 负责调度。
+///
+/// # 设计原则
+///
+/// - **Command 而非 Patch**：`AppendMessage` 而非 `SetMessages`
+/// - **Enum 分发**：顶层 enum 只做一层 match，具体逻辑在各 variant 的 `apply()` 中
+/// - **无 Serialize 强制**：只有需要 Replay 的运行时才加 `Serialize` bound
+pub trait StateMutation<S>: Sized + Send + Sync + Debug {
+    /// 将此 Mutation 应用到目标 State。
     ///
-    /// 用于批量场景：多个 Effect 合并为一个，减少 apply 次数。
+    /// 这是 Mutation 的核心职责：每个 variant 独立实现，
+    /// 顶层 enum 只做一层 dispatch。
+    fn apply(self, state: &mut S);
+
+    /// 将此 Mutation 合并到另一个同类型 Mutation 中（可选）。
+    ///
+    /// 用于批量场景：多个 Mutation 合并为一个，减少 apply 次数。
     /// 默认返回 `None` 表示不可合并。
     fn combine(self, _other: Self) -> Option<Self> {
         None
@@ -31,61 +46,66 @@ pub trait Effect: Sized + Send + Sync + serde::Serialize + serde::de::Deserializ
 /// 工作流状态 — 编译期类型安全的状态容器。
 ///
 /// 替代 `HashMap<String, Value>` 动态模型。
-/// 每个工作流定义自己的 State struct 和 Effect enum，
-/// 实现此 trait 以声明状态转换规则。
+/// 每个工作流定义自己的 State struct 和 Mutation enum，
+/// 实现此 trait 以声明关联类型。
 ///
+/// **State 只是数据。** 状态变更逻辑在 [`StateMutation`] trait 中。
 /// **Merge 职责已从 `WorkflowState` 剥离到 [`MergeStrategy`]。**
-/// 并行合并是 Graph 层的执行语义，不是 State 层的内建属性。
 ///
 /// # 示例
 ///
 /// ```rust,ignore
-/// pub enum AgentEffect {
-///     AppendMessage(Message),
-///     IncrementIteration,
-///     RecordOutputTokens(usize),
-/// }
-///
+/// // State 只是数据
 /// pub struct AgentState {
 ///     pub messages: Vec<Message>,
 ///     pub iterations: usize,
 ///     pub output_tokens: usize,
 /// }
 ///
-/// impl WorkflowState for AgentState {
-///     type Effect = AgentEffect;
+/// // Mutation 自己知道怎么改 State
+/// pub enum AgentMutation {
+///     AppendMessage(Message),
+///     IncrementIteration,
+///     RecordOutputTokens(usize),
+/// }
 ///
-///     fn apply(&mut self, effect: Self::Effect) {
-///         match effect {
-///             AgentEffect::AppendMessage(msg) => self.messages.push(msg),
-///             AgentEffect::IncrementIteration => self.iterations += 1,
-///             AgentEffect::RecordOutputTokens(n) => self.output_tokens += n,
+/// impl StateMutation<AgentState> for AgentMutation {
+///     fn apply(self, state: &mut AgentState) {
+///         match self {
+///             AgentMutation::AppendMessage(msg) => state.messages.push(msg),
+///             AgentMutation::IncrementIteration => state.iterations += 1,
+///             AgentMutation::RecordOutputTokens(n) => state.output_tokens += n,
 ///         }
 ///     }
+/// }
+///
+/// // WorkflowState 只声明关联类型 — 没有 apply()
+/// impl WorkflowState for AgentState {
+///     type Mutation = AgentMutation;
 /// }
 /// ```
 pub trait WorkflowState:
     Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned
 {
-    /// 与此状态关联的 Effect 类型。
-    type Effect: Effect;
+    /// 与此状态关联的 Mutation 类型。
+    type Mutation: StateMutation<Self>;
 
-    /// 应用一个 Effect 到状态。
-    fn apply(&mut self, effect: Self::Effect);
-
-    /// 批量应用 Effect（默认逐个 apply）。
-    fn apply_batch(&mut self, effects: impl IntoIterator<Item = Self::Effect>) {
-        for effect in effects {
-            self.apply(effect);
+    /// 批量应用 Mutation — 唯一公开入口。
+    ///
+    /// 默认实现：逐个调用 [`StateMutation::apply`]。
+    /// 未来可覆盖为 Transaction 语义（begin → validate → apply → commit/rollback）。
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>) {
+        for mutation in mutations {
+            mutation.apply(self);
         }
     }
 
     /// 应用一个 BranchState 变更记录到状态（backward compat）。
     ///
-    /// 默认实现：no-op（纯 Effect 驱动的状态不需要此方法）。
-    /// `State`（HashMap wrapper）覆盖此方法，将 ChangeRecord 转换为 StateEffect。
+    /// 默认实现：no-op（纯 Mutation 驱动的状态不需要此方法）。
+    /// `State`（HashMap wrapper）覆盖此方法，将 ChangeRecord 转换为 StateMutation。
     fn apply_branch_change(&mut self, _change: &crate::branch_state::ChangeRecord) {
-        // no-op — pure effect-driven states don't use BranchState changes
+        // no-op — pure mutation-driven states don't use BranchState changes
     }
 
     /// 创建默认/初始状态。
@@ -111,7 +131,7 @@ pub trait WorkflowState:
 /// - **ChangeLog** = Observability + Checkpoint
 /// - **MergeStrategy** = 并行语义
 /// - **Executor** = 调度
-/// - **Node** = Effect Producer
+/// - **Node** = Mutation Producer
 ///
 /// # 示例
 ///
@@ -170,8 +190,8 @@ pub enum WorkflowError {
     #[error("state merge conflict: {0}")]
     MergeConflict(String),
 
-    /// Effect 应用失败
-    #[error("failed to apply effect: {0}")]
+    /// Mutation 应用失败
+    #[error("failed to apply mutation: {0}")]
     ApplyFailed(String),
 
     /// 状态序列化/反序列化失败

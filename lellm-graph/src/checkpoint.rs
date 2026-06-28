@@ -3,7 +3,7 @@
 //! Checkpoint 的唯一职责：**恢复（Restore）**。
 //!
 //! - 不含 `parent_trace_id` — 与 Trace 通过存储层组织关联，非结构体关联
-//! - 不含 `effect_log` — Effect 审计走 `ExecutionTrace`
+//! - 不含 `effect_log` — Mutation 审计走 `ExecutionTrace`
 //! - 不含 `snapshot` — 增量快照是存储层优化，不应泄漏到 Checkpoint 结构
 //!
 //! 给我一个 Checkpoint 文件，我就能恢复。不需要任何其他东西。

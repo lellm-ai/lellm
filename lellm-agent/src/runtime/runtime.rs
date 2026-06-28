@@ -364,20 +364,18 @@ impl ToolUseLoop {
         let max_steps = self.config.max_iterations * 4 + 1;
 
         // 初始化 AgentState
-        let mut agent_state = super::typed_state::AgentState::from_messages(initial_messages);
+        let agent_state_init = super::typed_state::AgentState::from_messages(initial_messages);
 
-        // 创建 NodeContext<AgentState> 并调用 run_inline
-        let mut branch = lellm_graph::BranchState::empty();
-        let cancel = lellm_graph::CancellationToken::new();
-        let mut agent_ctx = lellm_graph::NodeContext::<super::typed_state::AgentState>::new(
-            &mut agent_state,
-            &mut branch,
+        // 创建 ExecutionContext<AgentState> 并调用 run_inline
+        let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
+            agent_state_init,
+            lellm_graph::BranchState::empty(),
             None,
-            cancel,
+            lellm_graph::CancellationToken::new(),
         );
 
         graph
-            .run_inline(&mut agent_ctx, max_steps)
+            .run_inline(&mut exec_ctx, max_steps)
             .await
             .map_err(|e| lellm_core::LlmError::Provider {
                 provider: "react_graph".into(),
@@ -386,13 +384,14 @@ impl ToolUseLoop {
                 message: e.to_string(),
             })?;
 
-        let stop_reason = agent_state.stop_reason.unwrap_or(StopReason::Complete);
-        let last_response = agent_state.last_response.unwrap_or_else(empty_response);
+        let agent_state = exec_ctx.state();
+        let stop_reason = agent_state.stop_reason.clone().unwrap_or(StopReason::Complete);
+        let last_response = agent_state.last_response.clone().unwrap_or_else(empty_response);
 
         Ok(ToolUseResult {
             stop_reason,
             response: last_response,
-            messages: agent_state.messages,
+            messages: agent_state.messages.clone(),
             iterations: agent_state.iterations,
             tool_calls_executed: agent_state.total_tool_calls,
         })

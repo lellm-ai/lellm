@@ -8,7 +8,7 @@
 
 use async_trait::async_trait;
 
-use lellm_graph::{FlowNode, Graph, GraphError, NodeContext, StateEffect, TerminalError};
+use lellm_graph::{FlowNode, Graph, GraphError, NodeContext, StateMutation, TerminalError};
 
 use crate::hook::{AgentHook, AgentHookContext, AgentHookSnapshot};
 use crate::runtime::{AgentEvent, StopReason, ToolUseLoop, ToolUseResult};
@@ -111,7 +111,7 @@ impl AgentFlowNode {
         }
     }
 
-    /// 将执行结果以 StateEffect 写入 ctx。
+    /// 将执行结果以 StateMutation 写入 ctx。
     fn apply_result(&self, ctx: &mut NodeContext<'_>, result: &ToolUseResult) {
         let messages: Vec<serde_json::Value> = result
             .messages
@@ -119,19 +119,19 @@ impl AgentFlowNode {
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
 
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             self.message_key.clone(),
             serde_json::json!(messages),
         ));
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             format!("{}_stop_reason", self.name),
             serde_json::json!(format!("{:?}", result.stop_reason)),
         ));
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             format!("{}_iterations", self.name),
             serde_json::json!(result.iterations as u64),
         ));
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             format!("{}_tool_calls", self.name),
             serde_json::json!(result.tool_calls_executed as u64),
         ));
@@ -304,17 +304,15 @@ impl AgentFlowNode {
     ///
     /// v0.4+ AgentState 驱动：
     /// 1. 构建 `Graph<AgentState, AgentStateMerge>`
-    /// 2. 调用 `run_inline()` — 自动处理 Effect 应用 + 控制信号 + 路由
+    /// 2. 调用 `run_inline()` — 自动处理 Mutation 应用 + 控制信号 + 路由
     /// 3. 将最终结果写入父 ctx
     async fn execute_with_react_graph(
         &self,
         ctx: &mut NodeContext<'_>,
         messages: Vec<lellm_core::Message>,
     ) -> Result<(), GraphError> {
-        use lellm_graph::NodeContext as GCtx;
-
         // 1. 初始化 AgentState
-        let mut agent_state = super::typed_state::AgentState::from_messages(messages);
+        let agent_state = super::typed_state::AgentState::from_messages(messages);
 
         // 2. 构建内部 ReAct Graph (Graph<AgentState, AgentStateMerge>)
         let graph = self.build_react_graph();
@@ -322,20 +320,18 @@ impl AgentFlowNode {
         // 最后 3 steps（budget_check → llm → post_llm_check）
         let max_steps = self.loop_.config().max_iterations * 5 + 3;
 
-        // 3. 创建 NodeContext<AgentState> 并调用 run_inline
-        let stream = ctx.stream();
-        let mut branch = lellm_graph::BranchState::empty();
-        let cancel = lellm_graph::CancellationToken::new();
-        let mut agent_ctx = GCtx::<super::typed_state::AgentState>::new(
-            &mut agent_state,
-            &mut branch,
-            stream,
-            cancel,
+        // 3. 创建 ExecutionContext<AgentState> 并调用 run_inline
+        let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
+            agent_state,
+            lellm_graph::BranchState::empty(),
+            None,
+            lellm_graph::CancellationToken::new(),
         );
 
-        graph.run_inline(&mut agent_ctx, max_steps).await?;
+        graph.run_inline(&mut exec_ctx, max_steps).await?;
 
         // 4. 调用 after_agent hooks
+        let agent_state = exec_ctx.state();
         let result = super::ToolUseResult {
             stop_reason: agent_state
                 .stop_reason
@@ -363,7 +359,7 @@ impl AgentFlowNode {
         }
 
         // 5. 将最终结果写入父 ctx
-        self.write_agent_result(ctx, &agent_state);
+        self.write_agent_result(ctx, agent_state);
 
         tracing::debug!(
             agent = %self.name,
@@ -375,7 +371,7 @@ impl AgentFlowNode {
         Ok(())
     }
 
-    /// 将 AgentState 最终结果以 StateEffect 写入 ctx。
+    /// 将 AgentState 最终结果以 StateMutation 写入 ctx。
     fn write_agent_result(
         &self,
         ctx: &mut NodeContext<'_>,
@@ -387,22 +383,22 @@ impl AgentFlowNode {
             .iter()
             .filter_map(|m| serde_json::to_value(m).ok())
             .collect();
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             self.message_key.clone(),
             serde_json::json!(messages),
         ));
 
         if let Some(ref stop_reason) = state.stop_reason {
-            ctx.emit_effect(StateEffect::Put(
+            ctx.record(StateMutation::Put(
                 format!("{}_stop_reason", self.name),
                 serde_json::json!(format!("{:?}", stop_reason)),
             ));
         }
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             format!("{}_iterations", self.name),
             serde_json::json!(state.iterations as u64),
         ));
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             format!("{}_tool_calls", self.name),
             serde_json::json!(state.total_tool_calls as u64),
         ));

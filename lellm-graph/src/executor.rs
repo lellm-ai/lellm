@@ -21,7 +21,7 @@ use crate::event::{
 use crate::graph::Graph;
 use crate::ids::SpanId;
 use crate::node::{FlowNode, NodeKind};
-use crate::node_context::{ExecutionSignal, NextAction, NodeContext, NodeMetadata};
+use crate::node_context::{ExecutionContext, ExecutionSignal, NextAction, NodeMetadata};
 use crate::runtime_event::RuntimeEvent;
 use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::stream_emitter::NoopSink;
@@ -652,7 +652,7 @@ impl GraphExecutor {
 
     // ─── 节点执行（核心）──────────────────────────────────────
 
-    /// 使用 BranchState + NodeContext 执行单个节点。
+    /// 使用 ExecutionContext + NodeContext 执行单个节点。
     async fn execute_node(
         &self,
         node: &NodeKind,
@@ -668,19 +668,25 @@ impl GraphExecutor {
         ),
         GraphError,
     > {
-        let mut branch = BranchState::from_state(state.clone());
-        let cancel = CancellationToken::new();
-        let noop_sink = NoopSink;
-        let mut ctx = NodeContext::new(state, &mut branch, Some(&noop_sink), cancel);
+        let mut exec_ctx = ExecutionContext::new(
+            state.clone(),
+            BranchState::from_state(state.clone()),
+            Some(Box::new(NoopSink)),
+            CancellationToken::new(),
+        );
 
+        let mut ctx = exec_ctx.build_node_context();
         node.execute(&mut ctx).await?;
+        drop(ctx); // release all borrows before taking data
 
-        let effects = ctx.consume_effects();
-        let (next_action, signal) = ctx.take_control();
-        let metadata = ctx.take_metadata();
-        let flow_events = ctx.take_flow_events();
+        let mutations = exec_ctx.take_mutations();
+        let (next_action, signal) = exec_ctx.take_control();
+        let metadata = exec_ctx.take_metadata();
+        let flow_events = exec_ctx.take_flow_events();
 
-        state.apply_batch(effects);
+        // Apply mutations to exec_ctx's state, then copy back to parent state
+        exec_ctx.state_mut().apply_batch(mutations);
+        *state = exec_ctx.state().clone();
 
         Ok((next_action, signal, metadata, flow_events))
     }
@@ -774,14 +780,20 @@ impl GraphExecutor {
 
         match node {
             NodeKind::Barrier(b) => {
-                let mut branch = BranchState::from_state(state.clone());
-                let cancel = CancellationToken::new();
-                let mut ctx = NodeContext::new(state, &mut branch, None, cancel);
-                b.apply_decision_to_ctx(&mut ctx, decision);
-                let (next, _signal) = ctx.take_control();
+                let mut exec_ctx = ExecutionContext::new(
+                    state.clone(),
+                    BranchState::from_state(state.clone()),
+                    None,
+                    CancellationToken::new(),
+                );
 
-                let effects = ctx.consume_effects();
-                state.apply_batch(effects);
+                let mut ctx = exec_ctx.build_node_context();
+                b.apply_decision_to_ctx(&mut ctx, decision);
+                drop(ctx);
+
+                let mutations = exec_ctx.take_mutations();
+                let (next, _signal) = exec_ctx.take_control();
+                state.apply_batch(mutations);
 
                 let end_time = Instant::now();
                 execution_log.push(ExecutionEntry {

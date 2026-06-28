@@ -5,7 +5,7 @@
 use lellm_graph::State;
 use lellm_graph::{
     FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeContext,
-    NodeKind, ParallelErrorStrategy, ParallelNode, StateEffect, StateExt, TaskNode,
+    NodeKind, ParallelErrorStrategy, ParallelNode, StateMutation, StateExt, TaskNode,
 };
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ async fn test_parallel_basic_two_branches() {
         .branch(
             "branch_a",
             Arc::new(TaskNode::new("branch_a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "a_result".into(),
                     serde_json::json!("from_a"),
                 ));
@@ -27,7 +27,7 @@ async fn test_parallel_basic_two_branches() {
         .branch(
             "branch_b",
             Arc::new(TaskNode::new("branch_b", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "b_result".into(),
                     serde_json::json!("from_b"),
                 ));
@@ -65,7 +65,7 @@ async fn test_parallel_single_branch() {
         .branch(
             "only",
             Arc::new(TaskNode::new("only", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("single".into(), serde_json::json!(42)));
+                ctx.record(StateMutation::Put("single".into(), serde_json::json!(42)));
                 Ok(())
             })),
         )
@@ -96,7 +96,7 @@ async fn test_parallel_reads_input_state() {
                     .get("base")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "computed".into(),
                     serde_json::json!(base * 2),
                 ));
@@ -132,14 +132,14 @@ async fn test_parallel_different_keys_no_conflict() {
         .branch(
             "writer_x",
             Arc::new(TaskNode::new("writer_x", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("x".into(), serde_json::json!(1)));
+                ctx.record(StateMutation::Put("x".into(), serde_json::json!(1)));
                 Ok(())
             })),
         )
         .branch(
             "writer_y",
             Arc::new(TaskNode::new("writer_y", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("y".into(), serde_json::json!(2)));
+                ctx.record(StateMutation::Put("y".into(), serde_json::json!(2)));
                 Ok(())
             })),
         )
@@ -167,14 +167,14 @@ async fn test_parallel_same_key_conflict() {
         .branch(
             "writer_a",
             Arc::new(TaskNode::new("writer_a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(1)));
+                ctx.record(StateMutation::Put("count".into(), serde_json::json!(1)));
                 Ok(())
             })),
         )
         .branch(
             "writer_b",
             Arc::new(TaskNode::new("writer_b", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("count".into(), serde_json::json!(2)));
+                ctx.record(StateMutation::Put("count".into(), serde_json::json!(2)));
                 Ok(())
             })),
         )
@@ -197,19 +197,19 @@ async fn test_parallel_same_key_conflict() {
 
 #[tokio::test]
 async fn test_parallel_append_delta_merge() {
-    // 两个分支使用 ctx.emit_effect() 写入同一 key — 最后写入者胜
+    // 两个分支使用 ctx.record() 写入同一 key — 最后写入者胜
     let parallel = ParallelNode::builder()
         .branch(
             "appender_a",
             Arc::new(TaskNode::new("appender_a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("items".into(), serde_json::json!([1, 2])));
+                ctx.record(StateMutation::Put("items".into(), serde_json::json!([1, 2])));
                 Ok(())
             })),
         )
         .branch(
             "appender_b",
             Arc::new(TaskNode::new("appender_b", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("items".into(), serde_json::json!([3, 4])));
+                ctx.record(StateMutation::Put("items".into(), serde_json::json!([3, 4])));
                 Ok(())
             })),
         )
@@ -245,7 +245,7 @@ async fn test_parallel_fail_fast() {
         .branch(
             "ok",
             Arc::new(TaskNode::new("ok", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "ok_result".into(),
                     serde_json::json!(true),
                 ));
@@ -285,7 +285,7 @@ async fn test_parallel_collect_all() {
         .branch(
             "ok",
             Arc::new(TaskNode::new("ok", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "ok_result".into(),
                     serde_json::json!(true),
                 ));
@@ -399,7 +399,7 @@ async fn test_parallel_in_pipeline() {
                     .get("base")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "result_a".into(),
                     serde_json::json!(base + 1),
                 ));
@@ -414,7 +414,7 @@ async fn test_parallel_in_pipeline() {
                     .get("base")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                ctx.emit_effect(StateEffect::Put(
+                ctx.record(StateMutation::Put(
                     "result_b".into(),
                     serde_json::json!(base * 2),
                 ));
@@ -428,7 +428,7 @@ async fn test_parallel_in_pipeline() {
     let _ = g.node(
         "init",
         NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("base".into(), serde_json::json!(10)));
+            ctx.record(StateMutation::Put("base".into(), serde_json::json!(10)));
             Ok(())
         })),
     );
@@ -446,7 +446,7 @@ async fn test_parallel_in_pipeline() {
                 .get("result_b")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            ctx.emit_effect(StateEffect::Put("total".into(), serde_json::json!(a + b)));
+            ctx.record(StateMutation::Put("total".into(), serde_json::json!(a + b)));
             Ok(())
         })),
     );
@@ -508,21 +508,21 @@ async fn test_parallel_three_branches() {
         .branch(
             "a",
             Arc::new(TaskNode::new("a", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("v".into(), serde_json::json!("a")));
+                ctx.record(StateMutation::Put("v".into(), serde_json::json!("a")));
                 Ok(())
             })),
         )
         .branch(
             "b",
             Arc::new(TaskNode::new("b", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("w".into(), serde_json::json!("b")));
+                ctx.record(StateMutation::Put("w".into(), serde_json::json!("b")));
                 Ok(())
             })),
         )
         .branch(
             "c",
             Arc::new(TaskNode::new("c", |ctx: &mut NodeContext<'_>| {
-                ctx.emit_effect(StateEffect::Put("x".into(), serde_json::json!("c")));
+                ctx.record(StateMutation::Put("x".into(), serde_json::json!("c")));
                 Ok(())
             })),
         )

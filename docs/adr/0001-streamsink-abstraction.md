@@ -67,7 +67,7 @@ CancellationToken.cancel()
 ### Step Boundary Commit
 
 Token 流式只走 Stream（emit），不写 State。
-LLMNode 内部累积 chunks → 流结束 → 一次性 `emit_effect(AppendMessage(...))`。
+LLMNode 内部累积 chunks → 流结束 → 一次性 `emit_mutation(AppendMessage(...))`。
 State 始终满足 step 边界提交。
 
 ### StreamChunk — Execution View

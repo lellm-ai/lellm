@@ -9,8 +9,8 @@
 
 | 维度 | LangGraph (Python/JS) | LeLLM (Rust) |
 |------|----------------------|--------------|
-| **状态管理** | `TypedDict` + `operator.add` reducer | 双层：`State`（`HashMap<String, Value>`）+ `WorkflowState` trait（编译期类型安全，Effect 驱动）；`StateKey<T>` 编译期类型安全的键；`BranchState` Overlay 模型 |
-| **状态变更** | 节点直接修改 State dict | `StateEffect` 领域事件 + `NodeContext::emit_effect()` → Executor 批量 `apply_batch()`；节点不直接写 State |
+| **状态管理** | `TypedDict` + `operator.add` reducer | 双层：`State`（`HashMap<String, Value>`）+ `WorkflowState` trait（编译期类型安全，Mutation 驱动）；`StateKey<T>` 编译期类型安全的键；`BranchState` Overlay 模型 |
+| **状态变更** | 节点直接修改 State dict | `StateMutation` 领域事件 + `NodeContext::emit_mutation()` → Executor 批量 `apply_batch()`；节点不直接写 State |
 | **工具定义** | `@tool` decorator + zod schema | `#[derive(Tool)]` macro + `ToolRegistration` + `ToolCatalog` 动态发现 |
 | **Agent 循环** | 手动构建 `llm_node → tool_node → condition → back` | 双模式：(1) `ToolUseLoop` 内置 ReAct 循环（黑盒）；(2) 内部构建 `Graph<AgentState>` ReAct 有环图（LLMNode → BudgetCondition → CompactorNode → ToolNode） |
 | **条件路由** | `should_continue()` 函数返回 node name | `ConditionNode` 声明式分支 + `edge_if()` 条件边（first-match-wins）；三元优先级：条件边 > 普通边 > Fallback 边 |
@@ -61,11 +61,11 @@ budget_check → llm → post_llm_check → (has_tool_calls?) → tool → budge
 
 **第三层：宏观 Graph 编排** — `AgentFlowNode` 作为 `NodeKind::External` 嵌入宏观 Graph。
 
-**优势：** 图只关心节点的输入输出 State（通过 `StateEffect` 声明式写入），天然支持 Multi-Agent 层次化网络。
+**优势：** 图只关心节点的输入输出 State（通过 `StateMutation` 声明式写入），天然支持 Multi-Agent 层次化网络。
 
 ---
 
-### 2. 状态管理：Effect 驱动 + Overlay 模型
+### 2. 状态管理：Mutation 驱动 + Overlay 模型
 
 **LangGraph — 隐式 Reducer**
 
@@ -76,19 +76,19 @@ class MessagesState(TypedDict):
 
 多个节点返回数据时自动隐式合并。在复杂并发场景下极易触发黑盒 Bug。
 
-**LeLLM — Effect 驱动 + BranchState Overlay**
+**LeLLM — Mutation 驱动 + BranchState Overlay**
 
 ```rust
-// 节点通过 Effect 声明状态变更意图（不直接写 State）
-ctx.emit_effect(StateEffect::Put("messages", json!(messages)));
-ctx.emit_effect(StateEffect::Delete("temp_key"));
+// 节点通过 Mutation 声明状态变更意图（不直接写 State）
+ctx.emit_mutation(StateMutation::Put("messages", json!(messages)));
+ctx.emit_mutation(StateMutation::Delete("temp_key"));
 
-// 类型化 State 使用自定义 Effect enum（零序列化）
-ctx.emit_effect(AgentEffect::AppendMessage(msg));
+// 类型化 State 使用自定义 Mutation enum（零序列化）
+ctx.emit_mutation(AgentMutation::AppendMessage(msg));
 
-// Executor 统一消费 Effects → apply 到 typed state
-let effects = ctx.consume_effects();
-ctx.state_mut().apply_batch(effects);
+// Executor 统一消费 Mutations → apply 到 typed state
+let mutations = ctx.consume_mutations();
+ctx.state_mut().apply_batch(mutations);
 ```
 
 **BranchState — Overlay 模型：**
@@ -108,9 +108,9 @@ fork = O(n)：materialize(base + local) → 新 base（n = key 数量）
 
 ```rust
 pub trait WorkflowState: Clone + Send + Sync + Serialize + DeserializeOwned {
-    type Effect: Effect;
-    fn apply(&mut self, effect: Self::Effect);
-    fn apply_batch(&mut self, effects: impl IntoIterator<Item = Self::Effect>);
+    type Mutation: Mutation;
+    fn apply(&mut self, mutation: Self::Mutation);
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>);
     fn apply_branch_change(&mut self, change: &ChangeRecord); // backward compat, default no-op
     fn initial() -> Self where Self: Default;
 }
@@ -291,7 +291,7 @@ let parallel = ParallelNode::builder()
 g.node("research", NodeKind::Parallel(parallel));
 ```
 
-**执行流程：** 克隆 base State → 每个分支独立 `BranchState` → 分支执行 → 消费 Effects → `MergeStrategy::merge(branches)` 合并 → 替换父 State。
+**执行流程：** 克隆 base State → 每个分支独立 `BranchState` → 分支执行 → 消费 Mutations → `MergeStrategy::merge(branches)` 合并 → 替换父 State。
 
 当前为顺序执行（serial fallback），API 层已完备，可升级为 `tokio::join!` 并行。
 
@@ -358,9 +358,9 @@ let executor = GraphExecutor::with_checkpoint(
 
 `ToolUseLoop` 坍缩到节点内部，避免图拓扑污染。结合 Tokio 原生异步，吞吐高出动态语言几个数量级。
 
-### 2. Effect 驱动状态变更
+### 2. Mutation 驱动状态变更
 
-节点通过 `emit_effect()` 声明意图，Executor 统一 `apply_batch()`。`BranchState` Overlay 模型提供增量审计。
+节点通过 `emit_mutation()` 声明意图，Executor 统一 `apply_batch()`。`BranchState` Overlay 模型提供增量审计。
 
 ### 3. 编译期类型安全
 

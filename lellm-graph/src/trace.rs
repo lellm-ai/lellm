@@ -3,7 +3,7 @@
 //! Checkpoint = Snapshot（恢复）
 //! ExecutionTrace = WAL（审计）
 //!
-//! Runtime 层：强类型 `ExecutionTrace<E>`，`E = S::Effect`
+//! Runtime 层：强类型 `ExecutionTrace<E>`，`E = S::Mutation`
 //! 导出层：`ExportedTrace`，JSON 序列化
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use crate::checkpoint::NodeId;
 
 // ─── TraceStep ─────────────────────────────────────────────────
 
-/// 执行步骤记录 — 单个节点的 Effect 审计。
+/// 执行步骤记录 — 单个节点的 Mutation 审计。
 #[derive(Debug, Clone)]
 pub struct TraceStep<E> {
     /// 步骤序号（从 1 开始）
@@ -20,14 +20,14 @@ pub struct TraceStep<E> {
     /// 节点标识
     pub node_id: NodeId,
     /// 该节点产生的 Effects
-    pub effects: Vec<E>,
+    pub mutations: Vec<E>,
 }
 
 // ─── ExecutionTrace ────────────────────────────────────────────
 
-/// 执行追踪 — 强类型 Effect 审计日志。
+/// 执行追踪 — 强类型 Mutation 审计日志。
 ///
-/// `E = S::Effect`，Runtime 层保持编译期类型安全。
+/// `E = S::Mutation`，Runtime 层保持编译期类型安全。
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionTrace<E> {
     pub steps: Vec<TraceStep<E>>,
@@ -106,7 +106,7 @@ pub struct ExportedTrace {
 pub struct ExportedTraceStep {
     pub step: usize,
     pub node_id: String,
-    pub effects: Vec<serde_json::Value>,
+    pub mutations: Vec<serde_json::Value>,
 }
 
 impl<E: Serialize> ExecutionTrace<E> {
@@ -119,8 +119,8 @@ impl<E: Serialize> ExecutionTrace<E> {
                 .map(|s| ExportedTraceStep {
                     step: s.step,
                     node_id: s.node_id.0.clone(),
-                    effects: s
-                        .effects
+                    mutations: s
+                        .mutations
                         .iter()
                         .filter_map(|e| serde_json::to_value(e).ok())
                         .collect(),

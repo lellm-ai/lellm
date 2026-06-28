@@ -5,7 +5,7 @@
 use lellm_graph::{
     Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore, CheckpointStoreError,
     GraphBuilder, GraphExecutor, InMemoryCheckpointStore, NodeContext, NodeKind, State,
-    StateEffect, TaskNode, TraceId,
+    StateMutation, TaskNode, TraceId,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ fn make_set_node(name: &str, key: &str, value: &str) -> TaskNode {
     let k = key.to_string();
     let v = value.to_string();
     TaskNode::new(name, move |ctx: &mut NodeContext<'_>| {
-        ctx.emit_effect(StateEffect::Put(
+        ctx.record(StateMutation::Put(
             k.clone(),
             serde_json::Value::String(v.clone()),
         ));
@@ -174,7 +174,7 @@ async fn test_checkpoint_typed_state_roundtrip() {
     g.node(
         "write",
         NodeKind::Task(TaskNode::new("write", move |ctx: &mut NodeContext<'_>| {
-            ctx.emit_effect(StateEffect::Put("typed_state".into(), typed_json.clone()));
+            ctx.record(StateMutation::Put("typed_state".into(), typed_json.clone()));
             Ok(())
         })),
     );
@@ -190,7 +190,7 @@ async fn test_checkpoint_typed_state_roundtrip() {
             .expect("deserialize");
             assert_eq!(restored.counter, 42);
             assert_eq!(restored.messages.len(), 2);
-            ctx.emit_effect(StateEffect::Put("verified".into(), serde_json::json!(true)));
+            ctx.record(StateMutation::Put("verified".into(), serde_json::json!(true)));
             Ok(())
         })),
     );
@@ -273,7 +273,7 @@ fn build_circular_graph() -> Arc<lellm_graph::Graph> {
                 .map(|v| v as u32)
                 .unwrap_or(0);
             let new_count = counter + 1;
-            ctx.emit_effect(StateEffect::Put(
+            ctx.record(StateMutation::Put(
                 "counter".into(),
                 serde_json::json!(new_count),
             ));
@@ -285,7 +285,7 @@ fn build_circular_graph() -> Arc<lellm_graph::Graph> {
                 .unwrap_or_default();
             let mut history = history;
             history.push(new_count);
-            ctx.emit_effect(StateEffect::Put(
+            ctx.record(StateMutation::Put(
                 "history".into(),
                 serde_json::to_value(history).unwrap(),
             ));
@@ -303,7 +303,7 @@ fn build_circular_graph() -> Arc<lellm_graph::Graph> {
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32)
                 .unwrap_or(0);
-            ctx.emit_effect(StateEffect::Put(
+            ctx.record(StateMutation::Put(
                 "reached".into(),
                 serde_json::json!(counter >= 3),
             ));

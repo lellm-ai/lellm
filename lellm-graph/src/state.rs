@@ -73,30 +73,30 @@ impl From<State> for HashMap<String, Value> {
 
 // ─── WorkflowState for State ────────────────────────────────────
 
-/// State 的 Effect — HashMap 级别的变更。
+/// State 的 Mutation — HashMap 级别的变更。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum StateEffect {
+pub enum StateMutation {
     /// 设置 key-value
     Put(String, Value),
     /// 删除 key
     Delete(String),
 }
 
-impl crate::workflow_state::Effect for StateEffect {}
-
-impl crate::workflow_state::WorkflowState for State {
-    type Effect = StateEffect;
-
-    fn apply(&mut self, effect: Self::Effect) {
-        match effect {
-            StateEffect::Put(key, value) => {
-                self.inner.insert(key, value);
+impl crate::workflow_state::StateMutation<State> for StateMutation {
+    fn apply(self, state: &mut State) {
+        match self {
+            StateMutation::Put(key, value) => {
+                state.insert(key, value);
             }
-            StateEffect::Delete(key) => {
-                self.inner.remove(&key);
+            StateMutation::Delete(key) => {
+                state.remove(&key);
             }
         }
     }
+}
+
+impl crate::workflow_state::WorkflowState for State {
+    type Mutation = StateMutation;
 
     fn apply_branch_change(&mut self, change: &crate::branch_state::ChangeRecord) {
         match change.operation {

@@ -626,29 +626,29 @@ LLM 调用 → 检查 tool_calls → 执行工具 → 追加消息 → 回到 LL
 - [ ] `compact()` 变成 Graph 中的 BudgetGuardNode + CompactNode
 - [ ] 引入 `SK_TOOL_CALL_HISTORY`（审计历史）
 
-#### v0.4+ 终局：Typed State + Effect 事件溯源
+#### v0.4+ 终局：Typed State + Mutation 事件溯源
 
 v0.3.1 的 `HashMap<String, Value>` 是动态的、弱类型的。
 `StateKey<T>` 和 `ReducerRegistry` 是补丁——在边界处做运行时类型检查。
 
-##### 终局愿景：Workflow<S> + Effect<S>
+##### 终局愿景：Workflow<S> + Mutation<S>
 
 ```rust
-// 节点返回 Effect 而非 Delta
-pub enum AgentEffect {
+// 节点返回 Mutation 而非 Delta
+pub enum AgentMutation {
     AppendMessage(Message),
     IncrementIteration,
     RecordUsage(TokenUsage),
 }
 
-// 状态机作为纯函数应用 Effect
+// 状态机作为纯函数应用 Mutation
 impl WorkflowState for AgentState {
-    type Effect = AgentEffect;
-    fn apply(&mut self, effect: Self::Effect) {
-        match effect {
-            AgentEffect::AppendMessage(msg) => self.messages.push(msg),
-            AgentEffect::IncrementIteration => self.iterations += 1,
-            AgentEffect::RecordUsage(usage) => self.usage += usage,
+    type Mutation = AgentMutation;
+    fn apply(&mut self, mutation: Self::Mutation) {
+        match mutation {
+            AgentMutation::AppendMessage(msg) => self.messages.push(msg),
+            AgentMutation::IncrementIteration => self.iterations += 1,
+            AgentMutation::RecordUsage(usage) => self.usage += usage,
         }
     }
 }
@@ -659,8 +659,8 @@ pub trait Merge {
 }
 ```
 
-- **Checkpoint = Effect Log**：追加轻量级 Effect 到数据库，而非序列化几百 KB 的 JSON State
-- **恢复**：重放 Effect Log，天然支持确定性重放测试
+- **Checkpoint = Mutation Log**：追加轻量级 Mutation 到数据库，而非序列化几百 KB 的 JSON State
+- **恢复**：重放 Mutation Log，天然支持确定性重放测试
 
 #### 版本路线图
 
@@ -682,7 +682,7 @@ pub trait Merge {
                                     ▼
   v0.4+ (强类型领域)
   [砸碎 HashMap] ──> [Workflow<S>]
-  [Effect 事件溯源] ──> [编译期 Merge]
+  [Mutation 事件溯源] ──> [编译期 Merge]
                                     │
                                     ▼
   v0.5 (多智能体时代)
@@ -696,14 +696,14 @@ pub trait Merge {
 |------|-------|------|-------------|
 | **节点签名** | `execute(state) -> NodeOutput` | `execute(ctx) -> Result<(), GraphError>` | 同 v0.4 |
 | **状态底层** | `HashMap<String, Value>` | 同 v0.3.1 | 强类型 `S` |
-| **变更机制** | `StateDelta` | `ChangeRecord` (Overlay) | `Effect<S>` |
+| **变更机制** | `StateDelta` | `ChangeRecord` (Overlay) | `Mutation<S>` |
 | **并行合并** | 运行时 Reducer | Reducer merge changes | `Merge` trait 编译期 |
-| **Checkpoint** | State 快照 | Snapshot + ChangeLog | Effect Log 重放 |
+| **Checkpoint** | State 快照 | Snapshot + ChangeLog | Mutation Log 重放 |
 | **中间类型** | `NodeOutput`, `StreamNodeResult` | 消失 | 消失 |
 
 | 版本 | 范围 |
 |------|------|
 | v0.4 | ReAct = 有环图 + Agent 降维成 SubGraph + Context 驱动 + Overlay State + Control/Data Plane 分离 |
-| v0.4+ | 砸碎 HashMap + Workflow<S> + Effect 事件溯源 + 编译期 Merge |
+| v0.4+ | 砸碎 HashMap + Workflow<S> + Mutation 事件溯源 + 编译期 Merge |
 | v0.5 | Multi-Agent Orchestration + Durable Execution + Agent↔Agent via MCP |
 | v0.6 | Sampling |
