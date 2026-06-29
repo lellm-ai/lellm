@@ -1,8 +1,11 @@
 # LeLLM v0.4 架构演进
 
-> 版本：v0.4 | 日期：2026-06-21 | 状态：规划中（Grill Session 确认 Mutation Only 路线）
+> 版本：v0.4 | 日期：2026-06-29 | 状态：实施中（约 55-60% 完成）
 >
 > 本文档记录 v0.3 → v0.4 的设计决策和演进路线。
+>
+> **2026-06-29 更新：** 基于代码实际状态全面审计，修正了过时的"待完成"标记。
+> 详见 [Plan vs Reality 对照表](../discuss/v04-plan-vs-reality.md)。
 
 ## 目录
 
@@ -56,7 +59,7 @@ pub static SK_REASONING_TOKENS: StateKey<usize> = StateKey::new("reasoning_token
 - [x] `AgentFlowNode` 支持 ReAct Graph 模式（已完成）
 - [x] ReAct Graph 模式传播 StopReason 到外层 State（已完成）
 - [x] ReAct Graph 模式补全流式输出（StreamChunk emit）（已完成）
-- [ ] 验证 Checkpoint 能正确恢复 Agent 中间状态
+- [ ] 验证 Checkpoint 能正确恢复 Agent 中间状态（Checkpoint 集成未完成）
 
 ---
 
@@ -614,11 +617,26 @@ impl WorkflowState for AgentState {
 
 **零运行时字符串匹配开销。** 合并规则在编译期确定。
 
-#### 核心 3：Checkpoint = Mutation Log — 📋 规划中
+#### 核心 3：Checkpoint = Snapshot（非 Mutation Log）— ✅ 架构完成，❌ 未集成
 
-- **持久化**：追加轻量级 Mutation（如 `IncrementIteration`）到数据库，而非序列化几百 KB 的 JSON State
-- **恢复**：重放 Mutation Log，天然支持确定性重放测试（Deterministic Replay Testing）
-- **可观测性**：每个 Mutation 都是领域事件，天然可审计
+> **2026-06-29 修正：** Checkpoint 采用 Snapshot 模式（非 Mutation Replay），
+> 因为"给我一个 Checkpoint 就能恢复"比 Mutation Replay 更简单可靠。
+
+**已完成的架构：**
+
+```
+Checkpoint<S> (typed snapshot)
+  → CheckpointCodec<S> (serialize/deserialize)
+    → CheckpointBlob (bytes + metadata)
+      → BlobCheckpointStore (bytes in/out SPI)
+        → InMemoryBlobStore (HashMap backend)
+```
+
+**未完成的工作：**
+
+- execution_loop 未接入 Checkpoint 保存
+- 恢复路径（load checkpoint → restore state → resume from node）不存在
+- Barrier 恢复（decision queue 重建）未设计
 
 ### 已完成的工作（2026-06-20）
 
@@ -631,19 +649,35 @@ impl WorkflowState for AgentState {
 - [x] `AgentFlowNode::execute_with_react_graph` 使用 Typed State
 - [x] `StopReason` 加 serde derive（支持序列化）
 
-### v0.4+ 待做清单（2026-06-21 Grill 确认）
+### v0.4+ 待做清单（2026-06-29 状态更新）
 
-- [ ] 消灭 dual-write（`emit_and_set` 消失），Mutation 成为唯一状态变更来源
-- [ ] `NodeContext.mutations` 从 `Vec<serde_json::Value>` 改为 `Vec<S::Mutation>`（强类型）
-- [ ] `Graph<S>` 完全泛型化 + `NodeKind<S>` + `Edge<S>`
-- [ ] `NodeContext<S>` 一刀切 — 删除 `get/set/append/increment` 等 HashMap API
-- [ ] `FlowNode<S>` 泛型化 + 全链适配
-- [ ] `GraphExecutor<S>` 即时 apply Effects
-- [ ] `ParallelNode<S>` merge + `replace_state()`
-- [ ] `StateExtractor` trait + `AgentFlowNode<S, E>` 桥接
-- [ ] Mutation Log Checkpoint（替代 State Snapshot）
+**已完成：**
+
+- [x] 消灭 dual-write（`emit_and_set` 消失），Mutation 成为唯一状态变更来源
+- [x] `NodeContext.mutations` 改为 `Vec<S::Mutation>`（强类型）
+- [x] `Graph<S>` 完全泛型化 + `NodeKind<S>` + `Edge<S>`
+- [x] `NodeContext<S>` 一刀切 — LeafContext 无 HashMap API，NodeContext 保留 replace_state
+- [x] `FlowNode<S>` 泛型化 + 全链适配（向后兼容）
+- [x] `ExecutionEngine<S>` 即时 apply Effects（commit()）
+- [x] `ParallelNode<S>` merge + `replace_state()`（ExecutorOperation）
+- [x] `AgentState` + `AgentMutation` 桥接（无 StateExtractor trait，直接用 AgentState）
+- [x] LlmInvoker（Retry + Fallback + Stream State Machine）
+- [x] ExecutionTrace 类型定义（TraceStep, TraceSink, ExportedTrace）
+- [x] Checkpoint 分层架构（Codec + Blob + BlobStore）
+
+**未完成：**
+
+- [ ] `ConditionNode` → `LeafNode` 迁移
+- [ ] `BarrierNode` → `LeafNode` 迁移
+- [ ] `TaskNode` → 考虑新增 `LeafTaskNode`
+- [ ] Checkpoint 集成到 execution_loop（保存 + 恢复）
+- [ ] ExecutionTrace 集成到 execution_loop
+- [ ] `run_inline_stream()` API（或确认不需要）
 - [ ] Message Store（Mutation 存 message_id，本体走外部存储）
+- [ ] Mutation Log Checkpoint（替代 State Snapshot）— 待 v0.5 决策
 - [ ] 确定性重放测试
+- [ ] 文件拆分：`node_context.rs` (575 行) → `execution_engine.rs` + `node_context.rs`
+- [ ] 文件拆分：`execution_loop.rs` (469 行) → 拆出 `barrier_wait.rs`
 
 ---
 
@@ -659,36 +693,36 @@ impl WorkflowState for AgentState {
 | 4 | NodeContext<S> 一刀切 | 删除 HashMap API，只保留 `state()` + `emit_mutation()` |
 | 5 | 纯 Mutation | 节点不直接写 State。ParallelNode 例外：`replace_state()` 用于 merge |
 | 6 | StateExtractor trait | AgentFlowNode 桥接外部 State ↔ AgentState |
-| 7 | Mutation Log Checkpoint | 只存 Mutation 序列，不存 Snapshot。天然支持确定性重放 |
-| 8 | Message 引用 | Mutation 存 message_id，Message 本体走外部 Store |
+| 7 | Checkpoint = Snapshot | 存完整 State Snapshot（非 Mutation Replay）。"给我一个 Checkpoint 就能恢复"。架构完成，集成未开始 |
+| 8 | Message | Mutation 存完整 Message（非 message_id 引用）。简单可靠，无需 Message Store |
 
-### 目标架构
+### 目标架构（2026-06-29 修正）
 
 ```
 Graph<S: WorkflowState>
   ├─ Edge<S>              — 条件闭包: &S -> bool
-  ├─ NodeKind<S>
-  │    ├─ External(Arc<dyn FlowNode<S>>)
-  │    ├─ Task(TaskNode<S>)
-  │    ├─ Condition(ConditionNode<S>)
-  │    ├─ Barrier(BarrierNode<S>)
-  │    └─ Parallel(ParallelNode<S>) — merge 后 replace_state()
+  ├─ NodeKind<S, M>
+  │    ├─ External(Arc<dyn FlowNode<S>>)     — 向后兼容
+  │    ├─ ExternalLeaf(Arc<dyn LeafNode<S>>) — 声明式（推荐）
+  │    ├─ Task(TaskNode<S>)                   — FlowNode（待迁移）
+  │    ├─ Condition(ConditionNode<S>)         — FlowNode（待迁移）
+  │    ├─ Barrier(BarrierNode<S>)             — FlowNode（待迁移）
+  │    └─ Parallel(ParallelNode<S, M>)        — ExecutorOperation（已完成）
   │
-  ├─ NodeContext<'a, S>
-  │    ├─ state: &'a mut S
-  │    ├─ mutations: Vec<S::Mutation>    — 强类型，不序列化
-  │    ├─ stream: Option<&'a StreamEmitter>
-  │    ├─ control: ExecutionControl
-  │    └─ metadata: NodeMetadata
+  ├─ LeafContext<'a, S>     — 只读 &S + record(Mutation) + emit(StreamChunk)
+  ├─ NodeContext<'a, S>     — 可变 &mut S + record + emit + replace_state（向后兼容）
   │
-  └─ GraphExecutor<S>
-       └─ step(): execute → consume_mutations → apply_batch → checkpoint
+  └─ ExecutionEngine<S>
+       └─ commit(): take_mutations → state.apply_batch()
 
-AgentFlowNode<S, E: StateExtractor<S>>
-  └─ 内部 Graph<AgentState> + run_inline(state: &mut AgentState)
+AgentFlowNode
+  └─ 内部 Graph<AgentState, AgentStateMerge> + run_inline(&mut ExecutionEngine)
 
-Checkpoint<S>
-  └─ Mutation Log: Vec<(step, node_id, Mutation)> + Message Store 引用
+Checkpoint<S> (Snapshot, 非 Mutation Log)
+  └─ CheckpointCodec → CheckpointBlob → BlobCheckpointStore
+
+ExecutionTrace<E> (审计, 未集成)
+  └─ Vec<TraceStep<E>> — step, node_id, mutations
 ```
 
 ### 核心变更
@@ -781,60 +815,93 @@ impl<S: WorkflowState, E: StateExtractor<S>> FlowNode<S> for AgentFlowNode<S, E>
 }
 ```
 
-#### 5. Mutation Log Checkpoint
+#### 5. Checkpoint = Snapshot（非 Mutation Log）
+
+> **2026-06-29 修正：** 采用 Snapshot 模式，非 Mutation Replay。
 
 **之前：** 序列化整个 `State = HashMap<String, Value>`
-**之后：** 追加 Mutation 序列到 Log，恢复时重放
+**之后：** 序列化 `Checkpoint<S>`（强类型），通过 `CheckpointCodec` 转换为 `CheckpointBlob`。
 
 ```rust
 // 存储
-Checkpoint {
-    trace_id: TraceId,
-    effect_log: Vec<(step: usize, node_id: String, mutation: serde_json::Value)>,
-    message_store_refs: Vec<message_id>,  // Message 本体走外部存储
+Checkpoint<S> {
+    checkpoint_id: CheckpointId,
+    current_node: NodeId,
+    state: S,                      // 完整 Snapshot
+    created_at: SystemTime,
 }
+  → CheckpointCodec<S> → CheckpointBlob { bytes, graph_hash, codec, metadata }
+    → BlobCheckpointStore → InMemoryBlobStore / SQLite / S3
 
 // 恢复
-let state = S::initial();
-for (step, node_id, mutation) in checkpoint.effect_log {
-    let mutation = serde_json::from_value(mutation)?;
-    state.apply(mutation);
-}
+let blob = store.load_latest(trace_id).await?;
+let checkpoint = codec.deserialize(&blob)?;
+resume_from(checkpoint.current_node, checkpoint.state);
 ```
 
-#### 6. Message 引用
+**Mutation Log Checkpoint 推迟到 v0.5。** 原因：
+- Snapshot 更简单可靠（"给我一个 Checkpoint 就能恢复"）
+- Mutation Replay 需要确定性保证（工具调用、LLM 响应）
+- Message Store 引用增加了复杂度
+- v0.4 先验证 Snapshot 模式是否足够
+let blob = store.load_latest(trace_id).await?;
+let checkpoint = codec.deserialize(&blob)?;
+resume_from(checkpoint.current_node, checkpoint.state);
+```
 
-`AppendMessage` Mutation 只存 `message_id`（UUID），Message 本体存外部 Message Store。
-- 恢复时从 Mutation Log + Message Store 重建 State
-- 天然支持 TTL、压缩、缓存
-- 与 Compaction 配合——旧 Message 自然 GC
+**Barrier 恢复（未设计）：**
+- decision queue 需要重建
+- 如果恢复点在 Barrier 节点，需要重新等待或跳过
+```
+
+#### 6. Message — 存完整 Message（非引用）
+
+> **2026-06-29 修正：** Mutation 存完整 `Message`，不引入 Message Store。
+
+`AppendMessage(Message)` 存完整 `Message`。
+
+**理由：**
+- 简单可靠——Checkpoint 自包含，不依赖外部 Store
+- Message 体积可控（Agent 有 Compaction 机制）
+- Message Store 增加复杂度（一致性、TTL、GC）
+- v0.4 先验证 Snapshot 模式，v0.5 再评估是否需要 Message Store
 
 ---
 
 ## 八、架构演进路线图
 
 ```
-  v0.3 (当前阶段: 大内聚/收拢)
-  [消灭 LoopState] ──> [统一 StateKey (方案 B+)]
-  [Agent 降维成 SubGraph] ──> [单一事实来源]
+  v0.3 (已完成: 大内聚/收拢)
+  [消灭 LoopState ✅] ──> [统一 StateKey ✅]
+  [Agent 降维成 SubGraph ✅] ──> [单一事实来源 ✅]
                                     │
                                     ▼
-  v0.4 (破茧成蝶: 统一执行模型)
-  [ReAct = 有环图] ──> [Control Plane / Data Plane 分离]
-  [RuntimeEvent + StreamChunk] ──> [NodeContext + StateStore]
-  [StateStore 内建 ChangeLog] ──> [Graph::run_inline() 内联执行]
-  [AgentEvent 消失] ──> [Agent = Graph 的高级 DSL]
-  [嵌套执行禁止递归 RuntimeEvent]
+  v0.4 (进行中: 统一执行模型，约 55-60%)
+  [ReAct = 有环图 ✅] ──> [Control Plane / Data Plane 分离 ✅]
+  [RuntimeEvent + StreamChunk ✅] ──> [ExecutionEngine + LeafContext ✅]
+  [Typed WorkflowState ✅] ──> [Graph::run_inline() ✅]
+  [AgentEvent 保留（适配层）] ──> [Agent = Graph 的高级 DSL ✅]
+  [LeafNode ✅ + FlowNode(向后兼容) ⚠️]
+  [ExecutorOperation ✅ (ParallelNode)]
+  [LlmInvoker ✅ (Retry + Fallback + Stream SM)]
+  [Checkpoint 架构 ✅，集成 ❌]
+  [ExecutionTrace 类型 ✅，集成 ❌]
                                     │
                                     ▼
-  v0.4+ (强类型领域)
-  [砸碎 HashMap] ──> [Workflow<S>]
-  [Mutation 事件溯源] ──> [编译期 Merge]
+  v0.4 收尾（待完成）
+  [ConditionNode → LeafNode]
+  [BarrierNode → LeafNode]
+  [Checkpoint 集成到 execution_loop]
+  [ExecutionTrace 集成到 execution_loop]
+  [文件拆分：node_context.rs, execution_loop.rs]
                                     │
                                     ▼
   v0.5 (多智能体时代)
   [Multi-Agent Orchestration] ──> [Durable Execution]
-  [Agent ↔ Agent via MCP] ──> [Sampling]
+  [Agent ↔ Agent via MCP] ──> [Mutation Log Checkpoint?]
+  [Scheduler] ──> [Pause / Resume]
+  [ExecutorOperation 全量迁移]
+  [Graph::run_inline → Engine.run()]
 ```
 
 ---
@@ -858,9 +925,14 @@ for (step, node_id, mutation) in checkpoint.effect_log {
 | State 模型 | StateSnapshot + BranchState 双层 Overlay | Fork O(1)，Merge O(changes) |
 | ChangeLog | 节点级别，不合并 | 忠实记录，便于审计 |
 | 嵌套执行 | 内部不产生 RuntimeEvent | 防止递归嵌套和路径地狱 |
-| Graph 执行模式 | run_inline() + Executor::execute() | 区分内联与完整执行 |
-| v0.4 TypedState 时机 | v0.4+ 专门 grill | 范围大，需要独立规划 |
-| Mutation vs Delta | v0.4+ 用 Mutation 取代 Delta | 事件溯源 > 状态补丁 |
+| Graph 执行模式 | run_inline() + run_execution_loop() | 区分内联与完整执行 |
+| v0.4 TypedState 时机 | v0.4 已实现 | WorkflowState trait + AgentMutation |
+| Mutation vs Delta | v0.4 用 Mutation 取代 Delta | 已完成 |
+| Checkpoint 模式 | Snapshot（非 Mutation Replay）| 简单可靠，v0.5 再评估 Replay |
+| Message 存储 | Mutation 存完整 Message | 不引入 Message Store |
+| AgentEvent | 保留（AgentEventSink 适配 StreamChunk）| 非消失，是合理的适配层 |
+| FlowNode 去留 | 保留（向后兼容），标记 deprecated | 新代码用 LeafNode |
+| spawn_child | 不存在，ParallelNode 直接 ExecutionEngine::new | 不需要抽象 |
 
 ---
 
@@ -1028,10 +1100,15 @@ LLMNode, ToolNode, PostLLMGuard, CompactorNode, BudgetCondition — 全部从 `F
 | 2 | 删除 BranchState | ✅ | branch_state.rs 已删除 |
 | 3 | 删除 delta.rs + ReducerRegistry | ✅ | delta.rs 已删除 |
 | 4 | Checkpoint 分层架构 | ✅ | 5 层解耦架构，9 个新测试 |
-| 5 | ExecutionEngine + ExecutorState | ✅ | ExecutionContext 为 type alias |
-| 6 | Executable 统一抽象 | ⚠️ | `emit_flow_event` 已加入；`Executable` trait 因 dyn compatibility 限制放弃 |
-| 7 | NodeContext 瘦身 | ✅ | 已删除 branch 字段 |
-| 8 | 测试迁移 | ✅ | SimpleExecutor 兼容层 + execution_loop 独立模块 |
+| 5 | Checkpoint 集成 | ❌ | execution_loop 未接入 save_checkpoint |
+| 6 | ExecutionEngine + ExecutorState | ✅ | ExecutionContext 为 type alias |
+| 7 | Executable 统一抽象 | ⚠️ | `emit_flow_event` 已加入；`Executable` trait 因 dyn compatibility 限制放弃 |
+| 8 | NodeContext 瘦身 | ✅ | 已删除 branch 字段 |
+| 9 | LeafNode + LeafContext | ✅ | ReAct 节点全部迁移 |
+| 10 | ExecutorOperation | ✅ | ParallelNode 已实现 |
+| 11 | LlmInvoker | ✅ | Retry + Fallback + Stream State Machine |
+| 12 | ExecutionTrace | ⚠️ | 类型已定义，execution_loop 未接入 |
+| 13 | 测试迁移 | ✅ | SimpleExecutor 兼容层 + execution_loop 独立模块 |
 
 **总删除量：** ~1700+ 行（executor.rs ~1170 + branch_state.rs ~180 + delta.rs ~340）
 
@@ -1057,11 +1134,60 @@ Checkpoint<S> → CheckpointCodec<S> → CheckpointBlob → BlobCheckpointStore 
 2. `GraphResult` 硬编码 `State` — v0.5 重构时泛型化
 3. `BarrierNode` StateMutation 约束 — v0.5 待决策
 4. `FlowEvent::Custom` Box<dyn Any> — 低优先级，未来需要持久化时重新设计
+5. `ExecutorState<S>` 不是 dyn compatible — `build_node_context()` 返回生命周期引用 + `apply_batch()` 用 `impl IntoIterator`
+6. `spawn_child()` 只存在于注释 — ParallelNode 直接 `ExecutionEngine::new()` 创建子 engine
 
 #### 后续清理项
 
-- [ ] 迁移 `BarrierNode` → `LeafNode`
+- [ ] 迁移 `BarrierNode` → `LeafNode`（只读 state + pause 控制信号）
 - [ ] 迁移 `AgentFlowNode` → `LeafNode`
-- [ ] 迁移 `TaskNode` → `LeafNode`
-- [ ] 迁移 `ConditionNode` → `LeafNode`
+- [ ] 迁移 `TaskNode` → 考虑新增 `LeafTaskNode`（用户回调签名需改变）
+- [ ] 迁移 `ConditionNode` → `LeafNode`（只读 state + goto 控制信号）
 - [ ] 考虑将 `FlowNode` 标记为 `#[deprecated]`
+- [ ] 拆分 `node_context.rs` (575 行) → `execution_engine.rs` + `node_context.rs`
+- [ ] 拆分 `execution_loop.rs` (469 行) → 拆出 `barrier_wait.rs`
+- [ ] 清理 `workflow_state.rs:122` 中提及 BranchState/Overlay/ChangeLog 的过时注释
+
+---
+
+## 十一、v0.4 总体状态总结（2026-06-29）
+
+> 基于代码实际状态的全面审计。
+> 详见 [Plan vs Reality 对照表](../discuss/v04-plan-vs-reality.md)。
+
+### Phase 进度
+
+| Phase | 描述 | 进度 | 关键阻塞 |
+|-------|------|------|----------|
+| Phase 1 — ExecutionEngine | 已有，字段与 Plan 一致 | ✅ 100% | 文件位置不佳（node_context.rs） |
+| Phase 2 — 删除 BranchState | 已完全删除 | ✅ 100% | 无 |
+| Phase 3 — Node API 统一 | LeafNode 已有，FlowNode 待迁移 | ⚠️ 60% | ConditionNode, BarrierNode, TaskNode |
+| Phase 4 — Composite Node | ParallelNode 已在 ExecutorOperation | ✅ 100% | branches 仍用 FlowNode |
+| Phase 5 — Streaming 统一 | run_inline_stream 不存在 | ❌ 0% | 需确认 API 需求 |
+| Phase 6 — LlmInvoker | Retry + Fallback + Stream SM | ✅ 100% | 无 |
+| Phase 7 — Checkpoint | 架构完成，未集成 | ⚠️ 50% | execution_loop 未接入 |
+| Phase 8 — ExecutionTrace | 类型完成，未集成 | ⚠️ 30% | execution_loop 未接入 |
+
+**总体进度：约 55-60%**
+
+### 剩余工作量估算
+
+| 任务 | 复杂度 | 预估 |
+|------|--------|------|
+| ConditionNode → LeafNode | 低 | 1h |
+| BarrierNode → LeafNode | 低 | 1h |
+| TaskNode 决策（保留/迁移） | 低 | 0.5h |
+| Checkpoint 集成到 execution_loop | 中 | 4-8h |
+| Checkpoint 恢复路径 | 高 | 8-16h |
+| ExecutionTrace 集成 | 低 | 2h |
+| 文件拆分（3 个） | 低 | 2h |
+| 注释清理 | 低 | 0.5h |
+| **合计** | | **~18-30h** |
+
+### 文件健康问题
+
+| 文件 | 行数 | 建议 |
+|------|------|------|
+| `node_context.rs` | 575 | 拆分为 execution_engine.rs + node_context.rs |
+| `execution_loop.rs` | 469 | 拆出 barrier_wait.rs |
+| `graph.rs` | 534 | 拆出 graph_builder.rs（可选） |
