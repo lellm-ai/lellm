@@ -30,17 +30,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::error::GraphError;
+use crate::execution_engine::ExecutionEngine;
 pub use crate::node_context::LeafContext;
-use crate::node_context::{ExecutionEngine, NodeContext};
+use crate::node_context::NodeContext;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
 pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
-pub use crate::parallel_node::{
-    ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder,
-};
+pub use crate::parallel_node::{ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder};
 
 // ─── LeafNode Trait ───────────────────────────────────────────
 
@@ -70,8 +69,6 @@ pub trait LeafNode<S: WorkflowState = State>: Send + Sync {
 ///
 /// 直接接收 `&mut ExecutionEngine<S>`，拥有完整能力：
 /// - clone_state / replace_state
-/// - spawn_child_engine
-/// - merge_state
 /// - build_leaf_context（用于执行子分支）
 ///
 /// 这不是"节点"，而是 ExecutionEngine 的内部控制逻辑扩展。

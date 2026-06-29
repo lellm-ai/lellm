@@ -7,9 +7,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::checkpoint::{
-    CheckpointBlob, CheckpointId, CheckpointStoreError, TraceId,
-};
+use crate::checkpoint::{CheckpointBlob, CheckpointId, CheckpointStoreError, TraceId};
 
 // ─── BlobCheckpointStore Trait ─────────────────────────────────
 
@@ -27,10 +25,8 @@ pub trait BlobCheckpointStore: Send + Sync {
     ) -> Result<(), CheckpointStoreError>;
 
     /// 加载指定 ID 的 CheckpointBlob。
-    async fn load(
-        &self,
-        id: &CheckpointId,
-    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError>;
+    async fn load(&self, id: &CheckpointId)
+    -> Result<Option<CheckpointBlob>, CheckpointStoreError>;
 
     /// 加载 trace 最新的 CheckpointBlob。
     async fn load_latest(

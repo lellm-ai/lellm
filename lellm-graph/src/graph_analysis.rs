@@ -82,8 +82,7 @@ pub(crate) fn filter_unprotected_cycles<S: WorkflowState, M: MergeStrategy<S>>(
 pub(crate) fn build_adj<S: WorkflowState, M: MergeStrategy<S>>(
     graph: &Graph<S, M>,
 ) -> std::collections::HashMap<String, Vec<String>> {
-    let mut adj: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut adj: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for edge in &graph.edges {
         adj.entry(edge.from.clone())
             .or_default()

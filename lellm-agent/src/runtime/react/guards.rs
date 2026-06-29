@@ -93,7 +93,9 @@ impl LeafNode<AgentState> for PostLLMGuard {
 
         // 2. 超过最大迭代 → End
         if state.reached_max(self.stop_config.max_iterations) {
-            ctx.record(AgentMutation::SetStopReason(StopReason::MaxIterationsReached));
+            ctx.record(AgentMutation::SetStopReason(
+                StopReason::MaxIterationsReached,
+            ));
             ctx.end();
             return Ok(());
         }
@@ -120,7 +122,9 @@ impl LeafNode<AgentState> for PostLLMGuard {
 
         // 4. 总输出 Token 超限
         if !stopped && state.exceeded_output(self.stop_config.max_total_output_tokens) {
-            ctx.record(AgentMutation::SetStopReason(StopReason::OutputBudgetExceeded));
+            ctx.record(AgentMutation::SetStopReason(
+                StopReason::OutputBudgetExceeded,
+            ));
             stopped = true;
         }
 

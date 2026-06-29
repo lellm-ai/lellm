@@ -150,12 +150,8 @@ impl ToolUseLoop {
 
         // 构建 ReAct Graph (Graph<AgentState, AgentStateMerge>)
         let invoker = self.build_invoker();
-        let llm_node = super::react::LLMNode::new(
-            "llm",
-            invoker,
-            self.executor.clone(),
-            self.config.clone(),
-        );
+        let llm_node =
+            super::react::LLMNode::new("llm", invoker, self.executor.clone(), self.config.clone());
         let tool_node =
             super::react::ToolNode::new("tool", self.executor.clone(), self.config.clone());
         let compactor_node = super::react::CompactorNode::new(
@@ -190,8 +186,14 @@ impl ToolUseLoop {
             })?;
 
         let agent_state = exec_ctx.state();
-        let stop_reason = agent_state.stop_reason.clone().unwrap_or(StopReason::Complete);
-        let last_response = agent_state.last_response.clone().unwrap_or_else(empty_response);
+        let stop_reason = agent_state
+            .stop_reason
+            .clone()
+            .unwrap_or(StopReason::Complete);
+        let last_response = agent_state
+            .last_response
+            .clone()
+            .unwrap_or_else(empty_response);
 
         Ok(ToolUseResult {
             stop_reason,
@@ -240,14 +242,9 @@ impl ToolUseLoop {
             };
 
             // 2. 构建 ReAct Graph
-            let llm_node = super::react::LLMNode::new(
-                "llm",
-                invoker,
-                executor.clone(),
-                config.clone(),
-            );
-            let tool_node =
-                super::react::ToolNode::new("tool", executor.clone(), config.clone());
+            let llm_node =
+                super::react::LLMNode::new("llm", invoker, executor.clone(), config.clone());
+            let tool_node = super::react::ToolNode::new("tool", executor.clone(), config.clone());
             let compactor_node = super::react::CompactorNode::new(
                 "compactor",
                 Arc::new(LocalCompactor::new()),
@@ -272,10 +269,7 @@ impl ToolUseLoop {
                 lellm_graph::CancellationToken::new(),
             );
 
-            match graph
-                .run_inline(&mut exec_ctx, max_steps)
-                .await
-            {
+            match graph.run_inline(&mut exec_ctx, max_steps).await {
                 Ok(()) => {
                     // 执行成功，从 AgentState 提取结果
                     let state = exec_ctx.state();

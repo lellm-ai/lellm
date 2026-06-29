@@ -52,6 +52,11 @@ impl std::fmt::Display for NodeId {
 ///
 /// Checkpoint 的唯一职责：恢复（Restore）。
 /// 给我一个 Checkpoint，我就能从 `current_node` 开始，用 `state` 继续执行。
+///
+/// # Graph Compatibility
+///
+/// `graph_hash` 记录创建 Checkpoint 时的图结构指纹。
+/// 恢复时必须校验：`graph_hash` 不匹配 → 拒绝恢复（不允许 silent mismatch）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint<S = State> {
     /// 唯一标识
@@ -60,16 +65,19 @@ pub struct Checkpoint<S = State> {
     pub current_node: NodeId,
     /// 物化状态快照
     pub state: S,
+    /// 图结构指纹 — 恢复时校验兼容性
+    pub graph_hash: u64,
     /// 创建时间
     pub created_at: std::time::SystemTime,
 }
 
 impl<S: WorkflowState> Checkpoint<S> {
-    pub fn new(current_node: impl Into<String>, state: S) -> Self {
+    pub fn new(current_node: impl Into<String>, state: S, graph_hash: u64) -> Self {
         Self {
             checkpoint_id: CheckpointId(uuid::Uuid::new_v4()),
             current_node: NodeId(current_node.into()),
             state,
+            graph_hash,
             created_at: std::time::SystemTime::now(),
         }
     }
@@ -81,19 +89,34 @@ impl<S: WorkflowState> Checkpoint<S> {
 ///
 /// 将序列化后的二进制数据与元数据打包，供 CheckpointStore 使用。
 /// 存储层无需知道 State 类型或序列化格式。
+///
+/// `graph_hash` 作为 correctness invariant 存储：
+/// 恢复时校验 `graph_hash` 不匹配 → reject，不允许 silent mismatch。
 #[derive(Debug, Clone)]
 pub struct CheckpointBlob {
     /// Checkpoint 唯一标识
     pub id: CheckpointId,
     /// 序列化后的二进制数据（格式由 Codec 决定）
     pub data: Vec<u8>,
+    /// 图结构指纹 — 恢复时校验兼容性
+    pub graph_hash: u64,
     /// 创建时间
     pub created_at: std::time::SystemTime,
 }
 
 impl CheckpointBlob {
-    pub fn new(id: CheckpointId, data: Vec<u8>, created_at: std::time::SystemTime) -> Self {
-        Self { id, data, created_at }
+    pub fn new(
+        id: CheckpointId,
+        data: Vec<u8>,
+        graph_hash: u64,
+        created_at: std::time::SystemTime,
+    ) -> Self {
+        Self {
+            id,
+            data,
+            graph_hash,
+            created_at,
+        }
     }
 }
 
@@ -110,6 +133,8 @@ pub enum CheckpointStoreError {
     Corrupted(String),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("graph mismatch: expected hash {expected:#018x}, got {actual:#018x}")]
+    GraphMismatch { expected: u64, actual: u64 },
 }
 
 // ─── TraceId Re-export ─────────────────────────────────────────

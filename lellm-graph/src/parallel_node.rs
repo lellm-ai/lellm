@@ -23,9 +23,9 @@ use std::time::Instant;
 
 use crate::error::GraphError;
 use crate::event::FlowEvent;
+use crate::execution_engine::{ExecutionEngine, ExecutorState};
 use crate::ids::SpanId;
 use crate::node::{ExecutorOperation, FlowNode};
-use crate::node_context::{ExecutionEngine, ExecutorState};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -102,7 +102,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
             .collect()
     }
 
-    pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode<S>>)>{
+    pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode<S>>)> {
         self.branches
             .iter()
             .map(|(name, node)| (name.as_str(), node))
@@ -221,8 +221,11 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ExecutorOperat
         let parent_stream = engine.stream_sink();
 
         // Clone branch data so async blocks own everything they need
-        let branches: Vec<(String, Arc<dyn crate::node::FlowNode<S>>)> =
-            self.branches.iter().map(|(n, nd)| (n.clone(), nd.clone())).collect();
+        let branches: Vec<(String, Arc<dyn crate::node::FlowNode<S>>)> = self
+            .branches
+            .iter()
+            .map(|(n, nd)| (n.clone(), nd.clone()))
+            .collect();
 
         // Create a future for each branch — no spawn, no 'static required
         let branch_futures: Vec<_> = branches
@@ -235,11 +238,7 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ExecutorOperat
                     let branch_start = Instant::now();
 
                     // Each branch gets its own ExecutionEngine (child engine)
-                    let mut child_engine = ExecutionEngine::new(
-                        state,
-                        child_stream,
-                        child_cancel,
-                    );
+                    let mut child_engine = ExecutionEngine::new(state, child_stream, child_cancel);
 
                     let mut branch_ctx = child_engine.build_node_context();
                     let ok = node.execute(&mut branch_ctx).await.is_ok();

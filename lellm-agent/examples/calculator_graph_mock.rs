@@ -232,15 +232,9 @@ async fn main() {
 
     let start = std::time::Instant::now();
 
-    let mut engine = ExecutionContext::<State>::new(
-        State::new(),
-        None,
-        lellm_graph::CancellationToken::new(),
-    );
-    graph
-        .run_inline(&mut engine, 100)
-        .await
-        .expect("执行失败");
+    let mut engine =
+        ExecutionContext::<State>::new(State::new(), None, lellm_graph::CancellationToken::new());
+    graph.run_inline(&mut engine, 100).await.expect("执行失败");
 
     let duration = start.elapsed();
 

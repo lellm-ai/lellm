@@ -27,10 +27,24 @@ use crate::workflow_state::WorkflowState;
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 pub trait CheckpointCodec<S: WorkflowState = State>: Send + Sync {
     /// 将 Checkpoint 序列化为二进制 Blob。
-    fn serialize(&self, cp: &Checkpoint<S>) -> Result<CheckpointBlob, CheckpointStoreError>;
+    ///
+    /// `graph_hash` 由调用方提供（从 `Graph::hash_u64()` 获取），
+    /// 写入 Blob 作为 correctness invariant。
+    fn serialize(
+        &self,
+        cp: &Checkpoint<S>,
+        graph_hash: u64,
+    ) -> Result<CheckpointBlob, CheckpointStoreError>;
 
     /// 从二进制 Blob 反序列化为 Checkpoint。
-    fn deserialize(&self, blob: &CheckpointBlob) -> Result<Checkpoint<S>, CheckpointStoreError>;
+    ///
+    /// 如果 Blob 中的 `graph_hash` 与 `expected_hash` 不匹配，
+    /// 返回 `CheckpointStoreError::GraphMismatch`。
+    fn deserialize(
+        &self,
+        blob: &CheckpointBlob,
+        expected_hash: u64,
+    ) -> Result<Checkpoint<S>, CheckpointStoreError>;
 }
 
 // ─── SerdeCheckpointCodec ──────────────────────────────────────
@@ -56,13 +70,32 @@ impl<S> CheckpointCodec<S> for SerdeCheckpointCodec<S>
 where
     S: WorkflowState + Serialize + for<'de> Deserialize<'de>,
 {
-    fn serialize(&self, cp: &Checkpoint<S>) -> Result<CheckpointBlob, CheckpointStoreError> {
+    fn serialize(
+        &self,
+        cp: &Checkpoint<S>,
+        graph_hash: u64,
+    ) -> Result<CheckpointBlob, CheckpointStoreError> {
         let data = serde_json::to_vec(cp)
             .map_err(|e| CheckpointStoreError::Serialization(e.to_string()))?;
-        Ok(CheckpointBlob::new(cp.checkpoint_id.clone(), data, cp.created_at))
+        Ok(CheckpointBlob::new(
+            cp.checkpoint_id.clone(),
+            data,
+            graph_hash,
+            cp.created_at,
+        ))
     }
 
-    fn deserialize(&self, blob: &CheckpointBlob) -> Result<Checkpoint<S>, CheckpointStoreError> {
+    fn deserialize(
+        &self,
+        blob: &CheckpointBlob,
+        expected_hash: u64,
+    ) -> Result<Checkpoint<S>, CheckpointStoreError> {
+        if blob.graph_hash != expected_hash {
+            return Err(CheckpointStoreError::GraphMismatch {
+                expected: expected_hash,
+                actual: blob.graph_hash,
+            });
+        }
         let cp: Checkpoint<S> = serde_json::from_slice(&blob.data)
             .map_err(|e| CheckpointStoreError::Corrupted(e.to_string()))?;
         Ok(cp)
@@ -83,8 +116,8 @@ where
 /// let codec = SerdeCheckpointCodec::<State>::new();
 /// let typed = TypedCheckpointStore::new(&store, codec);
 ///
-/// typed.save_with_trace(&trace_id, &checkpoint).await?;
-/// let restored = typed.load(&id).await?;
+/// typed.save_with_trace(&trace_id, &checkpoint, graph_hash).await?;
+/// let restored = typed.load(&id, graph_hash).await?;
 /// ```
 pub struct TypedCheckpointStore<'a, Codec, S: WorkflowState = State> {
     store: &'a dyn BlobCheckpointStore,
@@ -111,33 +144,43 @@ where
     Codec: CheckpointCodec<S>,
 {
     /// 保存 Checkpoint 并关联 trace_id。
+    ///
+    /// `graph_hash` 由调用方提供（从 `Graph::hash_u64()` 获取），
+    /// 写入 Blob 作为 correctness invariant。
     pub async fn save_with_trace(
         &self,
         trace_id: &crate::checkpoint::TraceId,
         checkpoint: &Checkpoint<S>,
+        graph_hash: u64,
     ) -> Result<(), CheckpointStoreError> {
-        let blob = self.codec.serialize(checkpoint)?;
+        let blob = self.codec.serialize(checkpoint, graph_hash)?;
         self.store.save_with_trace(trace_id, &blob).await
     }
 
     /// 加载指定 ID 的 Checkpoint。
+    ///
+    /// 校验 `graph_hash`：不匹配则返回 `GraphMismatch` 错误。
     pub async fn load(
         &self,
         id: &crate::checkpoint::CheckpointId,
+        expected_hash: u64,
     ) -> Result<Option<Checkpoint<S>>, CheckpointStoreError> {
         match self.store.load(id).await? {
-            Some(blob) => Ok(Some(self.codec.deserialize(&blob)?)),
+            Some(blob) => Ok(Some(self.codec.deserialize(&blob, expected_hash)?)),
             None => Ok(None),
         }
     }
 
     /// 加载 trace 最新的 Checkpoint。
+    ///
+    /// 校验 `graph_hash`：不匹配则返回 `GraphMismatch` 错误。
     pub async fn load_latest(
         &self,
         trace_id: &crate::checkpoint::TraceId,
+        expected_hash: u64,
     ) -> Result<Option<Checkpoint<S>>, CheckpointStoreError> {
         match self.store.load_latest(trace_id).await? {
-            Some(blob) => Ok(Some(self.codec.deserialize(&blob)?)),
+            Some(blob) => Ok(Some(self.codec.deserialize(&blob, expected_hash)?)),
             None => Ok(None),
         }
     }

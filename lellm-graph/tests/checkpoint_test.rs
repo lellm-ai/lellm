@@ -5,26 +5,56 @@
 //! 参见: `docs/adr/v04-execution-model-redesign.md` 决策 4 (Phase D)
 
 use lellm_graph::{
-    Checkpoint, CheckpointCodec, CheckpointId, CheckpointPolicy, CheckpointStoreError,
-    SerdeCheckpointCodec, State, TypedCheckpointStore, BlobCheckpointStore,
-    InMemoryBlobStore, TraceId,
+    BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointId, CheckpointPolicy,
+    CheckpointStoreError, InMemoryBlobStore, SerdeCheckpointCodec, State, TraceId,
+    TypedCheckpointStore,
 };
 use uuid::Uuid;
+
+const TEST_GRAPH_HASH: u64 = 0x1234_5678_9abc_def0;
 
 /// 测试 SerdeCheckpointCodec 序列化/反序列化
 #[tokio::test]
 async fn test_serde_codec_roundtrip() {
     let codec = SerdeCheckpointCodec::<State>::new();
     let state = State::new();
-    let cp = Checkpoint::new("test_node", state);
+    let cp = Checkpoint::new("test_node", state, TEST_GRAPH_HASH);
 
-    let blob = codec.serialize(&cp).expect("serialize should succeed");
+    let blob = codec
+        .serialize(&cp, TEST_GRAPH_HASH)
+        .expect("serialize should succeed");
     assert!(!blob.data.is_empty(), "serialized data should not be empty");
     assert_eq!(blob.id, cp.checkpoint_id);
+    assert_eq!(blob.graph_hash, TEST_GRAPH_HASH);
 
-    let restored = codec.deserialize(&blob).expect("deserialize should succeed");
+    let restored = codec
+        .deserialize(&blob, TEST_GRAPH_HASH)
+        .expect("deserialize should succeed");
     assert_eq!(restored.checkpoint_id, cp.checkpoint_id);
     assert_eq!(restored.current_node, cp.current_node);
+}
+
+/// 测试 graph_hash 不匹配时 deserialize 返回 GraphMismatch
+#[tokio::test]
+async fn test_graph_hash_mismatch_rejected() {
+    let codec = SerdeCheckpointCodec::<State>::new();
+    let state = State::new();
+    let cp = Checkpoint::new("test_node", state, TEST_GRAPH_HASH);
+
+    let blob = codec
+        .serialize(&cp, TEST_GRAPH_HASH)
+        .expect("serialize should succeed");
+
+    let wrong_hash = TEST_GRAPH_HASH ^ 0xFF;
+    let result = codec.deserialize(&blob, wrong_hash);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        CheckpointStoreError::GraphMismatch { expected, actual } => {
+            assert_eq!(expected, wrong_hash);
+            assert_eq!(actual, TEST_GRAPH_HASH);
+        }
+        other => panic!("expected GraphMismatch, got: {other}"),
+    }
 }
 
 /// 测试 TypedCheckpointStore 保存与加载
@@ -36,16 +66,16 @@ async fn test_typed_store_save_and_load() {
 
     let trace_id = TraceId::new();
     let state = State::new();
-    let cp = Checkpoint::new("start", state);
+    let cp = Checkpoint::new("start", state, TEST_GRAPH_HASH);
     let cp_id = cp.checkpoint_id.clone();
 
     typed
-        .save_with_trace(&trace_id, &cp)
+        .save_with_trace(&trace_id, &cp, TEST_GRAPH_HASH)
         .await
         .expect("save should succeed");
 
     let loaded = typed
-        .load(&cp_id)
+        .load(&cp_id, TEST_GRAPH_HASH)
         .await
         .expect("load should succeed")
         .expect("checkpoint should exist");
@@ -61,10 +91,16 @@ fn test_checkpoint_blob_structure() {
     use std::time::SystemTime;
 
     let id = CheckpointId(Uuid::new_v4());
-    let blob = CheckpointBlob::new(id.clone(), vec![1, 2, 3], SystemTime::now());
+    let blob = CheckpointBlob::new(
+        id.clone(),
+        vec![1, 2, 3],
+        TEST_GRAPH_HASH,
+        SystemTime::now(),
+    );
 
     assert_eq!(blob.id, id);
     assert_eq!(blob.data, vec![1, 2, 3]);
+    assert_eq!(blob.graph_hash, TEST_GRAPH_HASH);
 }
 
 /// 测试 InMemoryBlobStore 基础操作
@@ -80,7 +116,12 @@ async fn test_blob_store_operations() {
     assert_eq!(store.len(), 0);
 
     let id = CheckpointId(Uuid::new_v4());
-    let blob = CheckpointBlob::new(id.clone(), vec![1, 2, 3], SystemTime::now());
+    let blob = CheckpointBlob::new(
+        id.clone(),
+        vec![1, 2, 3],
+        TEST_GRAPH_HASH,
+        SystemTime::now(),
+    );
 
     store
         .save_with_trace(&trace_id, &blob)
@@ -125,4 +166,13 @@ fn test_checkpoint_error_variants() {
 
     let serialization = CheckpointStoreError::Serialization("encode error".into());
     assert!(format!("{serialization}").contains("encode error"));
+
+    let graph_mismatch = CheckpointStoreError::GraphMismatch {
+        expected: 0xAAAA,
+        actual: 0xBBBB,
+    };
+    let msg = format!("{graph_mismatch}");
+    assert!(msg.contains("graph mismatch"));
+    assert!(msg.contains("0x000000000000aaaa"));
+    assert!(msg.contains("0x000000000000bbbb"));
 }

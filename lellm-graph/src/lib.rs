@@ -7,6 +7,7 @@ pub mod checkpoint;
 pub mod checkpoint_codec;
 pub mod error;
 pub mod event;
+pub mod execution_engine;
 pub mod execution_loop;
 pub mod graph;
 pub mod graph_analysis;
@@ -29,7 +30,7 @@ pub use ids::SpanId;
 
 // ─── State ───────────────────────────────────────────────────
 pub use state::{
-    ExecutionEntry, GraphResult, State, StateMutation, StateError, StateExt, StateMerge,
+    ExecutionEntry, GraphResult, State, StateError, StateExt, StateMerge, StateMutation,
     StateReducer, array_reducer,
 };
 
@@ -45,9 +46,7 @@ pub use checkpoint::{
 };
 
 // ─── Checkpoint Codec ────────────────────────────────────────
-pub use checkpoint_codec::{
-    CheckpointCodec, SerdeCheckpointCodec, TypedCheckpointStore,
-};
+pub use checkpoint_codec::{CheckpointCodec, SerdeCheckpointCodec, TypedCheckpointStore};
 
 // ─── Store ───────────────────────────────────────────────────
 pub use store::{BlobCheckpointStore, InMemoryBlobStore};
@@ -70,22 +69,24 @@ pub use graph_analysis::CycleAnalysis;
 // ─── Nodes ───────────────────────────────────────────────────
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
-    FlowNode, NodeKind, ParallelErrorStrategy, ParallelNode,
-    ParallelNodeBuilder, TaskFn, TaskNode, ExecutorOperation, LeafNode,
+    ExecutorOperation, FlowNode, LeafNode, NodeKind, ParallelErrorStrategy, ParallelNode,
+    ParallelNodeBuilder, TaskFn, TaskNode,
 };
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;
 
-// ─── v04: NodeContext + Stream ───────────────────────────────
-pub use node_context::{
-    ExecutionEngine, ExecutionContext, ExecutionControl, ExecutionSignal, ExecutorState,
-    ExecutionView, NextAction, NodeContext, NodeMetadata, LeafContext,
+// ─── v04: ExecutionEngine + NodeContext + Stream ─────────────
+pub use execution_engine::{
+    ExecutionContext, ExecutionControl, ExecutionEngine, ExecutionSignal, ExecutionView,
+    ExecutorState, NextAction, NodeMetadata,
 };
+pub use node_context::{LeafContext, NodeContext};
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::{StreamChunk, ToolPhase};
 pub use stream_emitter::{
-    BufferedSink, ChannelSink, NoopSink, StreamHub, StreamSink, noop_sink, sink_arc, spawn_forward_task,
+    BufferedSink, ChannelSink, NoopSink, StreamHub, StreamSink, noop_sink, sink_arc,
+    spawn_forward_task,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use workflow_state::{LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};

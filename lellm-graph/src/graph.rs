@@ -14,9 +14,9 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::error::{BuildError, BuildErrors, GraphDiagnostics, GraphError, TerminalError};
+use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph_analysis::{self, CycleAnalysis};
 use crate::node::{ExecutorOperation, FlowNode, NodeKind};
-use crate::node_context::{ExecutionEngine, ExecutorState, NextAction};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -98,8 +98,10 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
         &self.end
     }
 
-    /// 计算图结构指纹 hash。
-    pub fn hash(&self) -> String {
+    /// 计算图结构指纹 hash（u64 原始值）。
+    ///
+    /// 用于 Checkpoint 的 graph compatibility 校验。
+    pub fn hash_u64(&self) -> u64 {
         let mut s = String::new();
         let mut names: Vec<&str> = self.nodes.keys().map(|k| k.as_str()).collect();
         names.sort();
@@ -120,8 +122,12 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             .collect();
         edge_strs.sort();
         s.push_str(&edge_strs.join(","));
-        let hash = fnv_hash(&s);
-        format!("{:016x}", hash)
+        fnv_hash(&s)
+    }
+
+    /// 计算图结构指纹 hash（hex 字符串）。
+    pub fn hash(&self) -> String {
+        format!("{:016x}", self.hash_u64())
     }
 
     pub fn edges_from(&self, from: &str) -> Vec<&Edge<S>> {
@@ -166,7 +172,11 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
     }
 
     /// 路由解析 — 内联执行使用，无匹配时返回错误。
-    pub(crate) fn resolve_next_inline(&self, current: &str, state: &S) -> Result<String, GraphError> {
+    pub(crate) fn resolve_next_inline(
+        &self,
+        current: &str,
+        state: &S,
+    ) -> Result<String, GraphError> {
         if self.edges_from(current).is_empty() {
             return Err(GraphError::Terminal(TerminalError::InvalidGraph(format!(
                 "node '{}' has no outgoing edges and is not the end node",
@@ -274,9 +284,9 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
         loop {
             step += 1;
             if step > max_steps {
-                return Err(GraphError::Terminal(
-                    TerminalError::StepsExceeded { limit: max_steps },
-                ));
+                return Err(GraphError::Terminal(TerminalError::StepsExceeded {
+                    limit: max_steps,
+                }));
             }
 
             let node = self.nodes.get(&current).ok_or_else(|| {

@@ -16,13 +16,11 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::GraphError;
-use crate::event::{
-    BarrierDecision, BarrierDecisionMessage, GraphEvent,
-};
+use crate::event::{BarrierDecision, BarrierDecisionMessage, GraphEvent};
+use crate::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::{SpanId, TraceId};
 use crate::node::{ExecutorOperation, FlowNode, NodeKind};
-use crate::node_context::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -88,9 +86,9 @@ pub(crate) async fn run_execution_loop<S, M>(
             None => {
                 let _ = event_tx
                     .send(GraphEvent::GraphError {
-                        error: GraphError::Terminal(
-                            crate::error::TerminalError::NodeNotFound(current.clone()),
-                        ),
+                        error: GraphError::Terminal(crate::error::TerminalError::NodeNotFound(
+                            current.clone(),
+                        )),
                         state: engine.state().clone(),
                     })
                     .await;
@@ -149,12 +147,10 @@ pub(crate) async fn run_execution_loop<S, M>(
 
             let _ = event_tx
                 .send(GraphEvent::GraphError {
-                    error: GraphError::Terminal(
-                        crate::error::TerminalError::NodeExecutionFailed {
-                            node: node_name,
-                            source: "node execution failed".into(),
-                        },
-                    ),
+                    error: GraphError::Terminal(crate::error::TerminalError::NodeExecutionFailed {
+                        node: node_name,
+                        source: "node execution failed".into(),
+                    }),
                     state: engine.state().clone(),
                 })
                 .await;
@@ -234,11 +230,8 @@ pub(crate) async fn run_execution_loop<S, M>(
                         })
                         .await;
 
-                    let reroute_target = apply_barrier_decision_generic(
-                        engine.state_mut(),
-                        &node_name,
-                        &d,
-                    );
+                    let reroute_target =
+                        apply_barrier_decision_generic(engine.state_mut(), &node_name, &d);
 
                     if let Some(target) = reroute_target {
                         current = target;
@@ -259,7 +252,9 @@ pub(crate) async fn run_execution_loop<S, M>(
                     apply_barrier_decision_generic(
                         engine.state_mut(),
                         &node_name,
-                        &BarrierDecision::Reject { reason: "timeout".into() },
+                        &BarrierDecision::Reject {
+                            reason: "timeout".into(),
+                        },
                     );
                     next_action = NextAction::Next;
                 }
@@ -282,13 +277,7 @@ pub(crate) async fn run_execution_loop<S, M>(
         // 处理路由
         match next_action {
             NextAction::End => {
-                send_complete(
-                    &event_tx,
-                    trace_id,
-                    engine,
-                    execution_log,
-                    start_time,
-                );
+                send_complete(&event_tx, trace_id, engine, execution_log, start_time);
                 break;
             }
             NextAction::Goto(target) => {
@@ -296,13 +285,7 @@ pub(crate) async fn run_execution_loop<S, M>(
             }
             NextAction::Next => {
                 if current == graph.end_node() {
-                    send_complete(
-                        &event_tx,
-                        trace_id,
-                        engine,
-                        execution_log,
-                        start_time,
-                    );
+                    send_complete(&event_tx, trace_id, engine, execution_log, start_time);
                     break;
                 }
                 match graph.resolve_next_inline(&current, engine.state()) {

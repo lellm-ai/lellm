@@ -99,12 +99,16 @@ impl LeafNode<AgentState> for LLMNode {
         );
 
         // 4. 通过 LlmInvoker 执行流式调用（自动处理 retry/fallback）
-        let mut stream = self.invoker.invoke_stream(&req, &state.messages, state.iterations).await.map_err(|e| {
-            GraphError::Terminal(TerminalError::NodeExecutionFailed {
-                node: self.name.clone(),
-                source: e.into(),
-            })
-        })?;
+        let mut stream = self
+            .invoker
+            .invoke_stream(&req, &state.messages, state.iterations)
+            .await
+            .map_err(|e| {
+                GraphError::Terminal(TerminalError::NodeExecutionFailed {
+                    node: self.name.clone(),
+                    source: e.into(),
+                })
+            })?;
 
         // 收集流式事件，构建完整的 ChatResponse
         let mut content_blocks: Vec<ContentBlock> = Vec::new();

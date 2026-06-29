@@ -5,7 +5,7 @@
 use lellm_graph::State;
 use lellm_graph::{
     FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, NodeContext, NodeKind,
-    ParallelErrorStrategy, ParallelNode, SimpleExecutor, StateMutation, StateExt, TaskNode,
+    ParallelErrorStrategy, ParallelNode, SimpleExecutor, StateExt, StateMutation, TaskNode,
 };
 use std::sync::Arc;
 
@@ -202,14 +202,20 @@ async fn test_parallel_append_delta_merge() {
         .branch(
             "appender_a",
             Arc::new(TaskNode::new("appender_a", |ctx: &mut NodeContext<'_>| {
-                ctx.record(StateMutation::Put("items".into(), serde_json::json!([1, 2])));
+                ctx.record(StateMutation::Put(
+                    "items".into(),
+                    serde_json::json!([1, 2]),
+                ));
                 Ok(())
             })),
         )
         .branch(
             "appender_b",
             Arc::new(TaskNode::new("appender_b", |ctx: &mut NodeContext<'_>| {
-                ctx.record(StateMutation::Put("items".into(), serde_json::json!([3, 4])));
+                ctx.record(StateMutation::Put(
+                    "items".into(),
+                    serde_json::json!([3, 4]),
+                ));
                 Ok(())
             })),
         )

@@ -10,13 +10,11 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::GraphError;
-use crate::event::{
-    GraphExecution, GraphHandle,
-};
+use crate::event::{GraphExecution, GraphHandle};
+use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::TraceId;
 use crate::node::{ExecutorOperation, FlowNode, NodeKind};
-use crate::node_context::{ExecutionEngine, ExecutorState, NextAction};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
 // ─── SimpleExecutor 兼容层 ────────────────────────────────────────
@@ -77,7 +75,7 @@ impl SimpleExecutor {
             let node_name = current.clone();
             let node_start = Instant::now();
 
-// 根据 NodeKind 分发执行
+            // 根据 NodeKind 分发执行
             match node {
                 NodeKind::Task(n) => {
                     let mut ctx = engine.build_node_context();

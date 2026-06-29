@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use lellm_graph::{Graph, GraphBuilder, NodeKind, TaskNode};
 
+use super::super::typed_state::{AgentState, AgentStateMerge};
 use super::guards::{BudgetCondition, CompactorNode, PostLLMGuard, StopConfig};
 use super::llm_node::LLMNode;
 use super::tool_node::ToolNode;
-use super::super::typed_state::{AgentState, AgentStateMerge};
 
 /// 构建 ReAct 内部图。
 ///
@@ -55,7 +55,10 @@ pub fn build_react_graph(
             budget,
         ))),
     );
-    builder.node("compactor", NodeKind::ExternalLeaf(Arc::new(compactor_node)));
+    builder.node(
+        "compactor",
+        NodeKind::ExternalLeaf(Arc::new(compactor_node)),
+    );
     // End 节点 — no-op 终端节点
     builder.node(
         "end",

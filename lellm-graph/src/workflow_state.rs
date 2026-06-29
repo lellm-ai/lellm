@@ -119,10 +119,8 @@ pub trait WorkflowState:
 /// # 职责边界
 ///
 /// - **State** = 数据
-/// - **BranchState** = Overlay
-/// - **ChangeLog** = Observability + Checkpoint
 /// - **MergeStrategy** = 并行语义
-/// - **Executor** = 调度
+/// - **ExecutionEngine** = 调度 + commit
 /// - **Node** = Mutation Producer
 ///
 /// # 示例

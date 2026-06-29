@@ -1,8 +1,8 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, Diagnostic,
-    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution,
-    NodeContext, NodeKind, SK_COUNT, SK_STEPS, SimpleExecutor, State, StateMutation, StateExt, StateKey, TaskNode,
-    TerminalError, TraceId,
+    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, NodeContext,
+    NodeKind, SK_COUNT, SK_STEPS, SimpleExecutor, State, StateExt, StateKey, StateMutation,
+    TaskNode, TerminalError, TraceId,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,7 +77,10 @@ async fn test_condition_branching() {
         let _ = g.node(
             "yes",
             NodeKind::Task(TaskNode::new("yes", |ctx: &mut NodeContext<'_>| {
-                ctx.record(StateMutation::Put("result".into(), serde_json::json!("yes")));
+                ctx.record(StateMutation::Put(
+                    "result".into(),
+                    serde_json::json!("yes"),
+                ));
                 Ok(())
             })),
         );
@@ -1278,7 +1281,10 @@ async fn test_statekey_in_graph_execution() {
                     serde_json::json!(count + 1),
                 ));
                 if count + 1 >= 3 {
-                    ctx.record(StateMutation::Put("result".into(), serde_json::json!("done")));
+                    ctx.record(StateMutation::Put(
+                        "result".into(),
+                        serde_json::json!("done"),
+                    ));
                 }
                 Ok(())
             })),
