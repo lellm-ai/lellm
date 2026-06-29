@@ -20,7 +20,7 @@ use crate::event::{BarrierDecision, BarrierDecisionMessage, GraphEvent};
 use crate::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::{SpanId, TraceId};
-use crate::node::{ExecutorOperation, FlowNode, NodeKind};
+use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
 use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -116,12 +116,16 @@ pub(crate) async fn run_execution_loop<S, M>(
                 n.execute(&mut ctx).await.is_ok()
             }
             NodeKind::Condition(n) => {
-                let mut ctx = engine.build_node_context();
-                n.execute(&mut ctx).await.is_ok()
+                let mut ctx = engine.build_leaf_context();
+                <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx)
+                    .await
+                    .is_ok()
             }
             NodeKind::Barrier(n) => {
-                let mut ctx = engine.build_node_context();
-                n.execute(&mut ctx).await.is_ok()
+                let mut ctx = engine.build_leaf_context();
+                <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx)
+                    .await
+                    .is_ok()
             }
             NodeKind::External(n) => {
                 let mut ctx = engine.build_node_context();

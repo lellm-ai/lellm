@@ -14,7 +14,7 @@ use crate::event::{GraphExecution, GraphHandle};
 use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::TraceId;
-use crate::node::{ExecutorOperation, FlowNode, NodeKind};
+use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
 // ─── SimpleExecutor 兼容层 ────────────────────────────────────────
@@ -82,12 +82,12 @@ impl SimpleExecutor {
                     n.execute(&mut ctx).await?;
                 }
                 NodeKind::Condition(n) => {
-                    let mut ctx = engine.build_node_context();
-                    n.execute(&mut ctx).await?;
+                    let mut ctx = engine.build_leaf_context();
+                    <ConditionNode as LeafNode>::execute(n, &mut ctx).await?;
                 }
                 NodeKind::Barrier(n) => {
-                    let mut ctx = engine.build_node_context();
-                    n.execute(&mut ctx).await?;
+                    let mut ctx = engine.build_leaf_context();
+                    <BarrierNode as LeafNode>::execute(n, &mut ctx).await?;
                 }
                 NodeKind::External(n) => {
                     let mut ctx = engine.build_node_context();

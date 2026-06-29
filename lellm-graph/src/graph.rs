@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use crate::error::{BuildError, BuildErrors, GraphDiagnostics, GraphError, TerminalError};
 use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph_analysis::{self, CycleAnalysis};
-use crate::node::{ExecutorOperation, FlowNode, NodeKind};
+use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -300,12 +300,12 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                     n.execute(&mut ctx).await?;
                 }
                 NodeKind::Condition(n) => {
-                    let mut ctx = exec_ctx.build_node_context();
-                    n.execute(&mut ctx).await?;
+                    let mut ctx = exec_ctx.build_leaf_context();
+                    <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx).await?;
                 }
                 NodeKind::Barrier(n) => {
-                    let mut ctx = exec_ctx.build_node_context();
-                    n.execute(&mut ctx).await?;
+                    let mut ctx = exec_ctx.build_leaf_context();
+                    <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx).await?;
                 }
                 NodeKind::External(n) => {
                     let mut ctx = exec_ctx.build_node_context();
