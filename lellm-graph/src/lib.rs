@@ -3,6 +3,7 @@
 //! 通用工作流引擎（类似 LangGraph / Temporal / Prefect）。
 
 pub mod barrier_node;
+pub mod barrier_wait;
 pub mod checkpoint;
 pub mod checkpoint_codec;
 pub mod error;

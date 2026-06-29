@@ -2,27 +2,91 @@
 //!
 //! 包含：
 //! - 执行循环（节点调度、路由、Mutation 消费）
-//! - Barrier 等待（决策、超时、取消）
-//! - Barrier 决策应用到 State
 //! - GraphComplete / GraphError 事件发射
+//! - Checkpoint Save Path（根据 CheckpointPolicy 触发）
+//!
+//! Barrier 等待与决策应用见 [`barrier_wait`] 模块。
+//! Checkpoint Restore 路径留给 v0.5。
 //!
 //! v0.4+: 泛型化 `run_execution_loop<S, M>`，支持任意 `WorkflowState`。
-//! `apply_barrier_decision` 仍为 `State` 专用（Barrier Modify 依赖 HashMap 语义）。
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::barrier_wait::{
+    BarrierOutcome, apply_barrier_decision_generic, wait_for_barrier_decision,
+};
+use crate::checkpoint::{Checkpoint, CheckpointPolicy, TraceId};
 use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierDecisionMessage, GraphEvent};
 use crate::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::graph::Graph;
-use crate::ids::{SpanId, TraceId};
+use crate::ids::SpanId;
 use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
-use crate::state::{ExecutionEntry, GraphResult, State};
+use crate::state::{ExecutionEntry, GraphResult};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
+
+// ─── CheckpointConfig ─────────────────────────────────────────
+
+/// Checkpoint 保存回调 — 传入 `run_execution_loop` 即可启用自动保存。
+///
+/// v0.4 只做 save path，restore 留给 v0.5。
+type CheckpointSaveFn<S> = Box<
+    dyn Fn(
+            Checkpoint<S>,
+            TraceId,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<(), crate::checkpoint::CheckpointStoreError>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
+/// Checkpoint 保存配置。
+pub struct CheckpointConfig<S: WorkflowState> {
+    save_fn: CheckpointSaveFn<S>,
+    policy: CheckpointPolicy,
+    graph_hash: u64,
+}
+
+impl<S: WorkflowState> CheckpointConfig<S> {
+    /// 创建 CheckpointConfig。
+    ///
+    /// `save_fn` 接收 `(Checkpoint<S>, TraceId)` 并异步保存。
+    /// 通常由调用方组合 `TypedCheckpointStore` + `SerdeCheckpointCodec` 构造。
+    pub fn new(
+        save_fn: impl Fn(
+            Checkpoint<S>,
+            TraceId,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<(), crate::checkpoint::CheckpointStoreError>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync
+        + 'static,
+        graph_hash: u64,
+    ) -> Self {
+        Self {
+            save_fn: Box::new(save_fn),
+            policy: CheckpointPolicy::default(),
+            graph_hash,
+        }
+    }
+
+    pub fn with_policy(mut self, policy: CheckpointPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+}
 
 /// 运行 Graph 的流式执行循环。
 ///
@@ -41,8 +105,9 @@ pub(crate) async fn run_execution_loop<S, M>(
     mut decision_rx: tokio::sync::mpsc::Receiver<BarrierDecisionMessage>,
     mut cancel_rx: tokio::sync::mpsc::Receiver<()>,
     cancel: CancellationToken,
+    checkpoint: Option<CheckpointConfig<S>>,
 ) where
-    S: WorkflowState + Clone + Send + Sync + 'static,
+    S: WorkflowState + Clone + Send + Sync + Serialize + 'static,
     M: MergeStrategy<S>,
 {
     let start_time = Instant::now();
@@ -51,7 +116,7 @@ pub(crate) async fn run_execution_loop<S, M>(
     let mut current = graph.start_node().to_string();
     let mut step: usize = 0;
     // 缓存通配决策 — 一次发送，多次匹配
-    let mut wildcard_cache: HashMap<String, BarrierDecision> = HashMap::new();
+    let mut wildcard_cache = std::collections::HashMap::new();
 
     let _ = event_tx.send(GraphEvent::GraphStart { trace_id }).await;
 
@@ -306,73 +371,20 @@ pub(crate) async fn run_execution_loop<S, M>(
                 }
             }
         }
-    }
-}
 
-/// Barrier 等待结果。
-pub(crate) enum BarrierOutcome {
-    /// 决策已收到
-    Decision(BarrierDecision),
-    /// 超时 — 应应用默认 Reject
-    TimedOut,
-    /// 取消
-    Cancelled,
-}
-
-/// 等待 Barrier 决策、取消或超时。
-pub(crate) async fn wait_for_barrier_decision(
-    decision_rx: &mut tokio::sync::mpsc::Receiver<BarrierDecisionMessage>,
-    cancel_rx: &mut tokio::sync::mpsc::Receiver<()>,
-    cancel: &CancellationToken,
-    barrier_id: &crate::event::BarrierId,
-    timeout: Option<std::time::Duration>,
-    wildcard_cache: &mut HashMap<String, BarrierDecision>,
-) -> BarrierOutcome {
-    // 先检查通配缓存
-    if let Some(decision) = wildcard_cache.get(&barrier_id.node_id) {
-        return BarrierOutcome::Decision(decision.clone());
-    }
-
-    if let Some(dur) = timeout {
-        tokio::select! {
-            biased;
-            _ = cancel_rx.recv() => {
-                cancel.cancel();
-                BarrierOutcome::Cancelled
+        // Checkpoint Save Path — 路由已解析，current 是下一个节点
+        if let Some(ref cp_config) = checkpoint {
+            let should_save = match cp_config.policy {
+                CheckpointPolicy::EveryNode => true,
+                CheckpointPolicy::BarrierOnly => false,
+                CheckpointPolicy::Manual => false,
+            };
+            if should_save {
+                let cp = Checkpoint::new(&current, engine.state().clone(), cp_config.graph_hash);
+                if let Err(e) = (cp_config.save_fn)(cp, trace_id).await {
+                    tracing::warn!(error = %e, "checkpoint save failed");
+                }
             }
-            _ = tokio::time::sleep(dur) => BarrierOutcome::TimedOut,
-            msg = decision_rx.recv() => match msg {
-                Some(BarrierDecisionMessage::Exact { barrier_id: bid, decision }) => {
-                    if bid == *barrier_id { BarrierOutcome::Decision(decision) } else { BarrierOutcome::Cancelled }
-                }
-                Some(BarrierDecisionMessage::Wildcard { node_id, decision }) => {
-                    if node_id == barrier_id.node_id {
-                        wildcard_cache.insert(node_id.clone(), decision.clone());
-                        BarrierOutcome::Decision(decision)
-                    } else { BarrierOutcome::Cancelled }
-                }
-                None => BarrierOutcome::Cancelled,
-            },
-        }
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel_rx.recv() => {
-                cancel.cancel();
-                BarrierOutcome::Cancelled
-            }
-            msg = decision_rx.recv() => match msg {
-                Some(BarrierDecisionMessage::Exact { barrier_id: bid, decision }) => {
-                    if bid == *barrier_id { BarrierOutcome::Decision(decision) } else { BarrierOutcome::Cancelled }
-                }
-                Some(BarrierDecisionMessage::Wildcard { node_id, decision }) => {
-                    if node_id == barrier_id.node_id {
-                        wildcard_cache.insert(node_id.clone(), decision.clone());
-                        BarrierOutcome::Decision(decision)
-                    } else { BarrierOutcome::Cancelled }
-                }
-                None => BarrierOutcome::Cancelled,
-            },
         }
     }
 }
@@ -394,63 +406,4 @@ pub(crate) fn send_complete<S: WorkflowState>(
         duration,
     };
     let _ = event_tx.try_send(GraphEvent::GraphComplete { result });
-}
-
-/// 应用 Barrier 决策到 State。返回 Reroute 目标（如果有）。
-///
-/// ⚠️ 仅对 `State`（HashMap）有效。Barrier `Modify` 决策依赖 key/value 语义。
-/// 泛型版本仅处理 `Approve`/`Reject`/`Reroute`，忽略 `Modify`。
-pub(crate) fn apply_barrier_decision_generic<S: WorkflowState>(
-    _state: &mut S,
-    _node_name: &str,
-    decision: &BarrierDecision,
-) -> Option<String> {
-    match decision {
-        BarrierDecision::Approve | BarrierDecision::Reject { .. } => {
-            // For generic state, Approve/Reject are no-ops on state.
-            // The decision is recorded in the event stream.
-            None
-        }
-        BarrierDecision::Modify { .. } => {
-            tracing::warn!(
-                "BarrierDecision::Modify is only supported for State (HashMap), ignoring"
-            );
-            None
-        }
-        BarrierDecision::Reroute { target } => Some(target.clone()),
-    }
-}
-
-/// 应用 Barrier 决策到 State。返回 Reroute 目标（如果有）。
-///
-/// `State` 专用版本，支持完整的 `Modify` 语义。
-///
-/// ⚠️ 内部执行循环使用泛型版本（不处理 Modify）。
-/// 此函数供需要完整 Barrier Modify 语义的外部调用者使用。
-#[allow(dead_code)]
-pub(crate) fn apply_barrier_decision(
-    state: &mut State,
-    node_name: &str,
-    decision: &BarrierDecision,
-) -> Option<String> {
-    let approve_key = format!("{node_name}.approved");
-    let reject_key = format!("{node_name}.reject_reason");
-
-    match decision {
-        BarrierDecision::Approve => {
-            state.insert(approve_key, serde_json::json!(true));
-            state.remove(&reject_key);
-            None
-        }
-        BarrierDecision::Reject { reason } => {
-            state.insert(reject_key, serde_json::json!(reason));
-            state.remove(&approve_key);
-            None
-        }
-        BarrierDecision::Modify { key, value } => {
-            state.insert(key.clone(), value.clone());
-            None
-        }
-        BarrierDecision::Reroute { target } => Some(target.clone()),
-    }
 }

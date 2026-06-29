@@ -166,6 +166,7 @@ impl SimpleExecutor {
             decision_rx,
             cancel_rx,
             cancel,
+            None,
         ));
 
         GraphExecution {
