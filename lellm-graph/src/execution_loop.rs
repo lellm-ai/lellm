@@ -21,7 +21,7 @@ use crate::event::{
 };
 use crate::graph::Graph;
 use crate::ids::{SpanId, TraceId};
-use crate::node::FlowNode;
+use crate::node::{ExecutorOperation, FlowNode, NodeKind};
 use crate::node_context::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::state::{ExecutionEntry, GraphResult, State};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
@@ -111,10 +111,29 @@ pub(crate) async fn run_execution_loop<S, M>(
             })
             .await;
 
-        // 执行节点
-        let node_ok = {
-            let mut ctx = engine.build_node_context();
-            node.execute(&mut ctx).await.is_ok()
+        // 执行节点 — 根据 NodeKind 分发
+        let node_ok = match node {
+            NodeKind::Task(n) => {
+                let mut ctx = engine.build_node_context();
+                n.execute(&mut ctx).await.is_ok()
+            }
+            NodeKind::Condition(n) => {
+                let mut ctx = engine.build_node_context();
+                n.execute(&mut ctx).await.is_ok()
+            }
+            NodeKind::Barrier(n) => {
+                let mut ctx = engine.build_node_context();
+                n.execute(&mut ctx).await.is_ok()
+            }
+            NodeKind::External(n) => {
+                let mut ctx = engine.build_node_context();
+                n.execute(&mut ctx).await.is_ok()
+            }
+            NodeKind::ExternalLeaf(n) => {
+                let mut ctx = engine.build_leaf_context();
+                n.execute(&mut ctx).await.is_ok()
+            }
+            NodeKind::Parallel(p) => p.execute(&mut engine).await.is_ok(),
         };
 
         if !node_ok {
@@ -154,9 +173,8 @@ pub(crate) async fn run_execution_loop<S, M>(
                 .await;
         }
 
-        // 消费 Mutation 缓冲 → apply 到 state
-        let mutations = engine.take_mutations();
-        engine.apply_batch(mutations);
+        // commit mutations (Unit of Work) — 对 Parallel 是空操作
+        engine.commit();
 
         let node_duration = node_start.elapsed();
         execution_log.push(ExecutionEntry {

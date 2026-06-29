@@ -24,11 +24,10 @@ use std::time::Instant;
 use crate::error::GraphError;
 use crate::event::FlowEvent;
 use crate::ids::SpanId;
-use crate::node::FlowNode;
-use crate::node_context::{ExecutionContext, ExecutorState, NodeContext};
+use crate::node::{ExecutorOperation, FlowNode};
+use crate::node_context::{ExecutionEngine, ExecutorState};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
-use tokio_util::sync::CancellationToken;
 
 /// 并行节点 — 同时执行多个分支，通过 MergeStrategy 合并 State。
 ///
@@ -199,26 +198,30 @@ impl<S: WorkflowState, M: MergeStrategy<S>> std::fmt::Debug for ParallelNode<S, 
 }
 
 #[async_trait::async_trait]
-impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
+impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ExecutorOperation<S>
     for ParallelNode<S, M>
 {
-    async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
+    async fn execute(&self, engine: &mut ExecutionEngine<S>) -> Result<(), GraphError> {
         let start_time = Instant::now();
         let span_id = SpanId::new();
         let branch_count = self.branches.len();
+        let display_name = self.display_name();
 
-        ctx.emit_flow_event(FlowEvent::ParallelStarted {
-            node_id: self.display_name(),
+        engine.emit_flow_event(FlowEvent::ParallelStarted {
+            node_id: display_name.clone(),
             branch_count,
             span_id,
         });
 
         // Clone typed state for each branch — each branch works on its own copy
-        let base_state = ctx.state().clone();
-        let display_name = self.display_name();
+        let base_state = engine.clone_state();
+
+        // Inherit parent's cancel token and stream (fan-out via Arc clone)
+        let parent_cancel = engine.cancel_token().clone();
+        let parent_stream = engine.stream_sink();
 
         // Clone branch data so async blocks own everything they need
-        let branches: Vec<(String, Arc<dyn FlowNode<S>>)> =
+        let branches: Vec<(String, Arc<dyn crate::node::FlowNode<S>>)> =
             self.branches.iter().map(|(n, nd)| (n.clone(), nd.clone())).collect();
 
         // Create a future for each branch — no spawn, no 'static required
@@ -226,16 +229,19 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
             .into_iter()
             .map(|(branch_name, node)| {
                 let state = base_state.clone();
+                let child_cancel = parent_cancel.child_token();
+                let child_stream = parent_stream.clone();
                 async move {
                     let branch_start = Instant::now();
 
-                    let mut exec_ctx = ExecutionContext::new(
+                    // Each branch gets its own ExecutionEngine (child engine)
+                    let mut child_engine = ExecutionEngine::new(
                         state,
-                        None,
-                        CancellationToken::new(),
+                        child_stream,
+                        child_cancel,
                     );
 
-                    let mut branch_ctx = exec_ctx.build_node_context();
+                    let mut branch_ctx = child_engine.build_node_context();
                     let ok = node.execute(&mut branch_ctx).await.is_ok();
                     drop(branch_ctx);
 
@@ -243,12 +249,12 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
                         return (branch_name, Err("branch execution failed".into()));
                     }
 
-                    let mutations = exec_ctx.take_mutations();
-                    exec_ctx.apply_batch(mutations);
+                    // Commit mutations to child engine
+                    child_engine.commit();
 
                     let duration = branch_start.elapsed();
 
-                    (branch_name, Ok((exec_ctx.into_state(), duration)))
+                    (branch_name, Ok((child_engine.into_state(), duration)))
                 }
             })
             .collect();
@@ -264,7 +270,7 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
         for (branch_name, result) in raw_results {
             match result {
                 Ok((state, branch_duration)) => {
-                    ctx.emit_flow_event(FlowEvent::BranchCompleted {
+                    engine.emit_flow_event(FlowEvent::BranchCompleted {
                         branch_name,
                         node_id: display_name.clone(),
                         span_id: SpanId::new(),
@@ -292,8 +298,6 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
                     ));
                 }
                 ParallelErrorStrategy::CollectAll => {
-                    // CollectAll: wait for all branches, merge successful ones,
-                    // but still return error if any branch failed.
                     if !branch_states.is_empty() {
                         for (name, reason) in &errors {
                             tracing::warn!(
@@ -322,10 +326,10 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
             )))
         })?;
 
-        // Replace parent state with merged result (sanctioned composite-node API)
-        ctx.replace_state(merged);
+        // Replace parent state with merged result
+        engine.replace_state(merged);
 
-        ctx.emit_flow_event(FlowEvent::ParallelCompleted {
+        engine.emit_flow_event(FlowEvent::ParallelCompleted {
             node_id: display_name,
             span_id,
             duration: start_time.elapsed(),

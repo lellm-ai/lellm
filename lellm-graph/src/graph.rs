@@ -15,7 +15,7 @@ use indexmap::IndexMap;
 
 use crate::error::{BuildError, BuildErrors, GraphDiagnostics, GraphError, TerminalError};
 use crate::graph_analysis::{self, CycleAnalysis};
-use crate::node::{FlowNode, NodeKind};
+use crate::node::{ExecutorOperation, FlowNode, NodeKind};
 use crate::node_context::{ExecutionEngine, ExecutorState, NextAction};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
@@ -283,16 +283,36 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                 GraphError::Terminal(TerminalError::NodeNotFound(current.clone()))
             })?;
 
-            // 构建节点能力视图并执行
-            {
-                let mut ctx = exec_ctx.build_node_context();
-                node.execute(&mut ctx).await?;
-                // ctx 在此作用域结束时 drop，释放所有借用
+            // 根据 NodeKind 分发执行
+            match node {
+                NodeKind::Task(n) => {
+                    let mut ctx = exec_ctx.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::Condition(n) => {
+                    let mut ctx = exec_ctx.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::Barrier(n) => {
+                    let mut ctx = exec_ctx.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::External(n) => {
+                    let mut ctx = exec_ctx.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::ExternalLeaf(n) => {
+                    let mut ctx = exec_ctx.build_leaf_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::Parallel(p) => {
+                    // ExecutorOperation 直接接收 &mut ExecutionEngine
+                    p.execute(exec_ctx).await?;
+                }
             }
 
-            // 消费 Mutation 缓冲 → apply 到 typed state（零序列化）
-            let mutations = exec_ctx.take_mutations();
-            exec_ctx.apply_batch(mutations);
+            // commit mutations (Unit of Work) — 对 Parallel 是空操作
+            exec_ctx.commit();
 
             // 消费 FlowEvent 缓冲（积累到 engine，执行结束后由调用者取用）
             let _flow_events = exec_ctx.take_flow_events();

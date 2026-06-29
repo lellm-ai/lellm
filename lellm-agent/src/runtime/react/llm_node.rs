@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 
 use lellm_core::{ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock};
-use lellm_graph::{FlowNode, GraphError, NodeContext, TerminalError};
+use lellm_graph::{GraphError, LeafContext, LeafNode, TerminalError};
 use lellm_provider::ProviderEvent;
 
 use super::super::config::{ToolUseConfig, build_request_inner_with_round};
@@ -78,8 +78,8 @@ impl LLMNode {
 }
 
 #[async_trait]
-impl FlowNode<AgentState> for LLMNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+impl LeafNode<AgentState> for LLMNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
         // 1. 获取 AgentState
         let state = ctx.state().clone();
 

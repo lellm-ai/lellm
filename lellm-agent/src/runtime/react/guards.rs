@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use lellm_core::ContentBlock;
-use lellm_graph::{FlowNode, GraphError, NodeContext};
+use lellm_graph::{GraphError, LeafContext, LeafNode};
 
 use super::super::config::{ToolUseConfig, empty_response};
 use super::super::context::{ContextBudget, ContextCompactor, estimate_reasoning_block};
@@ -81,8 +81,8 @@ impl PostLLMGuard {
 }
 
 #[async_trait]
-impl FlowNode<AgentState> for PostLLMGuard {
-    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+impl LeafNode<AgentState> for PostLLMGuard {
+    async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
         let state = ctx.state().clone();
 
         // 1. 已终止（前置节点已设置 stop_reason）→ End
@@ -175,8 +175,8 @@ impl CompactorNode {
 }
 
 #[async_trait]
-impl FlowNode<AgentState> for CompactorNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+impl LeafNode<AgentState> for CompactorNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
         let state = ctx.state();
 
         if !self.budget.should_compact(state.estimated_context_tokens()) {
@@ -224,8 +224,8 @@ impl BudgetCondition {
 }
 
 #[async_trait]
-impl FlowNode<AgentState> for BudgetCondition {
-    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+impl LeafNode<AgentState> for BudgetCondition {
+    async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
         let state = ctx.state();
 
         if self.budget.should_compact(state.estimated_context_tokens()) {

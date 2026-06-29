@@ -23,6 +23,8 @@
 //! 节点只能通过 `record()` 声明变更意图，无法直接修改 State。
 //! 这保证了 Mutation Log 是唯一写入口，使 Replay、Trace、Parallel Merge、Undo 全部成立。
 
+use std::sync::Arc;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::event::FlowEvent;
@@ -145,11 +147,17 @@ pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
 /// 执行引擎 — 拥有所有可变状态，替代 ExecutionContext。
 ///
 /// 不对节点开发者公开。节点通过 [`NodeContext`] 能力视图交互。
+///
+/// # 三层 API
+///
+/// - **Leaf Execution API**: `build_leaf_context()` — 构建只读 + emit 视图
+/// - **Composite Execution API**: `clone_state()`, `replace_state()`, `spawn_child()` — 执行控制
+/// - **Runtime Control Plane**: `stream`, `cancel`, `commit()` — 运行时管理
 pub struct ExecutionEngine<S: WorkflowState> {
     /// 类型化状态 — Engine 独占写权限
     state: S,
-    /// 数据面发射器 — 可选（阻塞模式 = None）
-    stream: Option<Box<dyn StreamSink>>,
+    /// 数据面发射器 — 可选（阻塞模式 = None）。使用 Arc 以便 Parallel 子分支 clone。
+    stream: Option<Arc<dyn StreamSink>>,
     /// 取消令牌 — 消费者断开时触发
     cancel: CancellationToken,
     /// 控制信号 — 节点写入，Executor 读取
@@ -166,7 +174,7 @@ impl<S: WorkflowState> ExecutionEngine<S> {
     /// 创建新的 ExecutionEngine。
     pub fn new(
         state: S,
-        stream: Option<Box<dyn StreamSink>>,
+        stream: Option<Arc<dyn StreamSink>>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -177,6 +185,22 @@ impl<S: WorkflowState> ExecutionEngine<S> {
             metadata: NodeMetadata::default(),
             mutations: Vec::new(),
             flow_events: Vec::new(),
+        }
+    }
+
+    /// 构建 LeafContext（纯借用视图）。
+    ///
+    /// 直接拆字段构造，不走 getter，以避免 borrow checker 误判。
+    /// LeafContext 只能读 State + emit Mutation，不能 replace_state。
+    pub fn build_leaf_context(&mut self) -> LeafContext<'_, S> {
+        LeafContext {
+            state: &self.state,
+            stream: self.stream.as_deref(),
+            cancel: &self.cancel,
+            control: &mut self.control,
+            metadata: &mut self.metadata,
+            mutations: &mut self.mutations,
+            flow_events: &mut self.flow_events,
         }
     }
 
@@ -217,12 +241,41 @@ impl<S: WorkflowState> ExecutionEngine<S> {
 
     /// 获取数据面发射器引用。
     pub fn stream(&self) -> Option<&dyn StreamSink> {
-        self.stream.as_ref().map(|s| s.as_ref())
+        self.stream.as_deref()
+    }
+
+    /// 获取取消令牌引用（Composite 节点用于 child_token）。
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel
+    }
+
+    /// 获取 stream 的 Arc 引用（Parallel 子分支 clone 用）。
+    pub fn stream_sink(&self) -> Option<Arc<dyn StreamSink>> {
+        self.stream.clone()
     }
 
     /// 取出最终状态。
     pub fn into_state(self) -> S {
         self.state
+    }
+
+    // ─── commit() — Unit of Work ──────────────────────────────
+
+    /// 提交当前节点产生的 mutations（Unit of Work）。
+    ///
+    /// 这是 commit 的统一入口：
+    /// 1. 将 mutations apply 到 state
+    /// 2. 清空 mutation buffer
+    ///
+    /// 未来扩展：
+    /// - Trace 记录
+    /// - Checkpoint 保存
+    /// - Metrics / EventBus
+    pub fn commit(&mut self) {
+        let mutations = std::mem::take(&mut self.mutations);
+        if !mutations.is_empty() {
+            self.state.apply_batch(mutations);
+        }
     }
 }
 
@@ -234,7 +287,7 @@ impl<S: WorkflowState> ExecutionView<S> for ExecutionEngine<S> {
     }
 
     fn emit(&self, chunk: StreamChunk) {
-        if let Some(stream) = self.stream.as_ref() {
+        if let Some(ref stream) = self.stream {
             stream.emit(chunk);
         }
     }
@@ -248,7 +301,7 @@ impl<S: WorkflowState> ExecutorState<S> for ExecutionEngine<S> {
     fn build_node_context(&mut self) -> NodeContext<'_, S> {
         NodeContext {
             state: &mut self.state,
-            stream: self.stream.as_ref().map(|s| s.as_ref()),
+            stream: self.stream.as_deref(),
             cancel: &self.cancel,
             control: &mut self.control,
             metadata: &mut self.metadata,
@@ -290,6 +343,113 @@ impl<S: WorkflowState> ExecutorState<S> for ExecutionEngine<S> {
 
 /// 向后兼容别名 — `ExecutionContext` → `ExecutionEngine`。
 pub type ExecutionContext<S> = ExecutionEngine<S>;
+
+// ─── LeafContext (Borrowed View) ──────────────────────────────
+
+/// Leaf 节点能力视图 — 纯借用，不拥有任何状态。
+///
+/// 设计原则：
+/// - **只能读 State**（`&S`，不可变引用）
+/// - **只能 emit Mutation**（借用在 Engine 的 mutations buffer）
+/// - **只能 emit Stream / FlowEvent**
+/// - **不能 replace_state / clone_state / fork / merge**
+///
+/// 与 NodeContext 的区别：
+/// - NodeContext 持有 `&mut S`（可变引用），Composite 节点可用 replace_state()
+/// - LeafContext 持有 `&S`（只读引用），编译期保证不能修改 State
+pub struct LeafContext<'a, S: WorkflowState = State> {
+    /// 类型化状态 — 只读引用
+    pub(crate) state: &'a S,
+    /// 数据面发射器 — 可选（阻塞模式 = None）
+    pub(crate) stream: Option<&'a dyn StreamSink>,
+    /// 取消令牌
+    pub(crate) cancel: &'a CancellationToken,
+    /// 控制信号 — 节点写入，Executor 读取
+    pub(crate) control: &'a mut ExecutionControl,
+    /// 节点元数据 — 节点写入
+    pub(crate) metadata: &'a mut NodeMetadata,
+    /// Mutation 缓冲 — 借用在 ExecutionEngine 的 buffer
+    pub(crate) mutations: &'a mut Vec<S::Mutation>,
+    /// FlowEvent 缓冲 — 借用在 ExecutionEngine 的 buffer
+    pub(crate) flow_events: &'a mut Vec<FlowEvent>,
+}
+
+impl<S: WorkflowState> LeafContext<'_, S> {
+    // ─── 读 State ─────────────────────────────────────────────
+
+    /// 获取类型化状态（只读）。
+    pub fn state(&self) -> &S {
+        self.state
+    }
+
+    // ─── 记录 Mutation ────────────────────────────────────────
+
+    /// 记录一个 Mutation（强类型状态变更命令）到缓冲。
+    ///
+    /// 这是 Leaf 节点变更状态的**唯一入口**。
+    pub fn record(&mut self, mutation: S::Mutation) {
+        self.mutations.push(mutation);
+    }
+
+    // ─── 数据面发射 ───────────────────────────────────────────
+
+    /// 发射数据面事件（无 stream 则静默丢弃）。
+    pub fn emit(&self, chunk: StreamChunk) {
+        if let Some(stream) = self.stream {
+            stream.emit(chunk);
+        }
+    }
+
+    /// 发射控制面 FlowEvent（缓冲到 ExecutionEngine，供 Executor 收集转发）。
+    pub fn emit_flow_event(&mut self, event: FlowEvent) {
+        self.flow_events.push(event);
+    }
+
+    // ─── 取消检查 ─────────────────────────────────────────────
+
+    /// 检查是否已取消。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// 获取取消令牌引用。
+    pub fn cancel_token(&self) -> &CancellationToken {
+        self.cancel
+    }
+
+    // ─── 控制信号 ─────────────────────────────────────────────
+
+    /// 跳转到指定节点。
+    pub fn goto(&mut self, target: impl Into<String>) {
+        self.control.goto(target);
+    }
+
+    /// 结束执行。
+    pub fn end(&mut self) {
+        self.control.end();
+    }
+
+    /// Barrier 挂起。
+    pub fn pause(
+        &mut self,
+        barrier_id: crate::event::BarrierId,
+        timeout: Option<std::time::Duration>,
+    ) {
+        self.control.pause(barrier_id, timeout);
+    }
+
+    // ─── 元数据 ───────────────────────────────────────────────
+
+    /// 设置 token 成本。
+    pub fn set_token_cost(&mut self, cost: f64) {
+        self.metadata.token_cost = cost;
+    }
+
+    /// 标记有副作用。
+    pub fn set_has_side_effects(&mut self) {
+        self.metadata.has_side_effects = true;
+    }
+}
 
 // ─── NodeContext ──────────────────────────────────────────────
 

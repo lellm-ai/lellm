@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 
 use lellm_core::ToolCall;
-use lellm_graph::{FlowNode, GraphError, NodeContext};
+use lellm_graph::{GraphError, LeafContext, LeafNode};
 
 use super::super::config::{ToolUseConfig, empty_response};
 use super::super::context::ContextBudget;
@@ -34,8 +34,8 @@ impl ToolNode {
 }
 
 #[async_trait]
-impl FlowNode<AgentState> for ToolNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_, AgentState>) -> Result<(), GraphError> {
+impl LeafNode<AgentState> for ToolNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
         use lellm_graph::{StreamChunk, ToolPhase};
 
         // 1. 获取工具调用

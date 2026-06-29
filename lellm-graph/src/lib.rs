@@ -71,7 +71,7 @@ pub use graph_analysis::CycleAnalysis;
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
     FlowNode, NodeKind, ParallelErrorStrategy, ParallelNode,
-    ParallelNodeBuilder, TaskFn, TaskNode,
+    ParallelNodeBuilder, TaskFn, TaskNode, ExecutorOperation, LeafNode,
 };
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
@@ -80,12 +80,12 @@ pub use test_executor::SimpleExecutor;
 // ─── v04: NodeContext + Stream ───────────────────────────────
 pub use node_context::{
     ExecutionEngine, ExecutionContext, ExecutionControl, ExecutionSignal, ExecutorState,
-    ExecutionView, NextAction, NodeContext, NodeMetadata,
+    ExecutionView, NextAction, NodeContext, NodeMetadata, LeafContext,
 };
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::{StreamChunk, ToolPhase};
 pub use stream_emitter::{
-    BufferedSink, ChannelSink, NoopSink, StreamSink, noop_sink, sink_arc, spawn_forward_task,
+    BufferedSink, ChannelSink, NoopSink, StreamHub, StreamSink, noop_sink, sink_arc, spawn_forward_task,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use workflow_state::{LastWriteWins, MergeStrategy, WorkflowError, WorkflowState};

@@ -263,7 +263,7 @@ impl ToolUseLoop {
 
             // 4. 创建 AgentEventSink (StreamChunk → AgentEvent 桥接)
             let event_sink = super::event_bridge::AgentEventSink::new(tx.clone());
-            let sink: Box<dyn lellm_graph::StreamSink> = Box::new(event_sink);
+            let sink: std::sync::Arc<dyn lellm_graph::StreamSink> = std::sync::Arc::new(event_sink);
 
             // 5. 创建 ExecutionContext 并调用 run_inline
             let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(

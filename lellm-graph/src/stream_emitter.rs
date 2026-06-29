@@ -113,6 +113,68 @@ impl StreamSink for NoopSink {
     }
 }
 
+// ─── StreamHub (Fan-out Bus) ─────────────────────────────────
+
+/// 扇出总线 — 将每个 emit 广播到所有注册的 sinks。
+///
+/// ParallelNode 的子分支 clone 父级的 `Arc<StreamHub>`，
+/// 子分支的 emit 自动汇聚到同一个消费者集合。
+///
+/// ```text
+/// ExecutionEngine
+///     │
+///     ├── StreamHub (fan-out bus)
+///     │     ├── CLI sink
+///     │     ├── Trace sink
+///     │     └── AgentEvent sink
+///     │
+///     └── Parallel 子分支 clone Arc<StreamHub>
+///           ├── Branch A → emit → → StreamHub → all sinks
+///           └── Branch B → emit → → StreamHub → all sinks
+/// ```
+/// StreamSink 不要求 Debug，故 StreamHub 也不 derive Debug。
+pub struct StreamHub {
+    sinks: Vec<Arc<dyn StreamSink>>,
+}
+
+impl StreamHub {
+    pub fn new() -> Self {
+        Self { sinks: Vec::new() }
+    }
+
+    /// 注册一个 sink。
+    pub fn add_sink(&mut self, sink: Arc<dyn StreamSink>) {
+        self.sinks.push(sink);
+    }
+
+    /// 从单个 sink 创建 StreamHub（便捷构造）。
+    pub fn from_sink(sink: Arc<dyn StreamSink>) -> Self {
+        Self { sinks: vec![sink] }
+    }
+
+    /// 是否为空（无 sink）。
+    pub fn is_empty(&self) -> bool {
+        self.sinks.is_empty()
+    }
+}
+
+impl StreamSink for StreamHub {
+    fn emit(&self, chunk: StreamChunk) {
+        for sink in &self.sinks {
+            sink.emit(chunk.clone());
+        }
+    }
+}
+
+impl Clone for StreamHub {
+    /// Clone 只克隆 sink 列表的 Arc 引用（浅拷贝）。
+    fn clone(&self) -> Self {
+        Self {
+            sinks: self.sinks.clone(),
+        }
+    }
+}
+
 // ─── Arc<dyn StreamSink> helpers ──────────────────────────────
 
 /// 创建 `Arc<dyn StreamSink>` 的便捷函数。

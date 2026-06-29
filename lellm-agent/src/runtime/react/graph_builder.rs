@@ -38,24 +38,24 @@ pub fn build_react_graph(
     builder.start("budget_check");
     builder.end("end");
 
-    // 节点注册
-    builder.node("llm", NodeKind::External(Arc::new(llm_node)));
-    builder.node("tool", NodeKind::External(Arc::new(tool_node)));
+    // 节点注册 — 全部迁移到 ExternalLeaf（LeafNode + LeafContext）
+    builder.node("llm", NodeKind::ExternalLeaf(Arc::new(llm_node)));
+    builder.node("tool", NodeKind::ExternalLeaf(Arc::new(tool_node)));
     builder.node(
         "post_llm_check",
-        NodeKind::External(Arc::new(PostLLMGuard::new(
+        NodeKind::ExternalLeaf(Arc::new(PostLLMGuard::new(
             format!("{}_post_llm", llm_name),
             stop_config,
         ))),
     );
     builder.node(
         "budget_check",
-        NodeKind::External(Arc::new(BudgetCondition::new(
+        NodeKind::ExternalLeaf(Arc::new(BudgetCondition::new(
             format!("{}_budget", llm_name),
             budget,
         ))),
     );
-    builder.node("compactor", NodeKind::External(Arc::new(compactor_node)));
+    builder.node("compactor", NodeKind::ExternalLeaf(Arc::new(compactor_node)));
     // End 节点 — no-op 终端节点
     builder.node(
         "end",

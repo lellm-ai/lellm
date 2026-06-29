@@ -15,7 +15,7 @@ use crate::event::{
 };
 use crate::graph::Graph;
 use crate::ids::TraceId;
-use crate::node::FlowNode;
+use crate::node::{ExecutorOperation, FlowNode, NodeKind};
 use crate::node_context::{ExecutionEngine, ExecutorState, NextAction};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
@@ -77,8 +77,33 @@ impl SimpleExecutor {
             let node_name = current.clone();
             let node_start = Instant::now();
 
-            let mut ctx = engine.build_node_context();
-            node.execute(&mut ctx).await?;
+// 根据 NodeKind 分发执行
+            match node {
+                NodeKind::Task(n) => {
+                    let mut ctx = engine.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::Condition(n) => {
+                    let mut ctx = engine.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::Barrier(n) => {
+                    let mut ctx = engine.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::External(n) => {
+                    let mut ctx = engine.build_node_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::ExternalLeaf(n) => {
+                    let mut ctx = engine.build_leaf_context();
+                    n.execute(&mut ctx).await?;
+                }
+                NodeKind::Parallel(p) => {
+                    // ExecutorOperation 直接接收 &mut ExecutionEngine
+                    p.execute(&mut engine).await?;
+                }
+            }
 
             let node_duration = node_start.elapsed();
 
@@ -91,9 +116,9 @@ impl SimpleExecutor {
                 error: None,
             });
 
-            // 消费 Mutation 缓冲 → apply 到 state
-            let mutations = engine.take_mutations();
-            engine.apply_batch(mutations);
+            // commit mutations (Unit of Work) — 对 Parallel 是空操作
+            // （replace_state 已经直接替换了状态，mutation buffer 为空）
+            engine.commit();
 
             // 提取控制信号
             let (next_action, _signal) = engine.take_control();
