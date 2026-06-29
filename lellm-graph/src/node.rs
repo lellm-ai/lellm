@@ -208,6 +208,21 @@ impl<S: WorkflowState> ConditionNodeBuilder<S> {
     }
 }
 
+/// ConditionNode 实现 LeafNode（推荐路径 — 只读 state + goto）。
+#[async_trait]
+impl<S: WorkflowState> LeafNode<S> for ConditionNode<S> {
+    async fn execute(&self, ctx: &mut LeafContext<'_, S>) -> Result<(), GraphError> {
+        let state = ctx.state();
+        for (target, condition) in &self.branches {
+            if condition(state) {
+                ctx.goto(target);
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// ConditionNode 实现 FlowNode（向后兼容 — 使用 NodeContext）。
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for ConditionNode<S> {

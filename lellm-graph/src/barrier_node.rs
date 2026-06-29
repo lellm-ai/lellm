@@ -13,8 +13,8 @@ use async_trait::async_trait;
 
 use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId};
-use crate::node::FlowNode;
-use crate::node_context::NodeContext;
+use crate::node::{FlowNode, LeafNode};
+use crate::node_context::{LeafContext, NodeContext};
 use crate::state::{State, StateMutation};
 use crate::workflow_state::WorkflowState;
 
@@ -99,6 +99,17 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
                 ctx.goto(&target);
             }
         }
+    }
+}
+
+/// BarrierNode 实现 LeafNode（推荐路径 — 只读 state + pause）。
+#[async_trait]
+impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
+    async fn execute(&self, ctx: &mut LeafContext<'_, S>) -> Result<(), GraphError> {
+        let barrier_id = BarrierId::new(&self.name, 0);
+        ctx.pause(barrier_id, self.timeout);
+        ctx.set_has_side_effects();
+        Ok(())
     }
 }
 
