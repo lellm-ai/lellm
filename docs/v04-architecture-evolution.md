@@ -16,6 +16,7 @@
 - [七补充、Mutation Only 架构决策（2026-06-21 Grill Session）](#七补充mutation-only-架构决策2026-06-21-grill-session-确认)
 - [八、架构演进路线图](#八架构演进路线图)
 - [九、关键设计决策](#九关键设计决策)
+- [十、ADR 归档（2026-06-25 ~ 2026-06-29）](#十adr-归档2026-06-25--2026-06-29)
 
 ---
 
@@ -860,3 +861,207 @@ for (step, node_id, mutation) in checkpoint.effect_log {
 | Graph 执行模式 | run_inline() + Executor::execute() | 区分内联与完整执行 |
 | v0.4 TypedState 时机 | v0.4+ 专门 grill | 范围大，需要独立规划 |
 | Mutation vs Delta | v0.4+ 用 Mutation 取代 Delta | 事件溯源 > 状态补丁 |
+
+---
+
+## 十、ADR 归档（2026-06-25 ~ 2026-06-29）
+
+> 本节汇总了 v0.4 实施过程中产生的 4 份架构决策记录（ADR），原文档已合并至此。
+
+---
+
+### ADR-0001：StreamSink 抽象 — Producer Push 模型
+
+**日期：** 2026-06-25 | **状态：** Accepted
+
+#### 上下文
+
+Graph 层需要支持流式执行。初始设计让 `Graph::execute_stream()` 返回 `mpsc::Receiver<T>`，将 Tokio channel 泄漏到 Graph 层。
+
+#### 决策
+
+**StreamSink Trait** — 同步 `emit`，Producer Push，Graph 不感知传输机制：
+
+```rust
+pub trait StreamSink: Send + Sync {
+    fn emit(&self, chunk: StreamChunk);
+}
+```
+
+**BufferedSink + Forward Task** — Node → BufferedSink（O(1)）→ Forward Task（异步消费）→ Consumer（backpressure 在此层处理）。
+
+**取消 = 消费者离开**（不是背压）。消费者断开 → receiver drop → forward task exit → CancellationToken.cancel() → 所有 Node 停止。
+
+**Step Boundary Commit** — Token 流式只走 Stream（emit），不写 State。流结束 → 一次性 `emit_mutation(AppendMessage(...))`。
+
+**StreamChunk — Execution View**（展示内容，不是 Message）：
+
+```rust
+pub enum StreamChunk {
+    TextDelta(String),
+    ThinkingDelta(String),
+    ToolLifecycle { phase: ToolPhase, call_id: String, tool_name: String },
+    ToolOutput { call_id: String, tool_name: String, content: String, is_error: bool },
+}
+```
+
+State Plane（`Message::ToolResult`，完整）与 Data Plane（`ToolOutput`，展示用）永不互相引用。
+
+**Tool 并发 emit 协议** — Start 保证顺序（A, B, C），End 允许乱序（按实际完成顺序），通过 call_id 关联。
+
+**Graph API 统一** — `run_inline_stream(state, sink)` 统一流式与阻塞。sink=None 等价于阻塞。
+
+**Agent API 统一** — `ToolUseLoop::execute_stream()` 统一流式与阻塞。提供 `ChannelSink` 包装。
+
+#### 后果
+
+正面：Graph 层完全解耦传输机制；Node 执行成本固定；取消传播立即主动；StreamChunk 成为一等协议。
+负面：BufferedSink 在极端情况下可能占用内存；`execute()` 删除是破坏性变更。
+
+---
+
+### ADR-0002：统一执行路径 + LlmInvoker 分层
+
+**日期：** 2026-06-28 | **状态：** Accepted
+
+#### 上下文
+
+`ToolUseLoop` 存在两条执行路径：`execute()` 走 Graph + react graph（~60 行），`execute_stream()` 手写 while 循环（~250 行）绕过 Graph。每次修改 Agent 循环逻辑必须在两个地方应用。
+
+同时，`lellm-graph/src/hook.rs`（229 行）是死代码——executor 从未调用，且与 agent 层 `AgentHook` 同名冲突。
+
+#### 决策
+
+**1. 删除 Graph 层 hook.rs** — 消除 `AgentHook` 同名冲突，修复 graph → agent 概念泄漏。
+
+**2. StreamSink 是唯一的消费抽象** — 没有 `StreamAdapter`、没有 `on_finish()`（Rust 的 `Drop` + channel close 就是 finish）。
+
+**3. 统一执行路径**：
+
+```
+AgentRuntime → Graph::run_inline_stream(state, sink) → StreamSink → Agent API
+```
+
+`execute_stream()` 不再包含任何业务逻辑，只负责创建 channel + sink + 调用 graph。
+
+**4. LlmInvoker 分层**：
+
+```
+ReAct Graph → LLMNode → LlmInvoker → LlmProvider → HTTP Client
+```
+
+LlmInvoker 负责 retry、fallback、circuit breaker、stream state machine、metrics。
+LlmProvider 保持 stateless protocol adapter。
+不做 ToolInvoker — 工具不需要 Invoker 层。
+
+**Stream State Machine** 决定 retry 边界：`NotStarted`（retry OK）→ `HeadersReceived`（retry OK）→ `FirstChunkSent`（abort）→ `Finished`。
+
+#### 实施顺序
+
+1. 创建 `AgentEventSink`（实现 `StreamSink`）
+2. 创建 `LlmInvoker`（包装 `InvocationPlan`）
+3. 改造 `LLMNode`（接收 `Arc<LlmInvoker>`）
+4. 改造 `execute_stream()`（删掉手写 while 循环）
+5. 删除 `iteration.rs` 中流式专用代码
+6. 清理被 typed state 替代的 State 辅助函数
+
+#### 后果
+
+正面：Agent 循环逻辑集中在 react.rs；一处修 bug 两条路径受益；删除 ~500 行重复/死代码。
+负面：AgentEventSink 需要完整覆盖转换逻辑；LlmInvoker 是新组件需要充分测试。
+
+---
+
+### ADR-0003：LeafContext / ExecutorOperation 执行模型分裂
+
+**日期：** 2026-06-29 | **状态：** Accepted
+
+#### 背景
+
+v0.4 引入了 `ExecutionEngine` + `ExecutorState` 统一执行模型。在此基础上，进一步细化节点的能力边界：Leaf 节点只需读 State + emit Mutation，Composite 节点需要 clone/merge/replace_state 等完整能力。
+
+#### 决策
+
+**1. LeafContext — 纯借用视图**：`state` 字段为 `&S`（只读），不提供 `replace_state()`，编译期保证 Leaf 节点无法修改 State。
+
+**2. LeafNode trait** — 接收 `LeafContext`（只读），语义上表达"此节点只做声明式业务逻辑"。
+
+**3. NodeKind 新增 ExternalLeaf 变体** — 三个执行循环统一 match dispatch：`External` → `build_node_context()` → `FlowNode`；`ExternalLeaf` → `build_leaf_context()` → `LeafNode`。
+
+**4. ExecutorOperation 保留给 Composite 节点** — 直接接收 `&mut ExecutionEngine`，拥有完整能力（clone/merge/replace_state/spawn_child）。
+
+#### 职责边界
+
+```
+Graph (AST) → NodeKind (不实现任何执行 trait)
+
+ExecutionEngine (runtime owner)
+    ├── dispatch → match NodeKind
+    ├── build_leaf_context() → LeafNode
+    ├── build_node_context() → FlowNode (backward compat)
+    └── pass &mut self → ExecutorOperation
+
+LeafNode → 只能 emit Mutation (LLM, Tool, Guard, Compactor)
+ExecutorOperation → 可以操纵 Executor (Parallel, Retry, Loop, SubGraph)
+```
+
+#### 已迁移节点
+
+LLMNode, ToolNode, PostLLMGuard, CompactorNode, BudgetCondition — 全部从 `FlowNode` 迁移为 `LeafNode`。
+
+#### 影响
+
+正面：编译期安全（Leaf 无法修改 State）；意图清晰；零运行时开销；渐进式迁移。
+负面：API 表面积增加；需要理解 Leaf vs Composite vs ExecutorOperation 的区别。
+
+---
+
+### v0.4 执行模型重构 — 设计决策总览
+
+**日期：** 2026-06-29 | **状态：** Phase A/B/D/E 完成，Phase C 部分完成
+
+#### 决策总览
+
+| # | 决策 | 状态 | 说明 |
+|---|------|------|------|
+| 1 | 删除 GraphExecutor | ✅ | executor.rs 已删除 |
+| 2 | 删除 BranchState | ✅ | branch_state.rs 已删除 |
+| 3 | 删除 delta.rs + ReducerRegistry | ✅ | delta.rs 已删除 |
+| 4 | Checkpoint 分层架构 | ✅ | 5 层解耦架构，9 个新测试 |
+| 5 | ExecutionEngine + ExecutorState | ✅ | ExecutionContext 为 type alias |
+| 6 | Executable 统一抽象 | ⚠️ | `emit_flow_event` 已加入；`Executable` trait 因 dyn compatibility 限制放弃 |
+| 7 | NodeContext 瘦身 | ✅ | 已删除 branch 字段 |
+| 8 | 测试迁移 | ✅ | SimpleExecutor 兼容层 + execution_loop 独立模块 |
+
+**总删除量：** ~1700+ 行（executor.rs ~1170 + branch_state.rs ~180 + delta.rs ~340）
+
+#### Checkpoint 分层架构
+
+```
+Checkpoint<S> → CheckpointCodec<S> → CheckpointBlob → BlobCheckpointStore → InMemoryBlobStore
+```
+
+新增类型：`CheckpointBlob`、`CheckpointCodec<S>`、`SerdeCheckpointCodec<S>`、`BlobCheckpointStore`、`InMemoryBlobStore`、`TypedCheckpointStore`、`CheckpointStoreError::Serialization`。
+
+#### Executable 统一抽象 — 部分放弃
+
+`Executable<S>` + `dyn ExecutorState<S>` 组合不可行，因为：
+1. `build_node_context()` 返回生命周期绑定的引用 — Rust 不允许 dyn trait 方法返回与自身生命周期绑定的引用
+2. `apply_batch()` 使用 `impl IntoIterator` — 泛型方法破坏 dyn compatibility
+
+**结论：** 保持 `FlowNode<S>` 作为主要 trait，`ExecutorState<S>` 用于静态分发（Composite 节点内部使用）。
+
+#### 已知问题
+
+1. `state_mut_ref()` Hack — ParallelNode 合并子分支时需要修改父 state，已替换为 `replace_state()`
+2. `GraphResult` 硬编码 `State` — v0.5 重构时泛型化
+3. `BarrierNode` StateMutation 约束 — v0.5 待决策
+4. `FlowEvent::Custom` Box<dyn Any> — 低优先级，未来需要持久化时重新设计
+
+#### 后续清理项
+
+- [ ] 迁移 `BarrierNode` → `LeafNode`
+- [ ] 迁移 `AgentFlowNode` → `LeafNode`
+- [ ] 迁移 `TaskNode` → `LeafNode`
+- [ ] 迁移 `ConditionNode` → `LeafNode`
+- [ ] 考虑将 `FlowNode` 标记为 `#[deprecated]`
