@@ -1,12 +1,21 @@
 //! Checkpoint — 执行恢复的唯一数据源。
 //!
-//! Checkpoint 的唯一职责：**恢复（Restore）**。
-//!
-//! - 不含 `parent_trace_id` — 与 Trace 通过存储层组织关联，非结构体关联
-//! - 不含 `effect_log` — Mutation 审计走 `ExecutionTrace`
-//! - 不含 `snapshot` — 增量快照是存储层优化，不应泄漏到 Checkpoint 结构
-//!
-//! 给我一个 Checkpoint 文件，我就能恢复。不需要任何其他东西。
+//! 分层架构：
+//! ```text
+//! Checkpoint<S>           ← Workflow 层，强类型，纯 Snapshot 模型
+//!        │
+//!        ▼ serialize/deserialize
+//! CheckpointCodec<S>      ← 序列化层，对象 ↔ 二进制表示
+//!        │
+//!        ▼
+//! CheckpointBlob           ← 跨 Codec 的统一载体
+//!        │
+//!        ▼ save/load
+//! BlobCheckpointStore      ← 存储层 SPI，bytes in / bytes out
+//!        │
+//!        ▼
+//! Memory / File / S3 / SQLite  ← 后端实现
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +75,28 @@ impl<S: WorkflowState> Checkpoint<S> {
     }
 }
 
+// ─── CheckpointBlob ────────────────────────────────────────────
+
+/// 跨 Codec 的统一载体 — 存储层操作的对象。
+///
+/// 将序列化后的二进制数据与元数据打包，供 CheckpointStore 使用。
+/// 存储层无需知道 State 类型或序列化格式。
+#[derive(Debug, Clone)]
+pub struct CheckpointBlob {
+    /// Checkpoint 唯一标识
+    pub id: CheckpointId,
+    /// 序列化后的二进制数据（格式由 Codec 决定）
+    pub data: Vec<u8>,
+    /// 创建时间
+    pub created_at: std::time::SystemTime,
+}
+
+impl CheckpointBlob {
+    pub fn new(id: CheckpointId, data: Vec<u8>, created_at: std::time::SystemTime) -> Self {
+        Self { id, data, created_at }
+    }
+}
+
 // ─── CheckpointStoreError ──────────────────────────────────────
 
 /// Checkpoint 存储操作错误。
@@ -77,30 +108,17 @@ pub enum CheckpointStoreError {
     NotFound(CheckpointId),
     #[error("corrupted checkpoint: {0}")]
     Corrupted(String),
+    #[error("serialization error: {0}")]
+    Serialization(String),
 }
 
-// ─── CheckpointStore trait ─────────────────────────────────────
+// ─── TraceId Re-export ─────────────────────────────────────────
 
-/// Checkpoint 存储后端 SPI。
+/// 从 ids 模块重导出 TraceId。
 ///
-/// 与类型解耦 — 存储层序列化/反序列化 `S`。
-#[async_trait::async_trait]
-pub trait CheckpointStore: Send + Sync {
-    /// 保存 Checkpoint 并关联 trace_id。
-    async fn save_with_trace(
-        &self,
-        trace_id: &TraceId,
-        checkpoint: &Checkpoint,
-    ) -> Result<(), CheckpointStoreError>;
-    async fn load(&self, id: &CheckpointId) -> Result<Option<Checkpoint>, CheckpointStoreError>;
-    async fn load_latest(
-        &self,
-        trace_id: &TraceId,
-    ) -> Result<Option<Checkpoint>, CheckpointStoreError>;
-    async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError>;
-    async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError>;
-    async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError>;
-}
+/// 注意：Checkpoint 结构体**不包含** trace_id。
+/// 关联关系由存储层组织（如同一目录下的文件）。
+pub use crate::ids::TraceId;
 
 // ─── CheckpointPolicy ──────────────────────────────────────────
 
@@ -115,11 +133,3 @@ pub enum CheckpointPolicy {
     /// 手动控制 — 调用方显式触发
     Manual,
 }
-
-// ─── TraceId Re-export ─────────────────────────────────────────
-
-/// 从 ids 模块重导出 TraceId，供 CheckpointStore trait 使用。
-///
-/// 注意：Checkpoint 结构体**不包含** trace_id。
-/// 关联关系由存储层组织（如同一目录下的文件）。
-pub use crate::ids::TraceId;

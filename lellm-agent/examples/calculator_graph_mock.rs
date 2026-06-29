@@ -24,7 +24,7 @@ use lellm_core::{
 };
 use lellm_derive::Tool;
 use lellm_graph::{
-    GraphBuilder, GraphExecutor, NodeContext, NodeKind, State, StateMutation, TaskNode,
+    ExecutionContext, GraphBuilder, NodeContext, NodeKind, State, StateMutation, TaskNode,
 };
 use lellm_provider::{ProviderEvent, ProviderStream};
 use std::sync::{Arc, Mutex};
@@ -230,25 +230,25 @@ async fn main() {
     println!("=== Calculator Graph (Mock) ===\n");
     println!("节点: {:?}", graph.node_names());
 
-    let result = GraphExecutor::default()
-        .execute(Arc::new(graph), State::new())
+    let start = std::time::Instant::now();
+
+    let mut engine = ExecutionContext::<State>::new(
+        State::new(),
+        None,
+        lellm_graph::CancellationToken::new(),
+    );
+    graph
+        .run_inline(&mut engine, 100)
         .await
         .expect("执行失败");
 
-    println!("\n=== 执行日志 ===");
-    for (i, e) in result.execution_log.iter().enumerate() {
-        let icon = if e.success { "✅" } else { "❌" };
-        println!(
-            "  [{}] {} {icon} {}ms",
-            i + 1,
-            e.node_name,
-            e.elapsed().as_millis()
-        );
-    }
-    println!("总耗时: {}ms", result.duration.as_millis());
+    let duration = start.elapsed();
+
+    println!("\n=== 执行完成 ===");
+    println!("总耗时: {}ms", duration.as_millis());
 
     println!("\n=== 最终状态 ===");
-    for (k, v) in result.state.iter() {
+    for (k, v) in engine.state().iter() {
         println!("  {k}: {v}");
     }
 }

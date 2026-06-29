@@ -1,6 +1,13 @@
 //! Human-in-the-loop 审批节点。
 //!
 //! v0.4+: 泛型化 `BarrierNode<S: WorkflowState>`。
+//!
+//! # 限制
+//!
+//! `BarrierNode` 要求 `S: WorkflowState<Mutation = StateMutation>`，
+//! 因为 `apply_decision_to_ctx()` 使用 key/value 操作（`Put`/`Delete`）。
+//! 对于 `AgentState` 等类型化状态，请实现自定义 Barrier 节点
+//! 或使用 `BarrierDecision` 枚举配合自定义逻辑。
 
 use async_trait::async_trait;
 

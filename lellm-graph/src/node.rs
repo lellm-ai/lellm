@@ -1,7 +1,6 @@
 //! 节点核心类型与模块。
 //!
 //! - `FlowNode<S>` trait — trait-based 节点，Graph 不知道具体节点类型
-//! - `NextAction` 枚举（v04 统一）
 //! - `NodeKind<S>` 节点类型枚举（Task, Condition, Barrier, Parallel, External）
 //! - `TaskNode<S>`, `ConditionNode<S>`
 //!
@@ -11,9 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::{GraphError, ObservedError};
-use crate::event::BarrierId;
-use crate::ids::SpanId;
+use crate::error::GraphError;
 use crate::node_context::NodeContext;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
@@ -22,103 +19,8 @@ use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
 pub use crate::parallel_node::{
-    ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder, ParallelNodeBuilderWithMerge,
+    ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder,
 };
-
-// ─── 核心类型 ──────────────────────────────────────────────────
-
-/// 节点执行后的下一步。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NextStep {
-    /// 跳转到指定节点
-    Goto(String),
-    /// 跳转到下一个节点（按拓扑顺序）
-    GoToNext,
-    /// 结束执行
-    End,
-}
-
-/// 节点执行输出 — 修改意图 + 下一步。
-///
-/// @deprecated v0.4+ 使用 NodeContext 替代。保留向后兼容。
-#[derive(Debug)]
-pub struct NodeOutput {
-    /// 状态增量（节点对 State 的修改意图）
-    pub deltas: Vec<crate::delta::StateDelta>,
-    /// 下一步路由
-    pub next: NextStep,
-    /// 节点元数据（可选）
-    pub metadata: Option<crate::node_context::NodeMetadata>,
-}
-
-impl NodeOutput {
-    pub fn new(next: NextStep) -> Self {
-        Self {
-            deltas: Vec::new(),
-            next,
-            metadata: None,
-        }
-    }
-
-    pub fn with_delta(mut self, delta: crate::delta::StateDelta) -> Self {
-        self.deltas.push(delta);
-        self
-    }
-
-    pub fn with_deltas(mut self, deltas: Vec<crate::delta::StateDelta>) -> Self {
-        self.deltas.extend(deltas);
-        self
-    }
-
-    pub fn with_metadata(mut self, metadata: crate::node_context::NodeMetadata) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    pub fn with_token_cost(mut self, cost: f64) -> Self {
-        self.metadata
-            .get_or_insert_with(Default::default)
-            .token_cost = cost;
-        self
-    }
-
-    pub fn with_side_effects(mut self) -> Self {
-        self.metadata
-            .get_or_insert_with(Default::default)
-            .has_side_effects = true;
-        self
-    }
-}
-
-/// 节点执行元数据。
-pub use crate::node_context::NodeMetadata;
-
-/// 节点流式执行结果。
-///
-/// @deprecated v0.4+ 使用 NodeContext 替代。保留向后兼容。
-#[derive(Debug)]
-pub enum StreamNodeResult {
-    Continue {
-        deltas: Vec<crate::delta::StateDelta>,
-        next: NextStep,
-        span_id: SpanId,
-        observed: Option<ObservedError>,
-        metadata: Option<NodeMetadata>,
-    },
-    Pause {
-        deltas: Vec<crate::delta::StateDelta>,
-        barrier_id: BarrierId,
-        node_name: String,
-        span_id: SpanId,
-        timeout: Option<std::time::Duration>,
-        default_action: BarrierDefaultAction,
-    },
-    Fallback {
-        deltas: Vec<crate::delta::StateDelta>,
-        reason: String,
-        node_name: String,
-    },
-}
 
 // ─── v04 FlowNode Trait ──────────────────────────────────────
 
@@ -127,7 +29,6 @@ pub enum StreamNodeResult {
 /// 统一原则 — 节点不返回业务数据，只返回 `Result<(), GraphError>`：
 /// - State      → ctx.state()（只读）
 /// - Mutation   → ctx.record()（唯一写入口）
-/// - 组合节点   → ctx.replace_state() / ctx.fork_branch()
 /// - Stream     → ctx.emit()
 /// - Metadata   → ctx.set_token_cost()
 /// - Control    → ctx.goto() / ctx.end() / ctx.pause()
@@ -140,6 +41,8 @@ pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
     /// 执行节点逻辑。
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError>;
 }
+
+// ─── NodeKind ─────────────────────────────────────────────────
 
 /// 节点类型枚举。
 ///

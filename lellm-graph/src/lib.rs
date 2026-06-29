@@ -3,13 +3,13 @@
 //! 通用工作流引擎（类似 LangGraph / Temporal / Prefect）。
 
 pub mod barrier_node;
-pub mod branch_state;
 pub mod checkpoint;
-pub mod delta;
+pub mod checkpoint_codec;
 pub mod error;
 pub mod event;
-pub mod executor;
+pub mod execution_loop;
 pub mod graph;
+pub mod graph_analysis;
 pub mod ids;
 pub mod node;
 pub mod node_context;
@@ -20,6 +20,7 @@ pub mod statekey;
 pub mod store;
 pub mod stream_chunk;
 pub mod stream_emitter;
+pub mod test_executor;
 pub mod workflow_state;
 
 // ─── IDs ─────────────────────────────────────────────────────
@@ -32,22 +33,24 @@ pub use state::{
     StateReducer, array_reducer,
 };
 
-// ─── Delta + Reducer ─────────────────────────────────────────
-pub use delta::{DeltaOp, DeltaSource, Reducer, ReducerRegistry, StateDelta};
-
 // ─── StateKey ────────────────────────────────────────────────
 pub use statekey::{
-    SK_COUNT, SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_PENDING_TOOL_CALLS,
+    Reducer, SK_COUNT, SK_ITERATIONS, SK_MESSAGES, SK_OUTPUT_TOKENS, SK_PENDING_TOOL_CALLS,
     SK_REASONING_TOKENS, SK_STEPS, SK_TOTAL_TOOL_CALLS, StateKey, StateKeyExt,
 };
 
 // ─── Checkpoint ──────────────────────────────────────────────
 pub use checkpoint::{
-    Checkpoint, CheckpointId, CheckpointPolicy, CheckpointStore, CheckpointStoreError, NodeId,
+    Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy, CheckpointStoreError, NodeId,
+};
+
+// ─── Checkpoint Codec ────────────────────────────────────────
+pub use checkpoint_codec::{
+    CheckpointCodec, SerdeCheckpointCodec, TypedCheckpointStore,
 };
 
 // ─── Store ───────────────────────────────────────────────────
-pub use store::InMemoryCheckpointStore;
+pub use store::{BlobCheckpointStore, InMemoryBlobStore};
 
 // ─── Error Types ─────────────────────────────────────────────
 pub use error::{
@@ -61,23 +64,23 @@ pub use event::{
 };
 
 // ─── Graph ───────────────────────────────────────────────────
-pub use graph::{CycleAnalysis, Edge, Graph, GraphBuilder};
+pub use graph::{Edge, Graph, GraphBuilder};
+pub use graph_analysis::CycleAnalysis;
 
 // ─── Nodes ───────────────────────────────────────────────────
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
-    FlowNode, NextStep, NodeKind, NodeOutput, ParallelErrorStrategy, ParallelNode,
+    FlowNode, NodeKind, ParallelErrorStrategy, ParallelNode,
     ParallelNodeBuilder, TaskFn, TaskNode,
 };
 
-// ─── Executor ────────────────────────────────────────────────
-pub use executor::GraphExecutor;
+// ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
+pub use test_executor::SimpleExecutor;
 
-
-// ─── v04: NodeContext + BranchState + Stream ──────────────────
-pub use branch_state::{BranchState, ChangeOperation, ChangeRecord};
+// ─── v04: NodeContext + Stream ───────────────────────────────
 pub use node_context::{
-    ExecutionContext, ExecutionControl, ExecutionSignal, NextAction, NodeContext, NodeMetadata,
+    ExecutionEngine, ExecutionContext, ExecutionControl, ExecutionSignal, ExecutorState,
+    ExecutionView, NextAction, NodeContext, NodeMetadata,
 };
 pub use runtime_event::RuntimeEvent;
 pub use stream_chunk::{StreamChunk, ToolPhase};

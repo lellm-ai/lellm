@@ -97,17 +97,6 @@ impl crate::workflow_state::StateMutation<State> for StateMutation {
 
 impl crate::workflow_state::WorkflowState for State {
     type Mutation = StateMutation;
-
-    fn apply_branch_change(&mut self, change: &crate::branch_state::ChangeRecord) {
-        match change.operation {
-            crate::branch_state::ChangeOperation::Put => {
-                self.inner.insert(change.key.clone(), change.value.clone());
-            }
-            crate::branch_state::ChangeOperation::Delete => {
-                self.inner.remove(&change.key);
-            }
-        }
-    }
 }
 
 /// State 的默认合并策略 — 逐 key 合并，后续分支覆盖同 key。
@@ -306,12 +295,16 @@ pub fn array_reducer(existing: &Value, new: &Value) -> Result<Value, String> {
 // ─── GraphResult ────────────────────────────────────────────────
 
 /// Graph 执行结果。
+///
+/// # 泛型
+///
+/// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[derive(Debug)]
-pub struct GraphResult {
+pub struct GraphResult<S = State> {
     /// 执行追踪 ID（关联本次执行的所有 SpanId）
     pub trace_id: crate::ids::TraceId,
     /// 最终状态
-    pub state: State,
+    pub state: S,
     /// 执行日志
     pub execution_log: Vec<ExecutionEntry>,
     /// 执行耗时

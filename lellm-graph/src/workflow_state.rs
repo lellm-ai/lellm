@@ -100,14 +100,6 @@ pub trait WorkflowState:
         }
     }
 
-    /// 应用一个 BranchState 变更记录到状态（backward compat）。
-    ///
-    /// 默认实现：no-op（纯 Mutation 驱动的状态不需要此方法）。
-    /// `State`（HashMap wrapper）覆盖此方法，将 ChangeRecord 转换为 StateMutation。
-    fn apply_branch_change(&mut self, _change: &crate::branch_state::ChangeRecord) {
-        // no-op — pure mutation-driven states don't use BranchState changes
-    }
-
     /// 创建默认/初始状态。
     fn initial() -> Self
     where

@@ -325,7 +325,6 @@ impl AgentFlowNode {
         // 3. 创建 ExecutionContext<AgentState> 并调用 run_inline
         let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
             agent_state,
-            lellm_graph::BranchState::empty(),
             None,
             lellm_graph::CancellationToken::new(),
         );

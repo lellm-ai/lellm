@@ -4,8 +4,8 @@
 
 use lellm_graph::State;
 use lellm_graph::{
-    FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor, NodeContext,
-    NodeKind, ParallelErrorStrategy, ParallelNode, StateMutation, StateExt, TaskNode,
+    FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, NodeContext, NodeKind,
+    ParallelErrorStrategy, ParallelNode, SimpleExecutor, StateMutation, StateExt, TaskNode,
 };
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ async fn test_parallel_basic_two_branches() {
     let _ = g.end("parallel");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -77,7 +77,7 @@ async fn test_parallel_single_branch() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -114,7 +114,7 @@ async fn test_parallel_reads_input_state() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), initial_state)
         .await
         .expect("execution should succeed");
@@ -151,7 +151,7 @@ async fn test_parallel_different_keys_no_conflict() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -186,7 +186,7 @@ async fn test_parallel_same_key_conflict() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -224,7 +224,7 @@ async fn test_parallel_append_delta_merge() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), initial_state)
         .await
         .expect("execution should succeed");
@@ -272,7 +272,7 @@ async fn test_parallel_fail_fast() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await;
 
@@ -312,7 +312,7 @@ async fn test_parallel_collect_all() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await;
 
@@ -347,7 +347,7 @@ async fn test_parallel_emits_events() {
     let graph = g.build().expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     drop(handle);
 
@@ -455,7 +455,7 @@ async fn test_parallel_in_pipeline() {
     let _ = g.end("summary");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -536,7 +536,7 @@ async fn test_parallel_three_branches() {
     let _ = g.end("p");
     let graph = g.build().expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");

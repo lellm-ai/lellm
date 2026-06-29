@@ -3,9 +3,48 @@
 //! 从 lellm-runtime 合并到 lellm-graph，加上内置的常用 StateKey 常量。
 
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
-use crate::delta::Reducer;
 use crate::state::{State, StateError};
+
+// ─── Reducer ────────────────────────────────────────────────────
+
+/// Reducer 枚举 — 描述"这个 key 允许怎么合并"。
+#[allow(unpredictable_function_pointer_comparisons)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reducer {
+    /// 冲突即报错
+    Error,
+    /// 最后写入者胜
+    Replace,
+    /// 数组追加
+    Append,
+    /// 对象浅合并
+    MergeObject,
+    /// 数值求和
+    Sum,
+    /// 取最大值
+    Max,
+    /// 取最小值
+    Min,
+    /// 自定义合并函数
+    Custom(fn(&Value, &Value) -> Result<Value, String>),
+}
+
+impl std::fmt::Display for Reducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Reducer::Error => write!(f, "Error"),
+            Reducer::Replace => write!(f, "Replace"),
+            Reducer::Append => write!(f, "Append"),
+            Reducer::MergeObject => write!(f, "MergeObject"),
+            Reducer::Sum => write!(f, "Sum"),
+            Reducer::Max => write!(f, "Max"),
+            Reducer::Min => write!(f, "Min"),
+            Reducer::Custom(_) => write!(f, "Custom"),
+        }
+    }
+}
 
 /// 编译期类型安全的 State 键。
 #[derive(Debug)]

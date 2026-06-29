@@ -1,16 +1,7 @@
 //! Agent-level Hook — AgentLoop 执行扩展点。
 //!
-//! 与 graph 层 `AgentHook`（观测型）不同，agent 层 hook 可以：
-//! - 在 agent loop 执行前后注入 StateDelta
-//! - 观测 agent 执行过程
-//!
-//! # 设计原则
-//!
-//! - Hook 方法**可以修改 State**（通过返回 `Vec<StateDelta>`）
-//! - Hook 修改经过 Reducer，进入 ExecutionTrace — 无审计盲区
-//! - Hook 失败不影响 Agent 执行（降级为 ObservedError）
-
-use lellm_graph::StateDelta;
+//! v0.4+: Hook 仅用于观测（日志、指标等），不再修改 State。
+//! State 变更应通过 Mutation 模型进行。
 
 use crate::runtime::{AgentEvent, ToolUseResult};
 
@@ -33,43 +24,13 @@ pub struct AgentHookSnapshot {
 /// Agent-level Hook trait。
 ///
 /// 在 AgentFlowNode 执行 Agent Loop 前后调用。
-/// Hook 返回的 `Vec<StateDelta>` 会经过 Reducer 合并到 State。
-///
-/// # 示例
-///
-/// ```rust,ignore
-/// use lellm_agent::hook::{AgentHook, AgentHookContext, AgentHookSnapshot};
-/// use lellm_graph::StateDelta;
-///
-/// struct AuditHook;
-///
-/// impl AgentHook for AuditHook {
-///     fn before_agent(&self, ctx: &AgentHookContext) -> Vec<StateDelta> {
-///         vec![StateDelta::put("audit_log", serde_json::json!([
-///             format!("agent '{}' started", ctx.node_name)
-///         ]))]
-///     }
-///
-///     fn after_agent(&self, snapshot: &AgentHookSnapshot) -> Vec<StateDelta> {
-///         vec![StateDelta::put(
-///             "audit_log",
-///             serde_json::json!([format!("agent completed: {} iterations", snapshot.result.iterations)]),
-///         )]
-///     }
-/// }
-/// ```
+/// v0.4+: 仅用于观测，不修改 State。
 pub trait AgentHook: Send + Sync {
     /// Agent loop 执行前调用。
-    /// 返回的 Deltas 会在 agent loop 启动前 apply 到 State。
-    fn before_agent(&self, _ctx: &AgentHookContext) -> Vec<StateDelta> {
-        Vec::new()
-    }
+    fn before_agent(&self, _ctx: &AgentHookContext) {}
 
     /// Agent loop 执行后调用。
-    /// 返回的 Deltas 会在 agent loop 完成后 apply 到 State。
-    fn after_agent(&self, _snapshot: &AgentHookSnapshot) -> Vec<StateDelta> {
-        Vec::new()
-    }
+    fn after_agent(&self, _snapshot: &AgentHookSnapshot) {}
 }
 
 /// 无操作 Hook — 默认行为。
@@ -83,23 +44,21 @@ impl AgentHook for NoOpAgentHook {}
 pub struct TracingAgentHook;
 
 impl AgentHook for TracingAgentHook {
-    fn before_agent(&self, ctx: &AgentHookContext) -> Vec<StateDelta> {
+    fn before_agent(&self, ctx: &AgentHookContext) {
         tracing::debug!(
             node = %ctx.node_name,
             input_messages = ctx.input_message_count,
             "agent loop starting"
         );
-        Vec::new()
     }
 
-    fn after_agent(&self, snapshot: &AgentHookSnapshot) -> Vec<StateDelta> {
+    fn after_agent(&self, snapshot: &AgentHookSnapshot) {
         tracing::debug!(
             iterations = snapshot.result.iterations,
             tool_calls = snapshot.result.tool_calls_executed,
             stop_reason = ?snapshot.result.stop_reason,
             "agent loop completed"
         );
-        Vec::new()
     }
 }
 
@@ -114,8 +73,7 @@ mod tests {
             node_name: "test".to_string(),
             input_message_count: 0,
         };
-        let deltas = hook.before_agent(&ctx);
-        assert!(deltas.is_empty());
+        hook.before_agent(&ctx);
     }
 
     #[test]
@@ -125,7 +83,6 @@ mod tests {
             node_name: "test".to_string(),
             input_message_count: 5,
         };
-        let deltas = hook.before_agent(&ctx);
-        assert!(deltas.is_empty());
+        hook.before_agent(&ctx);
     }
 }

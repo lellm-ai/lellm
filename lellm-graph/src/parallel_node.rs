@@ -25,7 +25,7 @@ use crate::error::GraphError;
 use crate::event::FlowEvent;
 use crate::ids::SpanId;
 use crate::node::FlowNode;
-use crate::node_context::{ExecutionContext, NodeContext};
+use crate::node_context::{ExecutionContext, ExecutorState, NodeContext};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 use tokio_util::sync::CancellationToken;
@@ -103,7 +103,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
             .collect()
     }
 
-    pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode<S>>)> {
+    pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode<S>>)>{
         self.branches
             .iter()
             .map(|(name, node)| (name.as_str(), node))
@@ -181,11 +181,6 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
     }
 }
 
-/// 带 MergeStrategy 的构建器 — 由 ParallelNode::builder() 返回。
-pub struct ParallelNodeBuilderWithMerge<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge>(
-    pub ParallelNodeBuilder<S, M>,
-);
-
 impl<S: WorkflowState, M: MergeStrategy<S>> std::fmt::Debug for ParallelNode<S, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParallelNode")
@@ -204,7 +199,9 @@ impl<S: WorkflowState, M: MergeStrategy<S>> std::fmt::Debug for ParallelNode<S, 
 }
 
 #[async_trait::async_trait]
-impl<S: WorkflowState, M: MergeStrategy<S>> FlowNode<S> for ParallelNode<S, M> {
+impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> FlowNode<S>
+    for ParallelNode<S, M>
+{
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
         let start_time = Instant::now();
         let span_id = SpanId::new();
@@ -218,63 +215,118 @@ impl<S: WorkflowState, M: MergeStrategy<S>> FlowNode<S> for ParallelNode<S, M> {
 
         // Clone typed state for each branch — each branch works on its own copy
         let base_state = ctx.state().clone();
-        let base_branch = ctx.fork_branch();
-        let mut branch_results: Vec<S> = Vec::with_capacity(self.branches.len());
+        let display_name = self.display_name();
 
-        // Execute branches sequentially (serial fallback)
-        for (name, node) in &self.branches {
-            let branch_start = Instant::now();
-            let branch_span = SpanId::new();
+        // Clone branch data so async blocks own everything they need
+        let branches: Vec<(String, Arc<dyn FlowNode<S>>)> =
+            self.branches.iter().map(|(n, nd)| (n.clone(), nd.clone())).collect();
 
-            // Each branch gets its own ExecutionContext with cloned state
-            let mut exec_ctx = ExecutionContext::new(
-                base_state.clone(),
-                base_branch.fork(),
-                None,
-                CancellationToken::new(),
-            );
+        // Create a future for each branch — no spawn, no 'static required
+        let branch_futures: Vec<_> = branches
+            .into_iter()
+            .map(|(branch_name, node)| {
+                let state = base_state.clone();
+                async move {
+                    let branch_start = Instant::now();
 
-            let mut branch_ctx = exec_ctx.build_node_context();
-            let branch_ok = node.execute(&mut branch_ctx).await.is_ok();
-            drop(branch_ctx);
+                    let mut exec_ctx = ExecutionContext::new(
+                        state,
+                        None,
+                        CancellationToken::new(),
+                    );
 
-            if !branch_ok {
-                return Err(GraphError::Terminal(
-                    crate::error::TerminalError::NodeExecutionFailed {
-                        node: format!("{}/{}", self.display_name(), name),
-                        source: "branch execution failed".into(),
-                    },
-                ));
+                    let mut branch_ctx = exec_ctx.build_node_context();
+                    let ok = node.execute(&mut branch_ctx).await.is_ok();
+                    drop(branch_ctx);
+
+                    if !ok {
+                        return (branch_name, Err("branch execution failed".into()));
+                    }
+
+                    let mutations = exec_ctx.take_mutations();
+                    exec_ctx.apply_batch(mutations);
+
+                    let duration = branch_start.elapsed();
+
+                    (branch_name, Ok((exec_ctx.into_state(), duration)))
+                }
+            })
+            .collect();
+
+        // Execute all branches concurrently (no spawn, just concurrent polling)
+        let raw_results: Vec<(String, Result<(S, std::time::Duration), String>)> =
+            futures::future::join_all(branch_futures).await;
+
+        // Process results in branch order
+        let mut branch_states: Vec<S> = Vec::with_capacity(branch_count);
+        let mut errors: Vec<(String, String)> = Vec::new();
+
+        for (branch_name, result) in raw_results {
+            match result {
+                Ok((state, branch_duration)) => {
+                    ctx.emit_flow_event(FlowEvent::BranchCompleted {
+                        branch_name,
+                        node_id: display_name.clone(),
+                        span_id: SpanId::new(),
+                        success: true,
+                        duration: branch_duration,
+                    });
+                    branch_states.push(state);
+                }
+                Err(reason) => {
+                    errors.push((branch_name, reason));
+                }
             }
+        }
 
-            let mutations = exec_ctx.take_mutations();
-            exec_ctx.state_mut().apply_batch(mutations);
-
-            let branch_duration = branch_start.elapsed();
-
-            ctx.emit_flow_event(FlowEvent::BranchCompleted {
-                branch_name: name.clone(),
-                node_id: self.display_name(),
-                span_id: branch_span,
-                success: true,
-                duration: branch_duration,
-            });
-
-            branch_results.push(exec_ctx.state().clone());
+        // Error handling based on strategy
+        if !errors.is_empty() {
+            match self.error_strategy {
+                ParallelErrorStrategy::FailFast => {
+                    let (name, reason) = &errors[0];
+                    return Err(GraphError::Terminal(
+                        crate::error::TerminalError::NodeExecutionFailed {
+                            node: format!("{}/{}", display_name, name),
+                            source: reason.clone().into(),
+                        },
+                    ));
+                }
+                ParallelErrorStrategy::CollectAll => {
+                    // CollectAll: wait for all branches, merge successful ones,
+                    // but still return error if any branch failed.
+                    if !branch_states.is_empty() {
+                        for (name, reason) in &errors {
+                            tracing::warn!(
+                                parallel = %display_name,
+                                branch = %name,
+                                error = %reason,
+                                "branch failed (CollectAll strategy)"
+                            );
+                        }
+                    }
+                    let (name, reason) = &errors[0];
+                    return Err(GraphError::Terminal(
+                        crate::error::TerminalError::NodeExecutionFailed {
+                            node: format!("{}/{}", display_name, name),
+                            source: reason.clone().into(),
+                        },
+                    ));
+                }
+            }
         }
 
         // Merge all branch states using MergeStrategy — Graph 层并行语义
-        let merged = M::merge(branch_results).map_err(|e| {
+        let merged = M::merge(branch_states).map_err(|e| {
             GraphError::Terminal(crate::error::TerminalError::StateError(format!(
                 "parallel merge conflict: {e}",
             )))
         })?;
 
-        // Replace parent state with merged result
+        // Replace parent state with merged result (sanctioned composite-node API)
         ctx.replace_state(merged);
 
         ctx.emit_flow_event(FlowEvent::ParallelCompleted {
-            node_id: self.display_name(),
+            node_id: display_name,
             span_id,
             duration: start_time.elapsed(),
         });

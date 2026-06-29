@@ -1,0 +1,153 @@
+//! 测试用执行器 — 替代已删除的 SimpleExecutor。
+//!
+//! 提供两种执行模式：
+//! - `execute()` — 阻塞执行，返回 `GraphResult`
+//! - `execute_stream()` — 流式执行，返回 `GraphExecution { stream, handle }`
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::error::GraphError;
+use crate::event::{
+    GraphExecution, GraphHandle,
+};
+use crate::graph::Graph;
+use crate::ids::TraceId;
+use crate::node::FlowNode;
+use crate::node_context::{ExecutionEngine, ExecutorState, NextAction};
+use crate::state::{ExecutionEntry, GraphResult, State};
+
+// ─── SimpleExecutor 兼容层 ────────────────────────────────────────
+
+/// 兼容 SimpleExecutor 的 API，供测试使用。
+///
+/// 仅支持 `Graph<State, StateMerge>`（默认泛型参数）。
+pub struct SimpleExecutor {
+    max_steps: usize,
+}
+
+impl Default for SimpleExecutor {
+    fn default() -> Self {
+        Self { max_steps: 100 }
+    }
+}
+
+impl SimpleExecutor {
+    pub fn new(max_steps: usize) -> Self {
+        Self { max_steps }
+    }
+
+    pub async fn execute(
+        &self,
+        graph: Arc<Graph>,
+        state: State,
+    ) -> Result<GraphResult, GraphError> {
+        let trace_id = TraceId::new();
+        let start_time = Instant::now();
+        let mut execution_log: Vec<ExecutionEntry> = Vec::new();
+
+        let cancel = CancellationToken::new();
+        let mut engine = ExecutionEngine::new(state, None, cancel);
+
+        // 执行循环 — 与 run_inline 一致，但记录 ExecutionEntry
+        let mut current = graph.start_node().to_string();
+        let mut step: usize = 0;
+
+        loop {
+            step += 1;
+            if step > self.max_steps {
+                return Err(GraphError::Terminal(
+                    crate::error::TerminalError::StepsExceeded {
+                        limit: self.max_steps,
+                    },
+                ));
+            }
+
+            let node = match graph.nodes.get(&current) {
+                Some(n) => n,
+                None => {
+                    return Err(GraphError::Terminal(
+                        crate::error::TerminalError::NodeNotFound(current.clone()),
+                    ));
+                }
+            };
+
+            let node_name = current.clone();
+            let node_start = Instant::now();
+
+            let mut ctx = engine.build_node_context();
+            node.execute(&mut ctx).await?;
+
+            let node_duration = node_start.elapsed();
+
+            execution_log.push(ExecutionEntry {
+                step,
+                node_name,
+                start_time: node_start,
+                end_time: start_time.checked_add(node_duration).unwrap_or(start_time),
+                success: true,
+                error: None,
+            });
+
+            // 消费 Mutation 缓冲 → apply 到 state
+            let mutations = engine.take_mutations();
+            engine.apply_batch(mutations);
+
+            // 提取控制信号
+            let (next_action, _signal) = engine.take_control();
+
+            // 处理路由
+            match next_action {
+                NextAction::End => break,
+                NextAction::Goto(target) => {
+                    current = target;
+                }
+                NextAction::Next => {
+                    if current == graph.end_node() {
+                        break;
+                    }
+                    current = graph.resolve_next_inline(&current, engine.state())?;
+                }
+            }
+        }
+
+        let duration = start_time.elapsed();
+        let final_state = engine.into_state();
+
+        Ok(GraphResult {
+            trace_id,
+            state: final_state,
+            execution_log,
+            duration,
+        })
+    }
+
+    pub fn execute_stream(&self, graph: Arc<Graph>, state: State) -> GraphExecution<State> {
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
+        let (decision_tx, decision_rx) = tokio::sync::mpsc::channel(256);
+        let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel(1);
+
+        let trace_id = TraceId::new();
+        let cancel = CancellationToken::new();
+
+        let handle = GraphHandle::new(decision_tx, cancel_tx);
+
+        tokio::spawn(crate::execution_loop::run_execution_loop(
+            graph,
+            state,
+            self.max_steps,
+            trace_id,
+            event_tx,
+            decision_rx,
+            cancel_rx,
+            cancel,
+        ));
+
+        GraphExecution {
+            stream: event_rx,
+            handle,
+        }
+    }
+}

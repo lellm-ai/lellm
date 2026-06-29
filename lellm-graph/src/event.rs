@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::checkpoint::CheckpointId;
 use crate::error::{GraphError, ObservedError};
 use crate::ids::{SpanId, TraceId};
-use crate::state::GraphResult;
+use crate::state::{GraphResult, State};
 
 // ─── FlowEvent ───────────────────────────────────────────────
 
@@ -29,7 +29,8 @@ pub enum FlowEvent {
     /// 状态变更
     StateChanged {
         node_id: String,
-        delta: crate::delta::StateDelta,
+        key: String,
+        value: serde_json::Value,
     },
     /// 并行节点开始执行
     ParallelStarted {
@@ -95,8 +96,12 @@ pub enum BarrierDecision {
 // ─── GraphEvent ───────────────────────────────────────────────
 
 /// Graph 层流式事件。
+///
+/// # 泛型
+///
+/// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[derive(Debug)]
-pub enum GraphEvent {
+pub enum GraphEvent<S = State> {
     /// Graph 执行开始（恰好一次）
     GraphStart { trace_id: TraceId },
     /// 节点开始执行
@@ -143,20 +148,20 @@ pub enum GraphEvent {
         step: usize,
     },
     /// Graph 执行完成（恰好一次）
-    GraphComplete { result: GraphResult },
+    GraphComplete { result: GraphResult<S> },
     /// Graph 执行出错（恰好一次）
     GraphError {
         error: GraphError,
-        state: crate::state::State,
+        state: S,
     },
 }
 
 /// Graph 事件通道类型别名
-pub type GraphStream = tokio::sync::mpsc::Receiver<GraphEvent>;
+pub type GraphStream<S = State> = tokio::sync::mpsc::Receiver<GraphEvent<S>>;
 
 /// Graph 流式执行的完整返回包装。
-pub struct GraphExecution {
-    pub stream: GraphStream,
+pub struct GraphExecution<S = State> {
+    pub stream: GraphStream<S>,
     pub handle: GraphHandle,
 }
 

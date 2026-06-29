@@ -17,4 +17,5 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+futures = "0.3"
 uuid = { workspace = true, features = ["serde"] }

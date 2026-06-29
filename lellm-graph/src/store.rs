@@ -1,23 +1,66 @@
-//! Checkpoint 存储后端实现 — 内存后端。
+//! Checkpoint 存储后端 — BlobCheckpointStore SPI + 内存后端实现。
+//!
+//! 存储层操作 `CheckpointBlob`（bytes in / bytes out），与 State 类型和序列化格式解耦。
 
 use std::collections::HashMap;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::checkpoint::{Checkpoint, CheckpointId, CheckpointStore, CheckpointStoreError, TraceId};
+use crate::checkpoint::{
+    CheckpointBlob, CheckpointId, CheckpointStoreError, TraceId,
+};
+
+// ─── BlobCheckpointStore Trait ─────────────────────────────────
+
+/// Checkpoint 存储后端 SPI — bytes in / bytes out。
+///
+/// 存储层无需知道 State 类型或序列化格式，只操作 `CheckpointBlob`。
+/// 通过 `TypedCheckpointStore` 组合 Codec 实现类型化的 save/load。
+#[async_trait]
+pub trait BlobCheckpointStore: Send + Sync {
+    /// 保存 CheckpointBlob 并关联 trace_id。
+    async fn save_with_trace(
+        &self,
+        trace_id: &TraceId,
+        blob: &CheckpointBlob,
+    ) -> Result<(), CheckpointStoreError>;
+
+    /// 加载指定 ID 的 CheckpointBlob。
+    async fn load(
+        &self,
+        id: &CheckpointId,
+    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError>;
+
+    /// 加载 trace 最新的 CheckpointBlob。
+    async fn load_latest(
+        &self,
+        trace_id: &TraceId,
+    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError>;
+
+    /// 列出 trace 的所有 CheckpointId（按时间倒序）。
+    async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError>;
+
+    /// 删除指定 ID 的 Checkpoint。
+    async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError>;
+
+    /// 修剪 trace 的旧 Checkpoint，保留最新的 keep 个。
+    async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError>;
+}
+
+// ─── InMemoryBlobStore ─────────────────────────────────────────
 
 /// 基于内存的 Checkpoint 存储后端。
 ///
 /// 通过 `save_with_trace()` 关联 trace_id，或在存储层组织关联。
 #[derive(Default)]
-pub struct InMemoryCheckpointStore {
-    store: RwLock<HashMap<CheckpointId, Checkpoint>>,
+pub struct InMemoryBlobStore {
+    store: RwLock<HashMap<CheckpointId, CheckpointBlob>>,
     /// trace_id → [CheckpointId] 索引（按时间正序）
     index: RwLock<HashMap<TraceId, Vec<CheckpointId>>>,
 }
 
-impl InMemoryCheckpointStore {
+impl InMemoryBlobStore {
     pub fn new() -> Self {
         Self::default()
     }
@@ -32,20 +75,20 @@ impl InMemoryCheckpointStore {
 }
 
 #[async_trait]
-impl CheckpointStore for InMemoryCheckpointStore {
+impl BlobCheckpointStore for InMemoryBlobStore {
     async fn save_with_trace(
         &self,
         trace_id: &TraceId,
-        checkpoint: &Checkpoint,
+        blob: &CheckpointBlob,
     ) -> Result<(), CheckpointStoreError> {
-        let id = checkpoint.checkpoint_id.clone();
+        let id = blob.id.clone();
 
         {
             let mut store = self
                 .store
                 .write()
                 .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            store.insert(id.clone(), checkpoint.clone());
+            store.insert(id.clone(), blob.clone());
         }
 
         {
@@ -59,7 +102,10 @@ impl CheckpointStore for InMemoryCheckpointStore {
         Ok(())
     }
 
-    async fn load(&self, id: &CheckpointId) -> Result<Option<Checkpoint>, CheckpointStoreError> {
+    async fn load(
+        &self,
+        id: &CheckpointId,
+    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
         let store = self
             .store
             .read()
@@ -70,7 +116,7 @@ impl CheckpointStore for InMemoryCheckpointStore {
     async fn load_latest(
         &self,
         trace_id: &TraceId,
-    ) -> Result<Option<Checkpoint>, CheckpointStoreError> {
+    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
         let last_id = {
             let index = self
                 .index

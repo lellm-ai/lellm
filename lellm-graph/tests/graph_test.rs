@@ -1,7 +1,7 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, Diagnostic,
-    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, GraphExecutor,
-    NodeContext, NodeKind, SK_COUNT, SK_STEPS, State, StateMutation, StateExt, StateKey, TaskNode,
+    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution,
+    NodeContext, NodeKind, SK_COUNT, SK_STEPS, SimpleExecutor, State, StateMutation, StateExt, StateKey, TaskNode,
     TerminalError, TraceId,
 };
 use std::sync::Arc;
@@ -50,7 +50,7 @@ async fn test_linear_pipeline() {
     .expect("build should succeed");
 
     let initial_state = State::new();
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), initial_state)
         .await
         .expect("execution should succeed");
@@ -110,7 +110,7 @@ async fn test_condition_branching() {
 
     let mut initial_state = State::new();
     initial_state.insert("flag".into(), serde_json::json!(true));
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), initial_state)
         .await
         .expect("execution should succeed");
@@ -138,7 +138,7 @@ async fn test_task_node_error() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await;
     assert!(result.is_err());
@@ -207,7 +207,7 @@ async fn test_cyclic_graph_steps_exceeded() {
     })
     .expect("cyclic graph should build");
 
-    let executor = GraphExecutor::new(5);
+    let executor = SimpleExecutor::new(5);
     let result = executor.execute(Arc::new(graph), State::new()).await;
 
     assert!(result.is_err());
@@ -258,7 +258,7 @@ async fn test_cyclic_graph_with_edge_if_exit() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -313,7 +313,7 @@ async fn test_condition_node_back_jump() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -379,7 +379,7 @@ async fn test_execution_log() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -403,7 +403,7 @@ async fn test_barrier_blocked_mode_default_reject() {
     .expect("build should succeed");
 
     // execute() 内部 drop handle → decision_tx 关闭 → executor 使用默认 Reject
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await;
 
@@ -431,7 +431,7 @@ async fn test_barrier_approve() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -491,7 +491,7 @@ async fn test_barrier_reject_with_back_jump() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut reject_count = 0;
     loop {
@@ -545,7 +545,7 @@ async fn test_barrier_modify() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -598,7 +598,7 @@ async fn test_barrier_timeout() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+    } = SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -651,7 +651,7 @@ async fn test_barrier_reroute() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -742,7 +742,7 @@ async fn test_double_barrier_sequential() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     loop {
         let event = stream.recv().await.expect("stream should not close");
@@ -1042,7 +1042,7 @@ async fn test_stream_has_span_id() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+    } = SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut span_ids = Vec::new();
     loop {
@@ -1115,7 +1115,7 @@ async fn test_goto_edge_with_analysis() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -1146,7 +1146,7 @@ async fn test_goto_missing_edge_error() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await;
 
@@ -1316,7 +1316,7 @@ async fn test_statekey_in_graph_execution() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -1349,7 +1349,7 @@ async fn test_trace_id_full_lifecycle() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+    } = SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut trace_id_from_start = None;
     let mut trace_ids_from_nodes = Vec::new();
@@ -1407,7 +1407,7 @@ async fn test_trace_id_blocking_mode() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");
@@ -1475,7 +1475,7 @@ async fn test_fallback_control_flow() {
 
     // 节点报错 → executor 发送 GraphError，不路由到 fallback 边
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
     drop(handle);
 
     let mut has_error = false;
@@ -1530,7 +1530,7 @@ async fn test_fallback_no_edge() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
     drop(handle);
 
     let mut has_error = false;
@@ -1570,7 +1570,7 @@ async fn test_graph_cancel() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     // 等待 BarrierWaiting 事件
     loop {
@@ -1682,7 +1682,7 @@ async fn test_decide_wildcard() {
     .expect("build should succeed");
 
     let GraphExecution { mut stream, handle } =
-        GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     let mut barrier_count = 0;
     loop {
@@ -1867,7 +1867,7 @@ async fn test_consumer_drop_cancels_execution() {
     let GraphExecution {
         mut stream,
         handle: _handle,
-    } = GraphExecutor::default().execute_stream(Arc::new(graph), State::new());
+    } = SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
 
     // 消费 GraphStart 和第一个 NodeStart 后，drop stream
     let mut received = 0;
@@ -1994,7 +1994,7 @@ async fn test_end_node_stops_execution() {
     })
     .expect("build should succeed");
 
-    let result = GraphExecutor::default()
+    let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
         .await
         .expect("execution should succeed");

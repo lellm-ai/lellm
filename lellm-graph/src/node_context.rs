@@ -1,7 +1,7 @@
-//! NodeContext + ExecutionContext — v0.4 核心类型。
+//! NodeContext + ExecutionEngine — v0.4 核心类型。
 //!
 //! 职责分离：
-//! - `ExecutionContext<S>` — Executor 内部拥有，持有 State、Mutation 缓冲、流发射器等
+//! - `ExecutionEngine<S>` — Executor 内部拥有，持有 State、Mutation 缓冲、流发射器等
 //! - `NodeContext<'a, S>` — 节点能力视图，只暴露 Read State / Record Mutation / Emit Stream
 //!
 //! 数据流单向：
@@ -11,9 +11,9 @@
 //!   ↓
 //! ctx.record(Mutation)
 //!   ↓
-//! Mutation Buffer (ExecutionContext)
+//! Mutation Buffer (ExecutionEngine)
 //!   ↓
-//! Executor: ctx.take_mutations()
+//! Engine: take_mutations()
 //!   ↓
 //! state.apply_batch(mutations)
 //!   ↓
@@ -25,7 +25,6 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::branch_state::BranchState;
 use crate::event::FlowEvent;
 use crate::state::State;
 use crate::stream_chunk::StreamChunk;
@@ -112,16 +111,43 @@ pub struct NodeMetadata {
     pub has_side_effects: bool,
 }
 
-// ─── ExecutionContext ─────────────────────────────────────────
+// ─── ExecutionView trait ──────────────────────────────────────
 
-/// 执行上下文 — Executor 内部拥有，持有所有可变状态。
+/// 受限视图 — Leaf 节点需要的最小能力。
+pub trait ExecutionView<S: WorkflowState>: Send + Sync {
+    fn state(&self) -> &S;
+    fn emit(&self, chunk: StreamChunk);
+    fn is_cancelled(&self) -> bool;
+}
+
+// ─── ExecutorState trait ──────────────────────────────────────
+
+/// 完整能力 — Composite 节点 + LeafAdapter 使用。
+///
+/// # 注意
+///
+/// 此 trait **不是 dyn compatible**（`build_node_context` 返回带生命周期的 `NodeContext`，
+/// `apply_batch` 使用泛型）。仅用于静态分发（`T: ExecutorState<S>`），不用于 `dyn ExecutorState<S>`。
+pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
+    fn build_node_context(&mut self) -> NodeContext<'_, S>;
+    fn clone_state(&self) -> S;
+    fn replace_state(&mut self, state: S);
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = S::Mutation>);
+    fn take_control(&mut self) -> (NextAction, Option<ExecutionSignal>);
+    fn take_metadata(&mut self) -> NodeMetadata;
+    fn take_flow_events(&mut self) -> Vec<FlowEvent>;
+    /// 发射控制面 FlowEvent（Composite 节点如 ParallelNode 需要）。
+    fn emit_flow_event(&mut self, event: FlowEvent);
+}
+
+// ─── ExecutionEngine ──────────────────────────────────────────
+
+/// 执行引擎 — 拥有所有可变状态，替代 ExecutionContext。
 ///
 /// 不对节点开发者公开。节点通过 [`NodeContext`] 能力视图交互。
-pub struct ExecutionContext<S: WorkflowState> {
-    /// 类型化状态 — Executor 独占写权限
+pub struct ExecutionEngine<S: WorkflowState> {
+    /// 类型化状态 — Engine 独占写权限
     state: S,
-    /// 底层分支状态 — 用于 fork 等操作（backward compat）
-    branch: BranchState,
     /// 数据面发射器 — 可选（阻塞模式 = None）
     stream: Option<Box<dyn StreamSink>>,
     /// 取消令牌 — 消费者断开时触发
@@ -136,17 +162,15 @@ pub struct ExecutionContext<S: WorkflowState> {
     flow_events: Vec<FlowEvent>,
 }
 
-impl<S: WorkflowState> ExecutionContext<S> {
-    /// 创建新的 ExecutionContext。
+impl<S: WorkflowState> ExecutionEngine<S> {
+    /// 创建新的 ExecutionEngine。
     pub fn new(
         state: S,
-        branch: BranchState,
         stream: Option<Box<dyn StreamSink>>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
             state,
-            branch,
             stream,
             cancel,
             control: ExecutionControl::new(),
@@ -184,18 +208,11 @@ impl<S: WorkflowState> ExecutionContext<S> {
     }
 
     /// 获取状态可变引用（Executor 内部使用）。
-    pub fn state_mut(&mut self) -> &mut S {
+    ///
+    /// ⚠️ 仅限 crate 内部调用。外部代码应通过 `ExecutorState::apply_batch()` 或
+    /// `NodeContext::record()` 间接操作状态。
+    pub(crate) fn state_mut(&mut self) -> &mut S {
         &mut self.state
-    }
-
-    /// 替换整个状态（Executor 内部使用，如 ParallelNode merge）。
-    pub fn replace_state(&mut self, state: S) {
-        self.state = state;
-    }
-
-    /// 获取底层 BranchState 可变引用（Executor 内部使用）。
-    pub fn branch_mut(&mut self) -> &mut BranchState {
-        &mut self.branch
     }
 
     /// 获取数据面发射器引用。
@@ -203,15 +220,34 @@ impl<S: WorkflowState> ExecutionContext<S> {
         self.stream.as_ref().map(|s| s.as_ref())
     }
 
-    // ─── 构建 NodeContext（Executor 使用）─────────────────────
+    /// 取出最终状态。
+    pub fn into_state(self) -> S {
+        self.state
+    }
+}
 
-    /// 构建 NodeContext 供 Executor 使用。
-    ///
-    /// 返回 NodeContext，Executor 负责在执行后调用 take_* 方法消费数据。
-    pub fn build_node_context(&mut self) -> NodeContext<'_, S> {
+// ─── ExecutorState for ExecutionEngine ────────────────────────
+
+impl<S: WorkflowState> ExecutionView<S> for ExecutionEngine<S> {
+    fn state(&self) -> &S {
+        &self.state
+    }
+
+    fn emit(&self, chunk: StreamChunk) {
+        if let Some(stream) = self.stream.as_ref() {
+            stream.emit(chunk);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+impl<S: WorkflowState> ExecutorState<S> for ExecutionEngine<S> {
+    fn build_node_context(&mut self) -> NodeContext<'_, S> {
         NodeContext {
             state: &mut self.state,
-            branch: &mut self.branch,
             stream: self.stream.as_ref().map(|s| s.as_ref()),
             cancel: &self.cancel,
             control: &mut self.control,
@@ -220,7 +256,40 @@ impl<S: WorkflowState> ExecutionContext<S> {
             flow_events: &mut self.flow_events,
         }
     }
+
+    fn clone_state(&self) -> S {
+        self.state.clone()
+    }
+
+    fn replace_state(&mut self, state: S) {
+        self.state = state;
+    }
+
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = S::Mutation>) {
+        self.state.apply_batch(mutations);
+    }
+
+    fn take_control(&mut self) -> (NextAction, Option<ExecutionSignal>) {
+        self.control.take()
+    }
+
+    fn take_metadata(&mut self) -> NodeMetadata {
+        std::mem::take(&mut self.metadata)
+    }
+
+    fn take_flow_events(&mut self) -> Vec<FlowEvent> {
+        std::mem::take(&mut self.flow_events)
+    }
+
+    fn emit_flow_event(&mut self, event: FlowEvent) {
+        self.flow_events.push(event);
+    }
 }
+
+// ─── Backward Compat Alias ────────────────────────────────────
+
+/// 向后兼容别名 — `ExecutionContext` → `ExecutionEngine`。
+pub type ExecutionContext<S> = ExecutionEngine<S>;
 
 // ─── NodeContext ──────────────────────────────────────────────
 
@@ -232,23 +301,14 @@ impl<S: WorkflowState> ExecutionContext<S> {
 /// - 节点只借用，不拥有。零复制透传给子组件
 /// - 禁止放入：RuntimeEventEmitter、TraceId、SpanId、GraphHandle、ExecutorConfig
 /// - **不提供 `state_mut()`** — 节点只能通过 `record()` 声明变更意图
-///
-/// # 为什么没有 `state_mut()`
-///
-/// 一旦节点能直接修改 State，整个 Runtime 就有两个写入口：
-/// 1. `record(Mutation)` → Mutation Log → Executor apply
-/// 2. `state_mut()` → 直接写 State（绕过一切）
-///
-/// 这破坏了：Replay、ExecutionTrace、Parallel Merge、Undo、Remote Executor。
+/// - 组合节点（如 ParallelNode）使用 `replace_state()` 整体替换状态
 ///
 /// # 泛型参数
 ///
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 pub struct NodeContext<'a, S: WorkflowState = State> {
-    /// 类型化状态 — 可变引用（ExecutionContext 传入 &mut S；deprecated 路径也兼容）
+    /// 类型化状态 — 可变引用（仅组合节点如 ParallelNode 需要写权限）
     state: &'a mut S,
-    /// 底层分支状态 — 可变引用（backward compat）
-    branch: &'a mut BranchState,
     /// 数据面发射器 — 可选（阻塞模式 = None）
     stream: Option<&'a dyn StreamSink>,
     /// 取消令牌
@@ -268,7 +328,18 @@ impl<S: WorkflowState> NodeContext<'_, S> {
 
     /// 获取类型化状态（只读）。
     pub fn state(&self) -> &S {
-        self.state
+        &self.state
+    }
+
+    /// 替换整个状态（仅组合节点使用，如 ParallelNode）。
+    ///
+    /// 这是组合节点合并子分支结果后的 sanctioned API。
+    /// 普通节点应使用 `record()` 声明变更意图。
+    ///
+    /// 替换后，Engine 持有的状态直接变为 `new_state`。
+    /// 不会触发 Mutation 记录（因为这是整体替换，不是增量变更）。
+    pub fn replace_state(&mut self, new_state: S) {
+        *self.state = new_state;
     }
 
     // ─── 记录 Mutation ────────────────────────────────────────
@@ -340,83 +411,5 @@ impl<S: WorkflowState> NodeContext<'_, S> {
     /// 标记有副作用。
     pub fn set_has_side_effects(&mut self) {
         self.metadata.has_side_effects = true;
-    }
-
-    // ─── 组合节点专用 API ──────────────────────────────────────
-
-    /// Fork 底层分支状态（ParallelNode 等组合节点使用）。
-    ///
-    /// 替代废弃的 `branch_mut().fork()`。
-    pub fn fork_branch(&mut self) -> BranchState {
-        self.branch.fork()
-    }
-
-    /// 用合并后的 State 替换当前 State（ParallelNode 等组合节点使用）。
-    ///
-    /// 这是组合节点合并子分支结果的特有通道，不经过 Mutation 缓冲。
-    /// 替代废弃的 `*ctx.state_mut() = merged`。
-    pub fn replace_state(&mut self, state: S) {
-        *self.state = state;
-    }
-}
-
-
-// ─── Backward Compat ──────────────────────────────────────────
-
-/// 当代码直接操作 NodeContext 时（如 ParallelNode 内部），提供已废弃的 API。
-///
-/// 新代码应使用 `ExecutionContext` 管理节点执行。
-#[deprecated(
-    since = "0.5.0",
-    note = "Use ExecutionContext for node execution. These methods are kept for backward compat with ParallelNode and direct NodeContext usage."
-)]
-impl<'a, S: WorkflowState> NodeContext<'a, S> {
-    /// 获取类型化状态可变引用。
-    ///
-    /// ⚠️ 已废弃。节点应通过 `record()` 声明变更意图。
-    pub fn state_mut(&mut self) -> &mut S {
-        self.state
-    }
-
-    /// 消费 Mutation 缓冲（Executor 调用）。
-    ///
-    /// ⚠️ 已废弃。使用 `ExecutionContext::take_mutations()`。
-    pub fn consume_mutations(&mut self) -> Vec<S::Mutation> {
-        std::mem::take(self.mutations)
-    }
-
-    /// 获取底层 BranchState 引用。
-    ///
-    /// ⚠️ 已废弃。Executor 内部使用。
-    pub fn branch(&self) -> &BranchState {
-        &*self.branch
-    }
-
-    /// 获取底层 BranchState 可变引用。
-    ///
-    /// ⚠️ 已废弃。Executor 内部使用。
-    pub fn branch_mut(&mut self) -> &mut BranchState {
-        self.branch
-    }
-
-    /// 消费控制信号（Executor 调用）。
-    ///
-    /// ⚠️ 已废弃。使用 `ExecutionContext::take_control()`。
-    pub fn take_control(&mut self) -> (NextAction, Option<ExecutionSignal>) {
-        self.control.take()
-    }
-
-    /// 获取元数据（Executor 调用）。
-    ///
-    /// ⚠️ 已废弃。使用 `ExecutionContext::take_metadata()`。
-    pub fn take_metadata(&mut self) -> NodeMetadata {
-        std::mem::take(self.metadata)
-    }
-
-    /// 消费 FlowEvent 缓冲（Executor 调用）。
-    ///
-    /// ⚠️ 已废弃。使用 `ExecutionContext::take_flow_events()`。
-    pub fn take_flow_events(&mut self) -> Vec<FlowEvent> {
-        std::mem::take(self.flow_events)
     }
 }
