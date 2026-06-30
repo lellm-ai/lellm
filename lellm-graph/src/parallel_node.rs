@@ -23,9 +23,9 @@ use std::time::Instant;
 
 use crate::error::GraphError;
 use crate::event::FlowEvent;
-use crate::execution_engine::{ExecutionEngine, ExecutorState};
+use crate::execution_engine::{ExecutionEngine, ExecutorState, OwnedExecutionEngine};
 use crate::ids::SpanId;
-use crate::node::{ExecutorOperation, FlowNode};
+use crate::node::FlowNode;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -197,11 +197,9 @@ impl<S: WorkflowState, M: MergeStrategy<S>> std::fmt::Debug for ParallelNode<S, 
     }
 }
 
-#[async_trait::async_trait]
-impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ExecutorOperation<S>
-    for ParallelNode<S, M>
-{
-    async fn execute(&self, engine: &mut ExecutionEngine<S>) -> Result<(), GraphError> {
+impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S, M> {
+    /// 执行并行分支 — 创建独立的 OwnedExecutionEngine 给每个分支。
+    pub async fn execute(&self, engine: &mut ExecutionEngine<'_, S>) -> Result<(), GraphError> {
         let start_time = Instant::now();
         let span_id = SpanId::new();
         let branch_count = self.branches.len();
@@ -237,8 +235,9 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ExecutorOperat
                 async move {
                     let branch_start = Instant::now();
 
-                    // Each branch gets its own ExecutionEngine (child engine)
-                    let mut child_engine = ExecutionEngine::new(state, child_stream, child_cancel);
+                    // Each branch gets its own OwnedExecutionEngine (child engine)
+                    let mut child_engine =
+                        OwnedExecutionEngine::new(state, child_stream, child_cancel);
 
                     let mut branch_ctx = child_engine.build_node_context();
                     let ok = node.execute(&mut branch_ctx).await.is_ok();

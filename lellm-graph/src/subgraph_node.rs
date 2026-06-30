@@ -146,68 +146,43 @@ impl<
     ///
     /// # 执行流程
     ///
-    /// 1. 从外层 State 通过 Lens 投影出内层 State
-    /// 2. 创建内层 ExecutionContext
+    /// 1. 从外层 State 通过 Lens 投影出内层 State（`&mut Inner`）
+    /// 2. 创建内层 `ExecutionEngine<'_, Inner>`（借用 `&mut Inner`）
     /// 3. 调用 `graph.run_inline()`
-    /// 4. 返回后借用自动释放
+    /// 4. inner_engine drop → 借用释放 → outer 可继续使用
     ///
     /// # 借用安全
     ///
     /// `lens.get()` 返回的引用生命周期限制在本函数内，
     /// 退出后借用结束，外层 State 可继续使用。
+    /// Rust 的 borrow checker 在编译期保证状态安全。
     pub async fn execute(
         &self,
         outer: &mut Outer,
-        _stream: Option<Arc<dyn crate::StreamSink>>,
-        _cancellation: crate::CancellationToken,
+        stream: Option<Arc<dyn crate::StreamSink>>,
+        cancellation: crate::CancellationToken,
     ) -> Result<(), crate::GraphError> {
         // 1. 通过 Lens 投影出内层 State
-        let _inner = self.lens.get(outer);
+        let inner_ref = self.lens.get(outer);
 
-        // 2. 创建内层 ExecutionContext
-        // 注意：inner 是 &mut Inner，需要拥有所有权才能创建 ExecutionContext
-        // 所以我们需要先 take 出来，执行完再放回去
-        //
-        // 但是 Inner 是 WorkflowState，不一定有 Default 实现
-        // 所以这里有个设计问题...
-        //
-        // 解决方案：ExecutionContext 持有 &mut Inner 的引用
-        // 但这需要 lifetime 参数，比较复杂
-        //
-        // 更简单的方案：SubgraphNode 直接操作 &mut Outer，
-        // 通过 Lens 获取 Inner 的引用，传给 graph.run_inline()
-        //
-        // 但是 graph.run_inline() 需要 ExecutionContext<Inner>
-        // ExecutionContext 需要拥有 Inner 的所有权
-        //
-        // 这是一个设计难题...
+        // 2. 创建内层 ExecutionEngine（借用 inner_ref）
+        let mut inner_engine = crate::ExecutionEngine::new(inner_ref, stream, cancellation);
 
-        // 暂时用简化方案：
-        // SubgraphNode 不直接执行，而是返回一个闭包
-        // 由 ExecutionEngine 负责执行
-        //
-        // 或者：SubgraphNode 实现 FlowNode trait
-        // 在 FlowNode::execute() 中通过 NodeContext 获取 state
+        // 3. 执行内层 Graph
+        self.graph
+            .run_inline(&mut inner_engine, self.max_steps)
+            .await?;
 
-        todo!("SubgraphNode::execute() 需要重新设计")
+        // 4. inner_engine drop → 借用释放 → outer 可继续使用
+        Ok(())
     }
 }
 
 // ─── FlowNode 实现 ─────────────────────────────────────────────
 
-// SubgraphNode 需要实现 FlowNode trait
-// 但是 FlowNode::execute() 的签名是：
-//   async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError>;
+// SubgraphNode 不实现 FlowNode。
+// 它在 ExecutionEngine 的 match dispatch 中被特殊处理：
+//   NodeKind::Subgraph(spec) => spec.execute(outer, stream, cancel).await
 //
-// NodeContext 持有 &mut S，我们可以从中获取 state
-// 然后通过 Lens 投影出 Inner
-//
-// 问题是：ExecutionContext 需要 Inner 的所有权
-// 但 NodeContext 只提供 &mut S 的引用
-//
-// 解决方案：
-// 1. SubgraphNode 不实现 FlowNode
-// 2. 在 ExecutionEngine 中特殊处理 SubgraphNode
-// 3. 或者修改 ExecutionContext 支持引用语义
-
-// 暂时标记为 todo
+// 因为 SubgraphNode 需要 Outer 和 Inner 两种类型参数，
+// 而 FlowNode<S> 只知道 S，无法表达 StateLens 投影。

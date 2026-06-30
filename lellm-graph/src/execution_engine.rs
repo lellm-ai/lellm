@@ -1,8 +1,25 @@
 //! ExecutionEngine — 执行引擎核心类型。
 //!
 //! 职责分离：
-//! - `ExecutionEngine<S>` — Executor 内部拥有，持有 State、Mutation 缓冲、流发射器等
+//! - `ExecutionEngine<'a, S>` — Executor 内部使用，**借用** State（`&'a mut S`），
+//!   持有 Mutation 缓冲、流发射器等运行时资源
 //! - `NodeContext<'a, S>` / `LeafContext<'a, S>` — 节点能力视图（在 node_context.rs 中）
+//!
+//! # 状态所有权模型
+//!
+//! ExecutionEngine **借用** State，不拥有它。调用方持有 State 的所有权，
+//! Engine 只在执行期间借用。这使得 Subgraph 组合成为可能：
+//!
+//! ```text
+//! 调用方
+//!   ├── state: S                （拥有所有权）
+//!   ├── engine: Engine<'_, S>   （借用 &mut state）
+//!   │     └── SubgraphNode::execute()
+//!   │           ├── lens.get(state) → &mut Inner
+//!   │           ├── inner_engine: Engine<'_, Inner>  （借用 &mut inner）
+//!   │           └── graph.run_inline(&mut inner_engine)
+//!   └── state 仍然可用（engine drop 后借用释放）
+//! ```
 //!
 //! 数据流单向：
 //!
@@ -144,19 +161,24 @@ pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
 
 // ─── ExecutionEngine ──────────────────────────────────────────
 
-/// 执行引擎 — 拥有所有可变状态，替代 ExecutionContext。
+/// 执行引擎 — **借用** State，持有 Mutation 缓冲、流发射器等运行时资源。
 ///
 /// 不对节点开发者公开。节点通过 [`NodeContext`](crate::node_context::NodeContext)
 /// 或 [`LeafContext`](crate::node_context::LeafContext) 能力视图交互。
+///
+/// # 状态所有权
+///
+/// Engine 借用 `&'a mut S`，不拥有 State。调用方在 Engine 生命周期外持有所有权。
+/// 这使得 Subgraph 组合成为可能 — 外层 Engine 借用 Outer，内层 Engine 借用 Inner。
 ///
 /// # 三层 API
 ///
 /// - **Leaf Execution API**: `build_leaf_context()` — 构建只读 + emit 视图
 /// - **Composite Execution API**: `clone_state()`, `replace_state()` — 执行控制
 /// - **Runtime Control Plane**: `stream`, `cancel`, `commit()` — 运行时管理
-pub struct ExecutionEngine<S: WorkflowState> {
-    /// 类型化状态 — Engine 独占写权限
-    state: S,
+pub struct ExecutionEngine<'a, S: WorkflowState> {
+    /// 类型化状态 — Engine 借用，不拥有
+    state: &'a mut S,
     /// 数据面发射器 — 可选（阻塞模式 = None）。使用 Arc 以便 Parallel 子分支 clone。
     stream: Option<Arc<dyn StreamSink>>,
     /// 取消令牌 — 消费者断开时触发
@@ -171,9 +193,15 @@ pub struct ExecutionEngine<S: WorkflowState> {
     flow_events: Vec<FlowEvent>,
 }
 
-impl<S: WorkflowState> ExecutionEngine<S> {
+impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
     /// 创建新的 ExecutionEngine。
-    pub fn new(state: S, stream: Option<Arc<dyn StreamSink>>, cancel: CancellationToken) -> Self {
+    ///
+    /// Engine 借用 `state`，不拥有它。调用方在 Engine 外保持所有权。
+    pub fn new(
+        state: &'a mut S,
+        stream: Option<Arc<dyn StreamSink>>,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             state,
             stream,
@@ -217,7 +245,7 @@ impl<S: WorkflowState> ExecutionEngine<S> {
     /// ⚠️ 仅限 crate 内部调用。外部代码应通过 `ExecutorState::apply_batch()` 或
     /// `NodeContext::record()` 间接操作状态。
     pub(crate) fn state_mut(&mut self) -> &mut S {
-        &mut self.state
+        self.state
     }
 
     /// 获取数据面发射器引用。
@@ -233,11 +261,6 @@ impl<S: WorkflowState> ExecutionEngine<S> {
     /// 获取 stream 的 Arc 引用（Parallel 子分支 clone 用）。
     pub fn stream_sink(&self) -> Option<Arc<dyn StreamSink>> {
         self.stream.clone()
-    }
-
-    /// 取出最终状态。
-    pub fn into_state(self) -> S {
-        self.state
     }
 
     // ─── commit() — Unit of Work 流水线 ───────────────────────
@@ -276,7 +299,7 @@ impl<S: WorkflowState> ExecutionEngine<S> {
 
 // ─── ExecutionView for ExecutionEngine ───────────────────────
 
-impl<S: WorkflowState> ExecutionView<S> for ExecutionEngine<S> {
+impl<'a, S: WorkflowState> ExecutionView<S> for ExecutionEngine<'a, S> {
     fn state(&self) -> &S {
         &self.state
     }
@@ -294,7 +317,7 @@ impl<S: WorkflowState> ExecutionView<S> for ExecutionEngine<S> {
 
 // ─── ExecutorState for ExecutionEngine ────────────────────────
 
-impl<S: WorkflowState> ExecutorState<S> for ExecutionEngine<S> {
+impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
     fn build_node_context(&mut self) -> crate::node_context::NodeContext<'_, S> {
         crate::node_context::NodeContext {
             state: &mut self.state,
@@ -324,7 +347,7 @@ impl<S: WorkflowState> ExecutorState<S> for ExecutionEngine<S> {
     }
 
     fn replace_state(&mut self, state: S) {
-        self.state = state;
+        *self.state = state;
     }
 
     fn apply_batch(&mut self, mutations: impl IntoIterator<Item = S::Mutation>) {
@@ -351,4 +374,134 @@ impl<S: WorkflowState> ExecutorState<S> for ExecutionEngine<S> {
 // ─── Backward Compat Alias ────────────────────────────────────
 
 /// 向后兼容别名 — `ExecutionContext` → `ExecutionEngine`。
-pub type ExecutionContext<S> = ExecutionEngine<S>;
+pub type ExecutionContext<'a, S> = ExecutionEngine<'a, S>;
+
+// ─── OwnedExecutionEngine ────────────────────────────────────
+
+/// 拥有 State 所有权的执行引擎 — 用于 Parallel 分支等需要独立 State 的场景。
+///
+/// 与 `ExecutionEngine<'a, S>` 的区别：
+/// - `ExecutionEngine<'a, S>` 借用 `&'a mut S`，用于主执行路径
+/// - `OwnedExecutionEngine<S>` 拥有 `S`，用于需要独立 State 副本的场景（如 Parallel 分支）
+pub struct OwnedExecutionEngine<S: WorkflowState> {
+    inner: S,
+    stream: Option<Arc<dyn StreamSink>>,
+    cancel: CancellationToken,
+    control: ExecutionControl,
+    metadata: NodeMetadata,
+    mutations: Vec<S::Mutation>,
+    flow_events: Vec<FlowEvent>,
+}
+
+impl<S: WorkflowState> OwnedExecutionEngine<S> {
+    /// 创建拥有 State 所有权的 Engine（用于 Parallel 分支等场景）。
+    pub fn new(state: S, stream: Option<Arc<dyn StreamSink>>, cancel: CancellationToken) -> Self {
+        Self {
+            inner: state,
+            stream,
+            cancel,
+            control: ExecutionControl::new(),
+            metadata: NodeMetadata::default(),
+            mutations: Vec::new(),
+            flow_events: Vec::new(),
+        }
+    }
+
+    /// 消费并返回最终状态。
+    pub fn into_state(self) -> S {
+        self.inner
+    }
+
+    pub fn state(&self) -> &S {
+        &self.inner
+    }
+
+    pub fn state_mut(&mut self) -> &mut S {
+        &mut self.inner
+    }
+
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel
+    }
+
+    pub fn stream_sink(&self) -> Option<Arc<dyn StreamSink>> {
+        self.stream.clone()
+    }
+
+    pub fn commit(&mut self) {
+        let batch = std::mem::take(&mut self.mutations);
+        if !batch.is_empty() {
+            self.inner.apply_batch(batch);
+        }
+    }
+}
+
+impl<S: WorkflowState> ExecutionView<S> for OwnedExecutionEngine<S> {
+    fn state(&self) -> &S {
+        &self.inner
+    }
+
+    fn emit(&self, chunk: StreamChunk) {
+        if let Some(ref stream) = self.stream {
+            stream.emit(chunk);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+impl<S: WorkflowState> ExecutorState<S> for OwnedExecutionEngine<S> {
+    fn build_node_context(&mut self) -> crate::node_context::NodeContext<'_, S> {
+        crate::node_context::NodeContext {
+            state: &mut self.inner,
+            stream: self.stream.as_deref(),
+            cancel: &self.cancel,
+            control: &mut self.control,
+            metadata: &mut self.metadata,
+            mutations: &mut self.mutations,
+            flow_events: &mut self.flow_events,
+        }
+    }
+
+    fn build_leaf_context(&mut self) -> crate::node_context::LeafContext<'_, S> {
+        crate::node_context::LeafContext {
+            state: &self.inner,
+            stream: self.stream.as_deref(),
+            cancel: &self.cancel,
+            control: &mut self.control,
+            metadata: &mut self.metadata,
+            mutations: &mut self.mutations,
+            flow_events: &mut self.flow_events,
+        }
+    }
+
+    fn clone_state(&self) -> S {
+        self.inner.clone()
+    }
+
+    fn replace_state(&mut self, state: S) {
+        self.inner = state;
+    }
+
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = S::Mutation>) {
+        self.inner.apply_batch(mutations);
+    }
+
+    fn take_control(&mut self) -> (NextAction, Option<ExecutionSignal>) {
+        self.control.take()
+    }
+
+    fn take_metadata(&mut self) -> NodeMetadata {
+        std::mem::take(&mut self.metadata)
+    }
+
+    fn take_flow_events(&mut self) -> Vec<FlowEvent> {
+        std::mem::take(&mut self.flow_events)
+    }
+
+    fn emit_flow_event(&mut self, event: FlowEvent) {
+        self.flow_events.push(event);
+    }
+}

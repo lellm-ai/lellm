@@ -67,7 +67,7 @@ pub trait LeafNode<S: WorkflowState = State>: Send + Sync {
 
 /// 命令式执行控制 — Composite 节点使用。
 ///
-/// 直接接收 `&mut ExecutionEngine<S>`，拥有完整能力：
+/// 直接接收 `&mut ExecutionEngine`，拥有完整能力：
 /// - clone_state / replace_state
 /// - build_leaf_context（用于执行子分支）
 ///
@@ -75,7 +75,7 @@ pub trait LeafNode<S: WorkflowState = State>: Send + Sync {
 #[async_trait]
 pub trait ExecutorOperation<S: WorkflowState = State>: Send + Sync {
     /// 执行组合操作。
-    async fn execute(&self, engine: &mut ExecutionEngine<S>) -> Result<(), GraphError>;
+    async fn execute(&self, engine: &mut ExecutionEngine<'_, S>) -> Result<(), GraphError>;
 }
 
 // ─── Backward Compat: FlowNode ────────────────────────────────

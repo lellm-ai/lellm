@@ -16,7 +16,7 @@ use indexmap::IndexMap;
 use crate::error::{BuildError, BuildErrors, GraphDiagnostics, GraphError, TerminalError};
 use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph_analysis::{self, CycleAnalysis};
-use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
+use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
@@ -275,7 +275,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
     /// ```
     pub async fn run_inline(
         &self,
-        exec_ctx: &mut ExecutionEngine<S>,
+        exec_ctx: &mut ExecutionEngine<'_, S>,
         max_steps: usize,
     ) -> Result<(), GraphError> {
         let mut current = self.start_node().to_string();

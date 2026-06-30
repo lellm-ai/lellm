@@ -30,7 +30,7 @@ Graph<S: WorkflowState>
   ├─ LeafContext<'a, S>     — 只读 &S + record(Mutation) + emit(StreamChunk)
   ├─ NodeContext<'a, S>     — 可变 &mut S + record + emit + replace_state
   │
-  └─ ExecutionEngine<S>     — 拥有 State + Mutation Buffer + Stream + Cancel
+  └─ ExecutionEngine<'a, S>  — 借用 State（&'a mut S）+ Mutation Buffer + Stream + Cancel
        ├─ build_leaf_context()  → LeafNode dispatch
        ├─ build_node_context()  → FlowNode dispatch (backward compat)
        ├─ commit()              → take_mutations → state.apply_batch()
@@ -50,7 +50,7 @@ Checkpoint (Snapshot model)
 | # | 原则 | 实现 |
 |---|------|------|
 | 1 | Graph 只编排 | Node Registry + Edge Routing + Condition Evaluation |
-| 2 | ExecutionEngine 拥有运行时 | State + Mutation Buffer + Stream + Cancel |
+| 2 | ExecutionEngine 借用 State | `&'a mut S`，调用方持有所有权 + Mutation Buffer + Stream + Cancel |
 | 3 | Leaf Node 只读 | `&S`，只能 `record(Mutation)` + `emit(StreamChunk)` |
 | 4 | Composite Node 拥有执行 | `clone_state` / `replace_state` / `MergeStrategy` |
 | 5 | Mutation 是唯一写入口 | 禁止 `ctx.state_mut()`，节点通过 `record()` 声明变更 |

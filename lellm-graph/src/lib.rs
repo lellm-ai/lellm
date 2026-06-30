@@ -94,7 +94,7 @@ pub use test_executor::SimpleExecutor;
 // ─── v04: ExecutionEngine + NodeContext + Stream ─────────────
 pub use execution_engine::{
     ExecutionContext, ExecutionControl, ExecutionEngine, ExecutionSignal, ExecutionView,
-    ExecutorState, NextAction, NodeMetadata,
+    ExecutorState, NextAction, NodeMetadata, OwnedExecutionEngine,
 };
 pub use node_context::{LeafContext, NodeContext};
 pub use runtime_event::RuntimeEvent;

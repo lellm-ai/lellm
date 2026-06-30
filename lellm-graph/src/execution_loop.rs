@@ -26,7 +26,7 @@ use crate::event::{BarrierDecision, BarrierDecisionMessage, GraphEvent};
 use crate::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::SpanId;
-use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
+use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::{ExecutionEntry, GraphResult};
 use crate::trace::{MemoryTraceSink, TraceSink, TraceStep};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
@@ -193,8 +193,8 @@ pub(crate) async fn run_execution_loop<S, M>(
 
     // 恢复路径：使用 Checkpoint 中的 state 和 current_node
     let restore_state = restore_from.as_ref().map(|cp| cp.state.clone());
-    let engine_state = restore_state.unwrap_or(state);
-    let mut engine = ExecutionEngine::new(engine_state, None, cancel.clone());
+    let mut engine_state = restore_state.unwrap_or(state);
+    let mut engine = ExecutionEngine::new(&mut engine_state, None, cancel.clone());
     let mut current = if let Some(ref cp) = restore_from {
         cp.current_node.0.clone()
     } else {
@@ -309,7 +309,7 @@ pub(crate) async fn run_execution_loop<S, M>(
                         send_complete(
                             &event_tx,
                             trace_id,
-                            engine,
+                            engine.state(),
                             execution_log,
                             start_time,
                             trace_sink.take(),
@@ -573,7 +573,7 @@ pub(crate) async fn run_execution_loop<S, M>(
                 send_complete(
                     &event_tx,
                     trace_id,
-                    engine,
+                    engine.state(),
                     execution_log,
                     start_time,
                     trace_sink.take(),
@@ -588,7 +588,7 @@ pub(crate) async fn run_execution_loop<S, M>(
                     send_complete(
                         &event_tx,
                         trace_id,
-                        engine,
+                        engine.state(),
                         execution_log,
                         start_time,
                         trace_sink.take(),
@@ -634,17 +634,16 @@ pub(crate) async fn run_execution_loop<S, M>(
 pub(crate) fn send_complete<S: WorkflowState>(
     event_tx: &tokio::sync::mpsc::Sender<GraphEvent<S>>,
     trace_id: TraceId,
-    engine: ExecutionEngine<S>,
+    final_state: &S,
     execution_log: Vec<ExecutionEntry>,
     start_time: Instant,
     trace_sink: Option<MemoryTraceSink<S::Mutation>>,
 ) {
     let duration = start_time.elapsed();
-    let final_state = engine.into_state();
     let trace = trace_sink.map(|sink| sink.into_trace());
     let result = GraphResult {
         trace_id,
-        state: final_state,
+        state: final_state.clone(),
         execution_log,
         duration,
         trace,

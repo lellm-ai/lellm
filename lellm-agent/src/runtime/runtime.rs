@@ -130,11 +130,11 @@ impl ToolUseLoop {
         let max_steps = self.config.max_iterations * 4 + 1;
 
         // 初始化 AgentState
-        let agent_state_init = super::typed_state::AgentState::from_messages(initial_messages);
+        let mut agent_state_init = super::typed_state::AgentState::from_messages(initial_messages);
 
         // 创建 ExecutionContext<AgentState> 并调用 run_inline
         let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
-            agent_state_init,
+            &mut agent_state_init,
             None,
             lellm_graph::CancellationToken::new(),
         );
@@ -208,7 +208,7 @@ impl ToolUseLoop {
             let max_steps = config.max_iterations * 4 + 1;
 
             // 2. 初始化 AgentState
-            let agent_state = super::typed_state::AgentState::from_messages(initial_messages);
+            let mut agent_state = super::typed_state::AgentState::from_messages(initial_messages);
 
             // 3. 创建 AgentEventSink (StreamChunk → AgentEvent 桥接)
             let event_sink = super::event_bridge::AgentEventSink::new(tx.clone());
@@ -216,7 +216,7 @@ impl ToolUseLoop {
 
             // 4. 创建 ExecutionContext 并调用 run_inline
             let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
-                agent_state,
+                &mut agent_state,
                 Some(sink),
                 lellm_graph::CancellationToken::new(),
             );

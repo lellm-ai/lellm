@@ -14,7 +14,7 @@ use crate::event::{GraphExecution, GraphHandle};
 use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::TraceId;
-use crate::node::{BarrierNode, ConditionNode, ExecutorOperation, FlowNode, LeafNode, NodeKind};
+use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
 // ─── SimpleExecutor 兼容层 ────────────────────────────────────────
@@ -40,14 +40,14 @@ impl SimpleExecutor {
     pub async fn execute(
         &self,
         graph: Arc<Graph>,
-        state: State,
+        mut state: State,
     ) -> Result<GraphResult, GraphError> {
         let trace_id = TraceId::new();
         let start_time = Instant::now();
         let mut execution_log: Vec<ExecutionEntry> = Vec::new();
 
         let cancel = CancellationToken::new();
-        let mut engine = ExecutionEngine::new(state, None, cancel);
+        let mut engine = ExecutionEngine::new(&mut state, None, cancel);
 
         // 执行循环 — 与 run_inline 一致，但记录 ExecutionEntry
         let mut current = graph.start_node().to_string();
@@ -142,7 +142,7 @@ impl SimpleExecutor {
         }
 
         let duration = start_time.elapsed();
-        let final_state = engine.into_state();
+        let final_state = state;
 
         Ok(GraphResult {
             trace_id,
