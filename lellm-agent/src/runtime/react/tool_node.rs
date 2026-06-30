@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use lellm_core::ToolCall;
+use lellm_core::{CacheControl, TextBlock, ToolCall};
 use lellm_graph::{GraphError, LeafContext, LeafNode};
 
 use super::super::config::{ToolUseConfig, empty_response};
@@ -88,9 +88,10 @@ impl LeafNode<AgentState> for ToolNode {
                 };
                 let duration = start.elapsed();
 
-                // 应用预算截断
+                // 应用预算截断 + 前缀缓存 Breakpoint
                 let msg = lellm_core::Message::tool_result(&call_clone, &result);
                 let msg = apply_budget_truncate(msg, &budget_clone);
+                let msg = set_tool_result_cache(msg);
 
                 (msg, duration)
             }));
@@ -125,6 +126,7 @@ impl LeafNode<AgentState> for ToolNode {
                             message: format!("tool task panicked: {join_err}"),
                         }),
                     );
+                    let err_msg = set_tool_result_cache(err_msg);
                     ctx.emit(StreamChunk::ToolLifecycle {
                         phase: ToolPhase::Finished,
                         call_id: call.id.clone(),
@@ -173,6 +175,37 @@ fn apply_budget_truncate(msg: lellm_core::Message, budget: &ContextBudget) -> le
         }
     }
     msg
+}
+
+/// 为 ToolResult 的 TextBlock 添加 cache_control Breakpoint。
+///
+/// ToolResult 在 Anthropic 协议中等价于 role="user" 消息，成为对话历史的一部分。
+/// 添加 Breakpoint 后，后续轮次可命中前缀缓存（包含之前的工具执行结果）。
+fn set_tool_result_cache(msg: lellm_core::Message) -> lellm_core::Message {
+    if let lellm_core::Message::ToolResult {
+        tool_call_id,
+        is_error,
+        content,
+    } = msg
+    {
+        let new_content = content
+            .into_iter()
+            .map(|block| match block {
+                lellm_core::ContentBlock::Text(tb) => lellm_core::ContentBlock::Text(TextBlock {
+                    text: tb.text,
+                    cache_control: Some(CacheControl::Breakpoint),
+                }),
+                other => other,
+            })
+            .collect();
+        lellm_core::Message::ToolResult {
+            tool_call_id,
+            is_error,
+            content: new_content,
+        }
+    } else {
+        msg
+    }
 }
 
 /// 从 Message::ToolResult 提取内容，构建 ToolOutput chunk。

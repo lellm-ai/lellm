@@ -102,6 +102,21 @@ impl ChatCodec for AnthropicCodec {
             if has_cache {
                 let blocks = serialize_anthropic_content_blocks(&system_blocks)?;
                 body.insert("system".into(), blocks);
+
+                // 校验缓存前缀是否达到最小 token 阈值
+                // Anthropic 要求缓存前缀至少 1024 tokens 才会创建缓存条目
+                // 粗略估算：1 token ≈ 2 字符（中英混合保守估计）
+                let prefix_chars = estimate_cache_prefix_chars(&system_blocks);
+                let estimated_tokens = prefix_chars / 2;
+                if estimated_tokens < 1024 {
+                    tracing::warn!(
+                        model = %req.model,
+                        estimated_tokens = estimated_tokens,
+                        prefix_chars = prefix_chars,
+                        "Cache prefix may be too small — Anthropic requires ~1024 tokens minimum. \
+                         Consider adding more stable content to cached layers."
+                    );
+                }
             } else {
                 let text: String = system_blocks.iter().filter_map(|b| b.as_text()).collect();
                 body.insert("system".into(), text.into());
@@ -510,6 +525,24 @@ fn serialize_anthropic_tool_choice(choice: &ToolChoice) -> serde_json::Value {
         }
         ToolChoice::Any => "any".into(),
     }
+}
+
+/// 估算缓存前缀的字符数（到 Breakpoint 为止，包含 Breakpoint 所在块）。
+///
+/// 用于检查缓存前缀是否达到 Anthropic 的最小 token 阈值（~1024 tokens）。
+/// 粗略估算：1 token ≈ 2 字符（中英混合保守估计）。
+fn estimate_cache_prefix_chars(blocks: &[ContentBlock]) -> usize {
+    let mut total = 0;
+    for block in blocks {
+        if let ContentBlock::Text(tb) = block {
+            total += tb.text.len();
+            // 遇到 Breakpoint 即停止 —— 之后不再被缓存
+            if tb.cache_control.is_some() {
+                break;
+            }
+        }
+    }
+    total
 }
 
 #[cfg(test)]

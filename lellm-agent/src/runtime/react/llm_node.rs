@@ -18,7 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 
-use lellm_core::{ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock};
+use lellm_core::{CacheControl, ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock};
 use lellm_graph::{GraphError, LeafContext, LeafNode, TerminalError};
 
 use super::super::config::{ToolUseConfig, build_request_inner_with_round};
@@ -170,7 +170,9 @@ impl LeafNode<AgentState> for LLMNode {
         if !current_text.is_empty() {
             content_blocks.push(ContentBlock::Text(TextBlock {
                 text: current_text,
-                cache_control: None,
+                // 为 Assistant 响应的最后一个 TextBlock 添加 Breakpoint，
+                // 使对话历史在后续轮次可被前缀缓存命中。
+                cache_control: Some(CacheControl::Breakpoint),
             }));
         }
 

@@ -112,6 +112,9 @@ impl Prompt {
     /// 合并所有层为纯文本，层之间以 `\n\n` 分隔。
     ///
     /// 用于不支持 `cache_control` 的 Provider（如 OpenAI、Google）。
+    ///
+    /// **注意：** `\n\n` 分隔符是 fallback 行为，仅用于纯文本拼接。
+    /// Anthropic 路径使用 `to_content_blocks()`，不存在此分隔符差异。
     pub fn build_text(&self) -> String {
         self.layers
             .iter()
