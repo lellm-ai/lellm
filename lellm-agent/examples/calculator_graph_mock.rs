@@ -154,7 +154,7 @@ fn build_graph() -> lellm_graph::Graph {
     };
 
     let agent = AgentBuilder::new(model)
-        .system_prompt("你是一个数学助手。".to_string())
+        .system("你是一个数学助手。".to_string())
         .tools([
             AddArgs::safe(|args| async move { Ok(serde_json::json!(args.a + args.b)) }),
             MultiplyArgs::safe(|args| async move { Ok(serde_json::json!(args.a * args.b)) }),

@@ -18,7 +18,7 @@
 //! // 分层构建 — 最大化前缀缓存
 //! let agent = AgentBuilder::new(model)
 //!     .system(
-//!         Prompt::builder()
+//!         Prompt::new()
 //!             .stable("核心身份…")
 //!             .stable("工具指南…")
 //!             .dynamic("会话上下文…")
@@ -135,7 +135,7 @@ impl AgentBuilder {
     /// use lellm_core::Prompt;
     /// let agent = AgentBuilder::new(model)
     ///     .system(
-    ///         Prompt::builder()
+    ///         Prompt::new()
     ///             .stable("核心身份…")
     ///             .stable("工具指南…")
     ///             .dynamic("会话上下文…")

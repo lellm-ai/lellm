@@ -442,14 +442,14 @@ async fn compare_with_system_prompt() {
 
     // 新路径
     let agent_new = AgentBuilder::new(model_new)
-        .system_prompt("你是测试助手".to_string())
+        .system("你是测试助手".to_string())
         .max_iterations(5)
         .build();
     let result_new = agent_new.execute(messages.clone()).await.unwrap();
 
     // 旧路径
     let agent_old = AgentBuilder::new(model_old)
-        .system_prompt("你是测试助手".to_string())
+        .system("你是测试助手".to_string())
         .max_iterations(5)
         .build();
     let stream_old = agent_old.execute_stream(messages.clone());

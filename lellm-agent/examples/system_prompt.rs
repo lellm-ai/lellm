@@ -42,7 +42,7 @@ fn create_agent_with_builder() -> ToolUseLoop {
     };
 
     AgentBuilder::new(model)
-        .system_prompt("你是一个简洁准确的助手。回答不超过两句话。使用技术术语。".to_string())
+        .system("你是一个简洁准确的助手。回答不超过两句话。使用技术术语。".to_string())
         .build()
 }
 

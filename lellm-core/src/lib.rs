@@ -20,6 +20,6 @@ pub use message::{
     CacheControl, ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall,
     text_block,
 };
-pub use prompt::{Prompt, PromptBuilder};
+pub use prompt::Prompt;
 pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};

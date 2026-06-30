@@ -71,7 +71,7 @@ fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
 /// 用户查询作为 user message 传递，不混入 system prompt。
 /// 这样 system prompt 可以 100% 被前缀缓存。
 fn build_system_prompt() -> Prompt {
-    Prompt::builder()
+    Prompt::new()
         // L1 — 核心身份
         .stable("你是天气查询助手。")
         // L2 — 任务步骤
@@ -142,7 +142,6 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 禁止进行多轮推理。
 禁止生成 reasoning。",
         )
-        .finish()
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────

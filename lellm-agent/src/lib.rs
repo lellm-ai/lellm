@@ -21,8 +21,8 @@ pub use runtime::{
     ToolUseDeps, ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
 };
 
-// 从 core 再导出 Prompt / PromptBuilder
-pub use lellm_core::{Prompt, PromptBuilder};
+// 从 core 再导出 Prompt
+pub use lellm_core::Prompt;
 
 // ─── 糖衣 API（第三层原型） ───
 

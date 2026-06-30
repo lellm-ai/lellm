@@ -304,7 +304,7 @@ async fn test_builder_with_config() {
     };
 
     let agent = AgentBuilder::new(model)
-        .system_prompt("你是助手".to_string())
+        .system("你是助手".to_string())
         .max_iterations(20)
         .build();
 
@@ -377,7 +377,7 @@ fn test_builder_chain_api() {
 
     // 完整链式调用
     let _agent = AgentBuilder::new(model)
-        .system_prompt("你是测试助手".to_string())
+        .system("你是测试助手".to_string())
         .tool(reg)
         .max_iterations(15)
         .build();

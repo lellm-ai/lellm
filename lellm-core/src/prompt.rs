@@ -19,8 +19,6 @@
 use crate::{CacheControl, ContentBlock, Message};
 
 /// Prompt 层 — 一段文本 + 稳定性标记。
-///
-/// 内部使用，不对外暴露。用户通过 `PromptBuilder` 操作。
 #[derive(Debug, Clone)]
 struct PromptLayer {
     text: String,
@@ -28,22 +26,25 @@ struct PromptLayer {
     stable: bool,
 }
 
-/// 统一的 Prompt 表示。
+/// 统一的 Prompt 表示 — 同时是 Builder。
 ///
-/// 内部始终为分层结构，即使是简单文本也会转换为单层。
-/// `build()` 产出 `Message::System`，断点已自动放置。
+/// `Prompt::new()` 创建空 Prompt，链式添加层后 `build()` 产出 `Message::System`。
+/// 简单文本通过 `From<&str>` / `From<String>` 自动转换。
 ///
 /// # 示例
 ///
 /// ```
-/// use lellm_core::Prompt;
+/// use lellm_core::{Prompt, Message};
 ///
-/// let msg = Prompt::builder()
+/// // 分层构建 — 最大化前缀缓存
+/// let msg = Prompt::new()
 ///     .stable("核心身份…")
 ///     .stable("工具指南…")
 ///     .dynamic("会话上下文: …")
-///     .finish()
 ///     .build();
+///
+/// // 简单文本 — 自动转换
+/// let msg: Message = Prompt::from("hello").build();
 /// ```
 #[derive(Debug, Clone)]
 pub struct Prompt {
@@ -51,19 +52,32 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    /// 从纯文本创建 Prompt（单层，动态）。
-    pub fn plain(text: impl Into<String>) -> Self {
-        Self {
-            layers: vec![PromptLayer {
-                text: text.into(),
-                stable: false,
-            }],
-        }
+    /// 创建空 Prompt。
+    pub fn new() -> Self {
+        Self { layers: vec![] }
     }
 
-    /// 创建分层构建器。
-    pub fn builder() -> PromptBuilder {
-        PromptBuilder::new()
+    /// 添加稳定层 — 内容不常变化，参与缓存前缀。
+    ///
+    /// 用于核心身份、工具指南、项目规则等。
+    /// 最后一个 stable 层会自动获得 `CacheControl::Breakpoint`。
+    pub fn stable(mut self, text: impl Into<String>) -> Self {
+        self.layers.push(PromptLayer {
+            text: text.into(),
+            stable: true,
+        });
+        self
+    }
+
+    /// 添加动态层 — 内容频繁变化，不参与缓存前缀。
+    ///
+    /// 用于会话上下文、临时注入信息等。
+    pub fn dynamic(mut self, text: impl Into<String>) -> Self {
+        self.layers.push(PromptLayer {
+            text: text.into(),
+            stable: false,
+        });
+        self
     }
 
     /// 构建为 `Message::System`。
@@ -101,85 +115,27 @@ impl Prompt {
     }
 }
 
+impl Default for Prompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl From<String> for Prompt {
     fn from(s: String) -> Self {
-        Self::plain(s)
+        Self::new().dynamic(s)
     }
 }
 
 impl From<&str> for Prompt {
     fn from(s: &str) -> Self {
-        Self::plain(s)
+        Self::new().dynamic(s)
     }
 }
 
 impl From<&String> for Prompt {
     fn from(s: &String) -> Self {
-        Self::plain(s.clone())
-    }
-}
-
-impl Default for Prompt {
-    fn default() -> Self {
-        Self { layers: vec![] }
-    }
-}
-
-/// Prompt 分层构建器。
-///
-/// 每一层可以独立设置稳定性，最大化前缀缓存命中率。
-///
-/// # 示例
-///
-/// ```
-/// use lellm_core::Prompt;
-///
-/// let msg = Prompt::builder()
-///     .stable("核心身份…")
-///     .stable("工具指南…")
-///     .stable("项目规则…")
-///     .dynamic("会话上下文: …")
-///     .finish()
-///     .build();
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct PromptBuilder {
-    layers: Vec<PromptLayer>,
-}
-
-impl PromptBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 添加稳定层 — 内容不常变化，参与缓存前缀。
-    ///
-    /// 用于核心身份、工具指南、项目规则等。
-    /// 最后一个 stable 层会自动获得 `CacheControl::Breakpoint`。
-    pub fn stable(mut self, text: impl Into<String>) -> Self {
-        self.layers.push(PromptLayer {
-            text: text.into(),
-            stable: true,
-        });
-        self
-    }
-
-    /// 添加动态层 — 内容频繁变化，不参与缓存前缀。
-    ///
-    /// 用于会话上下文、临时注入信息等。
-    pub fn dynamic(mut self, text: impl Into<String>) -> Self {
-        self.layers.push(PromptLayer {
-            text: text.into(),
-            stable: false,
-        });
-        self
-    }
-
-    /// 构建为 `Prompt`（尚未放置断点）。
-    pub fn finish(self) -> Prompt {
-        Prompt {
-            layers: self.layers,
-        }
+        Self::new().dynamic(s.clone())
     }
 }
 
@@ -207,23 +163,11 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_plain() {
-        let prompt = Prompt::plain("plain text");
-        let msg = prompt.build();
-        assert_eq!(msg.content().len(), 1);
-        assert!(matches!(
-            &msg.content()[0],
-            ContentBlock::Text(t) if t.cache_control.is_none()
-        ));
-    }
-
-    #[test]
-    fn test_prompt_builder_layered() {
-        let msg = Prompt::builder()
+    fn test_prompt_new_and_build() {
+        let msg = Prompt::new()
             .stable("layer1")
             .stable("layer2")
             .dynamic("dynamic")
-            .finish()
             .build();
 
         let blocks = msg.content();
@@ -271,14 +215,13 @@ mod tests {
 
     #[test]
     fn test_breakpoint_only_on_last_stable() {
-        let msg = Prompt::builder()
+        let msg = Prompt::new()
             .stable("L1")
             .stable("L2")
             .stable("L3")
             .stable("L4")
             .stable("L5")
             .dynamic("D")
-            .finish()
             .build();
 
         let blocks = msg.content();
@@ -307,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_all_stable_single_breakpoint() {
-        let msg = Prompt::builder().stable("A").stable("B").finish().build();
+        let msg = Prompt::new().stable("A").stable("B").build();
 
         let blocks = msg.content();
         if let ContentBlock::Text(t) = &blocks[0] {
@@ -319,8 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_layers_produce_empty_message() {
-        let msg = Prompt::builder().finish().build();
+    fn test_empty_prompt_produces_empty_message() {
+        let msg = Prompt::new().build();
         assert!(msg.content().is_empty());
     }
 

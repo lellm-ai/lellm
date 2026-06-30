@@ -26,7 +26,7 @@ pub struct ToolUseConfig {
     ///
     /// 支持 `Prompt` 类型，统一了简单文本与分层缓存两种模式。
     /// - 简单文本：通过 `From<String>` 自动转换
-    /// - 分层缓存：`Prompt::builder().stable(...).build()`
+    /// - 分层缓存：`Prompt::new().stable(...).build()`
     pub system: Option<Prompt>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
@@ -306,11 +306,10 @@ mod tests {
     fn test_build_request_messages_with_prompt() {
         let config = ToolUseConfig {
             system: Some(
-                Prompt::builder()
+                Prompt::new()
                     .stable("核心身份")
                     .stable("工具指南")
-                    .dynamic("会话上下文")
-                    .finish(),
+                    .dynamic("会话上下文"),
             ),
             ..Default::default()
         };

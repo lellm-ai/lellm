@@ -138,7 +138,7 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
 /// 用户查询作为 user message 传递，不混入 system prompt。
 /// 这样 system prompt 可以 100% 被前缀缓存。
 fn build_system_prompt() -> Prompt {
-    Prompt::builder()
+    Prompt::new()
         // L1 — 核心身份（永不变化）
         .stable("你是天气查询助手。")
         // L2 — 工具使用指南（极少变化）
@@ -177,7 +177,6 @@ fn build_system_prompt() -> Prompt {
 
 最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释",
         )
-        .finish()
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
