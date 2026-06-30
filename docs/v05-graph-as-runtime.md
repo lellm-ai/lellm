@@ -859,14 +859,14 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 - [x] Phase 2：ToolUseLoop 重构为薄 Facade
 - [x] Phase 3：删除 AgentFlowNode
 - [x] Phase 4：StateLens + SubgraphNode + SubgraphSpec
-- [ ] Phase 5：Compiler Inline Pass（可选优化）
+- [x] Phase 5：Compiler Inline Pass（骨架实现）
 - [ ] Phase 6：Checkpoint = Execution Frame Snapshot（待实现）
 
 ## 时间线
 
-已完成：Phase 1 + Phase 2 + Phase 3 + Phase 4
+已完成：Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5
 
-待实现：Phase 5 + Phase 6
+待实现：Phase 6
 
 ---
 
