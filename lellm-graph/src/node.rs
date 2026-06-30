@@ -90,6 +90,26 @@ pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError>;
 }
 
+// ─── SubgraphNode Trait ──────────────────────────────────────
+
+/// Subgraph 节点 trait — 运行时递归执行内层 Graph。
+///
+/// 用于组合多个 Graph，实现 Workflow → Agent → Tool 等多层架构。
+///
+/// # 设计理念
+///
+/// - SubgraphNode 不是普通 Node，而是 ExecutionEngine 的控制流概念
+/// - 由 Engine 负责 Frame 管理、状态投影、Checkpoint 和恢复
+/// - 运行时遇到 SubgraphNode 时，递归调用 `graph.run_inline()`
+#[async_trait]
+pub trait SubgraphNode<S: WorkflowState = State>: Send + Sync {
+    /// 获取内层 Graph 的节点数（用于评估是否值得内联）。
+    fn node_count(&self) -> usize;
+
+    /// 获取内层 Graph 的名称。
+    fn graph_name(&self) -> &str;
+}
+
 // ─── NodeKind (AST Only) ──────────────────────────────────────
 
 /// Graph 的 AST — 节点类型枚举。
@@ -114,6 +134,8 @@ pub enum NodeKind<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     External(Arc<dyn FlowNode<S>>),
     /// 外部 Leaf 节点 — 只能读 State + emit Mutation
     ExternalLeaf(Arc<dyn LeafNode<S>>),
+    /// Subgraph 节点 — 运行时递归执行内层 Graph
+    Subgraph(Arc<dyn SubgraphNode<S>>),
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> Clone for NodeKind<S, M> {
@@ -125,6 +147,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Clone for NodeKind<S, M> {
             Self::Parallel(n) => Self::Parallel(n.clone()),
             Self::External(n) => Self::External(n.clone()),
             Self::ExternalLeaf(n) => Self::ExternalLeaf(n.clone()),
+            Self::Subgraph(n) => Self::Subgraph(n.clone()),
         }
     }
 }

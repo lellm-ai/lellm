@@ -101,6 +101,11 @@ impl SimpleExecutor {
                     // ExecutorOperation 直接接收 &mut ExecutionEngine
                     p.execute(&mut engine).await?;
                 }
+                NodeKind::Subgraph(_subgraph) => {
+                    // TODO: 实现 Subgraph 执行
+                    // 由 ExecutionEngine 负责 Frame 管理、状态投影、Checkpoint 和恢复
+                    tracing::warn!("Subgraph execution not yet implemented");
+                }
             }
 
             let node_duration = node_start.elapsed();
