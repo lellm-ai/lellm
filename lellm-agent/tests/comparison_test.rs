@@ -131,7 +131,7 @@ fn build_agent(model: ResolvedModel, tools: Vec<ToolRegistration>) -> lellm_agen
     for tool in tools {
         builder = builder.tool(tool);
     }
-    builder.build()
+    builder.build_loop()
 }
 
 // ─── Test 1: 简单文本响应（无工具） ─────────────────────────────
@@ -155,12 +155,12 @@ async fn compare_simple_text_response() {
 
     // 新路径: execute()
     let result_new = build_agent(model_new, vec![])
-        .execute(messages.clone())
+        .invoke(messages.clone())
         .await
         .unwrap();
 
     // 旧路径: execute_stream()
-    let stream_old = build_agent(model_old, vec![]).execute_stream(messages.clone());
+    let stream_old = build_agent(model_old, vec![]).invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
         .expect("stream ended without LoopEnd");
@@ -237,12 +237,12 @@ async fn compare_single_tool_call() {
 
     // 新路径
     let result_new = build_agent(model_new, vec![echo_reg.clone()])
-        .execute(messages.clone())
+        .invoke(messages.clone())
         .await
         .unwrap();
 
     // 旧路径
-    let stream_old = build_agent(model_old, vec![echo_reg]).execute_stream(messages.clone());
+    let stream_old = build_agent(model_old, vec![echo_reg]).invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
         .expect("stream ended without LoopEnd");
@@ -364,12 +364,12 @@ async fn compare_multi_round_react() {
 
     // 新路径
     let result_new = build_agent(model_new, vec![add_reg.clone()])
-        .execute(messages.clone())
+        .invoke(messages.clone())
         .await
         .unwrap();
 
     // 旧路径
-    let stream_old = build_agent(model_old, vec![add_reg]).execute_stream(messages.clone());
+    let stream_old = build_agent(model_old, vec![add_reg]).invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
         .expect("stream ended without LoopEnd");
@@ -444,15 +444,15 @@ async fn compare_with_system_prompt() {
     let agent_new = AgentBuilder::new(model_new)
         .system("你是测试助手".to_string())
         .max_iterations(5)
-        .build();
-    let result_new = agent_new.execute(messages.clone()).await.unwrap();
+        .build_loop();
+    let result_new = agent_new.invoke(messages.clone()).await.unwrap();
 
     // 旧路径
     let agent_old = AgentBuilder::new(model_old)
         .system("你是测试助手".to_string())
         .max_iterations(5)
-        .build();
-    let stream_old = agent_old.execute_stream(messages.clone());
+        .build_loop();
+    let stream_old = agent_old.invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
         .expect("stream ended without LoopEnd");
@@ -501,12 +501,12 @@ async fn compare_tool_registered_but_not_called() {
 
     // 新路径
     let result_new = build_agent(model_new, vec![echo_reg.clone()])
-        .execute(messages.clone())
+        .invoke(messages.clone())
         .await
         .unwrap();
 
     // 旧路径
-    let stream_old = build_agent(model_old, vec![echo_reg]).execute_stream(messages.clone());
+    let stream_old = build_agent(model_old, vec![echo_reg]).invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
         .expect("stream ended without LoopEnd");
@@ -558,11 +558,11 @@ async fn compare_provider_requests_equivalent() {
 
     // 新路径
     let agent_new = build_agent(model_new, vec![]);
-    let _result_new = agent_new.execute(messages.clone()).await.unwrap();
+    let _result_new = agent_new.invoke(messages.clone()).await.unwrap();
 
     // 旧路径
     let agent_old = build_agent(model_old, vec![]);
-    let stream_old = agent_old.execute_stream(messages.clone());
+    let stream_old = agent_old.invoke_stream(messages.clone());
     let _ = collect_stream_result(stream_old).await;
 
     // 两条路径各调用了一次 provider
@@ -623,15 +623,15 @@ async fn compare_max_iterations_reached() {
     let agent_new = AgentBuilder::new(model_new)
         .tool(loop_reg.clone())
         .max_iterations(3)
-        .build();
-    let result_new = agent_new.execute(messages.clone()).await.unwrap();
+        .build_loop();
+    let result_new = agent_new.invoke(messages.clone()).await.unwrap();
 
     // 旧路径 — 明确返回 MaxIterationsReached
     let agent_old = AgentBuilder::new(model_old)
         .tool(loop_reg)
         .max_iterations(3)
-        .build();
-    let stream_old = agent_old.execute_stream(messages.clone());
+        .build_loop();
+    let stream_old = agent_old.invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
         .expect("stream ended without LoopEnd");

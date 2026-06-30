@@ -28,8 +28,8 @@ async fn test_tool_use_loop_no_tool_calls() {
 
     let result = AgentBuilder::new(model)
         .max_iterations(5)
-        .build()
-        .execute(messages)
+        .build_loop()
+        .invoke(messages)
         .await
         .unwrap();
 
@@ -280,10 +280,10 @@ async fn test_builder_basic_build() {
         model: "test-model".to_string(),
     };
 
-    let agent = AgentBuilder::new(model).build();
+    let agent = AgentBuilder::new(model).build_loop();
 
     let messages = vec![Message::user_text("hello")];
-    let result = agent.execute(messages).await.unwrap();
+    let result = agent.invoke(messages).await.unwrap();
 
     assert_eq!(result.iterations, 1);
     assert!(result.is_success());
@@ -306,10 +306,10 @@ async fn test_builder_with_config() {
     let agent = AgentBuilder::new(model)
         .system("你是助手".to_string())
         .max_iterations(20)
-        .build();
+        .build_loop();
 
     let messages = vec![Message::user_text("hello")];
-    let result = agent.execute(messages).await.unwrap();
+    let result = agent.invoke(messages).await.unwrap();
 
     assert!(result.is_success());
 }
@@ -347,7 +347,7 @@ async fn test_builder_with_tool() {
         model: "test".to_string(),
     };
 
-    let _agent = AgentBuilder::new(model).tool(reg).build();
+    let _agent = AgentBuilder::new(model).tool(reg).build_loop();
 
     // 如果 build() 成功，说明 tool() 方法工作正常
 }
@@ -380,7 +380,7 @@ fn test_builder_chain_api() {
         .system("你是测试助手".to_string())
         .tool(reg)
         .max_iterations(15)
-        .build();
+        .build_loop();
 }
 
 // ─── 糖衣 API 测试 ───
@@ -401,7 +401,7 @@ async fn test_create_agent() {
 
     let agent = lellm_agent::create_agent(model);
     let messages = vec![Message::user_text("hello")];
-    let result = agent.execute(messages).await.unwrap();
+    let result = agent.invoke(messages).await.unwrap();
 
     assert!(result.is_success());
 }
@@ -459,7 +459,7 @@ async fn test_create_agent_with_system() {
     let agent = lellm_agent::create_agent_with_system(model, "你是助手".to_string());
 
     let messages = vec![Message::user_text("hi")];
-    let result = agent.execute(messages).await.unwrap();
+    let result = agent.invoke(messages).await.unwrap();
 
     assert!(result.is_success());
 }

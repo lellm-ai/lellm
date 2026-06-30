@@ -3,13 +3,10 @@
 //! 对照 LangGraph 官方教程：
 //!   https://langchain-ai.github.io/langgraph/tutorials/quickstart/
 //!
-//! LangGraph 用 3 个节点手动构建 Agent Loop：
-//!   llm_node → tool_node → condition → (llm_node | END)
-//!
-//! LeLLM 的设计哲学不同：
-//! - `ToolUseLoop` 内部完成 LLM ↔ Tools 的 ReAct 循环
-//! - `AgentFlowNode` 包装 ToolUseLoop，作为 Graph 的一个节点
-//! - Graph 层负责宏观编排（预处理 → Agent → 后处理）
+//! LeLLM 的设计：
+//! - `AgentBuilder::build()` 返回 `Graph<AgentState>`
+//! - 可以直接用 `graph.run_inline()` 执行
+//! - 也可以用 `build_loop().invoke()` 便捷执行
 //!
 //! 使用 OpenAI 兼容的 LLaMA Provider：
 //!
@@ -21,12 +18,9 @@
 
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
-use lellm_agent::{AgentBuilder, AgentFlowNode, ResolvedModel};
+use lellm_agent::{AgentBuilder, ResolvedModel};
 use lellm_core::Message;
 use lellm_derive::Tool;
-use lellm_graph::{
-    ExecutionContext, GraphBuilder, NodeContext, NodeKind, State, StateMutation, TaskNode,
-};
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
 use std::sync::Arc;
@@ -51,9 +45,9 @@ struct MultiplyArgs {
     b: f64,
 }
 
-// ─── 构建 Graph ─────────────────────────────────────────────
+// ─── 构建 Agent ─────────────────────────────────────────────
 
-fn build_graph() -> lellm_graph::Graph {
+fn build_agent() -> lellm_agent::ToolUseLoop {
     // 创建 Provider（从环境变量读取 API Key）
     let provider =
         CodecProvider::load(OpenAICompatCodec::llama()).expect("请设置 OPENAI_API_KEY 环境变量");
@@ -64,77 +58,14 @@ fn build_graph() -> lellm_graph::Graph {
         context_window: Some(8192),
     };
 
-    let agent = AgentBuilder::new(model)
+    AgentBuilder::new(model)
         .system("你是一个数学助手。当用户问数学问题时，使用工具计算。".to_string())
         .tools([
             AddArgs::safe(|args| async move { Ok(serde_json::json!(args.a + args.b)) }),
             MultiplyArgs::safe(|args| async move { Ok(serde_json::json!(args.a * args.b)) }),
         ])
         .max_iterations(10)
-        .build();
-
-    let mut g = GraphBuilder::new("calculator");
-
-    g.start("init");
-
-    // 初始化：写入用户问题
-    g.node(
-        "init",
-        NodeKind::Task(TaskNode::new("init", |ctx: &mut NodeContext<'_, State>| {
-            ctx.record(StateMutation::Put(
-                "messages".into(),
-                serde_json::json!([Message::user_text("3加4等于多少，然后再乘以2。")]),
-            ));
-            Ok(())
-        })),
-    );
-
-    // Agent 节点：执行 ReAct 循环
-    g.node(
-        "agent",
-        NodeKind::External(Arc::new(AgentFlowNode::new("agent", agent))),
-    );
-
-    // 后处理：打印结果
-    g.node(
-        "summary",
-        NodeKind::Task(TaskNode::new(
-            "summary",
-            |ctx: &mut NodeContext<'_, State>| {
-                println!("\n=== 结果 ===");
-
-                let state = ctx.state();
-                if let Some(msgs) = state.get("messages") {
-                    let count = msgs.as_array().map_or(0, |a| a.len());
-                    println!("消息数: {count}");
-                }
-
-                let reason = state
-                    .get("agent_stop_reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let iters = state
-                    .get("agent_iterations")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let calls = state
-                    .get("agent_tool_calls")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                println!("停止原因: {reason}");
-                println!("迭代次数: {iters}");
-                println!("工具调用: {calls}");
-
-                Ok(())
-            },
-        )),
-    );
-
-    g.edge("init", "agent");
-    g.edge("agent", "summary");
-    g.end("summary");
-
-    g.build().expect("Graph 构建失败")
+        .build_loop()
 }
 
 #[tokio::main]
@@ -146,24 +77,66 @@ async fn main() {
         )
         .try_init();
 
-    let graph = build_graph();
+    let agent = build_agent();
 
-    println!("=== Calculator Graph (LLaMA) ===\n");
-    println!("节点: {:?}", graph.node_names());
+    println!("=== Calculator Agent (LLaMA) ===\n");
 
     let start = std::time::Instant::now();
 
-    let mut engine =
-        ExecutionContext::<State>::new(State::new(), None, lellm_graph::CancellationToken::new());
-    graph.run_inline(&mut engine, 100).await.expect("执行失败");
+    let messages = vec![Message::user_text("3加4等于多少，然后再乘以2。")];
+    let result = agent.invoke(messages).await.expect("Agent 执行失败");
 
     let duration = start.elapsed();
 
     println!("\n=== 执行完成 ===");
     println!("总耗时: {}ms", duration.as_millis());
 
-    println!("\n=== 最终状态 ===");
-    for (k, v) in engine.state().iter() {
-        println!("  {k}: {v}");
+    println!("\n=== 对话历史 ===");
+    for msg in &result.messages {
+        match msg {
+            Message::User { content } => {
+                print!("[用户] ");
+                for block in content {
+                    if let lellm_core::ContentBlock::Text(t) = block {
+                        print!("{}", t.text);
+                    }
+                }
+                println!();
+            }
+            Message::Assistant { content } => {
+                print!("[AI] ");
+                for block in content {
+                    match block {
+                        lellm_core::ContentBlock::Text(t) => {
+                            print!("{}", t.text);
+                        }
+                        lellm_core::ContentBlock::ToolCall(tc) => {
+                            print!("[调用 {}({})]", tc.name, tc.arguments);
+                        }
+                        _ => {}
+                    }
+                }
+                println!();
+            }
+            Message::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
+                print!("[工具结果 {tool_call_id}] ");
+                for block in content {
+                    if let lellm_core::ContentBlock::Text(t) = block {
+                        print!("{}", t.text);
+                    }
+                }
+                println!();
+            }
+            _ => {}
+        }
     }
+
+    println!("\n=== 执行摘要 ===");
+    println!("停止原因: {:?}", result.stop_reason);
+    println!("迭代次数: {}", result.iterations);
+    println!("工具调用: {}", result.tool_calls_executed);
 }

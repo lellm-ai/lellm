@@ -124,7 +124,7 @@ fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
         model: "test-model".to_string(),
     };
 
-    AgentBuilder::new(model).tools(tools).build()
+    AgentBuilder::new(model).tools(tools).build_loop()
 }
 
 #[tokio::main]
@@ -217,7 +217,7 @@ async fn main() {
 
     println!("\n=== 执行 Agent ===");
     let result = agent
-        .execute(vec![Message::user_text("搜索一下 Rust 编程语言。")])
+        .invoke(vec![Message::user_text("搜索一下 Rust 编程语言。")])
         .await
         .expect("Agent 执行失败");
 

@@ -12,13 +12,13 @@ pub use serde;
 
 pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
 pub use runtime::{
-    AgentBuilder, AgentEvent, AgentFlowNode, AgentState, AgentStream, BackoffStrategy,
-    BatchExecutionResult, CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor,
-    DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy, IntoToolError,
-    IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy,
-    StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog, ToolCategory, ToolError,
-    ToolErrorKind, ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig,
-    ToolUseDeps, ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
+    AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, BatchExecutionResult,
+    CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback,
+    FallbackAction, FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult,
+    LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy, StaticCatalog,
+    StopReason, ToolArgs, ToolCachePolicy, ToolCatalog, ToolCategory, ToolError, ToolErrorKind,
+    ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
+    ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
 };
 
 // 从 core 再导出 Prompt
@@ -44,7 +44,7 @@ pub use lellm_core::Prompt;
 ///
 /// 快速创建一个无工具的 Agent。
 pub fn create_agent(model: ResolvedModel) -> ToolUseLoop {
-    AgentBuilder::new(model).build()
+    AgentBuilder::new(model).build_loop()
 }
 
 /// 快速创建带工具的 Agent。
@@ -52,12 +52,12 @@ pub fn create_agent_with_tools(
     model: ResolvedModel,
     tools: impl IntoIterator<Item = ToolRegistration>,
 ) -> ToolUseLoop {
-    AgentBuilder::new(model).tools(tools).build()
+    AgentBuilder::new(model).tools(tools).build_loop()
 }
 
 /// 快速创建带系统提示的 Agent。
 pub fn create_agent_with_system(model: ResolvedModel, system: impl Into<Prompt>) -> ToolUseLoop {
-    AgentBuilder::new(model).system(system).build()
+    AgentBuilder::new(model).system(system).build_loop()
 }
 
 /// 完整配置的便捷创建。
@@ -71,5 +71,5 @@ pub fn create_agent_full(
         .system(system)
         .tools(tools)
         .max_iterations(max_iterations)
-        .build()
+        .build_loop()
 }

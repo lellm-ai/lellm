@@ -194,7 +194,7 @@ fn create_react_agent() -> ToolUseLoop {
     AgentBuilder::new(model)
         .tools(tools)
         .max_iterations(10)
-        .build()
+        .build_loop()
 }
 
 #[tokio::main]
@@ -204,7 +204,7 @@ async fn main() {
     println!("=== ReAct 工具调用循环 ===\n");
 
     let result = agent
-        .execute(vec![Message::user_text(
+        .invoke(vec![Message::user_text(
             "找出当前最受欢迎的无线耳机并检查其库存",
         )])
         .await

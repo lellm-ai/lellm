@@ -9,7 +9,6 @@ pub mod context;
 pub mod event;
 pub mod event_bridge;
 pub mod fallback;
-pub mod flow_node;
 pub mod invoker;
 pub mod react;
 pub mod request_opts;
@@ -47,6 +46,5 @@ pub use typed_state::{AgentMutation, AgentState};
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};
 
-// FlowNode 适配
-pub use flow_node::AgentFlowNode;
+// 流式事件翻译
 pub use stream_translation::{AgentStreamEvent, TranslationResult, translate_provider_event};

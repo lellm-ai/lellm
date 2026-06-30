@@ -23,7 +23,7 @@ pub struct AgentHookSnapshot {
 
 /// Agent-level Hook trait。
 ///
-/// 在 AgentFlowNode 执行 Agent Loop 前后调用。
+/// 在 Agent 执行前后调用。
 /// v0.4+: 仅用于观测，不修改 State。
 pub trait AgentHook: Send + Sync {
     /// Agent loop 执行前调用。

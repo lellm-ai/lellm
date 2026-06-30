@@ -1,14 +1,14 @@
 //! AgentBuilder — Agent 链式构建器。
 //!
-//! 提供推荐的入口 API，一步构建 ToolUseLoop。
+//! 提供推荐的入口 API，一步构建 `Graph<AgentState>`。
 //!
 //! # 示例
 //! ```ignore
 //! use lellm_agent::{AgentBuilder, ToolRegistration};
 //! use lellm_core::Prompt;
 //!
-//! // 简单文本
-//! let agent = AgentBuilder::new(model)
+//! // 简单文本 — build() 返回 Graph<AgentState>
+//! let graph = AgentBuilder::new(model)
 //!     .system("你是一个有帮助的助手。")
 //!     .tool(search_tool)
 //!     .tool(weather_tool)
@@ -16,7 +16,7 @@
 //!     .build();
 //!
 //! // 分层构建 — 最大化前缀缓存
-//! let agent = AgentBuilder::new(model)
+//! let graph = AgentBuilder::new(model)
 //!     .system(
 //!         Prompt::new()
 //!             .stable("核心身份…")
@@ -25,20 +25,30 @@
 //!             .build(),
 //!     )
 //!     .build();
+//!
+//! // 便捷执行 — build_loop() 返回 ToolUseLoop Facade
+//! let result = AgentBuilder::new(model)
+//!     .tools([search_tool, weather_tool])
+//!     .build_loop()
+//!     .invoke(messages)
+//!     .await?;
 //! ```
 
 use std::sync::Arc;
 
 use lellm_core::{Prompt, ReasoningConfig, ToolChoice};
+use lellm_graph::Graph;
 use lellm_provider::ResolvedModel;
 
 use super::config::{ToolCachePolicy, ToolUseConfig, ToolUseDeps};
-use super::context::ContextBudget;
+use super::context::{ContextBudget, LocalCompactor};
 use super::fallback::FallbackStrategy;
+use super::react::{CompactorNode, LLMNode, ToolNode, build_react_graph};
 use super::request_opts::RequestOptions;
 use super::retry::RetryPolicy;
 use super::runtime::ToolUseLoop;
 use super::tools::{CompositeCatalog, StaticCatalog, ToolCatalog, ToolExecutor, ToolRegistration};
+use super::typed_state::{AgentState, AgentStateMerge};
 
 /// Agent 链式构建器 — 推荐的 Agent 创建方式。
 ///
@@ -254,11 +264,59 @@ impl AgentBuilder {
         self
     }
 
-    /// 构建 ToolUseLoop。
+    /// 构建 ReAct Graph — 返回 `Graph<AgentState>`。
     ///
-    /// 将静态工具和动态目录坍缩为最终的 `ToolCatalog`，
-    /// 传给 `ToolUseLoop::new()`。
-    pub fn build(self) -> ToolUseLoop {
+    /// 这是核心 API，返回标准 Graph，可直接用 `graph.run_inline()` 执行。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let graph = AgentBuilder::new(model).tools([...]).build();
+    ///
+    /// // 直接执行
+    /// let state = AgentState::from_messages(messages);
+    /// let mut ctx = ExecutionContext::new(state, None, CancellationToken::new());
+    /// graph.run_inline(&mut ctx, max_steps).await?;
+    /// ```
+    pub fn build(self) -> Graph<AgentState, AgentStateMerge> {
+        let (model, executor, config, deps) = self.into_parts();
+
+        let invoker = Arc::new(super::invoker::LlmInvoker::from_config(
+            model,
+            &config,
+            deps.fallback.clone(),
+        ));
+
+        let llm_node = LLMNode::new("llm", invoker, executor.clone(), config.clone());
+        let tool_node = ToolNode::new("tool", executor.clone(), config.clone());
+        let compactor_node = CompactorNode::new(
+            "compactor",
+            Arc::new(LocalCompactor::new()),
+            config.context_budget.clone(),
+        );
+
+        build_react_graph(llm_node, tool_node, compactor_node)
+    }
+
+    /// 构建 ToolUseLoop — 便捷 Facade。
+    ///
+    /// 返回 `ToolUseLoop`，提供 `invoke()` / `invoke_stream()` 等高级 API。
+    /// 内部仍然调用 `Graph::run_inline()`，只是封装了 State 初始化和结果提取。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let result = AgentBuilder::new(model)
+    ///     .tools([search_tool, weather_tool])
+    ///     .build_loop()
+    ///     .invoke(messages)
+    ///     .await?;
+    /// ```
+    pub fn build_loop(self) -> ToolUseLoop {
+        let (model, executor, config, deps) = self.into_parts();
+        ToolUseLoop::new(model, executor, config, deps)
+    }
+
+    /// 内部辅助 — 分解为 (Model, Executor, Config, Deps)。
+    fn into_parts(self) -> (ResolvedModel, ToolExecutor, ToolUseConfig, ToolUseDeps) {
         // 构造优先级队列：本地静态工具永远拥有最高优先级
         let mut sources: Vec<Arc<dyn ToolCatalog>> = Vec::new();
 
@@ -277,6 +335,7 @@ impl AgentBuilder {
 
         let executor =
             ToolExecutor::with_retry_policy(final_catalog, self.config.retry_policy.clone());
-        ToolUseLoop::new(self.model, executor, self.config, self.deps)
+
+        (self.model, executor, self.config, self.deps)
     }
 }

@@ -43,7 +43,7 @@ fn create_agent_with_builder() -> ToolUseLoop {
 
     AgentBuilder::new(model)
         .system("你是一个简洁准确的助手。回答不超过两句话。使用技术术语。".to_string())
-        .build()
+        .build_loop()
 }
 
 /// 使用糖衣 API 设置系统提示
@@ -74,7 +74,7 @@ async fn main() {
     let agent = create_agent_with_builder();
 
     let result = agent
-        .execute(vec![Message::user_text("介绍一下 LeLLM 项目。")])
+        .invoke(vec![Message::user_text("介绍一下 LeLLM 项目。")])
         .await
         .expect("执行失败");
 
@@ -105,7 +105,7 @@ async fn main() {
     let agent2 = create_agent_simple();
 
     let result2 = agent2
-        .execute(vec![Message::user_text("LeLLM 是什么？")])
+        .invoke(vec![Message::user_text("LeLLM 是什么？")])
         .await
         .expect("执行失败");
 
@@ -146,10 +146,10 @@ async fn main() {
     };
 
     // 不设置 system_prompt，Agent 直接从用户消息推断任务
-    let agent3 = AgentBuilder::new(model3).build();
+    let agent3 = AgentBuilder::new(model3).build_loop();
 
     let result3 = agent3
-        .execute(vec![Message::user_text(
+        .invoke(vec![Message::user_text(
             "你是一个翻译助手。请将以下句子翻译成英文：你好世界",
         )])
         .await

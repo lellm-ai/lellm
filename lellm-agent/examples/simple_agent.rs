@@ -36,7 +36,8 @@ fn create_simple_agent() -> ToolUseLoop {
     };
 
     // 无工具的 Agent — 仅包含一个 LLM 节点，不具备工具调用能力
-    AgentBuilder::new(model).build()
+    // build_loop() 返回 ToolUseLoop，提供 invoke() 便捷 API
+    AgentBuilder::new(model).build_loop()
 }
 
 #[tokio::main]
@@ -46,7 +47,7 @@ async fn main() {
     // ─── 非流式执行 ───
     println!("=== 非流式执行 ===");
     let result = agent
-        .execute(vec![Message::user_text("请介绍一下自己。")])
+        .invoke(vec![Message::user_text("请介绍一下自己。")])
         .await
         .expect("Agent 执行失败");
 

@@ -36,13 +36,13 @@ async fn main() {
         model: "streaming-model".to_string(),
     };
 
-    let agent = AgentBuilder::new(model).build();
+    let agent = AgentBuilder::new(model).build_loop();
 
     println!("=== 流式 Agent 执行 ===\n");
 
     // ─── 流式执行 ───
     let messages = vec![Message::user_text("介绍一下 LeLLM。")];
-    let mut stream = agent.execute_stream(messages);
+    let mut stream = agent.invoke_stream(messages);
 
     let mut has_tool_calls = false;
 

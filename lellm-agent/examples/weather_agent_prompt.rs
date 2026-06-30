@@ -159,7 +159,7 @@ fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
     .max_output_tokens(8000)
     .reasoning_budget(8000)
     //.reasoning(lellm_core::ReasoningConfig::Disabled)
-    .build()
+    .build_loop()
 }
 
 // ─── 主函数 ─────────────────────────────────────────────────────
@@ -187,6 +187,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = create_agent(provider);
 
     let messages = vec![Message::user(text_block(question.clone()))];
-    let stream = agent.execute_stream(messages);
+    let stream = agent.invoke_stream(messages);
     shared::observe_react_loop(stream, &question).await
 }

@@ -141,11 +141,17 @@ impl ToolUseLoop {
         ))
     }
 
-    /// 非流式执行
+    /// 非流式执行 — 执行 Agent 循环并返回结果。
     ///
-    /// v0.4+: AgentState 驱动 — 使用 `Graph<AgentState>.run_inline()` 执行 ReAct 循环。
-    /// 零序列化，编译期类型安全。
-    pub async fn execute(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
+    /// 内部构建 `Graph<AgentState>`，调用 `run_inline()` 执行 ReAct 循环。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
+    /// let result = loop_.invoke(messages).await?;
+    /// println!("Answer: {}", result.response.text());
+    /// ```
+    pub async fn invoke(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
 
         // 构建 ReAct Graph (Graph<AgentState, AgentStateMerge>)
@@ -206,21 +212,21 @@ impl ToolUseLoop {
 
     /// 流式执行，返回事件接收器。
     ///
-    /// v0.4+: AgentState 驱动 — 使用 `Graph<AgentState>.run_inline()` + `AgentEventSink`。
-    /// 与 `execute()` 共享 ReAct Graph 逻辑，消除手写 while 循环。
+    /// 内部构建 `Graph<AgentState>`，调用 `run_inline()` + `AgentEventSink`。
     ///
-    /// # 数据流
-    ///
-    /// ```text
-    /// execute_stream()
-    ///   → 创建 channel + AgentEventSink
-    ///   → 构建 ReAct Graph
-    ///   → ExecutionContext(state, sink)
-    ///   → graph.run_inline()
-    ///   → AgentEventSink: StreamChunk → AgentEvent → channel
-    ///   → 完成后发送 LoopEnd / LoopError
+    /// # 示例
+    /// ```ignore
+    /// let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
+    /// let mut stream = loop_.invoke_stream(messages);
+    /// while let Some(event) = stream.recv().await {
+    ///     match event {
+    ///         AgentEvent::LoopEnd { result } => println!("Done: {}", result.response.text()),
+    ///         AgentEvent::Provider(e) => print!("{}", e.delta()),
+    ///         _ => {}
+    ///     }
+    /// }
     /// ```
-    pub fn execute_stream(&self, messages: Vec<Message>) -> AgentStream {
+    pub fn invoke_stream(&self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let invoker = self.build_invoker();
         let executor = self.executor.clone();
