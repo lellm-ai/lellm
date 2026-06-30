@@ -17,6 +17,24 @@ struct ToolTiming {
     name: String,
 }
 
+/// 自动推断时间单位并格式化，保留 2 位小数。
+///
+/// `<1ms` → `123µs`，`<60s` → `1.23s`，`<60min` → `2.50min`，`≥60min` → `1.05h`
+fn format_duration(secs: f64) -> String {
+    let ms = secs * 1000.0;
+    if ms < 1.0 {
+        format!("{:.0}µs", secs * 1_000_000.0)
+    } else if ms < 1000.0 {
+        format!("{:.2}ms", ms)
+    } else if secs < 60.0 {
+        format!("{:.2}s", secs)
+    } else if secs < 3600.0 {
+        format!("{:.2}min", secs / 60.0)
+    } else {
+        format!("{:.2}h", secs / 3600.0)
+    }
+}
+
 /// 观测并打印 ReAct 循环事件
 pub async fn observe_react_loop(
     mut stream: AgentStream,
@@ -102,7 +120,7 @@ pub async fn observe_react_loop(
                 println!(
                     "=============================== 工具观察 ================================"
                 );
-                println!("🔧 {}  (耗时: {:.2}s)", tool_name, elapsed);
+                println!("🔧 {}  (耗时: {})", tool_name, format_duration(elapsed));
                 tool_times.push((tool_name, elapsed));
                 match result {
                     Ok(ref output) => {
@@ -175,7 +193,7 @@ pub async fn observe_react_loop(
                 println!();
                 println!("--- 耗时明细 ---");
                 for (i, t) in &step_times {
-                    println!("  第 {} 轮 LLM: {:.2}s", i, t);
+                    println!("  第 {} 轮 LLM: {}", i, format_duration(*t));
                 }
                 println!();
                 println!("--- 工具耗时明细 ---");
@@ -187,19 +205,23 @@ pub async fn observe_react_loop(
                 }
                 for (name, times) in &grouped {
                     if times.len() == 1 {
-                        println!("  🔧 {}: {:.2}s", name, times[0]);
+                        println!("  🔧 {}: {}", name, format_duration(times[0]));
                     } else {
                         let max = times.iter().copied().fold(f64::MIN, f64::max);
                         let sum: f64 = times.iter().sum();
                         println!("  🔧 {} (×{}):", name, times.len());
                         for (i, t) in times.iter().enumerate() {
-                            println!("      call {}: {:.2}s", i + 1, t);
+                            println!("      call {}: {}", i + 1, format_duration(*t));
                         }
-                        println!("      wall-clock: {:.2}s  (合计: {:.2}s)", max, sum);
+                        println!(
+                            "      wall-clock: {}  (合计: {})",
+                            format_duration(max),
+                            format_duration(sum)
+                        );
                     }
                 }
                 println!();
-                println!("总耗时: {:.2}s", total.as_secs_f64());
+                println!("总耗时: {}", format_duration(total.as_secs_f64()));
                 return Ok(());
             }
 
@@ -208,7 +230,7 @@ pub async fn observe_react_loop(
                 println!();
                 println!("================================ 错误 =================================");
                 println!("❌ 失败（第 {iterations} 轮）: {error}");
-                println!("总耗时: {:.2}s", total.as_secs_f64());
+                println!("总耗时: {}", format_duration(total.as_secs_f64()));
                 return Err(format!("Agent 执行失败: {error}").into());
             }
         }
