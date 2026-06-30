@@ -18,13 +18,18 @@
 
 use crate::{CacheControl, ContentBlock};
 
-/// Prompt 层 — 一段文本 + 可选的缓存控制标记。
+/// Prompt 层 — 一段文本 + 缓存意图标记。
 ///
 /// 内部使用，不对外暴露。用户通过 `PromptBuilder` 操作。
+///
+/// `is_cached` 表示用户希望这段内容被缓存。
+/// 实际的 `CacheControl::Breakpoint` 由 `to_content_blocks()` 统一放置在
+/// **最后一个 cached layer** 上（Anthropic 最多 4 个断点，中间断点无意义）。
 #[derive(Debug, Clone)]
 struct PromptLayer {
     text: String,
-    cache_control: Option<CacheControl>,
+    /// 用户标记的缓存意图（非直接映射为 Breakpoint）
+    is_cached: bool,
 }
 
 /// 统一的 Prompt 表示。
@@ -36,16 +41,17 @@ struct PromptLayer {
 /// # 示例
 ///
 /// ```
-/// use lellm_core::{Prompt, PromptBuilder, CacheControl};
+/// use lellm_core::Prompt;
 ///
 /// // 简单文本 — 自动转换
 /// let simple: Prompt = "You are a helpful assistant.".into();
 ///
 /// // 分层构建 — 最大化前缀缓存
+/// // 只有最后一个 cached layer 会获得 cache_control 断点（Anthropic 限额 4 个/请求）
 /// let layered = Prompt::builder()
-///     .layer_cached("核心身份…")               // 永不变化
-///     .layer_cached("工具指南…")               // 极少变化
-///     .layer_dynamic("会话上下文: …")          // 每轮变化
+///     .layer_cached("核心身份…")               // 永不变化 — 无断点
+///     .layer_cached("工具指南…")               // 极少变化 — 获得断点 ✓
+///     .layer_dynamic("会话上下文: …")          // 每轮变化 — 无断点
 ///     .build();
 ///
 /// // 合并为纯文本（用于不支持 cache_control 的 Provider）
@@ -62,7 +68,7 @@ impl Prompt {
         Self {
             layers: vec![PromptLayer {
                 text: text.into(),
-                cache_control: None,
+                is_cached: false,
             }],
         }
     }
@@ -74,13 +80,31 @@ impl Prompt {
 
     /// 将 Prompt 转换为带 cache_control 的 `Vec<ContentBlock>`。
     ///
-    /// 供框架内部构建 `Message::System` 使用。
+    /// **断点放置策略：** 只在最后一个 cached layer 上放置 `CacheControl::Breakpoint`。
+    ///
+    /// Anthropic 每个请求最多允许 4 个 `cache_control` 断点。
+    /// 缓存前缀是累积的——断点标记的是"到此为止的前缀被缓存"。
+    /// 中间层的断点不产生独立的缓存段，纯属浪费限额。
+    /// 所以只在最后一个 cached layer（即 dynamic layer 之前的那个）放置断点。
     pub fn to_content_blocks(&self) -> Vec<ContentBlock> {
+        // 找到最后一个 cached layer 的索引
+        let last_cached_idx = self
+            .layers
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, layer)| layer.is_cached)
+            .map(|(idx, _)| idx);
+
         self.layers
             .iter()
-            .map(|layer| match layer.cache_control {
-                Some(cache) => ContentBlock::text_with_cache(layer.text.clone(), cache),
-                None => ContentBlock::text(&layer.text),
+            .enumerate()
+            .map(|(idx, layer)| {
+                if Some(idx) == last_cached_idx {
+                    ContentBlock::text_with_cache(layer.text.clone(), CacheControl::Breakpoint)
+                } else {
+                    ContentBlock::text(&layer.text)
+                }
             })
             .collect()
     }
@@ -133,20 +157,18 @@ impl Default for Prompt {
 /// # 示例
 ///
 /// ```
-/// use lellm_core::{Prompt, PromptBuilder, CacheControl};
+/// use lellm_core::Prompt;
 ///
 /// let prompt = Prompt::builder()
-///     // L1 — 核心身份，永不变化 → 永远命中缓存
+///     // L1 — 核心身份，永不变化 → 永远命中缓存（无断点）
 ///     .layer_cached("你是 DevOps Agent，专注于 CI/CD 管理。")
-///     // L2 — 工具指南，极少变化 → 长期命中缓存
+///     // L2 — 工具指南，极少变化 → 长期命中缓存（无断点）
 ///     .layer_cached("可用工具: get_time, get_env, get_config")
-///     // L3 — 项目规则，偶尔变化
+///     // L3 — 项目规则，偶尔变化（无断点）
 ///     .layer_cached("项目规则: 使用中文回复。")
-///     // L4 — 分隔符
+///     // L4 — 分隔符（获得断点 ✓ — 最后一个 cached layer）
 ///     .layer_cached("---")
-///     // L5 — 注入记忆，每轮变化
-///     .layer_cached("相关记忆: 用户偏好 Jenkins。")
-///     // L6 — 会话上下文，频繁变化 → 不缓存
+///     // L5 — 会话上下文，频繁变化 → 不缓存
 ///     .layer_dynamic("当前目标: 部署 ds-pkg")
 ///     .build();
 /// ```
@@ -160,36 +182,40 @@ impl PromptBuilder {
         Self::default()
     }
 
-    /// 添加带 `CacheControl::Breakpoint` 缓存断点的层。
+    /// 添加缓存层。
     ///
     /// 用于稳定性高的内容（核心身份、工具指南、项目规则）。
     /// 这是最常用的方法——绝大多数层都应该缓存。
+    ///
+    /// **注意：** 实际的 `cache_control` 断点由 `to_content_blocks()` 统一放置在
+    /// 最后一个 cached layer 上（Anthropic 最多 4 个断点/请求，中间断点无意义）。
     pub fn layer_cached(mut self, text: impl Into<String>) -> Self {
         self.layers.push(PromptLayer {
             text: text.into(),
-            cache_control: Some(CacheControl::Breakpoint),
+            is_cached: true,
         });
         self
     }
 
-    /// 添加不带缓存的层。
+    /// 添加不缓存的层。
     ///
     /// 用于频繁变化的内容（会话上下文、临时注入信息）。
     pub fn layer_dynamic(mut self, text: impl Into<String>) -> Self {
         self.layers.push(PromptLayer {
             text: text.into(),
-            cache_control: None,
+            is_cached: false,
         });
         self
     }
 
     /// 添加带自定义缓存策略的层。
     ///
-    /// 当前只有 `CacheControl::Breakpoint`，预留未来扩展。
-    pub fn layer(mut self, text: impl Into<String>, cache: Option<CacheControl>) -> Self {
+    /// `is_cached = true` 表示希望缓存，`false` 表示不缓存。
+    /// 实际的 `cache_control` 断点由 `to_content_blocks()` 统一放置。
+    pub fn layer(mut self, text: impl Into<String>, is_cached: bool) -> Self {
         self.layers.push(PromptLayer {
             text: text.into(),
-            cache_control: cache,
+            is_cached,
         });
         self
     }
@@ -246,20 +272,25 @@ mod tests {
 
         let blocks = prompt.to_content_blocks();
         assert_eq!(blocks.len(), 3);
-        assert_eq!(blocks.len(), 3);
 
-        // Layer 1 — cached
+        // Layer 1 — cached, but NO breakpoint (not the last cached)
         if let ContentBlock::Text(t) = &blocks[0] {
             assert_eq!(t.text, "layer1");
-            assert!(t.cache_control.is_some());
+            assert!(
+                t.cache_control.is_none(),
+                "Intermediate cached layer should NOT have breakpoint"
+            );
         } else {
             panic!("expected Text block");
         }
 
-        // Layer 2 — cached
+        // Layer 2 — cached, HAS breakpoint (last cached layer before dynamic)
         if let ContentBlock::Text(t) = &blocks[1] {
             assert_eq!(t.text, "layer2");
-            assert!(t.cache_control.is_some());
+            assert!(
+                t.cache_control.is_some(),
+                "Last cached layer should have breakpoint"
+            );
         } else {
             panic!("expected Text block");
         }
@@ -302,13 +333,17 @@ mod tests {
     #[test]
     fn test_prompt_layer_custom_cache() {
         let prompt = Prompt::builder()
-            .layer("cached", Some(CacheControl::Breakpoint))
-            .layer("no cache", None)
+            .layer("cached", true)
+            .layer("no cache", false)
             .build();
 
         let blocks = prompt.to_content_blocks();
+        // "cached" is the last (and only) cached layer → gets the breakpoint
         if let ContentBlock::Text(t) = &blocks[0] {
-            assert!(t.cache_control.is_some());
+            assert!(
+                t.cache_control.is_some(),
+                "Only cached layer should get breakpoint"
+            );
         } else {
             panic!("expected Text");
         }
@@ -316,6 +351,60 @@ mod tests {
             assert!(t.cache_control.is_none());
         } else {
             panic!("expected Text");
+        }
+    }
+
+    #[test]
+    fn test_breakpoint_only_on_last_cached() {
+        // 5 cached layers + 1 dynamic → only layer 5 gets the breakpoint
+        let prompt = Prompt::builder()
+            .layer_cached("L1")
+            .layer_cached("L2")
+            .layer_cached("L3")
+            .layer_cached("L4")
+            .layer_cached("L5")
+            .layer_dynamic("D")
+            .build();
+
+        let blocks = prompt.to_content_blocks();
+        assert_eq!(blocks.len(), 6);
+
+        // Count breakpoints
+        let breakpoint_count = blocks
+            .iter()
+            .filter(|b| {
+                if let ContentBlock::Text(t) = b {
+                    t.cache_control.is_some()
+                } else {
+                    false
+                }
+            })
+            .count();
+        assert_eq!(
+            breakpoint_count, 1,
+            "Should have exactly 1 breakpoint (on last cached layer)"
+        );
+
+        // Verify it's on L5 (index 4)
+        if let ContentBlock::Text(t) = &blocks[4] {
+            assert!(t.cache_control.is_some());
+        }
+    }
+
+    #[test]
+    fn test_all_cached_single_breakpoint() {
+        // All cached, no dynamic → last layer gets breakpoint
+        let prompt = Prompt::builder()
+            .layer_cached("A")
+            .layer_cached("B")
+            .build();
+
+        let blocks = prompt.to_content_blocks();
+        if let ContentBlock::Text(t) = &blocks[0] {
+            assert!(t.cache_control.is_none(), "A should not have breakpoint");
+        }
+        if let ContentBlock::Text(t) = &blocks[1] {
+            assert!(t.cache_control.is_some(), "B should have breakpoint");
         }
     }
 

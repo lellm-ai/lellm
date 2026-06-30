@@ -15,8 +15,7 @@ mod shared;
 mod city_resolver;
 
 use lellm_agent::{
-    AgentBuilder, ToolArgs, ToolCachePolicy, ToolRegistration, ToolUseLoop, schemars::JsonSchema,
-    serde::Deserialize,
+    AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
 };
 use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
 use lellm_derive::Tool;
@@ -128,15 +127,17 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
 
 // ─── 分层 System Prompt — 最大化前缀缓存 ────────────────────────
 
-/// 构建分层 Prompt，利用 Anthropic 前缀缓存机制。
+/// 构建分层 Prompt，全部 cached — 用户查询通过 user message 传递。
 ///
 /// 缓存策略：
-/// - L1 核心身份：永不变化（缓存命中最高）
-/// - L2 工具指南：极少变化（流程步骤）
-/// - L3 字段规则：极少变化（emoji/温度/风向转换）
-/// - L4 输出格式：极少变化（JSON 模板）
-/// - L5 动态层：每轮变化（用户查询），不缓存
-fn build_system_prompt(query: &str) -> Prompt {
+/// - L1 核心身份：永不变化
+/// - L2 工具指南：极少变化
+/// - L3 字段规则：极少变化
+/// - L4 输出格式：极少变化（最后一个 cached layer → 获得 cache_control 断点）
+///
+/// 用户查询作为 user message 传递，不混入 system prompt。
+/// 这样 system prompt 可以 100% 被前缀缓存。
+fn build_system_prompt() -> Prompt {
     Prompt::builder()
         // L1 — 核心身份（永不变化）
         .layer_cached("你是天气查询助手。")
@@ -168,7 +169,7 @@ fn build_system_prompt(query: &str) -> Prompt {
    - \"↖11km/h\" → \"东北风11km/h\"
    - 无箭头（如 \"7km/h\"）→ 保持原样",
         )
-        // L4 — 输出格式规则（极少变化）
+        // L4 — 输出格式规则（极少变化，最后一个 cached → 获得断点 ✓）
         .layer_cached(
             "输出格式（纯紧凑JSON，禁止任何解释文字）：
 单地址: {\"city\":\"tokyo\",\"address\":\"新宿\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"东风7km/h\"}
@@ -176,14 +177,12 @@ fn build_system_prompt(query: &str) -> Prompt {
 
 最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释",
         )
-        // L5 — 用户查询（每轮变化，不缓存）
-        .layer_dynamic(format!("当前查询: {query}"))
         .build()
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>, query: &str) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
     // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
     let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
 
@@ -192,9 +191,9 @@ fn create_agent(provider: CodecProvider<OpenAICompatCodec>, query: &str) -> Tool
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
-    .system(build_system_prompt(query))
+    .system(build_system_prompt())
     .tools(register_weather_tools(Some(shared_provider)))
-    .tool_cache_policy(ToolCachePolicy::Preserve)
+    // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
     .max_iterations(10)
     .max_output_tokens(8000)
     //.reasoning(lellm_core::ReasoningConfig::Disabled)
@@ -222,8 +221,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
 
-    // 分层 Prompt 在创建 Agent 时注入，利用前缀缓存
-    let agent = create_agent(provider, &question);
+    // System prompt 全部缓存（无动态层），查询通过 user message 传递
+    let agent = create_agent(provider);
 
     let stream = agent.execute_stream(vec![Message::user(text_block(question.clone()))]);
     shared::observe_react_loop(stream, &question).await

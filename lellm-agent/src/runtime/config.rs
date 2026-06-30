@@ -316,22 +316,29 @@ mod tests {
         // Should have system + user
         assert_eq!(result.len(), 2);
 
-        // Verify system message has 3 content blocks with correct cache markers
+        // Verify system message has 3 content blocks with correct cache markers.
+        // Only the LAST cached layer gets the breakpoint (Anthropic max 4 per request).
         if let Message::System { content } = &result[0] {
             assert_eq!(content.len(), 3);
 
-            // Layer 1 — cached
+            // Layer 1 — cached, but NO breakpoint (not the last cached)
             if let lellm_core::ContentBlock::Text(t) = &content[0] {
                 assert_eq!(t.text, "核心身份");
-                assert!(t.cache_control.is_some());
+                assert!(
+                    t.cache_control.is_none(),
+                    "Intermediate cached layer should NOT have breakpoint"
+                );
             } else {
                 panic!("expected Text block");
             }
 
-            // Layer 2 — cached
+            // Layer 2 — cached, HAS breakpoint (last cached before dynamic)
             if let lellm_core::ContentBlock::Text(t) = &content[1] {
                 assert_eq!(t.text, "工具指南");
-                assert!(t.cache_control.is_some());
+                assert!(
+                    t.cache_control.is_some(),
+                    "Last cached layer should have breakpoint"
+                );
             } else {
                 panic!("expected Text block");
             }

@@ -10,9 +10,7 @@
 #[path = "_shared/shared.rs"]
 mod shared;
 
-use lellm_agent::{
-    AgentBuilder, ToolCachePolicy, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
-};
+use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
 use lellm_derive::Tool;
 use lellm_provider::ResolvedModel;
@@ -60,7 +58,7 @@ fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
 
 // ─── 分层 System Prompt — 最大化前缀缓存 ────────────────────────
 
-/// 构建分层 Prompt，利用前缀缓存机制。
+/// 构建分层 Prompt，全部 cached — 用户查询通过 user message 传递。
 ///
 /// 缓存策略：
 /// - L1 核心身份：永不变化
@@ -68,9 +66,11 @@ fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
 /// - L3 归一化规则：极少变化
 /// - L4 城市示例：极少变化
 /// - L5 天气查询步骤：极少变化
-/// - L6 输出格式：极少变化
-/// - L7 动态层：每轮变化（用户查询），不缓存
-fn build_system_prompt(query: &str) -> Prompt {
+/// - L6 输出格式：极少变化（最后一个 cached layer → 获得 cache_control 断点）
+///
+/// 用户查询作为 user message 传递，不混入 system prompt。
+/// 这样 system prompt 可以 100% 被前缀缓存。
+fn build_system_prompt() -> Prompt {
     Prompt::builder()
         // L1 — 核心身份
         .layer_cached("你是天气查询助手。")
@@ -116,7 +116,7 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 - 仅重试一次
 - 再失败返回 unknown",
         )
-        // L6 — 输出格式 + 约束规则
+        // L6 — 输出格式 + 约束规则（最后一个 cached → 获得断点 ✓）
         .layer_cached(
             "最终输出：
 
@@ -142,22 +142,20 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 禁止进行多轮推理。
 禁止生成 reasoning。",
         )
-        // L7 — 用户查询（每轮变化，不缓存）
-        .layer_dynamic(format!("当前查询: {query}"))
         .build()
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>, query: &str) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
-    .system(build_system_prompt(query))
+    .system(build_system_prompt())
     .tools(register_http_tools())
-    .tool_cache_policy(ToolCachePolicy::Preserve)
+    // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
     .max_iterations(5)
     .max_output_tokens(8000)
     .reasoning_budget(8000)
@@ -186,8 +184,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
 
-    // 分层 Prompt 在创建 Agent 时注入，利用前缀缓存
-    let agent = create_agent(provider, &question);
+    // System prompt 全部缓存（无动态层），查询通过 user message 传递
+    let agent = create_agent(provider);
 
     let messages = vec![Message::user(text_block(question.clone()))];
     let stream = agent.execute_stream(messages);
