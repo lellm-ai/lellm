@@ -240,23 +240,37 @@ impl<S: WorkflowState> ExecutionEngine<S> {
         self.state
     }
 
-    // ─── commit() — Unit of Work ──────────────────────────────
+    // ─── commit() — Unit of Work 流水线 ───────────────────────
 
-    /// 提交当前节点产生的 mutations（Unit of Work）。
+    /// 取出 mutation batch（Executor 调用）。
     ///
-    /// 这是 commit 的统一入口：
-    /// 1. 将 mutations apply 到 state
-    /// 2. 清空 mutation buffer
+    /// 这是 commit 流水线的第一段：
+    /// ```text
+    /// take_commit_batch() → TraceSink/MutationLog 消费 → apply_batch_to_state()
+    /// ```
     ///
-    /// 未来扩展：
-    /// - Trace 记录
-    /// - Checkpoint 保存
-    /// - Metrics / EventBus
-    pub fn commit(&mut self) {
-        let mutations = std::mem::take(&mut self.mutations);
+    /// 调用方可以在此处插入 Trace 记录、MutationLog 持久化等扩展点。
+    pub fn take_commit_batch(&mut self) -> Vec<S::Mutation> {
+        std::mem::take(&mut self.mutations)
+    }
+
+    /// 将 mutation batch 应用到状态（Executor 调用）。
+    ///
+    /// commit 流水线的最后一段。与 `take_commit_batch()` 配合使用。
+    pub fn apply_batch_to_state(&mut self, mutations: Vec<S::Mutation>) {
         if !mutations.is_empty() {
             self.state.apply_batch(mutations);
         }
+    }
+
+    /// 完整的 commit 流水线（便捷方法）。
+    ///
+    /// 等价于 `apply_batch_to_state(take_commit_batch())`。
+    /// 内部调用使用此方法即可；需要扩展 Trace/MutationLog 的场景
+    /// 应手动调用 `take_commit_batch()` + 扩展点 + `apply_batch_to_state()`。
+    pub fn commit(&mut self) {
+        let batch = self.take_commit_batch();
+        self.apply_batch_to_state(batch);
     }
 }
 

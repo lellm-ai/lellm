@@ -6,6 +6,7 @@ pub mod barrier_node;
 pub mod barrier_wait;
 pub mod checkpoint;
 pub mod checkpoint_codec;
+pub mod checkpoint_policy;
 pub mod error;
 pub mod event;
 pub mod execution_engine;
@@ -13,6 +14,7 @@ pub mod execution_loop;
 pub mod graph;
 pub mod graph_analysis;
 pub mod ids;
+pub mod mutation_log;
 pub mod node;
 pub mod node_context;
 pub mod parallel_node;
@@ -42,9 +44,13 @@ pub use statekey::{
 };
 
 // ─── Checkpoint ──────────────────────────────────────────────
+#[allow(deprecated)]
 pub use checkpoint::{
     Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy, CheckpointStoreError, NodeId,
 };
+
+// ─── Checkpoint Policy ───────────────────────────────────────
+pub use checkpoint_policy::{RetentionPolicy, TriggerPolicy};
 
 // ─── Checkpoint Codec ────────────────────────────────────────
 pub use checkpoint_codec::{CheckpointCodec, SerdeCheckpointCodec, TypedCheckpointStore};
@@ -96,4 +102,9 @@ pub use workflow_state::{LastWriteWins, MergeStrategy, WorkflowError, WorkflowSt
 pub mod trace;
 pub use trace::{
     ExecutionTrace, ExportedTrace, ExportedTraceStep, MemoryTraceSink, TraceSink, TraceStep,
+};
+
+// ─── MutationLog ─────────────────────────────────────────────
+pub use mutation_log::{
+    InMemoryMutationLog, MutationLogEntry, MutationLogStore, mutations_to_log_entries,
 };

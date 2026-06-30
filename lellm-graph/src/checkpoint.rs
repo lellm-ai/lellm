@@ -145,16 +145,10 @@ pub enum CheckpointStoreError {
 /// 关联关系由存储层组织（如同一目录下的文件）。
 pub use crate::ids::TraceId;
 
-// ─── CheckpointPolicy ──────────────────────────────────────────
+// ─── CheckpointPolicy 已迁移 ──────────────────────────────────
 
-/// Checkpoint 策略 — 控制何时保存。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CheckpointPolicy {
-    /// 每次节点执行后保存
-    #[default]
-    EveryNode,
-    /// 仅在 Barrier 决策后保存
-    BarrierOnly,
-    /// 手动控制 — 调用方显式触发
-    Manual,
-}
+/// 向后兼容 — CheckpointPolicy 已迁移至 checkpoint_policy 模块。
+/// v0.5 使用 TriggerPolicy + RetentionPolicy 替代。
+#[allow(deprecated)]
+#[doc(inline)]
+pub use crate::checkpoint_policy::CheckpointPolicy;

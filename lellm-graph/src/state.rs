@@ -309,6 +309,8 @@ pub struct GraphResult<S = State> {
     pub execution_log: Vec<ExecutionEntry>,
     /// 执行耗时
     pub duration: Duration,
+    /// 执行追踪（可选，启用 TraceSink 时填充）
+    pub trace: Option<crate::trace::ExecutionTrace<S::Mutation>>,
 }
 
 /// 单个节点执行记录。

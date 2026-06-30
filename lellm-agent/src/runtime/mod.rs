@@ -49,4 +49,4 @@ pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, To
 
 // FlowNode 适配
 pub use flow_node::AgentFlowNode;
-pub use stream_translation::{TranslationResult, translate_provider_event};
+pub use stream_translation::{AgentStreamEvent, TranslationResult, translate_provider_event};

@@ -166,7 +166,9 @@ impl SimpleExecutor {
             decision_rx,
             cancel_rx,
             cancel,
-            None,
+            None, // checkpoint
+            None, // trace_sink
+            None, // restore_from
         ));
 
         GraphExecution {
