@@ -16,6 +16,26 @@
 //!        ▼
 //! Memory / File / S3 / SQLite  ← 后端实现
 //! ```
+//!
+//! # Phase 6: Execution Frame Snapshot
+//!
+//! 核心洞察：checkpoint 不是保存 state，而是保存 execution position + state projection。
+//!
+//! ```text
+//! checkpoint 的边界单位是 Graph Execution Frame，不是 WorkflowState 或 Node。
+//!
+//! 正确模型：
+//!   Graph Execution = Frame Stack
+//!
+//! Frame = {
+//!     graph_id,
+//!     node_id,
+//!     state_snapshot,
+//!     cursor,
+//! }
+//!
+//! checkpoint = FrameStack snapshot
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -152,3 +172,83 @@ pub use crate::ids::TraceId;
 #[allow(deprecated)]
 #[doc(inline)]
 pub use crate::checkpoint_policy::CheckpointPolicy;
+
+// ─── Phase 6: Execution Frame Snapshot ────────────────────────
+
+/// 执行帧 — 保存单个 Graph 的执行位置。
+#[derive(Debug, Clone)]
+pub struct Frame<S: WorkflowState = State> {
+    /// 图 ID
+    pub graph_id: String,
+
+    /// 当前节点 ID
+    pub node_id: String,
+
+    /// 状态快照（可序列化的 projection）
+    pub state: S,
+
+    /// 执行游标（节点索引或步骤数）
+    pub cursor: usize,
+}
+
+impl<S: WorkflowState> Frame<S> {
+    /// 创建新的 Frame。
+    pub fn new(graph_id: String, node_id: String, state: S, cursor: usize) -> Self {
+        Self {
+            graph_id,
+            node_id,
+            state,
+            cursor,
+        }
+    }
+}
+
+/// 帧栈 — 保存完整的执行位置历史。
+#[derive(Debug, Clone)]
+pub struct FrameStack<S: WorkflowState = State> {
+    /// 帧列表（从外到内）
+    frames: Vec<Frame<S>>,
+}
+
+impl<S: WorkflowState> FrameStack<S> {
+    /// 创建空的帧栈。
+    pub fn new() -> Self {
+        Self { frames: Vec::new() }
+    }
+
+    /// Push 一个新帧。
+    pub fn push(&mut self, frame: Frame<S>) {
+        self.frames.push(frame);
+    }
+
+    /// Pop 最后一个帧。
+    pub fn pop(&mut self) -> Option<Frame<S>> {
+        self.frames.pop()
+    }
+
+    /// 获取当前帧（最顶层）。
+    pub fn current(&self) -> Option<&Frame<S>> {
+        self.frames.last()
+    }
+
+    /// 获取帧数量。
+    pub fn depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// 检查是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// 获取所有帧的引用。
+    pub fn frames(&self) -> &[Frame<S>] {
+        &self.frames
+    }
+}
+
+impl<S: WorkflowState> Default for FrameStack<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
