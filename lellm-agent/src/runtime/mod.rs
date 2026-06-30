@@ -30,7 +30,7 @@ pub use tools::{
 // ─── 运行时 re-export ────────────────────────────────────────────
 
 pub use builder::AgentBuilder;
-pub use config::{ToolUseConfig, ToolUseDeps};
+pub use config::{ToolCachePolicy, ToolUseConfig, ToolUseDeps};
 pub use context::{
     CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_message,
     estimate_text, estimate_tokens,

@@ -4,7 +4,7 @@
 //! - `ToolUseDeps` — 策略服务，Arc 包裹
 //! - `build_request_*` — 请求构建辅助函数
 
-use lellm_core::{ChatRequest, LlmError, Message, ToolDefinition};
+use lellm_core::{CacheControl, ChatRequest, LlmError, Message, Prompt, ToolDefinition};
 use lellm_provider::ResolvedModel;
 
 use super::context::ContextBudget;
@@ -22,8 +22,12 @@ use std::sync::Arc;
 /// - 未来可扩展为 `Serialize` / `Deserialize`
 #[derive(Debug, Clone)]
 pub struct ToolUseConfig {
-    /// 系统提示（运行时注入，不修改 messages）
-    pub system_prompt: Option<String>,
+    /// 系统提示（运行时注入，不修改 messages）。
+    ///
+    /// 支持 `Prompt` 类型，统一了简单文本与分层缓存两种模式。
+    /// - 简单文本：通过 `From<String>` 自动转换
+    /// - 分层缓存：`Prompt::builder().layer_cached(...).build()`
+    pub system: Option<Prompt>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
     /// 每次 LLM 请求的最大输出 token 数（默认 4k）
@@ -73,14 +77,37 @@ pub struct ToolUseConfig {
     /// **重要：** 此字段控制框架行为（Event 管道），不属于协议参数。
     /// 不应出现在 `ChatRequest` 中（Codec 不应看到此字段）。
     pub stream_thinking: bool,
+    /// 工具缓存策略（默认 `Auto`）。
+    ///
+    /// 控制框架如何为 Tool Definitions 添加 `cache_control` 标记：
+    /// - `Auto`（默认）：为未设置 `cache_control` 的工具自动添加 `Breakpoint`
+    /// - `Preserve`：不修改用户设置的 `cache_control`
+    /// - `Disabled`：显式清除所有工具的 `cache_control`
+    pub tool_cache_policy: ToolCachePolicy,
     /// 工具重试策略
     pub retry_policy: RetryPolicy,
+}
+
+/// 工具缓存策略。
+///
+/// 控制框架如何为 Tool Definitions 补充 `cache_control` 标记，
+/// 以最大化前缀缓存命中率。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolCachePolicy {
+    /// 自动模式（默认）：为未设置 `cache_control` 的工具添加 `Breakpoint`。
+    /// 已显式设置的标记不会被覆盖。
+    #[default]
+    Auto,
+    /// 保留模式：不修改用户设置的 `cache_control`。
+    Preserve,
+    /// 禁用模式：清除所有工具的 `cache_control`。
+    Disabled,
 }
 
 impl Default for ToolUseConfig {
     fn default() -> Self {
         Self {
-            system_prompt: None,
+            system: None,
             max_iterations: 10,
             max_output_tokens: 4_000,
             max_total_output_tokens: None,
@@ -88,6 +115,7 @@ impl Default for ToolUseConfig {
             context_budget: ContextBudget::default(),
             request_options: RequestOptions::default(),
             stream_thinking: false,
+            tool_cache_policy: ToolCachePolicy::default(),
             retry_policy: RetryPolicy::default(),
         }
     }
@@ -124,12 +152,12 @@ pub(super) fn build_request_messages_inner(
     config: &ToolUseConfig,
     messages: &[Message],
 ) -> Result<Vec<Message>, LlmError> {
-    if let Some(ref sp) = config.system_prompt {
+    if let Some(ref system) = config.system {
         if has_system_message(messages) {
             return Err(LlmError::DuplicateSystemPrompt);
         }
         let mut result = vec![Message::System {
-            content: lellm_core::text_block(sp.clone()),
+            content: system.to_content_blocks(),
         }];
         result.extend(messages.iter().cloned());
         Ok(result)
@@ -144,17 +172,59 @@ pub(super) fn build_request_messages_inner(
 /// 再应用 RequestOptions 非默认值覆盖。
 ///
 /// `definitions` — 预解析的工具定义列表（从 ResolvedRound 获取）。
+/// `tool_cache_policy` — 工具缓存策略，控制如何为 tools 添加 cache_control。
 pub(super) fn build_request_inner(
     model: &ResolvedModel,
     messages: &[Message],
     max_output_tokens: u32,
     request_options: &RequestOptions,
     definitions: &[ToolDefinition],
+    tool_cache_policy: ToolCachePolicy,
 ) -> ChatRequest {
-    let tools = if definitions.is_empty() {
-        None
-    } else {
-        Some(definitions.to_vec())
+    let tools = match tool_cache_policy {
+        ToolCachePolicy::Auto => {
+            if definitions.is_empty() {
+                None
+            } else {
+                Some(
+                    definitions
+                        .iter()
+                        .map(|d| {
+                            if d.cache_control.is_none() {
+                                let mut cloned = d.clone();
+                                cloned.cache_control = Some(CacheControl::Breakpoint);
+                                cloned
+                            } else {
+                                d.clone()
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        }
+        ToolCachePolicy::Preserve => {
+            if definitions.is_empty() {
+                None
+            } else {
+                Some(definitions.to_vec())
+            }
+        }
+        ToolCachePolicy::Disabled => {
+            if definitions.is_empty() {
+                None
+            } else {
+                Some(
+                    definitions
+                        .iter()
+                        .map(|d| {
+                            let mut cloned = d.clone();
+                            cloned.cache_control = None;
+                            cloned
+                        })
+                        .collect(),
+                )
+            }
+        }
     };
 
     let mut req = ChatRequest {
@@ -185,6 +255,7 @@ pub(super) fn build_request_inner(
 /// 后续轮次由 LLM 自主决定是否调用工具。
 ///
 /// `definitions` — 预解析的工具定义列表（从 ResolvedRound 获取）。
+/// `tool_cache_policy` — 工具缓存策略，控制如何为 tools 添加 cache_control。
 pub(super) fn build_request_inner_with_round(
     model: &ResolvedModel,
     messages: &[Message],
@@ -192,6 +263,7 @@ pub(super) fn build_request_inner_with_round(
     request_options: &RequestOptions,
     iteration: usize,
     definitions: &[ToolDefinition],
+    tool_cache_policy: ToolCachePolicy,
 ) -> ChatRequest {
     let mut req = build_request_inner(
         model,
@@ -199,6 +271,7 @@ pub(super) fn build_request_inner_with_round(
         max_output_tokens,
         request_options,
         definitions,
+        tool_cache_policy,
     );
 
     // 如果 RequestOptions 设置了 tool_choice 且不是第一轮，清除它
@@ -217,4 +290,104 @@ pub(super) fn empty_response() -> lellm_core::ChatResponse {
         lellm_core::TokenUsage::default(),
         serde_json::Value::Null,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lellm_core::Prompt;
+
+    #[test]
+    fn test_build_request_messages_with_prompt() {
+        let config = ToolUseConfig {
+            system: Some(
+                Prompt::builder()
+                    .layer_cached("核心身份")
+                    .layer_cached("工具指南")
+                    .layer_dynamic("会话上下文")
+                    .build(),
+            ),
+            ..Default::default()
+        };
+
+        let messages: Vec<Message> = vec![Message::user_text("你好")];
+        let result = build_request_messages_inner(&config, &messages).unwrap();
+
+        // Should have system + user
+        assert_eq!(result.len(), 2);
+
+        // Verify system message has 3 content blocks with correct cache markers
+        if let Message::System { content } = &result[0] {
+            assert_eq!(content.len(), 3);
+
+            // Layer 1 — cached
+            if let lellm_core::ContentBlock::Text(t) = &content[0] {
+                assert_eq!(t.text, "核心身份");
+                assert!(t.cache_control.is_some());
+            } else {
+                panic!("expected Text block");
+            }
+
+            // Layer 2 — cached
+            if let lellm_core::ContentBlock::Text(t) = &content[1] {
+                assert_eq!(t.text, "工具指南");
+                assert!(t.cache_control.is_some());
+            } else {
+                panic!("expected Text block");
+            }
+
+            // Layer 3 — dynamic (no cache)
+            if let lellm_core::ContentBlock::Text(t) = &content[2] {
+                assert_eq!(t.text, "会话上下文");
+                assert!(t.cache_control.is_none());
+            } else {
+                panic!("expected Text block");
+            }
+        } else {
+            panic!("expected System message");
+        }
+    }
+
+    #[test]
+    fn test_build_request_messages_with_plain_prompt() {
+        let config = ToolUseConfig {
+            system: Some("简单提示".into()),
+            ..Default::default()
+        };
+
+        let messages: Vec<Message> = vec![Message::user_text("你好")];
+        let result = build_request_messages_inner(&config, &messages).unwrap();
+
+        assert_eq!(result.len(), 2);
+        if let Message::System { content } = &result[0] {
+            assert_eq!(content.len(), 1);
+            assert_eq!(content[0].as_text(), Some("简单提示"));
+        } else {
+            panic!("expected System message");
+        }
+    }
+
+    #[test]
+    fn test_build_request_messages_no_system() {
+        let config = ToolUseConfig::default();
+        let messages: Vec<Message> = vec![Message::user_text("你好")];
+        let result = build_request_messages_inner(&config, &messages).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0], Message::User { .. }));
+    }
+
+    #[test]
+    fn test_duplicate_system_prompt_error() {
+        let config = ToolUseConfig {
+            system: Some("系统提示".into()),
+            ..Default::default()
+        };
+
+        let messages: Vec<Message> =
+            vec![Message::system_text("已有系统"), Message::user_text("你好")];
+        let result = build_request_messages_inner(&config, &messages);
+
+        assert!(result.is_err());
+    }
 }

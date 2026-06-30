@@ -16,10 +16,13 @@ pub use runtime::{
     BatchExecutionResult, CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor,
     DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy, IntoToolError,
     IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy,
-    StaticCatalog, StopReason, ToolArgs, ToolCatalog, ToolCategory, ToolError, ToolErrorKind,
-    ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
-    ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
+    StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog, ToolCategory, ToolError,
+    ToolErrorKind, ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig,
+    ToolUseDeps, ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
 };
+
+// 从 core 再导出 Prompt / PromptBuilder
+pub use lellm_core::{Prompt, PromptBuilder};
 
 // ─── 糖衣 API（第三层原型） ───
 
@@ -53,21 +56,19 @@ pub fn create_agent_with_tools(
 }
 
 /// 快速创建带系统提示的 Agent。
-pub fn create_agent_with_system(model: ResolvedModel, system_prompt: String) -> ToolUseLoop {
-    AgentBuilder::new(model)
-        .system_prompt(system_prompt)
-        .build()
+pub fn create_agent_with_system(model: ResolvedModel, system: impl Into<Prompt>) -> ToolUseLoop {
+    AgentBuilder::new(model).system(system).build()
 }
 
 /// 完整配置的便捷创建。
 pub fn create_agent_full(
     model: ResolvedModel,
-    system_prompt: String,
+    system: impl Into<Prompt>,
     tools: impl IntoIterator<Item = ToolRegistration>,
     max_iterations: usize,
 ) -> ToolUseLoop {
     AgentBuilder::new(model)
-        .system_prompt(system_prompt)
+        .system(system)
         .tools(tools)
         .max_iterations(max_iterations)
         .build()

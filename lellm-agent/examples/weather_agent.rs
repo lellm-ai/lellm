@@ -15,9 +15,10 @@ mod shared;
 mod city_resolver;
 
 use lellm_agent::{
-    AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
+    AgentBuilder, ToolArgs, ToolCachePolicy, ToolRegistration, ToolUseLoop, schemars::JsonSchema,
+    serde::Deserialize,
 };
-use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
+use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
 use lellm_derive::Tool;
 use lellm_provider::LlmProvider;
 use lellm_provider::ResolvedModel;
@@ -125,17 +126,31 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
     ]
 }
 
-// ─── 系统 Prompt ────────────────────────────────────────────────
+// ─── 分层 System Prompt — 最大化前缀缓存 ────────────────────────
 
-const SYSTEM_PROMPT: &str = r#"你是天气查询助手。
-
-流程：
+/// 构建分层 Prompt，利用 Anthropic 前缀缓存机制。
+///
+/// 缓存策略：
+/// - L1 核心身份：永不变化（缓存命中最高）
+/// - L2 工具指南：极少变化（流程步骤）
+/// - L3 字段规则：极少变化（emoji/温度/风向转换）
+/// - L4 输出格式：极少变化（JSON 模板）
+/// - L5 动态层：每轮变化（用户查询），不缓存
+fn build_system_prompt(query: &str) -> Prompt {
+    Prompt::builder()
+        // L1 — 核心身份（永不变化）
+        .layer_cached("你是天气查询助手。")
+        // L2 — 工具使用指南（极少变化）
+        .layer_cached(
+            "流程：
 1. 提取用户输入中的所有地址
 2. 对每个地址调用 resolve_city
-3. 对 city_en != "unknown" 调用 http_get(https://wttr.in/{city_en}?format=%c+%t+%h+%w)
-4. 解析 wttr.in 返回的文本，提取天气数据，输出 JSON
-
-wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
+3. 对 city_en != \"unknown\" 调用 http_get(https://wttr.in/{city_en}?format=%c+%t+%h+%w)
+4. 解析 wttr.in 返回的文本，提取天气数据，输出 JSON",
+        )
+        // L3 — 字段转换规则（极少变化）
+        .layer_cached(
+            "wttr.in 返回格式: \"🌧️ +17°C 94% ↖11km/h\"
 你需要转换以下字段：
 
 1. condition（emoji → 中文）：
@@ -144,24 +159,31 @@ wttr.in 返回格式: "🌧️ +17°C 94% ↖11km/h"
    - 其他 emoji 自行翻译为对应的中文天气描述
 
 2. temperature（格式修正）：
-   - "+23°C" → "23°C"（去掉 + 号）
-   - "-5°C" → "零下5°C"（负数加"零下"）
+   - \"+23°C\" → \"23°C\"（去掉 + 号）
+   - \"-5°C\" → \"零下5°C\"（负数加\"零下\"）
 
 3. wind（方向箭头 → 中文）：
-   - "→" → "东风", "←" → "西风", "↑" → "南风", "↓" → "北风"
-   - "↗" → "东南风", "↘" → "西南风", "↙" → "西北风", "↖" → "东北风"
-   - "↖11km/h" → "东北风11km/h"
-   - 无箭头（如 "7km/h"）→ 保持原样
-
-输出格式（纯 紧凑JSON，禁止任何解释文字）：
-单地址: {"city":"tokyo","address":"新宿","condition":"小雨","temperature":"17°C","humidity":"94%","wind":"东风7km/h"}
+   - \"→\" → \"东风\", \"←\" → \"西风\", \"↑\" → \"南风\", \"↓\" → \"北风\"
+   - \"↗\" → \"东南风\", \"↘\" → \"西南风\", \"↙\" → \"西北风\", \"↖\" → \"东北风\"
+   - \"↖11km/h\" → \"东北风11km/h\"
+   - 无箭头（如 \"7km/h\"）→ 保持原样",
+        )
+        // L4 — 输出格式规则（极少变化）
+        .layer_cached(
+            "输出格式（纯紧凑JSON，禁止任何解释文字）：
+单地址: {\"city\":\"tokyo\",\"address\":\"新宿\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"东风7km/h\"}
 多地址: [{...},{...}]
 
-最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释"#;
+最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释",
+        )
+        // L5 — 用户查询（每轮变化，不缓存）
+        .layer_dynamic(format!("当前查询: {query}"))
+        .build()
+}
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>, query: &str) -> ToolUseLoop {
     // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
     let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
 
@@ -170,8 +192,9 @@ fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
-    .system_prompt(SYSTEM_PROMPT.to_string())
+    .system(build_system_prompt(query))
     .tools(register_weather_tools(Some(shared_provider)))
+    .tool_cache_policy(ToolCachePolicy::Preserve)
     .max_iterations(10)
     .max_output_tokens(8000)
     //.reasoning(lellm_core::ReasoningConfig::Disabled)
@@ -191,7 +214,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let provider =
         CodecProvider::load(OpenAICompatCodec::llama()).expect("LLaMA provider env error");
-    let agent = create_agent(provider);
 
     println!("=== Weather Agent — resolve_city(四级降级) + http_get ===\n");
 
@@ -200,10 +222,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
 
-    // 打印调试信息
-    println!("=== 系统 Prompt ===");
-    println!("{}", SYSTEM_PROMPT);
-    println!();
+    // 分层 Prompt 在创建 Agent 时注入，利用前缀缓存
+    let agent = create_agent(provider, &question);
 
     let stream = agent.execute_stream(vec![Message::user(text_block(question.clone()))]);
     shared::observe_react_loop(stream, &question).await

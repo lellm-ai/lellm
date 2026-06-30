@@ -8,6 +8,7 @@
 
 pub mod error;
 pub mod message;
+pub mod prompt;
 pub mod request;
 pub mod response;
 
@@ -19,5 +20,6 @@ pub use message::{
     CacheControl, ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall,
     text_block,
 };
+pub use prompt::{Prompt, PromptBuilder};
 pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};

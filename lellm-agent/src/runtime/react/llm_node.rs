@@ -96,6 +96,7 @@ impl LeafNode<AgentState> for LLMNode {
             &self.config.request_options,
             state.iterations + 1,
             &round.definitions,
+            self.config.tool_cache_policy,
         );
 
         // 4. 通过 LlmInvoker 执行流式调用（自动处理 retry/fallback）

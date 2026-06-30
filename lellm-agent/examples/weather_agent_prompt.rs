@@ -10,8 +10,10 @@
 #[path = "_shared/shared.rs"]
 mod shared;
 
-use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
-use lellm_core::{Message, ToolError, ToolErrorKind, text_block};
+use lellm_agent::{
+    AgentBuilder, ToolCachePolicy, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
+};
+use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
 use lellm_derive::Tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
@@ -56,33 +58,53 @@ fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
     })]
 }
 
-// ─── Agent 工厂 ─────────────────────────────────────────────────
+// ─── 分层 System Prompt — 最大化前缀缓存 ────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
-    let prompt = r#"你是天气查询助手。
-任务分两步：
+/// 构建分层 Prompt，利用前缀缓存机制。
+///
+/// 缓存策略：
+/// - L1 核心身份：永不变化
+/// - L2 任务步骤：极少变化
+/// - L3 归一化规则：极少变化
+/// - L4 城市示例：极少变化
+/// - L5 天气查询步骤：极少变化
+/// - L6 输出格式：极少变化
+/// - L7 动态层：每轮变化（用户查询），不缓存
+fn build_system_prompt(query: &str) -> Prompt {
+    Prompt::builder()
+        // L1 — 核心身份
+        .layer_cached("你是天气查询助手。")
+        // L2 — 任务步骤
+        .layer_cached(
+            "任务分两步：
 
 步骤1：地址归一化
 
-将用户输入地址映射为 wttr.in 可识别城市。
-
-规则：
+将用户输入地址映射为 wttr.in 可识别城市。",
+        )
+        // L3 — 归一化规则
+        .layer_cached(
+            "规则：
 
 - 仅允许输出一个城市
 - 不允许多个候选
 - 不允许猜测
 - 不允许解释
 - 不允许分析过程
-- 无法确定时返回 unknown
-
-示例：
+- 无法确定时返回 unknown",
+        )
+        // L4 — 城市示例
+        .layer_cached(
+            "示例：
 
 宁海 -> ningbo
 浦东 -> shanghai
 新宿 -> tokyo
-未知地点 -> unknown
-
-步骤2：天气查询
+未知地点 -> unknown",
+        )
+        // L5 — 天气查询步骤
+        .layer_cached(
+            "步骤2：天气查询
 
 仅对非 unknown 城市调用 http_get：
 
@@ -92,40 +114,50 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 
 - 最多允许一个备用城市
 - 仅重试一次
-- 再失败返回 unknown
-
-最终输出：
+- 再失败返回 unknown",
+        )
+        // L6 — 输出格式 + 约束规则
+        .layer_cached(
+            "最终输出：
 
 单地址：
 
 {
-  "city":"tokyo",
-  "address":"新宿",
-  "condition":"小雨",
-  "temperature":"17°C",
-  "humidity":"94%",
-  "wind":"7km/h"
+  \"city\":\"tokyo\",
+  \"address\":\"新宿\",
+  \"condition\":\"小雨\",
+  \"temperature\":\"17°C\",
+  \"humidity\":\"94%\",
+  \"wind\":\"7km/h\"
 }
 
 多地址：
 
 [{...},{...}]
 
-最终回答必须为 紧凑JSON。
+最终回答必须为紧凑JSON。
 禁止输出解释、分析、思考过程。
 地址推理属于简单映射任务。
-
 禁止进行地理分析。
 禁止进行多轮推理。
-禁止生成 reasoning。"#;
+禁止生成 reasoning。",
+        )
+        // L7 — 用户查询（每轮变化，不缓存）
+        .layer_dynamic(format!("当前查询: {query}"))
+        .build()
+}
 
+// ─── Agent 工厂 ─────────────────────────────────────────────────
+
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>, query: &str) -> ToolUseLoop {
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
-    .system_prompt(prompt.to_string())
+    .system(build_system_prompt(query))
     .tools(register_http_tools())
+    .tool_cache_policy(ToolCachePolicy::Preserve)
     .max_iterations(5)
     .max_output_tokens(8000)
     .reasoning_budget(8000)
@@ -146,7 +178,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let provider =
         CodecProvider::load(OpenAICompatCodec::llama()).expect("OpenAI provider env error");
-    let agent = create_agent(provider);
 
     println!("=== LeLLM Agent — 天气查询链（纯 http_get）===\n");
 
@@ -154,6 +185,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(addr) => format!("帮我查一下{addr}的天气"),
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
+
+    // 分层 Prompt 在创建 Agent 时注入，利用前缀缓存
+    let agent = create_agent(provider, &question);
 
     let messages = vec![Message::user(text_block(question.clone()))];
     let stream = agent.execute_stream(messages);

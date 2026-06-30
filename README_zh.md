@@ -19,7 +19,7 @@ use lellm::agent::AgentBuilder;
 use lellm::core::Message;
 
 let agent = AgentBuilder::new(model)
-    .system_prompt("你是一个有用的助手。".into())
+    .system("你是一个有用的助手。")
     .tool(weather_tool)
     .max_iterations(10)
     .build();
@@ -203,7 +203,7 @@ let model = ResolvedModel {
 };
 
 let agent = AgentBuilder::new(model)
-    .system_prompt("你是一个有用的助手。".into())
+    .system("你是一个有用的助手。")
     .tool(search_tool)
     .max_iterations(10)
     .max_output_tokens(8000)

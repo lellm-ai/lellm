@@ -5,21 +5,34 @@
 //! # 示例
 //! ```ignore
 //! use lellm_agent::{AgentBuilder, ToolRegistration};
+//! use lellm_core::Prompt;
 //!
+//! // 简单文本
 //! let agent = AgentBuilder::new(model)
-//!     .system_prompt("你是一个有帮助的助手。".to_string())
+//!     .system("你是一个有帮助的助手。")
 //!     .tool(search_tool)
 //!     .tool(weather_tool)
 //!     .max_iterations(20)
+//!     .build();
+//!
+//! // 分层构建 — 最大化前缀缓存
+//! let agent = AgentBuilder::new(model)
+//!     .system(
+//!         Prompt::builder()
+//!             .layer_cached("核心身份…")
+//!             .layer_cached("工具指南…")
+//!             .layer_dynamic("会话上下文…")
+//!             .build(),
+//!     )
 //!     .build();
 //! ```
 
 use std::sync::Arc;
 
-use lellm_core::{ReasoningConfig, ToolChoice};
+use lellm_core::{Prompt, ReasoningConfig, ToolChoice};
 use lellm_provider::ResolvedModel;
 
-use super::config::{ToolUseConfig, ToolUseDeps};
+use super::config::{ToolCachePolicy, ToolUseConfig, ToolUseDeps};
 use super::context::ContextBudget;
 use super::fallback::FallbackStrategy;
 use super::request_opts::RequestOptions;
@@ -107,8 +120,50 @@ impl AgentBuilder {
     }
 
     /// 设置系统提示。
+    ///
+    /// 支持简单文本或分层 `Prompt`（通过 `From<String>` 自动转换）。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// // 简单文本
+    /// let agent = AgentBuilder::new(model)
+    ///     .system("你是一个有帮助的助手。")
+    ///     .build();
+    ///
+    /// // 分层构建 — 最大化前缀缓存
+    /// use lellm_core::Prompt;
+    /// let agent = AgentBuilder::new(model)
+    ///     .system(
+    ///         Prompt::builder()
+    ///             .layer_cached("核心身份…")
+    ///             .layer_cached("工具指南…")
+    ///             .layer_dynamic("会话上下文…")
+    ///             .build(),
+    ///     )
+    ///     .build();
+    /// ```
+    pub fn system(mut self, system: impl Into<Prompt>) -> Self {
+        self.config.system = Some(system.into());
+        self
+    }
+
+    /// 设置系统提示（纯文本）。
+    ///
+    /// 这是 `.system()` 的别名，保留用于向后兼容。
+    #[deprecated(since = "0.5.0", note = "Use `.system()` instead")]
     pub fn system_prompt(mut self, prompt: String) -> Self {
-        self.config.system_prompt = Some(prompt);
+        self.config.system = Some(prompt.into());
+        self
+    }
+
+    /// 设置工具缓存策略（默认 `Auto`）。
+    ///
+    /// - `Auto`：为未设置 `cache_control` 的工具自动添加 `Breakpoint`
+    /// - `Preserve`：不修改用户设置的 `cache_control`
+    /// - `Disabled`：清除所有工具的 `cache_control`
+    pub fn tool_cache_policy(mut self, policy: ToolCachePolicy) -> Self {
+        self.config.tool_cache_policy = policy;
         self
     }
 
