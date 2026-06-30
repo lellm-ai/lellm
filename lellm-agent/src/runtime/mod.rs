@@ -16,6 +16,7 @@ pub mod request_opts;
 pub mod retry;
 #[allow(clippy::module_inception)]
 pub mod runtime;
+pub mod stream_translation;
 pub mod tools;
 pub mod typed_state;
 
@@ -48,3 +49,4 @@ pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, To
 
 // FlowNode 适配
 pub use flow_node::AgentFlowNode;
+pub use stream_translation::{TranslationResult, translate_provider_event};

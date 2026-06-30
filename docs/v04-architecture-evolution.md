@@ -149,13 +149,36 @@ Checkpoint (Snapshot model)
 ## v0.5 路线图
 
 ```
-v0.5 (多智能体时代 + Restore)
-├─ Checkpoint Restore 路径（load → restore → resume）
-├─ Barrier 恢复（decision queue 重建）
-├─ ExecutionTrace 接入 execution_loop
+v0.5 (恢复 + 可观测 + 多智能体)
+├─ Checkpoint 三层重构
+│   ├─ CheckpointTrigger（every_commits, every_duration, on_barrier, manual）
+│   ├─ CheckpointRetention（keep_latest, max_age）
+│   └─ MutationLogStore（独立 append-only，不参与恢复路径）
+├─ Checkpoint Restore 路径（Snapshot + WAL Replay）
+├─ Barrier 恢复（Re-Wait 语义，不持久化 decision）
+├─ Commit 流水线重构
+│   ├─ commit() → take_commit_batch() + 分发 + apply(batch)
+│   ├─ ExecutionTrace 接入（session 调试信息）
+│   └─ MutationLog 接入（持久化 WAL）
+├─ Stream 修复
+│   ├─ StreamChunk::ThinkingDelta 增加 redacted 字段
+│   └─ ProviderEvent → StreamChunk 转换提取到独立模块
 ├─ TaskNode → LeafTaskNode 迁移
 ├─ Graph::run_inline → Engine.run() 收敛
 ├─ Multi-Agent Orchestration
 ├─ Scheduler + Pause / Resume
 └─ 确定性重放测试
 ```
+
+### v0.4 Grill 决策纪要
+
+| # | 决策 | 结论 |
+|---|------|------|
+| 1 | Checkpoint 分层 | Trigger / Retention / Store 三层，MutationLogStore 独立 |
+| 2 | Barrier 恢复语义 | Re-Wait（重新等待人类决策），decision 属于 Control Plane |
+| 3 | AgentState 定位 | 执行器工作集（working set），不是对话档案 |
+| 4 | 四层数据模型 | Runtime State → Checkpoint → MutationLog → Conversation Archive |
+| 5 | Commit 流水线 | 拆分为 take_commit_batch() + 分发 + apply(batch) |
+| 6 | ExecutionTrace 定位 | session 调试信息，非 MutationLog 的内存版 |
+| 7 | StreamChunk::ThinkingDelta | 增加 redacted 字段，禁止静默丢弃 |
+| 8 | ProviderEvent 转换 | 提取到独立模块，不使用 Option<StreamChunk> |

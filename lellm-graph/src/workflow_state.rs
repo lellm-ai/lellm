@@ -7,7 +7,8 @@
 //! - 状态变更通过 Mutation（确定性命令），不是节点直接写
 //! - Mutation 自己知道如何修改 State（CQRS / Event Sourcing 职责划分）
 //! - 并行合并规则由 Graph 层的 MergeStrategy 决定，不是 State 内建属性
-//! - Checkpoint = Mutation Log，支持确定性重放
+//! - Checkpoint 采用 Snapshot 实现快速恢复；Mutation Log 用于审计、调试和可选的
+//!   确定性重放，两者共同构成完整的恢复与追踪体系
 //!
 //! Graph 层提供 trait 框架，各业务层（agent/mcp/...）定义自己的 State + Mutation。
 

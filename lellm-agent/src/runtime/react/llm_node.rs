@@ -123,8 +123,11 @@ impl LeafNode<AgentState> for LLMNode {
                     ctx.emit(lellm_graph::StreamChunk::TextDelta(token.clone()));
                     current_text.push_str(&token);
                 }
-                Ok(ProviderEvent::ThinkingDelta { thinking, .. }) => {
-                    ctx.emit(lellm_graph::StreamChunk::ThinkingDelta(thinking.clone()));
+                Ok(ProviderEvent::ThinkingDelta { thinking, redacted }) => {
+                    ctx.emit(lellm_graph::StreamChunk::ThinkingDelta {
+                        text: thinking.clone(),
+                        redacted: redacted.clone(),
+                    });
                     current_thinking.push_str(&thinking);
                 }
                 Ok(ProviderEvent::ResponseComplete {

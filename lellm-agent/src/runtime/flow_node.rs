@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use lellm_graph::{FlowNode, Graph, GraphError, NodeContext, StateMutation, TerminalError};
 
 use crate::hook::{AgentHook, AgentHookContext, AgentHookSnapshot};
-use crate::runtime::{AgentEvent, StopReason, ToolUseLoop, ToolUseResult};
+use crate::runtime::{
+    AgentEvent, StopReason, ToolUseLoop, ToolUseResult, TranslationResult, translate_provider_event,
+};
 
 /// Agent 在 Graph 中的节点包装。
 ///
@@ -238,16 +240,13 @@ impl AgentFlowNode {
 
             events.push(agent_event.clone());
 
-            // 转发流式事件到 ctx.emit()
+            // 转发流式事件到 ctx.emit()（通过翻译层）
             if let AgentEvent::Provider(provider_event) = &agent_event {
-                match provider_event {
-                    lellm_provider::ProviderEvent::Token { token } => {
-                        ctx.emit(lellm_graph::StreamChunk::TextDelta(token.clone()));
-                    }
-                    lellm_provider::ProviderEvent::ThinkingDelta { thinking, .. } => {
-                        ctx.emit(lellm_graph::StreamChunk::ThinkingDelta(thinking.clone()));
-                    }
-                    _ => {}
+                match translate_provider_event(provider_event) {
+                    TranslationResult::Emit(chunk) => ctx.emit(chunk),
+                    TranslationResult::Usage(_)
+                    | TranslationResult::Finished
+                    | TranslationResult::Ignore => {}
                 }
             }
 

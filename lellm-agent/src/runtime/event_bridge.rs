@@ -58,10 +58,10 @@ impl StreamSink for AgentEventSink {
             StreamChunk::TextDelta(token) => {
                 self.emit_event(AgentEvent::Provider(ProviderEvent::Token { token }));
             }
-            StreamChunk::ThinkingDelta(thinking) => {
+            StreamChunk::ThinkingDelta { text, redacted } => {
                 self.emit_event(AgentEvent::Provider(ProviderEvent::ThinkingDelta {
-                    thinking,
-                    redacted: None,
+                    thinking: text,
+                    redacted,
                 }));
             }
             StreamChunk::ToolLifecycle {
@@ -138,7 +138,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(32);
         let sink = AgentEventSink::new(tx);
 
-        sink.emit(StreamChunk::ThinkingDelta("thinking...".into()));
+        sink.emit(StreamChunk::ThinkingDelta {
+            text: "thinking...".into(),
+            redacted: None,
+        });
 
         let event = rx.blocking_recv();
         assert!(matches!(

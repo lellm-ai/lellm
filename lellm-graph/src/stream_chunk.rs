@@ -40,7 +40,13 @@ pub enum StreamChunk {
     /// 文本输出（LLM 生成的文本 token）
     TextDelta(String),
     /// 思考内容（LLM 的 reasoning/thinking block）
-    ThinkingDelta(String),
+    ///
+    /// `redacted` 为审查后的敏感推理内容（如 Anthropic thinking_redacted）。
+    /// Graph 层保留完整信息，UI 层决定是否展示。
+    ThinkingDelta {
+        text: String,
+        redacted: Option<String>,
+    },
     /// 工具生命周期事件（Queued / Started / Finished）
     ToolLifecycle {
         phase: ToolPhase,
