@@ -179,8 +179,24 @@ pub async fn observe_react_loop(
                 }
                 println!();
                 println!("--- 工具耗时明细 ---");
+                // 按工具名分组，显示各次调用耗时 + wall-clock 总耗时
+                let mut grouped: std::collections::HashMap<String, Vec<f64>> =
+                    std::collections::HashMap::new();
                 for (name, t) in &tool_times {
-                    println!("  🔧 {}: {:.2}s", name, t);
+                    grouped.entry(name.clone()).or_default().push(*t);
+                }
+                for (name, times) in &grouped {
+                    if times.len() == 1 {
+                        println!("  🔧 {}: {:.2}s", name, times[0]);
+                    } else {
+                        let max = times.iter().copied().fold(f64::MIN, f64::max);
+                        let sum: f64 = times.iter().sum();
+                        println!("  🔧 {} (×{}):", name, times.len());
+                        for (i, t) in times.iter().enumerate() {
+                            println!("      call {}: {:.2}s", i + 1, t);
+                        }
+                        println!("      wall-clock: {:.2}s  (合计: {:.2}s)", max, sum);
+                    }
                 }
                 println!();
                 println!("总耗时: {:.2}s", total.as_secs_f64());
