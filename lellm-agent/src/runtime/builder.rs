@@ -34,7 +34,6 @@
 //!     .await?;
 //! ```
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use lellm_core::{Prompt, ReasoningConfig, ToolChoice};
@@ -354,21 +353,19 @@ impl AgentBuilder {
     ///
     /// # Hash 输入
     ///
-    /// - model provider name + model name
+    /// - provider_id（稳定字符串标识，如 "openai", "anthropic"）
+    /// - model name
     /// - sorted tool names
     /// - system prompt hash
     /// - max_iterations
     /// - max_output_tokens
-    /// - 其他影响 graph 结构的配置
     pub fn canonical_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
-        // 1. Model — 使用 provider 类型名 + model 名称（不依赖 Hash trait）
-        let provider_name = format!(
-            "{:?}",
-            std::any::TypeId::of::<dyn lellm_provider::LlmProvider>()
-        );
-        provider_name.hash(&mut hasher);
+        // 1. Model — 使用 provider_id()（稳定字符串）+ model 名称
+        self.model.provider.provider_id().hash(&mut hasher);
         self.model.model.hash(&mut hasher);
 
         // 2. Tools (排序后 hash，顺序无关)

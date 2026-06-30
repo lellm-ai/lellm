@@ -1095,17 +1095,17 @@ impl Checkpoint {
 - [x] Phase 4：StateLens + SubgraphNode + SubgraphSpec
 - [x] Phase 5：Compiler Inline Pass（骨架实现）
 - [x] Phase 6：Checkpoint = Execution Frame Snapshot
-- [ ] Phase 7：P0-1 Checkpoint Projection — `type Checkpoint` 关联类型
-- [ ] Phase 8：P0-2 Graph Hash — canonical AST hash
-- [ ] Phase 9：ExecutionSession — FrameStack 归属修正
+- [x] Phase 7：P0-1 Checkpoint Projection — `type Checkpoint` 关联类型
+- [x] Phase 8：P0-2 Graph Hash — canonical AST hash
+- [x] Phase 9：ExecutionSession — FrameStack 归属修正
+
+> Status: Implemented (v0.5)
 
 ## 时间线
 
-已完成：Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6
+已完成：Phase 1 ~ Phase 9 全部完成
 
-待实现：Phase 7（P0-1 Checkpoint Projection）+ Phase 8（P0-2 Graph Hash）+ Phase 9（ExecutionSession）
-
-v0.5 架构重构主体完成，P0 设计补丁已记录！
+v0.5 架构重构完成，P0 设计补丁已落地！
 
 ---
 

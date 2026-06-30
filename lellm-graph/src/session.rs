@@ -23,6 +23,8 @@
 
 use std::fmt::Debug;
 
+use serde::{Deserialize, Serialize};
+
 use crate::checkpoint::FrameStack;
 use crate::graph::Graph;
 use crate::state::{State, StateMerge};
@@ -37,11 +39,13 @@ use crate::workflow_state::{MergeStrategy, WorkflowState};
 /// - FrameStack（执行位置历史）
 /// - graph_hash（P0-2: canonical hash）
 ///
+/// 可序列化 — 用于持久化到文件/数据库。
+///
 /// # 与 Checkpoint 的区别
 ///
 /// - `Checkpoint<S>` — 单个 Graph 的检查点（current_node + state）
 /// - `SessionCheckpoint<S>` — 完整会话的检查点（state + frames + graph_hash）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCheckpoint<S: WorkflowState = State>
 where
     S::Checkpoint: Debug,

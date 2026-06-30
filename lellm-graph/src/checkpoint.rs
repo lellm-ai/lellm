@@ -192,7 +192,9 @@ pub use crate::checkpoint_policy::CheckpointPolicy;
 // ─── Phase 6: Execution Frame Snapshot ────────────────────────
 
 /// 执行帧 — 保存单个 Graph 的执行位置。
-#[derive(Debug, Clone)]
+///
+/// 可序列化 — 用于 SessionCheckpoint 持久化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame<S: WorkflowState = State> {
     /// 图 ID
     pub graph_id: String,
@@ -220,7 +222,9 @@ impl<S: WorkflowState> Frame<S> {
 }
 
 /// 帧栈 — 保存完整的执行位置历史。
-#[derive(Debug, Clone)]
+///
+/// 可序列化 — 用于 SessionCheckpoint 持久化。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameStack<S: WorkflowState = State>
 where
     S::Checkpoint: Debug,
