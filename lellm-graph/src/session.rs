@@ -22,6 +22,7 @@
 //! 不依赖 compiled graph 的 HashMap 迭代顺序。
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,7 +61,7 @@ where
 
 // ─── ExecutionSession ──────────────────────────────────────────
 
-/// 执行会话 — 持有 State 所有权 + FrameStack + Graph。
+/// 执行会话 — 持有 State 所有权 + FrameStack + Graph 引用。
 ///
 /// # 职责
 ///
@@ -68,17 +69,18 @@ where
 /// - 管理 FrameStack（Subgraph 执行时 push/pop）
 /// - 创建和恢复 SessionCheckpoint
 ///
-/// # 与 ExecutionEngine 的关系
+/// # 设计原则
+///
+/// Graph 是 Immutable 的，多个 Session 共享同一个 Graph 实例。
+/// Session 不拥有 Graph，只持有 `Arc<Graph>` 引用。
 ///
 /// ```text
-/// ExecutionSession
-/// ├── state: S           （拥有所有权）
-/// ├── frame_stack:       （执行位置历史）
-/// └── graph: Graph<S>    （图结构）
+/// Runtime
+/// └── Arc<Graph>
 ///
-/// └── session.run()
-///     ├── engine: ExecutionEngine<'_, S>  （借用 &mut state）
-///     └── graph.run_inline(&mut engine)
+/// Session1 ──┐
+/// Session2 ──┼── Arc<Graph>
+/// Session3 ──┘
 /// ```
 pub struct ExecutionSession<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge>
 where
@@ -88,8 +90,8 @@ where
     state: S,
     /// 执行帧栈（Subgraph 执行时 push/pop）
     frame_stack: FrameStack<S>,
-    /// 图结构
-    graph: Graph<S, M>,
+    /// 图结构（共享引用）
+    graph: Arc<Graph<S, M>>,
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> ExecutionSession<S, M>
@@ -97,10 +99,38 @@ where
     S::Checkpoint: Debug,
 {
     /// 创建新的执行会话。
-    pub fn new(state: S, graph: Graph<S, M>) -> Self {
+    pub fn new(state: S, graph: Arc<Graph<S, M>>) -> Self {
         Self {
             state,
             frame_stack: FrameStack::new(),
+            graph,
+        }
+    }
+
+    /// 从 Checkpoint 恢复。
+    ///
+    /// # P0-1: 使用 restore() 恢复 State
+    ///
+    /// `S::restore(checkpoint.state)` 从 checkpoint snapshot 恢复完整 Runtime State。
+    ///
+    /// # Graph 参数
+    ///
+    /// 调用方负责提供 `Arc<Graph>`（从 Runtime 获取），
+    /// Session 不负责存储或查找 Graph。
+    pub fn restore(checkpoint: SessionCheckpoint<S>, graph: Arc<Graph<S, M>>) -> Self {
+        // P0-2: 校验 graph_hash
+        if checkpoint.graph_hash != graph.canonical_hash() {
+            tracing::warn!(
+                expected = format!("{:#018x}", checkpoint.graph_hash),
+                actual = format!("{:#018x}", graph.canonical_hash()),
+                "graph hash mismatch during restore"
+            );
+        }
+
+        let state = S::restore(checkpoint.state);
+        Self {
+            state,
+            frame_stack: checkpoint.frames,
             graph,
         }
     }
@@ -119,29 +149,6 @@ where
             state: self.state.snapshot(),
             frames: self.frame_stack.clone(),
             graph_hash: self.graph.canonical_hash(),
-        }
-    }
-
-    /// 从 checkpoint 恢复。
-    ///
-    /// # P0-1: 使用 restore() 恢复 State
-    ///
-    /// `S::restore(checkpoint.state)` 从 checkpoint snapshot 恢复完整 Runtime State。
-    pub fn restore(checkpoint: SessionCheckpoint<S>, graph: Graph<S, M>) -> Self {
-        // P0-2: 校验 graph_hash
-        if checkpoint.graph_hash != graph.canonical_hash() {
-            tracing::warn!(
-                expected = format!("{:#018x}", checkpoint.graph_hash),
-                actual = format!("{:#018x}", graph.canonical_hash()),
-                "graph hash mismatch during restore"
-            );
-        }
-
-        let state = S::restore(checkpoint.state);
-        Self {
-            state,
-            frame_stack: checkpoint.frames,
-            graph,
         }
     }
 
@@ -168,6 +175,11 @@ where
     /// 获取图引用。
     pub fn graph(&self) -> &Graph<S, M> {
         &self.graph
+    }
+
+    /// 获取图的 Arc 引用（用于共享）。
+    pub fn graph_arc(&self) -> Arc<Graph<S, M>> {
+        self.graph.clone()
     }
 
     /// 消费会话，返回最终状态。
@@ -237,7 +249,7 @@ mod tests {
         builder.start("a");
         builder.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
         builder.end("a");
-        let graph = builder.build().unwrap();
+        let graph = Arc::new(builder.build().unwrap());
 
         // 创建 Session
         let state = State::new();
@@ -268,7 +280,7 @@ mod tests {
         builder.start("a");
         builder.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
         builder.end("a");
-        let graph = builder.build().unwrap();
+        let graph = Arc::new(builder.build().unwrap());
 
         // 创建 Session
         let state = State::new();
@@ -279,5 +291,21 @@ mod tests {
 
         // 验证 frame_stack 为空
         assert!(frame_stack.is_empty());
+    }
+
+    #[test]
+    fn test_session_graph_sharing() {
+        // 验证多个 Session 共享同一个 Graph
+        let mut builder = GraphBuilder::<State, StateMerge>::new("test");
+        builder.start("a");
+        builder.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        builder.end("a");
+        let graph = Arc::new(builder.build().unwrap());
+
+        let session1 = ExecutionSession::new(State::new(), graph.clone());
+        let session2 = ExecutionSession::new(State::new(), graph.clone());
+
+        // 验证 Arc 强引用计数
+        assert_eq!(Arc::strong_count(&graph), 3); // original + session1 + session2
     }
 }

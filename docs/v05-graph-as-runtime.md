@@ -1065,57 +1065,52 @@ impl Checkpoint {
 
 ## 待讨论设计点
 
-### D10：ExecutionSession 是否需要 Arc\<Graph\>
+### D10：ExecutionSession 持有 Arc\<Graph\>
 
-**当前设计**：
-```rust
-pub struct ExecutionSession<S, M> {
-    state: S,
-    frame_stack: FrameStack<S>,
-    graph: Graph<S, M>,  // 每个 Session 持有一份 Graph
-}
+**结论**：✅ 已实现
+
+**设计原则**：Runtime 尽量共享不可变对象。
+
+Graph 是 Immutable 的，多个 Session 共享同一个 Graph 实例：
+
+```text
+Runtime
+└── Arc<Graph>
+
+Session1 ──┐
+Session2 ──┼── Arc<Graph>
+Session3 ──┘
 ```
 
-**问题**：Graph 是 Immutable 的，每个 Session 都持有完整副本可能浪费内存。
+**实现**：
+- `AgentBuilder::build()` 返回 `Arc<Graph<AgentState>>`
+- `ExecutionSession` 持有 `Arc<Graph<S, M>>`
+- `ToolUseLoop` 持有 `Arc<Graph<AgentState, AgentStateMerge>>`
+- 恢复时：`ExecutionSession::restore(checkpoint, graph.clone())`
 
-**候选方案**：
-```rust
-pub struct ExecutionSession<S, M> {
-    state: S,
-    frame_stack: FrameStack<S>,
-    graph: Arc<Graph<S, M>>,  // 共享 Graph
-}
+**不需要 GraphRegistry**：v0.5 场景下，调用方直接持有 `Arc<Graph>` 传入即可。
 
-// 恢复时
-impl SessionCheckpoint {
-    fn restore(self, registry: &GraphRegistry) -> ExecutionSession {
-        let graph = registry.get(self.graph_hash);
-        ExecutionSession { state, frame_stack, graph }
-    }
-}
-```
+### D11：canonical_hash 保持 DSL 原貌
 
-**收益**：1000 个 Session 共享同一个 Graph 实例。
+**结论**：❌ 不排序，保持 DSL 输入顺序
 
-**待决策**：是否在 v0.5 中实现，还是留到 v0.6。
+**设计原则**：Checkpoint 尽量精确反映用户构建的 Runtime。
 
-### D11：canonical_hash 的 canonical 定义
-
-**当前实现**：工具列表排序后 hash，工具顺序不影响 hash。
+canonical = DSL 原貌，不做语义归一化：
 
 ```rust
-// 以下两种写法产生相同 hash
-AgentBuilder::new(model).tools([a, b]).canonical_hash()
-AgentBuilder::new(model).tools([b, a]).canonical_hash()  // 相同
+// 以下两种写法产生不同 hash
+AgentBuilder::new(model).tools([a, b]).canonical_hash()  // hash1
+AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 ```
 
-**问题**：如果未来工具顺序影响 prompt（如 system prompt 中工具列表顺序），hash 需要包含顺序信息。
+**原因**：
+1. Graph Hash 的作用是判断 Checkpoint 是否能**完全一致**地继续执行
+2. 工具顺序可能影响 prompt（如 `tool_choice`, `parallel_tool_calls`）
+3. 不应该替用户假设"工具顺序没有影响"
+4. 如果用户想忽略顺序，应该在 Catalog 层处理，不是在 Hash 层
 
-**候选定义**：
-- **当前**：canonical = 排序后（工具顺序无关）
-- **备选**：canonical = 插入顺序（工具顺序有关）
-
-**待决策**：明确 canonical 的语义，避免未来 breaking change。
+**类比**：类似 `Cargo.lock`, `Dockerfile` — 都是输入 hash，不做 normalize。
 
 ## 与 LangGraph 的对比
 

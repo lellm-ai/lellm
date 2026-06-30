@@ -74,11 +74,11 @@ impl ToolUseResult {
 ///
 /// ```text
 /// AgentBuilder::build_loop() → ToolUseLoop
-/// AgentBuilder::build()      → Graph<AgentState>
+/// AgentBuilder::build()      → Arc<Graph<AgentState>>
 ///
 /// ToolUseLoop {
-///     graph: Graph<AgentState>,  // 预构建的 ReAct Graph
-///     config: ToolUseConfig,     // 构建 ExecutionContext 的默认参数
+///     graph: Arc<Graph<AgentState>>,  // 共享的 ReAct Graph
+///     config: ToolUseConfig,          // 构建 ExecutionContext 的默认参数
 /// }
 /// ```
 ///
@@ -91,13 +91,13 @@ impl ToolUseResult {
 /// ```
 #[derive(Clone)]
 pub struct ToolUseLoop {
-    graph: Graph<AgentState, AgentStateMerge>,
+    graph: Arc<Graph<AgentState, AgentStateMerge>>,
     config: ToolUseConfig,
 }
 
 impl ToolUseLoop {
     /// 从预构建的 Graph 创建 Facade。
-    pub fn new(graph: Graph<AgentState, AgentStateMerge>, config: ToolUseConfig) -> Self {
+    pub fn new(graph: Arc<Graph<AgentState, AgentStateMerge>>, config: ToolUseConfig) -> Self {
         Self { graph, config }
     }
 

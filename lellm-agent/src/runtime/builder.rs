@@ -72,24 +72,25 @@ mod tests {
     #[test]
     fn test_canonical_hash_stability() {
         // 相同输入应该产生相同的 hash
-        // 通过比较两次构建的 canonical hash 来验证
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher1 = DefaultHasher::new();
         let mut hasher2 = DefaultHasher::new();
 
-        // 模拟相同的 DSL 输入
+        // 模拟相同的 DSL 输入（工具顺序相同）
         "test-provider".hash(&mut hasher1);
         "test-model".hash(&mut hasher1);
-        vec!["alpha", "beta"].hash(&mut hasher1);
+        "alpha".hash(&mut hasher1);
+        "beta".hash(&mut hasher1);
         "test prompt".hash(&mut hasher1);
         10usize.hash(&mut hasher1);
         4096u32.hash(&mut hasher1);
 
         "test-provider".hash(&mut hasher2);
         "test-model".hash(&mut hasher2);
-        vec!["alpha", "beta"].hash(&mut hasher2);
+        "alpha".hash(&mut hasher2);
+        "beta".hash(&mut hasher2);
         "test prompt".hash(&mut hasher2);
         10usize.hash(&mut hasher2);
         4096u32.hash(&mut hasher2);
@@ -102,27 +103,27 @@ mod tests {
     }
 
     #[test]
-    fn test_canonical_hash_order_independent() {
-        // 工具顺序不同应该产生相同的 hash
+    fn test_canonical_hash_order_dependent() {
+        // D11: 工具顺序不同应该产生不同的 hash
+        // canonical = DSL 原貌，不做语义归一化
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher1 = DefaultHasher::new();
         let mut hasher2 = DefaultHasher::new();
 
-        // 模拟排序后的工具列表
-        let mut tools1 = vec!["beta", "alpha"];
-        tools1.sort();
-        tools1.hash(&mut hasher1);
+        // .tools([alpha, beta])
+        "alpha".hash(&mut hasher1);
+        "beta".hash(&mut hasher1);
 
-        let mut tools2 = vec!["alpha", "beta"];
-        tools2.sort();
-        tools2.hash(&mut hasher2);
+        // .tools([beta, alpha])
+        "beta".hash(&mut hasher2);
+        "alpha".hash(&mut hasher2);
 
-        assert_eq!(
+        assert_ne!(
             hasher1.finish(),
             hasher2.finish(),
-            "Tool order should not affect hash after sorting"
+            "Tool order should affect hash — canonical = DSL 原貌"
         );
     }
 
@@ -135,8 +136,9 @@ mod tests {
         let mut hasher1 = DefaultHasher::new();
         let mut hasher2 = DefaultHasher::new();
 
-        vec!["alpha"].hash(&mut hasher1);
-        vec!["alpha", "beta"].hash(&mut hasher2);
+        "alpha".hash(&mut hasher1);
+        "alpha".hash(&mut hasher2);
+        "beta".hash(&mut hasher2);
 
         assert_ne!(
             hasher1.finish(),
@@ -345,20 +347,26 @@ impl AgentBuilder {
         self
     }
 
-    /// 计算 canonical AST hash — 不依赖 NodeId 顺序。
+    /// 计算 canonical AST hash — 保持 DSL 输入顺序。
     ///
     /// Hash 输入来自 DSL 层（model, tools, system prompt, config），
     /// 不依赖 compiled graph 的 HashMap 迭代顺序。
-    /// 这保证：相同输入永远产生相同 hash，Checkpoint 不会因此失效。
+    /// 这保证：相同 DSL 输入永远产生相同 hash，Checkpoint 不会因此失效。
     ///
     /// # Hash 输入
     ///
     /// - provider_id（稳定字符串标识，如 "openai", "anthropic"）
     /// - model name
-    /// - sorted tool names
+    /// - tool names（保持 DSL 插入顺序，不排序）
     /// - system prompt hash
     /// - max_iterations
     /// - max_output_tokens
+    ///
+    /// # 设计原则
+    ///
+    /// canonical = DSL 原貌，不做语义归一化。
+    /// `.tools([A, B])` 和 `.tools([B, A])` 产生不同 hash，
+    /// 因为它们是不同的 DSL 输入。
     pub fn canonical_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
 
@@ -368,15 +376,10 @@ impl AgentBuilder {
         self.model.provider.provider_id().hash(&mut hasher);
         self.model.model.hash(&mut hasher);
 
-        // 2. Tools (排序后 hash，顺序无关)
-        let mut tool_names: Vec<&str> = self
-            .static_tools
-            .iter()
-            .map(|t| t.definition().name.as_str())
-            .collect();
-        tool_names.sort();
-        for name in &tool_names {
-            name.hash(&mut hasher);
+        // 2. Tools — 保持 DSL 插入顺序，不排序
+        //    .tools([A, B]) != .tools([B, A])
+        for t in &self.static_tools {
+            t.definition().name.hash(&mut hasher);
         }
 
         // 3. System prompt (hash 内容)
@@ -393,9 +396,9 @@ impl AgentBuilder {
         hasher.finish()
     }
 
-    /// 构建 ReAct Graph — 返回 `Graph<AgentState>`。
+    /// 构建 ReAct Graph — 返回 `Arc<Graph<AgentState>>`。
     ///
-    /// 这是核心 API，返回标准 Graph，可直接用 `graph.run_inline()` 执行。
+    /// 这是核心 API，返回共享的 Graph，可直接用 `graph.run_inline()` 执行。
     /// Graph 携带 `canonical_hash`，用于 Checkpoint 的 graph compatibility 校验。
     ///
     /// # 示例
@@ -407,7 +410,7 @@ impl AgentBuilder {
     /// let mut ctx = ExecutionContext::new(state, None, CancellationToken::new());
     /// graph.run_inline(&mut ctx, max_steps).await?;
     /// ```
-    pub fn build(self) -> Graph<AgentState, AgentStateMerge> {
+    pub fn build(self) -> Arc<Graph<AgentState, AgentStateMerge>> {
         let canonical_hash = self.canonical_hash();
         let (model, executor, config, deps) = self.into_parts();
 
@@ -425,12 +428,17 @@ impl AgentBuilder {
             config.context_budget.clone(),
         );
 
-        build_react_graph(llm_node, tool_node, compactor_node, canonical_hash)
+        Arc::new(build_react_graph(
+            llm_node,
+            tool_node,
+            compactor_node,
+            canonical_hash,
+        ))
     }
 
     /// 构建 ToolUseLoop — 便捷 Facade。
     ///
-    /// 返回 `ToolUseLoop`，持有预构建的 Graph，提供 `invoke()` / `invoke_stream()` 等高级 API。
+    /// 返回 `ToolUseLoop`，持有共享的 Graph，提供 `invoke()` / `invoke_stream()` 等高级 API。
     /// 内部调用 `Graph::run_inline()`，封装了 State 初始化和结果提取。
     ///
     /// # 示例
