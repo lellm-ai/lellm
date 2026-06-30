@@ -26,6 +26,7 @@ pub mod store;
 pub mod stream_chunk;
 pub mod stream_emitter;
 pub mod subgraph_node;
+pub mod subgraph_spec;
 pub mod test_executor;
 pub mod workflow_state;
 
@@ -82,9 +83,10 @@ pub use node::{
     ParallelNodeBuilder, TaskFn, TaskNode,
 };
 
-// ─── StateLens + SubgraphNode ──────────────────────────────
+// ─── StateLens + SubgraphNode + SubgraphSpec ──────────────
 pub use state_lens::{IdentityLens, StateLens};
 pub use subgraph_node::SubgraphNode;
+pub use subgraph_spec::SubgraphSpec;
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;
