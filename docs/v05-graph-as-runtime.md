@@ -1,7 +1,7 @@
 # v0.5 架构重构：Graph is Runtime, Agent is DSL
 
 > 日期：2026-06-30
-> 状态：设计方案 v4，已整合 grill-me 讨论反馈（核心决策变更：merge → Compiler Pass）
+> 状态：设计方案 v5，已整合 grill-me 讨论反馈（核心决策变更：Subgraph 是 Engine 行为，不是 Node）
 
 ## 核心论点
 
@@ -24,11 +24,11 @@ AgentBuilder  PlannerBuilder  SupervisorBuilder
 
                     ↓ 组合
 
-               SubgraphNode (运行时递归执行)
+               SubgraphSpec (Engine 行为，不是 Node)
 
 ──────────────────────────────────────
           Runtime (lellm-graph)
-ExecutionEngine  Node  Edge  State  Graph
+ExecutionEngine  Node  Edge  State  Graph  FrameStack
 
 ──────────────────────────────────────
           Primitive (lellm-graph)
@@ -227,19 +227,111 @@ impl AgentBuilder {
 }
 ```
 
-### D6：Subgraph 组合 — 运行时递归执行 + Compiler Inline Pass
+### D6：Subgraph 组合 — Engine 行为，不是 Node
 
-**核心决策：merge 是 Compiler Pass，不是用户 API。**
+**核心决策：Subgraph 不是 Node，而是 ExecutionEngine 的控制流概念。**
 
-**用户 API：SubgraphNode（运行时递归执行）**
+**为什么 Subgraph 不是 Node：**
+
+❌ **take/put 模式**
+```rust
+let mut inner = lens.take(outer);
+graph.run_inline(&mut ExecutionContext::new(inner));
+lens.put(outer, inner);
+```
+问题：
+- take() 期间，Outer State 处于"不完整"状态
+- 如果 panic、cancel、timeout，put() 不一定执行
+- Barrier、Checkpoint、Trace 都不知道现在 State 到底属于谁
+- 后续如果支持并发节点，这种移动所有权会越来越复杂
+
+❌ **ExecutionContext 改为引用语义**
+```rust
+ExecutionContext<'a, S> {
+    state: &'a mut S,
+}
+```
+问题：
+- ExecutionContext 不只是 State，还持有 mutation buffer、current node、cancellation、checkpoint、stream、trace、barrier
+- 整个 Engine 生命周期都会变成 `ExecutionContext<'a, S>`
+- 几乎所有 API 都会变：`ExecutionEngine<'a, S>`
+- 生命周期会迅速扩散，这是整个 Runtime 的基础设施修改
+- 为了一个 Subgraph，不值得
+
+✅ **Subgraph 是 Engine 行为**
 
 ```rust
-// 组合 Agent 到 Workflow
+// ExecutionEngine 内部处理
+match node.kind() {
+    Leaf => execute_leaf(),
+    Flow => execute_flow(),
+    Subgraph => execute_subgraph(),
+}
+```
+
+**Subgraph 执行流程：**
+
+```rust
+// ExecutionEngine 内部
+fn execute_subgraph(&mut self, subgraph: &SubgraphSpec) {
+    // 1. 通过 Lens 投影状态
+    let inner = subgraph.lens.project(&mut self.state);
+
+    // 2. push Frame
+    self.frame_stack.push(Frame {
+        graph_id: subgraph.graph_id,
+        node_id: current_node,
+        state_snapshot: self.state.clone(),  // 或 checkpoint projection
+    });
+
+    // 3. 执行内层 Graph
+    let mut inner_engine = ExecutionEngine::new(inner, self.stream.clone(), self.cancel.clone());
+    inner_engine.run_inline(&subgraph.graph, max_steps).await;
+
+    // 4. pop Frame
+    self.frame_stack.pop();
+
+    // 5. commit 状态变更
+    subgraph.lens.commit(&mut self.state, inner_engine.into_state());
+}
+```
+
+**架构优势：**
+
+1. **FrameStack 天然支持**
+   ```rust
+   // Frame 0: Workflow
+   // Frame 1: Agent
+   // Frame 2: Planner
+
+   // 恢复时
+   Checkpoint {
+       frames: [Frame0, Frame1, Frame2],
+   }
+
+   // ExecutionEngine 天然知道
+   engine.resume(Frame2)
+   ```
+
+2. **Checkpoint 一致性**
+   - Engine 知道当前 State 属于谁
+   - Checkpoint 时机由 Engine 控制
+   - 恢复时 Engine 重建 FrameStack
+
+3. **并发支持**
+   - 多个 Subgraph 可以并发执行
+   - 每个 Subgraph 有独立的 ExecutionContext
+   - 不需要移动所有权
+
+**用户 API：**
+
+```rust
+// Builder 阶段
 let agent_graph = AgentBuilder::new(model).tools([...]).build();
 
 let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
 builder.node("init", init_node);
-builder.node("agent", NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)));
+builder.subgraph("agent", agent_graph, AgentLens);  // 语法糖
 builder.node("summary", summary_node);
 
 builder.edge("init", "agent");
@@ -247,6 +339,81 @@ builder.edge("agent", "summary");
 
 let graph = builder.build()?;
 ```
+
+**编译后：**
+
+```rust
+// Builder AST
+NodeKind::Subgraph(SubgraphNode { graph, lens })
+
+// 编译后
+CompiledNodeKind::Subgraph {
+    graph_id: String,
+    lens: Box<dyn StateLens<Outer, Inner>>,
+}
+
+// ExecutionEngine 根据 Kind 执行
+match node.kind() {
+    CompiledNodeKind::Subgraph { graph_id, lens } => {
+        self.execute_subgraph(graph_id, lens).await;
+    }
+    // ...
+}
+```
+
+**与 Checkpoint + FrameStack 的关系：**
+
+```rust
+// FrameStack 设计
+struct Frame {
+    graph_id: String,
+    node_id: String,
+    state_snapshot: WorkflowState,
+    cursor: usize,
+}
+
+// ExecutionEngine 持有 FrameStack
+struct ExecutionEngine<S> {
+    state: S,
+    frame_stack: Vec<Frame>,
+    // ...
+}
+
+// Subgraph 执行时
+fn execute_subgraph(&mut self, spec: &SubgraphSpec) {
+    // push Frame
+    self.frame_stack.push(Frame { ... });
+
+    // 执行内层 Graph
+    self.run_inner_graph(spec.graph).await;
+
+    // pop Frame
+    self.frame_stack.pop();
+}
+
+// Checkpoint 时
+fn checkpoint(&self) -> Checkpoint {
+    Checkpoint {
+        state: self.state.checkpoint(),
+        frames: self.frame_stack.clone(),
+    }
+}
+
+// 恢复时
+fn restore(&mut self, checkpoint: Checkpoint) {
+    self.state = restore_state(checkpoint.state);
+    self.frame_stack = checkpoint.frames;
+    // 从最后一个 Frame 恢复执行
+}
+```
+
+**为什么这是正确的设计：**
+
+1. **Subgraph 是控制流概念** — 不是普通 Node，而是 Engine 的递归执行
+2. **FrameStack 天然支持** — Engine 知道当前 State 属于谁
+3. **Checkpoint 一致** — Engine 控制 Checkpoint 时机
+4. **并发友好** — 每个 Subgraph 有独立的 ExecutionContext
+5. **生命周期清晰** — 不需要修改 ExecutionContext 的所有权模型
 
 **Subgraph 执行语义：**
 - 运行时遇到 SubgraphNode 时，递归调用 `graph.run_inline()`
@@ -691,7 +858,7 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 - [x] Phase 1：AgentBuilder::build() → Graph<AgentState>
 - [x] Phase 2：ToolUseLoop 重构为薄 Facade
 - [x] Phase 3：删除 AgentFlowNode
-- [ ] Phase 4：SubgraphNode + StateLens（待实现）
+- [ ] Phase 4：Subgraph 作为 Engine 行为（SubgraphSpec + FrameStack）
 - [ ] Phase 5：Compiler Inline Pass（可选优化）
 - [ ] Phase 6：Checkpoint = Execution Frame Snapshot（待实现）
 
@@ -710,9 +877,10 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 1. **GraphFactory Trait** → 去掉，保持命名约定
 2. **ToolUseLoop** → 重构为持有预构建 Graph 的 Facade
 3. **GraphBuilder::merge()** → 不实现，Subgraph 作为原语，merge 作为 Compiler Pass
-4. **Subgraph 组合** → 运行时递归执行，通过 StateLens 投影状态
+4. **Subgraph 组合** → Engine 行为，不是 Node；由 ExecutionEngine 负责 Frame 管理、状态投影、Checkpoint 和恢复
 5. **StateLens vs StateAdapter** → 选择 StateLens，零拷贝投影
 6. **Checkpoint** → Execution Frame Snapshot，不是 State 问题，是 Execution Control Problem
+7. **ExecutionContext 所有权** → 不要为了 Subgraph 改 ExecutionContext 的所有权模型
 
 ### 最终结论
 
@@ -721,4 +889,5 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 - **统一产物**：所有 Builder 都返回 Graph<S>
 - **统一 Runtime**：只有一个 ExecutionEngine
 - **零拷贝组合**：通过 StateLens 投影状态，不需要 clone/merge
+- **Subgraph 是 Engine 行为**：不是普通 Node，而是 ExecutionEngine 的控制流概念
 - **Checkpoint = Execution Position + State Projection**：不是保存 state，而是保存 execution position + state projection
