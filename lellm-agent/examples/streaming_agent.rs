@@ -86,14 +86,16 @@ async fn main() {
             AgentEvent::ToolEnd {
                 tool_call_id,
                 result,
+                duration,
             } => {
                 println!(
-                    "[工具结束] id={}, result={:?}",
+                    "[工具结束] id={}, result={:?}, duration={:.2?}",
                     tool_call_id,
                     match &result {
                         Ok(v) => v.as_str().unwrap_or_else(|| v.to_string().leak()),
                         Err(e) => &e.message,
-                    }
+                    },
+                    duration
                 );
             }
             AgentEvent::Retry {

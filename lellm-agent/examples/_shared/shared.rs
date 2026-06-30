@@ -110,12 +110,11 @@ pub async fn observe_react_loop(
             AgentEvent::ToolEnd {
                 tool_call_id,
                 result,
+                duration,
             } => {
                 let timing = tool_timings.remove(&tool_call_id);
                 let tool_name = timing.as_ref().map(|t| t.name.clone()).unwrap_or_default();
-                let elapsed = timing
-                    .map(|t| t.start.elapsed().as_secs_f64())
-                    .unwrap_or(0.0);
+                let elapsed = duration.as_secs_f64();
 
                 println!(
                     "=============================== 工具观察 ================================"
@@ -208,16 +207,11 @@ pub async fn observe_react_loop(
                         println!("  🔧 {}: {}", name, format_duration(times[0]));
                     } else {
                         let max = times.iter().copied().fold(f64::MIN, f64::max);
-                        let sum: f64 = times.iter().sum();
                         println!("  🔧 {} (×{}):", name, times.len());
                         for (i, t) in times.iter().enumerate() {
                             println!("      call {}: {}", i + 1, format_duration(*t));
                         }
-                        println!(
-                            "      wall-clock: {}  (合计: {})",
-                            format_duration(max),
-                            format_duration(sum)
-                        );
+                        println!("      wall-clock: {}", format_duration(max));
                     }
                 }
                 println!();

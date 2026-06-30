@@ -16,6 +16,7 @@ pub enum AgentEvent {
     ToolEnd {
         tool_call_id: String,
         result: super::ToolResult,
+        duration: std::time::Duration,
     },
     /// 工具重试（RetryPolicy 触发）
     Retry {

@@ -88,7 +88,7 @@ impl StreamSink for AgentEventSink {
                 tool_name: _tool_name,
                 content,
                 is_error,
-                duration: _duration,
+                duration,
             } => {
                 let result: ToolResult = if is_error {
                     Err(ToolError {
@@ -106,6 +106,7 @@ impl StreamSink for AgentEventSink {
                 self.emit_event(AgentEvent::ToolEnd {
                     tool_call_id: call_id,
                     result,
+                    duration,
                 });
             }
         }
@@ -188,9 +189,11 @@ mod tests {
             Some(AgentEvent::ToolEnd {
                 tool_call_id,
                 result,
+                duration,
             }) => {
                 assert_eq!(tool_call_id, "call_1");
                 assert!(result.is_ok());
+                assert_eq!(duration, std::time::Duration::from_millis(100));
             }
             other => panic!("expected ToolEnd, got {:?}", other),
         }
@@ -214,9 +217,11 @@ mod tests {
             Some(AgentEvent::ToolEnd {
                 tool_call_id,
                 result,
+                duration,
             }) => {
                 assert_eq!(tool_call_id, "call_2");
                 assert!(result.is_err());
+                assert_eq!(duration, std::time::Duration::from_millis(50));
             }
             other => panic!("expected ToolEnd, got {:?}", other),
         }
