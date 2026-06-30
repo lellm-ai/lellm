@@ -1061,6 +1061,61 @@ impl Checkpoint {
 8. **不动 GraphBuilder 核心逻辑** — 它是原语
 9. **不在 ToolUseLoop 中引入新执行循环** — 严格约束为 Graph 的 Facade
 10. **不在 ExecutionEngine 中持有 FrameStack** — Engine 生命周期短，FrameStack 生命周期长（见 D6 修正）
+11. **ExecutionSession 不持有 Stream** — Stream 属于 Engine，Session 只负责 state + frame_stack（见 Q3 修复）
+
+## 待讨论设计点
+
+### D10：ExecutionSession 是否需要 Arc\<Graph\>
+
+**当前设计**：
+```rust
+pub struct ExecutionSession<S, M> {
+    state: S,
+    frame_stack: FrameStack<S>,
+    graph: Graph<S, M>,  // 每个 Session 持有一份 Graph
+}
+```
+
+**问题**：Graph 是 Immutable 的，每个 Session 都持有完整副本可能浪费内存。
+
+**候选方案**：
+```rust
+pub struct ExecutionSession<S, M> {
+    state: S,
+    frame_stack: FrameStack<S>,
+    graph: Arc<Graph<S, M>>,  // 共享 Graph
+}
+
+// 恢复时
+impl SessionCheckpoint {
+    fn restore(self, registry: &GraphRegistry) -> ExecutionSession {
+        let graph = registry.get(self.graph_hash);
+        ExecutionSession { state, frame_stack, graph }
+    }
+}
+```
+
+**收益**：1000 个 Session 共享同一个 Graph 实例。
+
+**待决策**：是否在 v0.5 中实现，还是留到 v0.6。
+
+### D11：canonical_hash 的 canonical 定义
+
+**当前实现**：工具列表排序后 hash，工具顺序不影响 hash。
+
+```rust
+// 以下两种写法产生相同 hash
+AgentBuilder::new(model).tools([a, b]).canonical_hash()
+AgentBuilder::new(model).tools([b, a]).canonical_hash()  // 相同
+```
+
+**问题**：如果未来工具顺序影响 prompt（如 system prompt 中工具列表顺序），hash 需要包含顺序信息。
+
+**候选定义**：
+- **当前**：canonical = 排序后（工具顺序无关）
+- **备选**：canonical = 插入顺序（工具顺序有关）
+
+**待决策**：明确 canonical 的语义，避免未来 breaking change。
 
 ## 与 LangGraph 的对比
 

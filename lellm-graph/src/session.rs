@@ -185,13 +185,26 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ExecutionSession<S, M>
 where
     S::Checkpoint: Debug,
 {
-    /// 内联执行 — 借用 state 给 Engine 执行。
+    /// 使用指定的 Engine 执行。
     ///
-    /// 这是便捷方法，内部创建临时 Engine 执行 graph。
-    pub async fn run_inline(&mut self, max_steps: usize) -> Result<(), crate::GraphError> {
-        let mut engine =
-            crate::ExecutionEngine::new(&mut self.state, None, crate::CancellationToken::new());
-        self.graph.run_inline(&mut engine, max_steps).await
+    /// Session 不知道 Stream，Engine 才知道 Stream。
+    /// 职责分离：Session 负责 state + frame_stack，Engine 负责执行 + stream。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let mut engine = ExecutionEngine::new(
+    ///     &mut session.state,
+    ///     Some(stream),  // Stream 由调用者提供
+    ///     cancel,
+    /// );
+    /// session.run_with(&mut engine).await?;
+    /// ```
+    pub async fn run_with(
+        &mut self,
+        engine: &mut crate::ExecutionEngine<'_, S>,
+    ) -> Result<(), crate::GraphError> {
+        self.graph.run_inline(engine, usize::MAX).await
     }
 }
 
