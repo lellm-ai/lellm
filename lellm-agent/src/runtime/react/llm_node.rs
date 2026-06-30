@@ -20,12 +20,12 @@ use futures_util::StreamExt;
 
 use lellm_core::{ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock};
 use lellm_graph::{GraphError, LeafContext, LeafNode, TerminalError};
-use lellm_provider::ProviderEvent;
 
 use super::super::config::{ToolUseConfig, build_request_inner_with_round};
 use super::super::context::{estimate_reasoning_block, estimate_text};
 use super::super::invoker::LlmInvoker;
 use super::super::runtime::ResolvedRound;
+use super::super::stream_translation::{TranslationResult, translate_provider_event};
 use super::super::tools::ToolExecutor;
 use super::super::typed_state::{AgentMutation, AgentState};
 
@@ -119,31 +119,37 @@ impl LeafNode<AgentState> for LLMNode {
 
         while let Some(event) = stream.next().await {
             match event {
-                Ok(ProviderEvent::Token { token }) => {
-                    ctx.emit(lellm_graph::StreamChunk::TextDelta(token.clone()));
-                    current_text.push_str(&token);
-                }
-                Ok(ProviderEvent::ThinkingDelta { thinking, redacted }) => {
-                    ctx.emit(lellm_graph::StreamChunk::ThinkingDelta {
-                        text: thinking.clone(),
-                        redacted: redacted.clone(),
-                    });
-                    current_thinking.push_str(&thinking);
-                }
-                Ok(ProviderEvent::ResponseComplete {
-                    tool_calls,
-                    usage: u,
-                }) => {
-                    for tc in tool_calls {
-                        content_blocks.push(ContentBlock::ToolCall(tc));
+                Ok(provider_event) => {
+                    // ResponseComplete 需要提取 tool_calls（所有权转移），单独处理
+                    if let lellm_provider::ProviderEvent::ResponseComplete {
+                        tool_calls,
+                        usage: u,
+                    } = &provider_event
+                    {
+                        for tc in tool_calls {
+                            content_blocks.push(ContentBlock::ToolCall(tc.clone()));
+                        }
+                        tool_calls_count = content_blocks
+                            .iter()
+                            .filter(|b| matches!(b, ContentBlock::ToolCall(_)))
+                            .count();
+                        usage = u.clone();
+                        continue;
                     }
-                    tool_calls_count = content_blocks
-                        .iter()
-                        .filter(|b| matches!(b, ContentBlock::ToolCall(_)))
-                        .count();
-                    usage = u;
+
+                    match translate_provider_event(&provider_event) {
+                        TranslationResult::EmitWithText { chunk, delta } => {
+                            ctx.emit(chunk);
+                            current_text.push_str(&delta);
+                        }
+                        TranslationResult::EmitWithThinking { chunk, delta, .. } => {
+                            ctx.emit(chunk);
+                            current_thinking.push_str(&delta);
+                        }
+                        TranslationResult::Emit(chunk) => ctx.emit(chunk),
+                        _ => {}
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => {
                     return Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
                         node: self.name.clone(),

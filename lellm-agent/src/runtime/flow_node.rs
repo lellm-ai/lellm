@@ -243,7 +243,9 @@ impl AgentFlowNode {
             // 转发流式事件到 ctx.emit()（通过翻译层）
             if let AgentEvent::Provider(provider_event) = &agent_event {
                 match translate_provider_event(provider_event) {
-                    TranslationResult::Emit(chunk) => ctx.emit(chunk),
+                    TranslationResult::Emit(chunk)
+                    | TranslationResult::EmitWithText { chunk, .. }
+                    | TranslationResult::EmitWithThinking { chunk, .. } => ctx.emit(chunk),
                     TranslationResult::Usage(_)
                     | TranslationResult::Finished
                     | TranslationResult::Ignore => {}
