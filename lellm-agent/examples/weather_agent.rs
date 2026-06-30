@@ -140,9 +140,9 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
 fn build_system_prompt() -> Prompt {
     Prompt::builder()
         // L1 — 核心身份（永不变化）
-        .layer_cached("你是天气查询助手。")
+        .stable("你是天气查询助手。")
         // L2 — 工具使用指南（极少变化）
-        .layer_cached(
+        .stable(
             "流程：
 1. 提取用户输入中的所有地址
 2. 对每个地址调用 resolve_city
@@ -150,7 +150,7 @@ fn build_system_prompt() -> Prompt {
 4. 解析 wttr.in 返回的文本，提取天气数据，输出 JSON",
         )
         // L3 — 字段转换规则（极少变化）
-        .layer_cached(
+        .stable(
             "wttr.in 返回格式: \"🌧️ +17°C 94% ↖11km/h\"
 你需要转换以下字段：
 
@@ -169,8 +169,8 @@ fn build_system_prompt() -> Prompt {
    - \"↖11km/h\" → \"东北风11km/h\"
    - 无箭头（如 \"7km/h\"）→ 保持原样",
         )
-        // L4 — 输出格式规则（极少变化，最后一个 cached → 获得断点 ✓）
-        .layer_cached(
+        // L4 — 输出格式规则（极少变化，最后一个 stable → 获得断点 ✓）
+        .stable(
             "输出格式（纯紧凑JSON，禁止任何解释文字）：
 单地址: {\"city\":\"tokyo\",\"address\":\"新宿\",\"condition\":\"小雨\",\"temperature\":\"17°C\",\"humidity\":\"94%\",\"wind\":\"东风7km/h\"}
 多地址: [{...},{...}]

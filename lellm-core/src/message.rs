@@ -21,7 +21,7 @@ pub enum CacheControl {
 pub struct TextBlock {
     pub text: String,
 
-    /// 缓存控制标记。业务层在 System prompt 的稳定性层边界处设置。
+    /// 缓存控制标记。用于 System prompt 分层缓存，以及 Assistant/ToolResult 的前缀缓存断点。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
@@ -84,6 +84,18 @@ impl ContentBlock {
             ContentBlock::Text(block) => Some(&block.text),
             _ => None,
         }
+    }
+
+    /// 将多个 ContentBlock 拼接为纯文本，忽略非 Text 类型和 cache_control。
+    ///
+    /// 用于不支持 `cache_control` 的 Provider（OpenAI、Google）。
+    /// 所有 Provider 共享同一份实现，避免各自拼接。
+    pub fn flatten_text(blocks: &[ContentBlock]) -> String {
+        blocks
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 }
 

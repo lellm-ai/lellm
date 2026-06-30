@@ -26,7 +26,7 @@ pub struct ToolUseConfig {
     ///
     /// 支持 `Prompt` 类型，统一了简单文本与分层缓存两种模式。
     /// - 简单文本：通过 `From<String>` 自动转换
-    /// - 分层缓存：`Prompt::builder().layer_cached(...).build()`
+    /// - 分层缓存：`Prompt::builder().stable(...).build()`
     pub system: Option<Prompt>,
     /// 最大迭代轮次（默认 10）
     pub max_iterations: usize,
@@ -156,9 +156,7 @@ pub(super) fn build_request_messages_inner(
         if has_system_message(messages) {
             return Err(LlmError::DuplicateSystemPrompt);
         }
-        let mut result = vec![Message::System {
-            content: system.to_content_blocks(),
-        }];
+        let mut result = vec![system.clone().build()];
         result.extend(messages.iter().cloned());
         Ok(result)
     } else {
@@ -186,11 +184,18 @@ pub(super) fn build_request_inner(
             if definitions.is_empty() {
                 None
             } else {
+                // 只在最后一个 tool 上放置 Breakpoint（前缀缓存是累积的，
+                // 中间断点不产生独立缓存段，浪费 Anthropic 4 断点/请求的限额）。
+                // 与 System prompt 的断点策略保持一致。
+                let last_idx = definitions.len() - 1;
                 Some(
                     definitions
                         .iter()
-                        .map(|d| {
-                            if d.cache_control.is_none() {
+                        .enumerate()
+                        .map(|(i, d)| {
+                            if d.cache_control.is_some() {
+                                d.clone()
+                            } else if i == last_idx {
                                 let mut cloned = d.clone();
                                 cloned.cache_control = Some(CacheControl::Breakpoint);
                                 cloned
@@ -302,9 +307,9 @@ mod tests {
         let config = ToolUseConfig {
             system: Some(
                 Prompt::builder()
-                    .layer_cached("核心身份")
-                    .layer_cached("工具指南")
-                    .layer_dynamic("会话上下文")
+                    .stable("核心身份")
+                    .stable("工具指南")
+                    .dynamic("会话上下文")
                     .build(),
             ),
             ..Default::default()
@@ -396,5 +401,98 @@ mod tests {
         let result = build_request_messages_inner(&config, &messages);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tool_cache_auto_only_last_breakpoint() {
+        let definitions: Vec<ToolDefinition> = vec![
+            ToolDefinition {
+                name: "search".into(),
+                description: "Search".into(),
+                parameters: serde_json::json!({}),
+                cache_control: None,
+            },
+            ToolDefinition {
+                name: "calculate".into(),
+                description: "Calculate".into(),
+                parameters: serde_json::json!({}),
+                cache_control: None,
+            },
+            ToolDefinition {
+                name: "save".into(),
+                description: "Save".into(),
+                parameters: serde_json::json!({}),
+                cache_control: None,
+            },
+        ];
+
+        let req = build_request_inner(
+            &ResolvedModel {
+                provider: Arc::new(lellm_provider::providers::mock::MockProvider::new(vec![])),
+                model: "test".into(),
+                context_window: Some(100_000),
+            },
+            &[],
+            4096,
+            &RequestOptions::default(),
+            &definitions,
+            ToolCachePolicy::Auto,
+        );
+
+        let tools = req.tools.unwrap();
+        assert_eq!(tools.len(), 3);
+
+        // First two tools should NOT have breakpoint
+        assert!(
+            tools[0].cache_control.is_none(),
+            "First tool should NOT have breakpoint"
+        );
+        assert!(
+            tools[1].cache_control.is_none(),
+            "Second tool should NOT have breakpoint"
+        );
+        // Last tool SHOULD have breakpoint
+        assert!(
+            tools[2].cache_control == Some(CacheControl::Breakpoint),
+            "Last tool should have breakpoint"
+        );
+    }
+
+    #[test]
+    fn test_tool_cache_auto_preserves_explicit() {
+        let definitions: Vec<ToolDefinition> = vec![
+            ToolDefinition {
+                name: "search".into(),
+                description: "Search".into(),
+                parameters: serde_json::json!({}),
+                cache_control: None,
+            },
+            ToolDefinition {
+                name: "calculate".into(),
+                description: "Calculate".into(),
+                parameters: serde_json::json!({}),
+                // User explicitly set cache_control
+                cache_control: Some(CacheControl::Breakpoint),
+            },
+        ];
+
+        let req = build_request_inner(
+            &ResolvedModel {
+                provider: Arc::new(lellm_provider::providers::mock::MockProvider::new(vec![])),
+                model: "test".into(),
+                context_window: Some(100_000),
+            },
+            &[],
+            4096,
+            &RequestOptions::default(),
+            &definitions,
+            ToolCachePolicy::Auto,
+        );
+
+        let tools = req.tools.unwrap();
+        // First tool - no explicit, not last -> no breakpoint
+        assert!(tools[0].cache_control.is_none());
+        // Second tool - explicit Breakpoint preserved (also last, so would get one anyway)
+        assert!(tools[1].cache_control == Some(CacheControl::Breakpoint));
     }
 }

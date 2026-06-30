@@ -19,9 +19,9 @@
 //! let agent = AgentBuilder::new(model)
 //!     .system(
 //!         Prompt::builder()
-//!             .layer_cached("核心身份…")
-//!             .layer_cached("工具指南…")
-//!             .layer_dynamic("会话上下文…")
+//!             .stable("核心身份…")
+//!             .stable("工具指南…")
+//!             .dynamic("会话上下文…")
 //!             .build(),
 //!     )
 //!     .build();
@@ -136,9 +136,9 @@ impl AgentBuilder {
     /// let agent = AgentBuilder::new(model)
     ///     .system(
     ///         Prompt::builder()
-    ///             .layer_cached("核心身份…")
-    ///             .layer_cached("工具指南…")
-    ///             .layer_dynamic("会话上下文…")
+    ///             .stable("核心身份…")
+    ///             .stable("工具指南…")
+    ///             .dynamic("会话上下文…")
     ///             .build(),
     ///     )
     ///     .build();

@@ -73,9 +73,9 @@ fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
 fn build_system_prompt() -> Prompt {
     Prompt::builder()
         // L1 — 核心身份
-        .layer_cached("你是天气查询助手。")
+        .stable("你是天气查询助手。")
         // L2 — 任务步骤
-        .layer_cached(
+        .stable(
             "任务分两步：
 
 步骤1：地址归一化
@@ -83,7 +83,7 @@ fn build_system_prompt() -> Prompt {
 将用户输入地址映射为 wttr.in 可识别城市。",
         )
         // L3 — 归一化规则
-        .layer_cached(
+        .stable(
             "规则：
 
 - 仅允许输出一个城市
@@ -94,7 +94,7 @@ fn build_system_prompt() -> Prompt {
 - 无法确定时返回 unknown",
         )
         // L4 — 城市示例
-        .layer_cached(
+        .stable(
             "示例：
 
 宁海 -> ningbo
@@ -103,7 +103,7 @@ fn build_system_prompt() -> Prompt {
 未知地点 -> unknown",
         )
         // L5 — 天气查询步骤
-        .layer_cached(
+        .stable(
             "步骤2：天气查询
 
 仅对非 unknown 城市调用 http_get：
@@ -116,8 +116,8 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 - 仅重试一次
 - 再失败返回 unknown",
         )
-        // L6 — 输出格式 + 约束规则（最后一个 cached → 获得断点 ✓）
-        .layer_cached(
+        // L6 — 输出格式 + 约束规则（最后一个 stable → 获得断点 ✓）
+        .stable(
             "最终输出：
 
 单地址：
