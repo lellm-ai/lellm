@@ -17,3 +17,4 @@ LeLLM 传递快乐
 
 ## 发布
 - 务必使用 scripts/publish.sh
+- 同时更新 README / README_zh 版本引用

@@ -97,10 +97,7 @@ pub async fn observe_react_loop(
             }
 
             AgentEvent::ToolStart { tool_call_id, name } => {
-                tool_timings.insert(
-                    tool_call_id,
-                    ToolTiming { name },
-                );
+                tool_timings.insert(tool_call_id, ToolTiming { name });
             }
 
             AgentEvent::ToolEnd {

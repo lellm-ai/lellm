@@ -5,9 +5,8 @@
 //! 参见: `docs/adr/v04-execution-model-redesign.md` 决策 4 (Phase D)
 
 use lellm_graph::{
-    BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointId,
-    CheckpointStoreError, InMemoryBlobStore, SerdeCheckpointCodec, State, TraceId,
-    TriggerPolicy, TypedCheckpointStore,
+    BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointId, CheckpointStoreError,
+    InMemoryBlobStore, SerdeCheckpointCodec, State, TraceId, TriggerPolicy, TypedCheckpointStore,
 };
 use uuid::Uuid;
 

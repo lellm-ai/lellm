@@ -1,4 +1,5 @@
 # LeLLM
+English | [中文](./README_zh.md)
 
 > LeLLM spreads joy. The most important thing in life is to be happy.
 
@@ -8,7 +9,7 @@ Build production AI systems in Rust with predictable runtime behavior, provider 
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1-green)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.2-green)](./CHANGELOG.md)
 
 ```bash
 cargo add lellm
