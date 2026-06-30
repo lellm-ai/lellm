@@ -52,6 +52,8 @@ pub trait StateMutation<S>: Sized + Send + Sync + Debug {
 ///
 /// **State 只是数据。** 状态变更逻辑在 [`StateMutation`] trait 中。
 /// **Merge 职责已从 `WorkflowState` 剥离到 [`MergeStrategy`]。**
+/// **Checkpoint 采用 Projection 模式** — Runtime State 可包含不可序列化字段
+/// （如 `Arc<dyn ...>`, `Sender`, `Cache`），Checkpoint 只序列化必要字段。
 ///
 /// # 示例
 ///
@@ -61,6 +63,16 @@ pub trait StateMutation<S>: Sized + Send + Sync + Debug {
 ///     pub messages: Vec<Message>,
 ///     pub iterations: usize,
 ///     pub output_tokens: usize,
+///     pub cache: Arc<dyn ToolCatalog>,  // 不可序列化
+/// }
+///
+/// // 可序列化的 Checkpoint 投影
+/// #[derive(Serialize, Deserialize)]
+/// pub struct AgentCheckpoint {
+///     pub messages: Vec<Message>,
+///     pub iterations: usize,
+///     pub output_tokens: usize,
+///     // 不包含 cache
 /// }
 ///
 /// // Mutation 自己知道怎么改 State
@@ -80,16 +92,49 @@ pub trait StateMutation<S>: Sized + Send + Sync + Debug {
 ///     }
 /// }
 ///
-/// // WorkflowState 只声明关联类型 — 没有 apply()
+/// // WorkflowState 声明 Checkpoint 和 Mutation 关联类型
 /// impl WorkflowState for AgentState {
+///     type Checkpoint = AgentCheckpoint;
 ///     type Mutation = AgentMutation;
+///
+///     fn snapshot(&self) -> AgentCheckpoint {
+///         AgentCheckpoint {
+///             messages: self.messages.clone(),
+///             iterations: self.iterations,
+///             output_tokens: self.output_tokens,
+///         }
+///     }
+///
+///     fn restore(checkpoint: AgentCheckpoint) -> Self {
+///         AgentState {
+///             messages: checkpoint.messages,
+///             iterations: checkpoint.iterations,
+///             output_tokens: checkpoint.output_tokens,
+///             cache: Arc::new(ToolCatalog::default()),  // 重建
+///         }
+///     }
 /// }
 /// ```
-pub trait WorkflowState:
-    Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned
-{
+pub trait WorkflowState: Clone + Send + Sync {
+    /// 可序列化的 Checkpoint 快照（projection，不是 raw state）。
+    ///
+    /// Runtime State 可以包含不可序列化字段（`Arc<dyn ...>`, `Sender`, `Cache`），
+    /// Checkpoint 只序列化必要字段。这是强制的 Projection 模式。
+    type Checkpoint: serde::Serialize + serde::de::DeserializeOwned + Clone + Send;
+
     /// 与此状态关联的 Mutation 类型。
     type Mutation: StateMutation<Self>;
+
+    /// 创建 checkpoint 快照 — 只序列化必要字段。
+    ///
+    /// 这是 Projection 的核心：开发者必须决定哪些字段需要持久化。
+    /// 编译期保证 `Checkpoint` 可序列化。
+    fn snapshot(&self) -> Self::Checkpoint;
+
+    /// 从 checkpoint 恢复运行时状态。
+    ///
+    /// 恢复时明确哪些字段从 checkpoint 加载，哪些需要重建。
+    fn restore(checkpoint: Self::Checkpoint) -> Self;
 
     /// 批量应用 Mutation — 唯一公开入口。
     ///

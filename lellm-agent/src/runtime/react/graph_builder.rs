@@ -24,10 +24,16 @@ use super::tool_node::ToolNode;
 /// 构建 ReAct 内部图。
 ///
 /// 使用 `Graph<AgentState>` — 节点直接读写强类型 AgentState，零序列化。
+///
+/// # P0-2: Canonical Hash
+///
+/// `canonical_hash` 由 DSL 层（AgentBuilder）计算，从 DSL inputs（model, tools, system prompt）
+/// 得出，不依赖 compiled graph 的 HashMap 迭代顺序。
 pub fn build_react_graph(
     llm_node: LLMNode,
     tool_node: ToolNode,
     compactor_node: CompactorNode,
+    canonical_hash: u64,
 ) -> Graph<AgentState, AgentStateMerge> {
     let llm_name = llm_node.name.clone();
     let budget = llm_node.config.context_budget.clone();
@@ -84,5 +90,10 @@ pub fn build_react_graph(
     builder.edge_fallback("post_llm_check", "end");
     builder.edge("tool", "budget_check");
 
-    builder.build().expect("ReAct graph should be valid")
+    let mut graph = builder.build().expect("ReAct graph should be valid");
+
+    // P0-2: 设置 canonical hash — 从 DSL 层计算，不依赖 compiled graph
+    graph.set_canonical_hash(canonical_hash);
+
+    graph
 }

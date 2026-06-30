@@ -79,6 +79,9 @@ pub struct Graph<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     pub(crate) edges: Vec<Edge<S>>,
     pub(crate) start: String,
     pub(crate) end: String,
+    /// P0-2: Canonical AST hash — 从 DSL 层计算，不依赖 HashMap 顺序。
+    /// 用于 Checkpoint 的 graph compatibility 校验。
+    pub(crate) canonical_hash: u64,
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
@@ -98,9 +101,18 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
         &self.end
     }
 
-    /// 计算图结构指纹 hash（u64 原始值）。
+    /// 获取 canonical AST hash — 从 DSL 层计算，不依赖 HashMap 顺序。
     ///
     /// 用于 Checkpoint 的 graph compatibility 校验。
+    /// 相同输入永远产生相同 hash，Checkpoint 不会因此失效。
+    pub fn canonical_hash(&self) -> u64 {
+        self.canonical_hash
+    }
+
+    /// 计算图结构指纹 hash（u64 原始值）— 基于 compiled graph 结构。
+    ///
+    /// 注意：此 hash 依赖 HashMap 迭代顺序，可能不稳定。
+    /// 优先使用 `canonical_hash()` 进行 Checkpoint 校验。
     pub fn hash_u64(&self) -> u64 {
         let mut s = String::new();
         let mut names: Vec<&str> = self.nodes.keys().map(|k| k.as_str()).collect();
@@ -127,7 +139,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
 
     /// 计算图结构指纹 hash（hex 字符串）。
     pub fn hash(&self) -> String {
-        format!("{:016x}", self.hash_u64())
+        format!("{:016x}", self.canonical_hash)
     }
 
     pub fn edges_from(&self, from: &str) -> Vec<&Edge<S>> {
@@ -350,6 +362,14 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             }
         }
     }
+
+    /// P0-2: 设置 canonical hash — 由 DSL 层调用。
+    ///
+    /// `GraphBuilder::build()` 默认设置 hash=0，
+    /// DSL 层（如 AgentBuilder）在 build 后覆盖为正确的 canonical hash。
+    pub fn set_canonical_hash(&mut self, hash: u64) {
+        self.canonical_hash = hash;
+    }
 }
 
 // ─── PendingEdge ──────────────────────────────────────────────
@@ -519,6 +539,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
             edges: self.edges,
             start,
             end,
+            canonical_hash: 0, // 默认值，DSL 层（如 AgentBuilder）会覆盖
         };
 
         if let Err(e) = graph.validate() {

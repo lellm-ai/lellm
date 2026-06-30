@@ -192,7 +192,8 @@ pub(crate) async fn run_execution_loop<S, M>(
     let mut execution_log: Vec<ExecutionEntry> = Vec::new();
 
     // 恢复路径：使用 Checkpoint 中的 state 和 current_node
-    let restore_state = restore_from.as_ref().map(|cp| cp.state.clone());
+    // P0-1: checkpoint.state 是 S::Checkpoint，需要通过 restore() 转换为 S
+    let restore_state = restore_from.as_ref().map(|cp| S::restore(cp.state.clone()));
     let mut engine_state = restore_state.unwrap_or(state);
     let mut engine = ExecutionEngine::new(&mut engine_state, None, cancel.clone());
     let mut current = if let Some(ref cp) = restore_from {
@@ -613,7 +614,8 @@ pub(crate) async fn run_execution_loop<S, M>(
         // Checkpoint Save Path — 路由已解析，current 是下一个节点
         if let Some(ref cp_config) = checkpoint {
             if cp_config.should_save(has_mutations, is_barrier) {
-                let cp = Checkpoint::new(&current, engine.state().clone(), cp_config.graph_hash);
+                // P0-1: Checkpoint::new 现在接受 &S，内部调用 snapshot() 进行投影
+                let cp = Checkpoint::new(&current, engine.state(), cp_config.graph_hash);
                 match (cp_config.save_fn)(cp, trace_id).await {
                     Ok(()) => {
                         // 保存成功后，应用保留策略

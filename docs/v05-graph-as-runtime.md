@@ -296,7 +296,7 @@ pub async fn execute(
    - 每层 Subgraph 是一个不可中断调用
 
 2. **Checkpoint 一致性**
-   - Checkpoint 通过 `state.clone()` 获取快照
+   - Checkpoint 通过 `state.snapshot()` 获取投影快照（P0-1）
    - 不依赖 Engine 持有 State 所有权
 
 3. **并发支持**
@@ -341,65 +341,47 @@ match node.kind() {
 }
 ```
 
-**与 Checkpoint + FrameStack 的关系：**
+**FrameStack 归属修正：**
+
+> **重要**：FrameStack **不在** ExecutionEngine 中。Engine 生命周期短（一次执行），
+> FrameStack 生命周期长（整个恢复过程）。职责分离更清晰。
 
 ```rust
-// FrameStack 设计
-struct Frame {
-    graph_id: String,
-    node_id: String,
-    state_snapshot: WorkflowState,
-    cursor: usize,
+// ExecutionEngine — 一次执行，借用 State
+pub struct ExecutionEngine<'a, S: WorkflowState> {
+    state: &'a mut S,
+    mutations: Vec<S::Mutation>,
+    // ... 无 frame_stack
 }
 
-// ExecutionEngine 持有 FrameStack
-struct ExecutionEngine<S> {
+// ExecutionSession — 持有 FrameStack，管理恢复
+pub struct ExecutionSession<S: WorkflowState> {
     state: S,
-    frame_stack: Vec<Frame>,
-    // ...
+    frame_stack: FrameStack<S::Checkpoint>,  // 使用 Checkpoint 投影
+    graph: Graph<S>,
 }
 
-// Subgraph 执行时
-fn execute_subgraph(&mut self, spec: &SubgraphSpec) {
-    // push Frame
-    self.frame_stack.push(Frame { ... });
+impl<S: WorkflowState> ExecutionSession<S> {
+    /// 创建 checkpoint — 保存当前执行位置 + 状态投影
+    pub fn checkpoint(&self) -> SessionCheckpoint<S> {
+        SessionCheckpoint {
+            state: self.state.snapshot(),  // P0-1: 使用 snapshot()
+            frames: self.frame_stack.clone(),
+            graph_hash: self.graph.canonical_hash,  // P0-2: 使用 canonical hash
+        }
+    }
 
-    // 执行内层 Graph
-    self.run_inner_graph(spec.graph).await;
-
-    // pop Frame
-    self.frame_stack.pop();
-}
-
-// Checkpoint 时
-fn checkpoint(&self) -> Checkpoint {
-    Checkpoint {
-        state: self.state.checkpoint(),
-        frames: self.frame_stack.clone(),
+    /// 从 checkpoint 恢复
+    pub fn restore(checkpoint: SessionCheckpoint<S>, graph: Graph<S>) -> Self {
+        let state = S::restore(checkpoint.state);  // P0-1: 使用 restore()
+        Self {
+            state,
+            frame_stack: checkpoint.frames,
+            graph,
+        }
     }
 }
-
-// 恢复时
-fn restore(&mut self, checkpoint: Checkpoint) {
-    self.state = restore_state(checkpoint.state);
-    self.frame_stack = checkpoint.frames;
-    // 从最后一个 Frame 恢复执行
-}
 ```
-
-**为什么这是正确的设计：**
-
-1. **Subgraph 是控制流概念** — 不是普通 Node，而是 Engine 的递归执行
-2. **FrameStack 天然支持** — Engine 知道当前 State 属于谁
-3. **Checkpoint 一致** — Engine 控制 Checkpoint 时机
-4. **并发友好** — 每个 Subgraph 有独立的 ExecutionContext
-5. **生命周期清晰** — 不需要修改 ExecutionContext 的所有权模型
-
-**Subgraph 执行语义：**
-- 运行时遇到 SubgraphNode 时，递归调用 `graph.run_inline()`
-- 通过 StateLens 投影状态，不需要 Outer → Inner → Outer 复用
-- 退出 Subgraph 后，借用结束，继续操作外层 State
-- 不需要 Frame Stack，只是递归函数调用
 
 **Compiler Inline Pass（可选优化）：**
 
@@ -539,14 +521,33 @@ let graph = builder.build()?;  // 自动触发 Inline Pass（可选）
 ### 新增（Phase 4：Subgraph 组合）
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| `lellm-graph/src/subgraph_node.rs` | `SubgraphNode` 实现 — 运行时递归执行 | ⏸️ 待实现 |
-| `lellm-graph/src/state_lens.rs` | `StateLens` trait — 状态投影，不是状态转换 | ⏸️ 待实现 |
+| `lellm-graph/src/subgraph_node.rs` | `SubgraphNode` 实现 — 运行时递归执行 | ✅ |
+| `lellm-graph/src/state_lens.rs` | `StateLens` trait — 状态投影，不是状态转换 | ✅ |
 
 ### 新增（Phase 5：Compiler Inline Pass，可选优化）
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| `lellm-graph/src/compiler/mod.rs` | Compiler 模块入口 | ⏸️ 待实现 |
-| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 自动 merge Subgraph | ⏸️ 待实现 |
+| `lellm-graph/src/compiler/mod.rs` | Compiler 模块入口 | ✅ |
+| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 骨架实现 | ✅ |
+
+### 新增（Phase 7：P0-1 Checkpoint Projection）
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `lellm-graph/src/workflow_state.rs` | 添加 `type Checkpoint` + `snapshot()` + `restore()` | ⏸️ |
+| `lellm-graph/src/checkpoint.rs` | `Checkpoint<S>` 使用 `S::Checkpoint` | ⏸️ |
+| `lellm-agent/src/runtime/typed_state.rs` | `AgentCheckpoint` 定义 + 实现 | ⏸️ |
+
+### 新增（Phase 8：P0-2 Graph Hash）
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `lellm-agent/src/runtime/builder.rs` | `canonical_hash()` 方法 | ⏸️ |
+| `lellm-graph/src/graph.rs` | `Graph` 携带 `canonical_hash` 字段 | ⏸️ |
+
+### 新增（Phase 9：ExecutionSession）
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `lellm-graph/src/session.rs` | `ExecutionSession` — 持有 FrameStack | ⏸️ |
+| `lellm-graph/src/session.rs` | `SessionCheckpoint` — 完整恢复快照 | ⏸️ |
 
 ### 示例重写
 | 文件 | 改动 | 状态 |
@@ -694,15 +695,15 @@ builder.subgraph("agent", agent_graph, AgentLens);
 **正确模型：Graph Execution = Frame Stack**
 
 ```rust
-struct Frame {
+struct Frame<S: WorkflowState> {
     graph_id: String,
     node_id: String,
-    state_snapshot: WorkflowState,  // 或者 CheckpointState
-    cursor: usize,  // 执行位置
+    state: S::Checkpoint,  // P0-1: 使用 Checkpoint 关联类型
+    cursor: usize,
 }
 
-struct FrameStack {
-    frames: Vec<Frame>,
+struct FrameStack<S: WorkflowState> {
+    frames: Vec<Frame<S>>,
 }
 ```
 
@@ -716,77 +717,102 @@ struct FrameStack {
 
 ```rust
 // 恢复流程
-fn restore(checkpoint: Checkpoint) {
-    // 1. load WorkflowState
-    let state = load_state(checkpoint.state);
+fn restore(checkpoint: SessionCheckpoint<S>, graph: Graph<S>) -> ExecutionSession<S> {
+    // 1. 从 checkpoint snapshot 恢复 State（P0-1）
+    let state = S::restore(checkpoint.state);
 
     // 2. restore FrameStack
-    let frames = restore_frames(checkpoint.frames);
+    let frames = checkpoint.frames;
 
-    // 3. resume execution
-    resume_execution(state, frames);
+    // 3. 创建 session，从最后一个 Frame 恢复执行
+    ExecutionSession { state, frame_stack: frames, graph }
 }
 ```
 
-**序列化约束：Checkpoint State ≠ Runtime State**
+**序列化约束：Checkpoint State ≠ Runtime State（P0-1 强制）**
 
 ```rust
-// Runtime State（不可序列化）
-struct WorkflowState {
-    agent: AgentState,
-    planner: PlannerState,
-    cache: Arc<...>,  // ❌ 不可序列化
-    channels: mpsc::...,  // ❌ 不可序列化
+// Runtime State（可能包含不可序列化字段）
+struct AgentState {
+    messages: Vec<Message>,
+    iterations: usize,
+    output_tokens: usize,
+    cache: Arc<dyn ToolCatalog>,  // ❌ 不可序列化
+    sender: mpsc::Sender<Event>,  // ❌ 不可序列化
 }
 
-// Checkpoint State（可序列化）
-struct CheckpointState {
-    agent: AgentCheckpoint,
-    planner: PlannerCheckpoint,
-    memory: MemoryCheckpoint,
+// Checkpoint（只包含可序列化字段）
+#[derive(Serialize, Deserialize)]
+struct AgentCheckpoint {
+    messages: Vec<Message>,
+    iterations: usize,
+    output_tokens: usize,
+    // 不包含 cache, sender 等
 }
 
-// 核心原则：checkpoint = projection, not raw state
-impl WorkflowState {
-    fn checkpoint(&self) -> CheckpointState {
-        // 只序列化必要的字段
-        CheckpointState {
-            agent: self.agent.to_checkpoint(),
-            planner: self.planner.to_checkpoint(),
-            memory: self.memory.to_checkpoint(),
+// WorkflowState trait 强制实现（P0-1）
+impl WorkflowState for AgentState {
+    type Checkpoint = AgentCheckpoint;
+    type Mutation = AgentMutation;
+
+    fn snapshot(&self) -> AgentCheckpoint {
+        AgentCheckpoint {
+            messages: self.messages.clone(),
+            iterations: self.iterations,
+            output_tokens: self.output_tokens,
+        }
+    }
+
+    fn restore(checkpoint: AgentCheckpoint) -> Self {
+        AgentState {
+            messages: checkpoint.messages,
+            iterations: checkpoint.iterations,
+            output_tokens: checkpoint.output_tokens,
+            cache: Arc::new(ToolCatalog::default()),  // 重建
+            sender: create_channel(),  // 重建
         }
     }
 }
 ```
 
+**Graph Hash 稳定性（P0-2）：**
+
+```rust
+// ❌ 当前：来自 compiled graph（HashMap 顺序不确定）
+graph_hash = hash(nodes.keys())  // 每次 build 可能不同
+
+// ✅ 目标：来自 DSL canonical form（顺序无关）
+graph_hash = canonical_hash(model, sorted_tools, system_prompt)  // 永远相同
+```
+
 **最终架构：**
 
 ```rust
-// 1. WorkflowState（runtime）
-struct WorkflowState {
-    agent: AgentState,
-    planner: PlannerState,
-    memory: MemoryState,
-    // ... 其他 runtime 字段
+// 1. WorkflowState trait（P0-1 强制）
+trait WorkflowState {
+    type Checkpoint: Serialize + DeserializeOwned;
+    type Mutation: StateMutation<Self>;
+    fn snapshot(&self) -> Self::Checkpoint;
+    fn restore(checkpoint: Self::Checkpoint) -> Self;
 }
 
 // 2. StateLens
-trait StateLens {
-    fn project(&self, state: &WorkflowState) -> AgentStateView;
+trait StateLens<Outer, Inner> {
+    fn get<'a>(&self, outer: &'a mut Outer) -> &'a mut Inner;
 }
 
-// 3. FrameStack
-struct Frame {
-    graph_id: String,
-    node_id: String,
-    state_snapshot: WorkflowState,
-    cursor: usize,
+// 3. FrameStack（在 ExecutionSession 中，不在 Engine 中）
+struct ExecutionSession<S: WorkflowState> {
+    state: S,
+    frame_stack: FrameStack<S>,
+    graph: Graph<S>,
 }
 
-// 4. Checkpoint = FrameStack snapshot
-struct Checkpoint {
-    state: CheckpointState,  // 可序列化的 state projection
-    frames: Vec<Frame>,      // 执行位置
+// 4. Checkpoint = Session snapshot
+struct SessionCheckpoint<S: WorkflowState> {
+    state: S::Checkpoint,  // P0-1: 投影，不是 raw state
+    frames: FrameStack<S>,
+    graph_hash: u64,  // P0-2: canonical hash
 }
 
 // 5. Checkpoint 时机
@@ -797,7 +823,231 @@ struct Checkpoint {
 
 **一句话总结：**
 
-checkpoint 不是保存 state，而是保存 execution position + state projection。
+checkpoint 不是保存 state，而是保存 execution position + state projection（通过 `type Checkpoint` 关联类型强制）。
+
+## P0 设计补丁
+
+### P0-1: Checkpoint Projection — `type Checkpoint` 关联类型
+
+**核心问题**：文档说 `checkpoint = projection, not raw state`，但代码还是 `Checkpoint<S> { state: S }`。
+
+**当前状态**：
+
+```rust
+// workflow_state.rs — 当前
+pub trait WorkflowState: Clone + Send + Sync + Serialize + DeserializeOwned {
+    type Mutation: StateMutation<Self>;
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>);
+}
+
+// checkpoint.rs — 当前
+pub struct Checkpoint<S> {
+    pub state: S,  // 直接持有 S，无 projection
+}
+```
+
+**问题**：如果 `S` 包含 `Arc<dyn ToolCatalog>` 或 `mpsc::Sender`，序列化会失败。
+
+**目标设计**：
+
+```rust
+// workflow_state.rs — 目标
+pub trait WorkflowState: Clone + Send + Sync {
+    /// 可序列化的 Checkpoint 快照（projection，不是 raw state）。
+    type Checkpoint: Serialize + DeserializeOwned + Clone + Send;
+    /// 状态变更命令。
+    type Mutation: StateMutation<Self>;
+
+    /// 创建 checkpoint 快照 — 只序列化必要字段。
+    fn snapshot(&self) -> Self::Checkpoint;
+
+    /// 从 checkpoint 恢复运行时状态。
+    fn restore(checkpoint: Self::Checkpoint) -> Self;
+
+    /// 批量应用 Mutation。
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>);
+}
+
+// checkpoint.rs — 目标
+pub struct Checkpoint<S: WorkflowState> {
+    pub checkpoint_id: CheckpointId,
+    pub current_node: NodeId,
+    pub state: S::Checkpoint,  // 使用 Checkpoint 关联类型，不是 S
+    pub graph_hash: u64,
+    pub created_at: std::time::SystemTime,
+}
+```
+
+**示例：AgentState**：
+
+```rust
+// lellm-agent/src/runtime/typed_state.rs
+pub struct AgentState {
+    pub messages: Vec<Message>,
+    pub iterations: usize,
+    pub output_tokens: usize,
+    pub stop_reason: Option<StopReason>,
+    pub last_response: Option<ChatResponse>,
+    pub total_tool_calls: usize,
+    // ... 其他 runtime 字段
+}
+
+// 可序列化的 checkpoint 投影
+#[derive(Serialize, Deserialize)]
+pub struct AgentCheckpoint {
+    pub messages: Vec<Message>,
+    pub iterations: usize,
+    pub output_tokens: usize,
+    pub stop_reason: Option<StopReason>,
+    pub total_tool_calls: usize,
+    // 不包含: last_response（可重建）, Arc<dyn ...>, Sender 等
+}
+
+impl WorkflowState for AgentState {
+    type Checkpoint = AgentCheckpoint;
+    type Mutation = AgentMutation;
+
+    fn snapshot(&self) -> AgentCheckpoint {
+        AgentCheckpoint {
+            messages: self.messages.clone(),
+            iterations: self.iterations,
+            output_tokens: self.output_tokens,
+            stop_reason: self.stop_reason.clone(),
+            total_tool_calls: self.total_tool_calls,
+        }
+    }
+
+    fn restore(checkpoint: AgentCheckpoint) -> Self {
+        AgentState {
+            messages: checkpoint.messages,
+            iterations: checkpoint.iterations,
+            output_tokens: checkpoint.output_tokens,
+            stop_reason: checkpoint.stop_reason,
+            last_response: None,  // 重建时为空，下次 LLM 调用会填充
+            total_tool_calls: checkpoint.total_tool_calls,
+            // ... 其他 runtime 字段使用默认值
+        }
+    }
+
+    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>) {
+        for mutation in mutations {
+            mutation.apply(self);
+        }
+    }
+}
+```
+
+**收益**：
+
+1. **Runtime State 可以包含不可序列化字段** — `Arc<dyn ...>`, `Sender`, `Cache` 等
+2. **Checkpoint 是显式的 projection** — 开发者必须决定哪些字段需要持久化
+3. **恢复时语义清晰** — `restore()` 明确哪些字段重建、哪些从 checkpoint 加载
+4. **序列化安全** — 编译期保证 `Checkpoint` 可序列化
+
+**实现步骤**：
+
+1. 修改 `WorkflowState` trait，添加 `type Checkpoint` + `snapshot()` + `restore()`
+2. 修改 `Checkpoint<S>` 使用 `S::Checkpoint`
+3. 为 `AgentState` 实现 `Checkpoint` 投影
+4. 为其他 State 类型（`State` 默认 HashMap）提供 fallback 实现
+
+---
+
+### P0-2: Graph Hash — 从 AST Canonical Form 计算
+
+**核心问题**：当前 `graph_hash: u64` 来自 compiled graph 的节点顺序，但 `HashMap` 迭代顺序不确定。
+
+**问题场景**：
+
+```rust
+// 第一次 build()
+let graph1 = AgentBuilder::new(model).tools([a, b, c]).build();
+// graph1.nodes: {"llm" → ..., "tool" → ..., "budget_check" → ...}
+// hash1 = hash(llm, tool, budget_check)
+
+// 第二次 build() — 相同输入
+let graph2 = AgentBuilder::new(model).tools([a, b, c]).build();
+// graph2.nodes: {"budget_check" → ..., "llm" → ..., "tool" → ...}  // HashMap 顺序不同
+// hash2 = hash(budget_check, llm, tool)
+
+// hash1 ≠ hash2 → checkpoint 失效！
+```
+
+**目标设计**：Graph Hash 来自 DSL 层的 canonical AST，不依赖 compiled graph 的节点顺序。
+
+```rust
+// lellm-agent/src/runtime/builder.rs
+impl AgentBuilder {
+    /// 计算 canonical AST hash — 不依赖 NodeId 顺序。
+    ///
+    /// Hash 输入：
+    /// - model provider + model name
+    /// - sorted tool names
+    /// - system prompt hash
+    /// - max_iterations
+    /// - 其他影响 graph 结构的配置
+    pub fn canonical_hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+
+        // 1. Model (稳定)
+        self.model.provider.hash(&mut hasher);
+        self.model.name.hash(&mut hasher);
+
+        // 2. Tools (排序后 hash，顺序无关)
+        let mut tool_names: Vec<&str> = self.static_tools.iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        tool_names.sort();
+        for name in &tool_names {
+            name.hash(&mut hasher);
+        }
+
+        // 3. System prompt (hash 内容)
+        if let Some(ref system) = self.config.system {
+            // system.hash() 需要稳定实现
+            format!("{:?}", system).hash(&mut hasher);
+        }
+
+        // 4. 结构性配置
+        self.config.max_iterations.hash(&mut hasher);
+        self.config.max_output_tokens.hash(&mut hasher);
+
+        hasher.finish()
+    }
+}
+
+// Graph 携带 canonical hash
+pub struct Graph<S: WorkflowState, M: MergeStrategy<S>> {
+    pub nodes: HashMap<String, NodeKind<S, M>>,
+    pub edges: Vec<Edge>,
+    pub canonical_hash: u64,  // 来自 DSL，不来自 nodes HashMap
+    // ...
+}
+
+// Checkpoint 使用 canonical hash
+impl Checkpoint {
+    pub fn new(current_node: &str, state: S::Checkpoint, graph: &Graph<S, M>) -> Self {
+        Self {
+            checkpoint_id: CheckpointId::new(),
+            current_node: NodeId(current_node.into()),
+            state,
+            graph_hash: graph.canonical_hash,  // 使用 canonical hash
+            created_at: SystemTime::now(),
+        }
+    }
+}
+```
+
+**收益**：
+
+1. **Build 幂等** — 相同输入永远产生相同 hash
+2. **Checkpoint 稳定** — 不因 HashMap 迭代顺序失效
+3. **恢复安全** — graph_hash 不匹配时能正确拒绝
+
+---
 
 ## 不做的事情
 
@@ -806,10 +1056,11 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 3. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass
 4. **不做 StateAdapter** — 使用 StateLens，零拷贝投影
 5. **不做 Node/Subgraph 级别 checkpoint** — 使用 Frame Boundary Checkpoint
-6. **不序列化 Runtime State** — 只序列化 Checkpoint State Projection
+6. **不序列化 Runtime State** — 只序列化 Checkpoint State Projection（通过 `type Checkpoint` 关联类型强制）
 7. **不重命名 AgentBuilder** — 保持名字
 8. **不动 GraphBuilder 核心逻辑** — 它是原语
 9. **不在 ToolUseLoop 中引入新执行循环** — 严格约束为 Graph 的 Facade
+10. **不在 ExecutionEngine 中持有 FrameStack** — Engine 生命周期短，FrameStack 生命周期长（见 D6 修正）
 
 ## 与 LangGraph 的对比
 
@@ -832,6 +1083,9 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 5. **保留 AgentBuilder** — 保持 DSL 价值，build_react_graph() 保持私有 ✅
 6. **不做 GraphFactory Trait** — 符合 Rust 风格，统一命名约定 ⏸️
 7. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass ⏸️
+8. **Checkpoint Projection（P0-1）** — `type Checkpoint` 关联类型，强制 projection，序列化安全 ✅
+9. **Graph Hash 稳定性（P0-2）** — 从 DSL canonical form 计算，不依赖 HashMap 顺序 ✅
+10. **FrameStack 归属修正** — Engine 不持有 FrameStack，职责分离更清晰 ✅
 
 ## 实现状态
 
@@ -841,12 +1095,17 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 - [x] Phase 4：StateLens + SubgraphNode + SubgraphSpec
 - [x] Phase 5：Compiler Inline Pass（骨架实现）
 - [x] Phase 6：Checkpoint = Execution Frame Snapshot
+- [ ] Phase 7：P0-1 Checkpoint Projection — `type Checkpoint` 关联类型
+- [ ] Phase 8：P0-2 Graph Hash — canonical AST hash
+- [ ] Phase 9：ExecutionSession — FrameStack 归属修正
 
 ## 时间线
 
 已完成：Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6
 
-v0.5 架构重构完成！
+待实现：Phase 7（P0-1 Checkpoint Projection）+ Phase 8（P0-2 Graph Hash）+ Phase 9（ExecutionSession）
+
+v0.5 架构重构主体完成，P0 设计补丁已记录！
 
 ---
 
@@ -859,8 +1118,11 @@ v0.5 架构重构完成！
 3. **GraphBuilder::merge()** → 不实现，Subgraph 作为原语，merge 作为 Compiler Pass
 4. **Subgraph 组合** → Subgraph 是 Graph AST 的一种节点；ExecutionEngine 借用 State（`&'a mut S`），通过 StateLens 投影执行内层 Graph
 5. **StateLens vs StateAdapter** → 选择 StateLens，零拷贝投影
-6. **Checkpoint** → 通过 `state.clone()` 获取快照，不依赖 Engine 持有所有权
+6. **Checkpoint** → 通过 `state.snapshot()` 获取投影快照，不依赖 Engine 持有所有权
 7. **ExecutionContext 所有权** → Engine 借用 State（`&'a mut S`），调用方持有所有权。Parallel 分支使用 `OwnedExecutionEngine<S>`
+8. **P0-1 Checkpoint Projection** → 引入 `type Checkpoint` 关联类型，强制 projection，序列化安全
+9. **P0-2 Graph Hash** → 从 DSL canonical form 计算，不依赖 HashMap 顺序
+10. **FrameStack 归属** → Engine 不持有 FrameStack，职责分离到 ExecutionSession
 
 ### 最终结论
 
@@ -871,4 +1133,5 @@ v0.5 架构重构完成！
 - **零拷贝组合**：通过 StateLens 投影状态，不需要 clone/merge
 - **Subgraph 是 Node**：在 Graph AST 中是 `NodeKind::Subgraph`；在 Runtime 中递归执行
 - **Engine 借用 State**：`ExecutionEngine<'a, S>` 持有 `&'a mut S`，调用方持有所有权
-- **Checkpoint = clone(state)**：不需要 Engine 持有所有权即可序列化
+- **Checkpoint = snapshot()**：通过 `type Checkpoint` 关联类型强制 projection
+- **Graph Hash = canonical**：从 DSL 层计算，不依赖 compiled graph 的 HashMap 顺序

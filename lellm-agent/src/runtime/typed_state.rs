@@ -12,6 +12,7 @@
 
 use lellm_core::{ChatResponse, Message};
 use lellm_graph::WorkflowState;
+use serde::{Deserialize, Serialize};
 
 use super::context::estimate_tokens;
 use super::event::StopReason;
@@ -180,10 +181,62 @@ impl lellm_graph::workflow_state::StateMutation<AgentState> for AgentMutation {
     }
 }
 
+// ─── AgentCheckpoint ─────────────────────────────────────────────
+
+/// Agent Checkpoint 投影 — 可序列化的快照。
+///
+/// 只包含需要持久化的字段，不包含运行时字段（如 `last_response`）。
+/// 这是 P0-1 Checkpoint Projection 的核心：Runtime State 可以包含
+/// 不可序列化字段，Checkpoint 只序列化必要字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCheckpoint {
+    /// 消息历史
+    pub messages: Vec<Message>,
+    /// 当前迭代轮次
+    pub iterations: usize,
+    /// 累计工具调用总数
+    pub total_tool_calls: usize,
+    /// 累计输出 Token 数
+    pub output_tokens: usize,
+    /// 累计推理 Token 数
+    pub reasoning_tokens: usize,
+    /// 累计压缩次数
+    pub compact_count: usize,
+    /// 停止原因
+    pub stop_reason: Option<StopReason>,
+    // 不包含: last_response（可重建）, Arc<dyn ...>, Sender 等
+}
+
 // ─── WorkflowState for AgentState ───────────────────────────────
 
 impl WorkflowState for AgentState {
+    type Checkpoint = AgentCheckpoint;
     type Mutation = AgentMutation;
+
+    fn snapshot(&self) -> AgentCheckpoint {
+        AgentCheckpoint {
+            messages: self.messages.clone(),
+            iterations: self.iterations,
+            total_tool_calls: self.total_tool_calls,
+            output_tokens: self.output_tokens,
+            reasoning_tokens: self.reasoning_tokens,
+            compact_count: self.compact_count,
+            stop_reason: self.stop_reason.clone(),
+        }
+    }
+
+    fn restore(checkpoint: AgentCheckpoint) -> Self {
+        AgentState {
+            messages: checkpoint.messages,
+            iterations: checkpoint.iterations,
+            total_tool_calls: checkpoint.total_tool_calls,
+            output_tokens: checkpoint.output_tokens,
+            reasoning_tokens: checkpoint.reasoning_tokens,
+            compact_count: checkpoint.compact_count,
+            stop_reason: checkpoint.stop_reason,
+            last_response: None, // 重建时为空，下次 LLM 调用会填充
+        }
+    }
 }
 
 /// AgentState 的默认合并策略。

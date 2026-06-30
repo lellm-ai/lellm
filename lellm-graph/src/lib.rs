@@ -20,6 +20,7 @@ pub mod node;
 pub mod node_context;
 pub mod parallel_node;
 pub mod runtime_event;
+pub mod session;
 pub mod state;
 pub mod state_lens;
 pub mod statekey;
@@ -87,6 +88,9 @@ pub use node::{
 // ─── StateLens + SubgraphSpec ──────────────────────────────
 pub use state_lens::{IdentityLens, StateLens};
 pub use subgraph_spec::SubgraphSpec;
+
+// ─── ExecutionSession + SessionCheckpoint ──────────────────
+pub use session::{ExecutionSession, SessionCheckpoint};
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;

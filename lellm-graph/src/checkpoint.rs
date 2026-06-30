@@ -37,6 +37,8 @@
 //! checkpoint = FrameStack snapshot
 //! ```
 
+use std::fmt::Debug;
+
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
@@ -73,18 +75,26 @@ impl std::fmt::Display for NodeId {
 /// Checkpoint 的唯一职责：恢复（Restore）。
 /// 给我一个 Checkpoint，我就能从 `current_node` 开始，用 `state` 继续执行。
 ///
+/// # P0-1: Checkpoint Projection
+///
+/// `state` 字段使用 `S::Checkpoint`（关联类型），不是 `S`（Runtime State）。
+/// 这保证：
+/// - Runtime State 可以包含不可序列化字段（`Arc<dyn ...>`, `Sender`, `Cache`）
+/// - Checkpoint 只序列化必要字段
+/// - 编译期保证可序列化
+///
 /// # Graph Compatibility
 ///
 /// `graph_hash` 记录创建 Checkpoint 时的图结构指纹。
 /// 恢复时必须校验：`graph_hash` 不匹配 → 拒绝恢复（不允许 silent mismatch）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Checkpoint<S = State> {
+pub struct Checkpoint<S: WorkflowState = State> {
     /// 唯一标识
     pub checkpoint_id: CheckpointId,
     /// 下一个要执行的节点
     pub current_node: NodeId,
-    /// 物化状态快照
-    pub state: S,
+    /// 物化状态快照（P0-1: 使用 Checkpoint 关联类型，不是 raw State）
+    pub state: S::Checkpoint,
     /// 图结构指纹 — 恢复时校验兼容性
     pub graph_hash: u64,
     /// 创建时间
@@ -92,14 +102,20 @@ pub struct Checkpoint<S = State> {
 }
 
 impl<S: WorkflowState> Checkpoint<S> {
-    pub fn new(current_node: impl Into<String>, state: S, graph_hash: u64) -> Self {
+    /// 从 Runtime State 创建 Checkpoint（使用 snapshot() 投影）。
+    pub fn new(current_node: impl Into<String>, state: &S, graph_hash: u64) -> Self {
         Self {
             checkpoint_id: CheckpointId(uuid::Uuid::new_v4()),
             current_node: NodeId(current_node.into()),
-            state,
+            state: state.snapshot(),
             graph_hash,
             created_at: std::time::SystemTime::now(),
         }
+    }
+
+    /// 从 Checkpoint 恢复 Runtime State（使用 restore()）。
+    pub fn restore_state(self) -> S {
+        S::restore(self.state)
     }
 }
 
@@ -184,20 +200,20 @@ pub struct Frame<S: WorkflowState = State> {
     /// 当前节点 ID
     pub node_id: String,
 
-    /// 状态快照（可序列化的 projection）
-    pub state: S,
+    /// 状态快照（P0-1: 使用 Checkpoint 关联类型，可序列化）
+    pub state: S::Checkpoint,
 
     /// 执行游标（节点索引或步骤数）
     pub cursor: usize,
 }
 
 impl<S: WorkflowState> Frame<S> {
-    /// 创建新的 Frame。
-    pub fn new(graph_id: String, node_id: String, state: S, cursor: usize) -> Self {
+    /// 从 Runtime State 创建 Frame（使用 snapshot() 投影）。
+    pub fn new(graph_id: String, node_id: String, state: &S, cursor: usize) -> Self {
         Self {
             graph_id,
             node_id,
-            state,
+            state: state.snapshot(),
             cursor,
         }
     }
@@ -205,12 +221,18 @@ impl<S: WorkflowState> Frame<S> {
 
 /// 帧栈 — 保存完整的执行位置历史。
 #[derive(Debug, Clone)]
-pub struct FrameStack<S: WorkflowState = State> {
+pub struct FrameStack<S: WorkflowState = State>
+where
+    S::Checkpoint: Debug,
+{
     /// 帧列表（从外到内）
     frames: Vec<Frame<S>>,
 }
 
-impl<S: WorkflowState> FrameStack<S> {
+impl<S: WorkflowState> FrameStack<S>
+where
+    S::Checkpoint: Debug,
+{
     /// 创建空的帧栈。
     pub fn new() -> Self {
         Self { frames: Vec::new() }
@@ -247,7 +269,10 @@ impl<S: WorkflowState> FrameStack<S> {
     }
 }
 
-impl<S: WorkflowState> Default for FrameStack<S> {
+impl<S: WorkflowState> Default for FrameStack<S>
+where
+    S::Checkpoint: Debug,
+{
     fn default() -> Self {
         Self::new()
     }

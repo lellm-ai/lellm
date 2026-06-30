@@ -96,10 +96,21 @@ impl crate::workflow_state::StateMutation<State> for StateMutation {
 }
 
 impl crate::workflow_state::WorkflowState for State {
+    /// State 本身就是可序列化的 Checkpoint（向后兼容）。
+    type Checkpoint = State;
     type Mutation = StateMutation;
+
+    fn snapshot(&self) -> State {
+        self.clone()
+    }
+
+    fn restore(checkpoint: State) -> Self {
+        checkpoint
+    }
 }
 
 /// State 的默认合并策略 — 逐 key 合并，后续分支覆盖同 key。
+#[derive(Clone)]
 pub struct StateMerge;
 
 impl crate::workflow_state::MergeStrategy<State> for StateMerge {
