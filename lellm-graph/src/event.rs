@@ -101,7 +101,7 @@ pub enum BarrierDecision {
 ///
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[derive(Debug)]
-pub enum GraphEvent<S = State> {
+pub enum GraphEvent<S: crate::workflow_state::WorkflowState = State> {
     /// Graph 执行开始（恰好一次）
     GraphStart { trace_id: TraceId },
     /// 节点开始执行
@@ -157,7 +157,7 @@ pub enum GraphEvent<S = State> {
 pub type GraphStream<S = State> = tokio::sync::mpsc::Receiver<GraphEvent<S>>;
 
 /// Graph 流式执行的完整返回包装。
-pub struct GraphExecution<S = State> {
+pub struct GraphExecution<S: crate::workflow_state::WorkflowState = State> {
     pub stream: GraphStream<S>,
     pub handle: GraphHandle,
 }

@@ -557,7 +557,7 @@ pub(crate) async fn run_execution_loop<S, M>(
         // 处理路由
         match next_action {
             NextAction::End => {
-                send_complete(&event_tx, trace_id, engine, execution_log, start_time);
+                send_complete(&event_tx, trace_id, engine, execution_log, start_time, trace_sink.take());
                 break;
             }
             NextAction::Goto(target) => {
@@ -565,7 +565,7 @@ pub(crate) async fn run_execution_loop<S, M>(
             }
             NextAction::Next => {
                 if current == graph.end_node() {
-                    send_complete(&event_tx, trace_id, engine, execution_log, start_time);
+                    send_complete(&event_tx, trace_id, engine, execution_log, start_time, trace_sink.take());
                     break;
                 }
                 match graph.resolve_next_inline(&current, engine.state()) {

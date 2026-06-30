@@ -144,10 +144,20 @@ impl SimpleExecutor {
             state: final_state,
             execution_log,
             duration,
+            trace: None,
         })
     }
 
     pub fn execute_stream(&self, graph: Arc<Graph>, state: State) -> GraphExecution<State> {
+        self.execute_stream_with_restore(graph, state, None)
+    }
+
+    pub fn execute_stream_with_restore(
+        &self,
+        graph: Arc<Graph>,
+        state: State,
+        restore_from: Option<crate::checkpoint::Checkpoint<State>>,
+    ) -> GraphExecution<State> {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
         let (decision_tx, decision_rx) = tokio::sync::mpsc::channel(256);
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel(1);
@@ -168,7 +178,7 @@ impl SimpleExecutor {
             cancel,
             None, // checkpoint
             None, // trace_sink
-            None, // restore_from
+            restore_from,
         ));
 
         GraphExecution {

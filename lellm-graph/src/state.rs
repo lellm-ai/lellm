@@ -300,7 +300,7 @@ pub fn array_reducer(existing: &Value, new: &Value) -> Result<Value, String> {
 ///
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[derive(Debug)]
-pub struct GraphResult<S = State> {
+pub struct GraphResult<S: crate::workflow_state::WorkflowState = State> {
     /// 执行追踪 ID（关联本次执行的所有 SpanId）
     pub trace_id: crate::ids::TraceId,
     /// 最终状态
