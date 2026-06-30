@@ -412,12 +412,7 @@ fn serialize_google_parts(blocks: &[ContentBlock]) -> Result<Vec<serde_json::Val
 
 /// 将 ToolResult 的 content 序列化为 Gemini functionResponse 格式。
 fn serialize_google_tool_result_parts(blocks: &[ContentBlock]) -> serde_json::Value {
-    let text: String = blocks
-        .iter()
-        .filter_map(|b| b.as_text())
-        .collect::<Vec<_>>()
-        .join("\n");
-    serde_json::json!(text)
+    serde_json::json!(ContentBlock::flatten_text(blocks))
 }
 
 /// 将 ToolDefinition 序列化为 Gemini functionDeclarations。

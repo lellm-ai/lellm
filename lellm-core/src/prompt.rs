@@ -42,6 +42,7 @@ struct PromptLayer {
 ///     .stable("核心身份…")
 ///     .stable("工具指南…")
 ///     .dynamic("会话上下文: …")
+///     .finish()
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
@@ -138,6 +139,7 @@ impl Default for Prompt {
 ///     .stable("工具指南…")
 ///     .stable("项目规则…")
 ///     .dynamic("会话上下文: …")
+///     .finish()
 ///     .build();
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -173,8 +175,8 @@ impl PromptBuilder {
         self
     }
 
-    /// 构建为 `Prompt`。
-    pub fn build(self) -> Prompt {
+    /// 构建为 `Prompt`（尚未放置断点）。
+    pub fn finish(self) -> Prompt {
         Prompt {
             layers: self.layers,
         }
@@ -221,7 +223,7 @@ mod tests {
             .stable("layer1")
             .stable("layer2")
             .dynamic("dynamic")
-            .build()
+            .finish()
             .build();
 
         let blocks = msg.content();
@@ -276,7 +278,7 @@ mod tests {
             .stable("L4")
             .stable("L5")
             .dynamic("D")
-            .build()
+            .finish()
             .build();
 
         let blocks = msg.content();
@@ -305,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_all_stable_single_breakpoint() {
-        let msg = Prompt::builder().stable("A").stable("B").build().build();
+        let msg = Prompt::builder().stable("A").stable("B").finish().build();
 
         let blocks = msg.content();
         if let ContentBlock::Text(t) = &blocks[0] {
@@ -318,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_empty_layers_produce_empty_message() {
-        let msg = Prompt::builder().build().build();
+        let msg = Prompt::builder().finish().build();
         assert!(msg.content().is_empty());
     }
 

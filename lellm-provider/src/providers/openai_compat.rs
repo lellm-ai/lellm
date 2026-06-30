@@ -464,10 +464,7 @@ fn serialize_openai_message(msg: &Message) -> Result<serde_json::Value, LlmError
         Message::System { content } => {
             let mut map = serde_json::Map::new();
             map.insert("role".into(), "system".into());
-            map.insert(
-                "content".into(),
-                serialize_openai_text_blocks(content).into(),
-            );
+            map.insert("content".into(), ContentBlock::flatten_text(content).into());
             Ok(serde_json::Value::Object(map))
         }
         Message::User { content } => {
@@ -551,20 +548,8 @@ fn serialize_openai_content_blocks(blocks: &[ContentBlock]) -> Result<serde_json
             });
         }
     }
-    let text: String = blocks
-        .iter()
-        .filter_map(|b| b.as_text().map(|s| s.to_string()))
-        .collect();
+    let text: String = ContentBlock::flatten_text(blocks);
     Ok(serde_json::json!(text))
-}
-
-/// 将 ContentBlock 中的文本拼接为字符串（用于 System 消息）
-fn serialize_openai_text_blocks(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| b.as_text().map(|s| s.to_string()))
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 /// 将 ToolDefinition 数组序列化为 OpenAI 格式的工具列表。
@@ -705,7 +690,7 @@ mod tests {
             text: "system prompt".into(),
             cache_control: Some(CacheControl::Breakpoint),
         })];
-        let text = serialize_openai_text_blocks(&blocks);
+        let text = ContentBlock::flatten_text(&blocks);
         // OpenAI 只取文本，忽略 cache_control
         assert_eq!(text, "system prompt");
     }

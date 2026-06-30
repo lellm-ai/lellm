@@ -177,7 +177,7 @@ fn build_system_prompt() -> Prompt {
 
 最终回答必须为纯 JSON，不要包含 markdown 代码块标记或任何解释",
         )
-        .build()
+        .finish()
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────

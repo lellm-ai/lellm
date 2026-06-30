@@ -310,7 +310,7 @@ mod tests {
                     .stable("核心身份")
                     .stable("工具指南")
                     .dynamic("会话上下文")
-                    .build(),
+                    .finish(),
             ),
             ..Default::default()
         };

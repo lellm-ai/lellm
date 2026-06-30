@@ -90,6 +90,8 @@ impl ContentBlock {
     ///
     /// 用于不支持 `cache_control` 的 Provider（OpenAI、Google）。
     /// 所有 Provider 共享同一份实现，避免各自拼接。
+    ///
+    /// 分隔符为 `\n\n`，与 Anthropic 块之间的隐式换行行为一致。
     pub fn flatten_text(blocks: &[ContentBlock]) -> String {
         blocks
             .iter()

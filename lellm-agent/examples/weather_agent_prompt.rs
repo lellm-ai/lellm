@@ -142,7 +142,7 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 禁止进行多轮推理。
 禁止生成 reasoning。",
         )
-        .build()
+        .finish()
 }
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
