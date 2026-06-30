@@ -1,28 +1,30 @@
 # v0.5 架构重构：Graph is Runtime, Agent is DSL
 
 > 日期：2026-06-30
-> 状态：设计方案 v2，已整合评审反馈
+> 状态：设计方案 v4，已整合 grill-me 讨论反馈（核心决策变更：merge → Compiler Pass）
 
 ## 核心论点
 
-**Graph 是唯一的 Runtime，Agent 是 Graph 的 DSL / 模板构建器（Graph Factory）。**
+**Graph 是唯一的 Runtime，Agent 是 Graph 的 DSL / 模板构建器。**
 
 ```
 用户层
 ──────────────────────────────────────
-AgentBuilder  ReactBuilder  PlannerBuilder  SupervisorBuilder
-                        (DSL / Graph Factory, impl GraphFactory<AgentState>)
+AgentBuilder  PlannerBuilder  SupervisorBuilder
+                    (DSL, build() → Graph<S>)
 
-                        ↓ build() →
+                    ↓ build() →
+               Graph<AgentState>  Graph<PlannerState>  ...
 
-                   Graph<AgentState>
+                    ┌──────────────────────┐
+                    │  ToolUseLoop (Facade) │  ← 薄层，持有 Graph + 高级 API
+                    │  invoke()             │     invoke_stream()
+                    │  invoke_stream()      │
+                    └──────────────────────┘
 
-                   ┌──────────────────────┐
-                   │  ToolUseLoop (Facade) │  ← 薄层，持有 Graph + 高级 API
-                   │  invoke()             │     invoke_stream(), invoke_json()
-                   │  invoke_stream()      │
-                   │  invoke_json()        │
-                   └──────────────────────┘
+                    ↓ 组合
+
+               SubgraphNode (运行时递归执行)
 
 ──────────────────────────────────────
           Runtime (lellm-graph)
@@ -31,14 +33,18 @@ ExecutionEngine  Node  Edge  State  Graph
 ──────────────────────────────────────
           Primitive (lellm-graph)
 GraphBuilder  (AST 构建器，compile() → immutable Graph)
+
+──────────────────────────────────────
+          Compiler (lellm-graph, 可选优化)
+Inline Pass  (自动 merge Subgraph，用户不需要手动调用)
 ```
 
 类比：`Router::new().route().layer().build()` 生成 Axum `Router`；
 `AgentBuilder::new().tools().build()` 生成 `Graph<AgentState>`。
 
-## 当前问题
+## 当前问题（已解决）
 
-### 1. 双重 Runtime
+### 1. 双重 Runtime ✅
 
 ```
 AgentBuilder → ToolUseLoop → build_react_graph() → Graph<AgentState> → ExecutionEngine
@@ -52,24 +58,29 @@ AgentBuilder → ToolUseLoop → build_react_graph() → Graph<AgentState> → E
    ToolUseLoop.execute() → build_react_graph() → Graph<AgentState> → ExecutionEngine
 ```
 
-问题：
+**问题：**
 - **两个 ExecutionEngine** 在跑 —— Checkpoint、Trace、Cancellation、Streaming 全部双层
 - **AgentFlowNode** 是 graph-in-graph 的反模式，递归执行
 - **ToolUseLoop** 是一个独立的运行时实体，不是 graph 的一等公民
 
-### 2. AgentBuilder 的黑盒性质
+**解决方案：**
+- AgentBuilder::build() 直接返回 Graph<AgentState>
+- ToolUseLoop 重构为薄 Facade，持有预构建的 Graph
+- 删除 AgentFlowNode
 
-`AgentBuilder::build()` → `ToolUseLoop`（一个不透明的执行循环）
+### 2. AgentBuilder 的黑盒性质 ✅
 
-用户看不到 ReAct loop 的内部结构，也无法定制。这违背了"让开发者精准控制 Agent 的执行流程"。
+**问题：** `AgentBuilder::build()` → `ToolUseLoop`（一个不透明的执行循环），用户看不到 ReAct loop 的内部结构，也无法定制。
 
-### 3. 心智模型混乱
+**解决方案：** AgentBuilder::build() 返回标准 Graph，用户可以直接用 `graph.run_inline()` 执行，或用 `build_loop().invoke()` 便捷执行。
 
-用户需要同时理解两套 API：
-- `GraphBuilder` — "建图"
-- `AgentBuilder` — "建 Agent"
+### 3. 心智模型混乱 ✅
 
-但 LangGraph 用户的心智模型只有一套：`StateGraph().add_node().add_edge().compile()`
+**问题：** 用户需要同时理解两套 API：`GraphBuilder`（"建图"）和 `AgentBuilder`（"建 Agent"）。
+
+**解决方案：** 统一为两层世界：
+- **DSL 层**：AgentBuilder、PlannerBuilder 等，稳定 API
+- **Primitive 层**：GraphBuilder，完全自由
 
 ## 目标架构
 
@@ -86,245 +97,29 @@ AgentBuilder → ToolUseLoop → build_react_graph() → Graph<AgentState> → E
 
 | 组件 | 当前 | 目标 | 变化 |
 |------|------|------|------|
-| `AgentBuilder::build()` | → `ToolUseLoop` | → `Graph<AgentState>` | **核心变更** |
-| `ToolUseLoop` | 独立的运行时 | **薄 Facade**，持有 `Graph<AgentState>` | 保留，提供 invoke() 等高级 API |
-| `AgentFlowNode` | 公开 struct | **直接删除** | 不再需要，无过渡期 |
+| `AgentBuilder::build()` | → `ToolUseLoop` | → `Graph<AgentState>` | **核心变更** ✅ |
+| `ToolUseLoop` | 独立的运行时 | **薄 Facade**，持有 `Graph<AgentState>` | 保留，提供 invoke() 等高级 API ✅ |
+| `AgentFlowNode` | 公开 struct | **直接删除** | 不再需要，无过渡期 ✅ |
 | `build_react_graph()` | `pub(crate)` | 保持 `pub(crate)` | **不公开**，Runtime 实现细节 |
-| `GraphFactory<S>` | 不存在 | **新增 trait** | 统一所有 DSL Builder 的接口 |
+| `GraphFactory<S>` | 不存在 | **不实现** | 保持命名约定，不需要 trait |
 
-## GraphFactory Trait
+### 两层世界划分
 
-```rust
-/// Graph Factory — 所有 DSL Builder 的统一接口。
-///
-/// 类比：Axum 的 Router 构建器最终返回 Router；
-/// 我们的各种 Builder 最终返回 Graph<S>。
-pub trait GraphFactory<S> {
-    fn build(self) -> Graph<S>;
-}
+**世界一：Runtime DSL（稳定）**
+- AgentBuilder
+- PlannerBuilder
+- SupervisorBuilder
+- 特点：API 稳定，Runtime 可升级，内部结构不承诺
 
-// AgentBuilder (ReAct DSL)
-impl GraphFactory<AgentState> for AgentBuilder { ... }
+**世界二：Graph Primitive（完全自由）**
+- GraphBuilder
+- Node
+- Edge
+- Condition
+- 特点：完全透明，想怎么改怎么改
 
-// 未来：
-// impl GraphFactory<PlannerState> for PlannerBuilder { ... }
-// impl GraphFactory<SupervisorState> for SupervisorBuilder { ... }
-```
-
-这是整个生态的统一抽象。所有 DSL Builder 都实现 `GraphFactory`，返回各种 `Graph<S>`。
-
-## 迁移计划
-
-### Phase 1：AgentBuilder::build() → Graph<AgentState>
-
-**核心变更：** `AgentBuilder::build()` 的返回类型从 `ToolUseLoop` 变为 `Graph<AgentState, AgentStateMerge>`。
-
-```rust
-// Before
-let loop_: ToolUseLoop = AgentBuilder::new(model)
-    .system("...").tools([...]).build();
-
-// After — 拿到标准 Graph
-let graph: Graph<AgentState, AgentStateMerge> = AgentBuilder::new(model)
-    .system("...").tools([...]).build();
-
-// 直接用 ExecutionEngine 跑
-let mut engine = ExecutionContext::<AgentState>::new(
-    AgentState::from_messages(vec![Message::user_text("3+4*2")]),
-    None, CancellationToken::new()
-);
-graph.run_inline(&mut engine, 100).await?;
-```
-
-`AgentBuilder` 内部逻辑不变：
-- 仍然收集 tools、config、model
-- `build()` 时调用 `build_react_graph()` 生成 `Graph<AgentState>`
-- 实现 `GraphFactory<AgentState>` trait
-
-**影响面：**
-- `lellm-agent/src/runtime/builder.rs` — 核心修改
-- `lellm-agent/src/lib.rs` — re-export 调整
-- 所有 examples — 调用方式改变
-
-### Phase 2：ToolUseLoop 重构为薄 Facade
-
-**不删除** `ToolUseLoop`，而是重构为持有 `Graph<AgentState>` 的便捷层：
-
-```rust
-/// 薄 Facade — 持有 Graph，提供高级执行 API。
-///
-/// 不是独立的运行时，只是 Graph 的便捷包装。
-pub struct ToolUseLoop {
-    graph: Graph<AgentState, AgentStateMerge>,
-    config: ToolUseConfig,  // 用于构建 ExecutionContext 的默认参数
-}
-
-impl ToolUseLoop {
-    /// 从 Graph 创建 Facade
-    pub fn new(graph: Graph<AgentState, AgentStateMerge>) -> Self { ... }
-
-    /// 便捷执行 — 内部封装了 State 初始化 + 执行 + 结果提取
-    pub async fn invoke(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> { ... }
-
-    /// 流式执行
-    pub async fn invoke_stream(&self, messages: Vec<Message>) -> AgentStream { ... }
-
-    /// 结构化输出（未来）
-    // pub async fn invoke_json<T>(&self, ...) -> Result<T, LlmError> { ... }
-    // pub async fn invoke_structured<T>(&self, ...) -> Result<T, LlmError> { ... }
-    // pub async fn invoke_until<F>(&self, predicate: F) -> Result<ToolUseResult, LlmError> { ... }
-}
-
-// AgentBuilder 仍然提供 .build_loop() 作为便捷入口
-impl AgentBuilder {
-    pub fn build(self) -> Graph<AgentState, AgentStateMerge> { ... }
-    pub fn build_loop(self) -> ToolUseLoop {
-        ToolUseLoop::new(self.build())
-    }
-}
-```
-
-**关键区别：**
-- ToolUseLoop **不再** 内部构建 graph（那是 AgentBuilder 的事）
-- ToolUseLoop **不再** 启动独立的 ExecutionEngine
-- ToolUseLoop.invoke() 内部仍然调用 `graph.run_inline()`，但这是**同一个 ExecutionEngine**
-
-**影响面：**
-- `lellm-agent/src/runtime/runtime.rs` — 重构 ToolUseLoop
-- 所有直接调用 `ToolUseLoop::execute()` 的地方 → `invoke()`
-
-### Phase 3：直接删除 AgentFlowNode
-
-`AgentFlowNode` 存在的唯一原因是把 `ToolUseLoop` 包装成 `FlowNode`，塞进外层的 `GraphBuilder`。
-
-一旦 Agent = Graph，就不再需要这个包装层。
-
-**不 deprecate，直接删除。** 理由：
-- 它是历史包袱，没有任何独特的设计价值
-- 它的功能被 `GraphBuilder::merge()` 替代
-- 过渡期只会增加维护成本
-
-**影响面：**
-- `lellm-agent/src/runtime/flow_node.rs` — **删除整个文件**
-- `lellm-agent/examples/calculator_graph.rs` — 重写
-- `lellm-agent/examples/calculator_graph_mock.rs` — 重写
-
-### Phase 4：GraphBuilder::merge() — Builder 阶段 AST 内联
-
-**核心语义：** merge 发生在 **Builder 阶段**，不是 Graph 阶段。
-
-```rust
-// Builder 阶段完成 AST 合并
-let mut builder = GraphBuilder::<AgentState, _>::new("workflow");
-
-builder.node("init", init_node);
-
-// merge ReAct graph 的 AST 到 builder
-// prefix 参数避免节点名冲突
-builder.merge(
-    AgentBuilder::new(model).tools([...]).build(),
-    "agent"  // prefix
-);
-
-builder.node("summary", summary_node);
-
-// 手动连接入口/出口
-builder.edge("init", "agent_start");      // 连接到 merge 的入口
-builder.edge("agent_end", "summary");     // 从 merge 的出口连出
-
-// compile → immutable Graph (NodeId 只分配一次)
-let graph = builder.build()?;
-```
-
-**merge 的行为：**
-
-```
-Parent Builder:
-  A → B → C
-
-Merge ReAct Graph (prefix="agent"):
-  START → budget_check → llm → post_llm_check → tool → budget_check (循环)
-                                           → end
-
-Result (扁平 AST):
-  A → B → C → agent_budget_check → agent_llm → agent_post_llm_check → agent_tool → agent_budget_check (循环)
-                                                    → agent_end → summary
-
-  START → A
-  END = summary
-```
-
-**merge 的规则：**
-1. **NodeId 重写** — 所有节点名加 prefix + `_`
-2. **Edge 重写** — 边的 from/to 相应调整
-3. **START 删除** — 原 graph 的 start node 变为 merge 后的入口节点（以 `{prefix}_start` 命名）
-4. **END 删除** — 原 graph 的 end node 变为 merge 后的出口节点（以 `{prefix}_end` 命名）
-5. **最终生成一个真正的扁平图** — 没有 SubgraphNode，没有嵌套
-
-**为什么必须在 Builder 阶段：**
-
-```
-Builder 阶段 merge 的好处：
-  ✓ NodeId 只分配一次
-  ✓ BarrierId 不会变化
-  ✓ Checkpoint 不需要重新映射
-  ✓ Trace 的节点编号保持稳定
-  ✓ compile() 后 Graph 不可变
-
-Graph 阶段 merge 的问题：
-  ✗ 已编译的 graph 需要重新分配 NodeId
-  ✗ Checkpoint 映射可能失效
-  ✗ 多次 merge 导致不断重写
-```
-
-**API 设计：**
-
-```rust
-impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
-    /// 将另一个 Graph 的 AST 内联到当前 Builder。
-    ///
-    /// 所有节点名加 prefix，边相应调整。
-    /// 原 graph 的 START/END 被移除，入口/出口节点以 {prefix}_start / {prefix}_end 暴露。
-    ///
-    /// # 返回
-    /// MergeEntry 包含入口和出口节点名，用于连接外部边。
-    pub fn merge(
-        &mut self,
-        other: Graph<S, M>,
-        prefix: impl Into<String>,
-    ) -> MergeEntry {
-        let prefix = prefix.into();
-        for (name, kind) in other.nodes {
-            self.nodes.insert(format!("{prefix}_{name}"), kind);
-        }
-        for edge in other.edges {
-            self.edges.push(Edge {
-                from: format!("{prefix}_{}", edge.from),
-                to: format!("{prefix}_{}", edge.to),
-                condition: edge.condition,
-                fallback: edge.fallback,
-                ..edge
-            });
-        }
-        MergeEntry {
-            entry: format!("{prefix}_{}", other.start),
-            exit: format!("{prefix}_{}", other.end),
-        }
-    }
-}
-
-/// Merge 的结果，用于连接外部边。
-pub struct MergeEntry {
-    /// 入口节点名（原 graph 的 start node）
-    pub entry: String,
-    /// 出口节点名（原 graph 的 end node）
-    pub exit: String,
-}
-```
-
-**影响面：**
-- `lellm-graph/src/graph.rs` — 新增 `GraphBuilder::merge()`
-- 可能需要 `lellm-graph/src/graph_merge.rs` — 如果逻辑复杂
+**中间不存在第三层**
+- 不做 "半开放 ReAct Graph"（既没有 DSL 稳定，又没有 Primitive 自由）
 
 ## 关键设计决策
 
@@ -348,16 +143,15 @@ budget_check → llm → MyNode → post_llm_check → tool
 
 **真正应该公开的是 `AgentBuilder`（DSL），不是 `build_react_graph()`（Runtime 实现）。**
 
-### D2：GraphBuilder::merge() — Builder 阶段 AST 内联
+### D2：不做 GraphFactory Trait
 
-merge 发生在 Builder 阶段，不是 Graph 阶段。
+**原因：** `GraphFactory<S>` trait 只有一个方法 `fn build(self) -> Graph<S>`，但各个 Builder 的配置参数（model、tools、system prompt 等）不同，`build()` 签名根本不同。
 
-理由见 Phase 4。
+这个 trait 能提供的抽象价值是什么？
+- 如果是为了统一类型签名，那 Rust 的 trait 默认不支持 trait object，泛型约束也几乎不会跨 Builder 使用
+- 如果是为了文档/概念一致性，那一个空 trait 加注释就够了，不需要强制实现
 
-**不做 Subgraph Node（运行时压栈）：**
-- 违背"唯一 Runtime"原则
-- ExecutionEngine 需要支持 frame stack
-- 一期不做
+**结论：** 更符合 Rust 风格的做法是统一 Builder 的约定，而不是统一它们的类型体系。真正需要统一的是最终产物 Graph<S> 和 Runtime，而不是所有 Builder 必须实现同一个 trait。
 
 ### D3：AgentBuilder 命名
 
@@ -365,9 +159,14 @@ merge 发生在 Builder 阶段，不是 Graph 阶段。
 
 理由：
 - "Agent Builder" 是用户最自然的搜索词
-- `GraphFactory<AgentState>` trait 已经明确了它是 Graph Factory 的本质
 - 重命名带来 breaking change，收益不大
 - 未来 `PlannerBuilder`、`SupervisorBuilder` 是不同类型的 Builder，命名不会冲突
+
+**命名约定：** 所有 Builder 统一遵循：
+- `::new(...)` — 创建构建器
+- `.build()` → `Graph<_>` — 返回 Graph
+
+而不是 `.compile()`、`.finish()`、`.create()`、`.generate()`。一致的命名本身就是最好的抽象。
 
 ### D4：AgentState 的归属
 
@@ -378,7 +177,7 @@ merge 发生在 Builder 阶段，不是 Graph 阶段。
 - `lellm-agent` 依赖 `lellm-graph`，返回 `Graph<AgentState>` 完全合法
 - 迁移到 graph 或 core 是 premature abstraction
 
-### D5：ToolUseLoop 保留为 Facade
+### D5：ToolUseLoop 保留为薄 Facade
 
 **保留原因：** 提供高级 API，而不强迫用户写 boilerplate：
 
@@ -397,6 +196,130 @@ let result = loop_.invoke(messages).await?;
 
 **关键约束：** ToolUseLoop 内部**只能**调用 `Graph::run_inline()` / `Graph::run_stream()`，不能有自己的执行循环。
 
+**结构设计：**
+
+```rust
+/// 薄 Facade — 持有预构建的 Graph，提供便捷执行 API。
+pub struct ToolUseLoop {
+    graph: Graph<AgentState, AgentStateMerge>,  // 预构建的 ReAct Graph
+    config: ToolUseConfig,                       // 构建 ExecutionContext 的默认参数
+}
+
+impl ToolUseLoop {
+    /// 从预构建的 Graph 创建 Facade。
+    pub fn new(graph: Graph<AgentState, AgentStateMerge>, config: ToolUseConfig) -> Self;
+
+    /// 便捷执行 — 内部调用 graph.run_inline()
+    pub async fn invoke(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError>;
+
+    /// 流式执行
+    pub fn invoke_stream(&self, messages: Vec<Message>) -> AgentStream;
+}
+
+// AgentBuilder 仍然提供 .build_loop() 作为便捷入口
+impl AgentBuilder {
+    pub fn build(self) -> Graph<AgentState, AgentStateMerge> { ... }
+    pub fn build_loop(self) -> ToolUseLoop {
+        let config = self.config.clone();
+        let graph = self.build();
+        ToolUseLoop::new(graph, config)
+    }
+}
+```
+
+### D6：Subgraph 组合 — 运行时递归执行 + Compiler Inline Pass
+
+**核心决策：merge 是 Compiler Pass，不是用户 API。**
+
+**用户 API：SubgraphNode（运行时递归执行）**
+
+```rust
+// 组合 Agent 到 Workflow
+let agent_graph = AgentBuilder::new(model).tools([...]).build();
+
+let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
+builder.node("init", init_node);
+builder.node("agent", NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)));
+builder.node("summary", summary_node);
+
+builder.edge("init", "agent");
+builder.edge("agent", "summary");
+
+let graph = builder.build()?;
+```
+
+**Subgraph 执行语义：**
+- 运行时遇到 SubgraphNode 时，递归调用 `graph.run_inline()`
+- 通过 StateLens 投影状态，不需要 Outer → Inner → Outer 复用
+- 退出 Subgraph 后，借用结束，继续操作外层 State
+- 不需要 Frame Stack，只是递归函数调用
+
+**Compiler Inline Pass（可选优化）：**
+
+```rust
+// 用户不需要手动调用 merge
+// Compiler 在 compile() 时自动决定是否内联
+
+let graph = builder.build()?;  // 自动触发 Inline Pass
+
+// 编译器内部流程：
+// 1. 分析 SubgraphNode
+// 2. 评估是否值得内联（基于图大小、调用频率等）
+// 3. 如果值得：展开 Subgraph，合并到外层 Graph
+// 4. 如果不值得：保持 Subgraph，运行时递归执行
+```
+
+**为什么不做 GraphBuilder::merge()：**
+
+1. **封装破坏** — prefix 重命名导致外部依赖内部节点名
+   ```rust
+   // ❌ 不可接受
+   builder.merge(agent, "agent");
+   builder.edge("init", "agent_budget_check");  // 依赖内部节点名
+   ```
+
+2. **语义错误** — merge 是编译器优化，不是编程模型
+   - 像 LLVM 的 function inlining
+   - 用户不应该手动调用 `builder.merge()`
+   - 应该由 `compile()` 自动决定
+
+3. **Checkpoint 简化** — 不需要 merge 也能实现
+   ```rust
+   // Subgraph Checkpoint
+   Workflow → SubgraphNode → Checkpoint {
+       node = "agent",
+       subgraph_checkpoint = ...
+   }
+
+   // 恢复时
+   Workflow → 进入 agent → 恢复 agent checkpoint
+   ```
+
+4. **性能收益有限** — AST 内联的主要价值是编译器优化
+   - 用户手动 merge 不会比自动 inline 更好
+   - 编译器可以基于 profile 数据做更优决策
+
+**未来 Compiler Pass 实现：**
+
+```rust
+// lellm-graph/src/compiler/inline_pass.rs
+
+pub struct InlinePass;
+
+impl CompilerPass for InlinePass {
+    fn run(&self, graph: &mut Graph) {
+        // 1. 识别所有 SubgraphNode
+        // 2. 评估每个 Subgraph 是否值得内联
+        //    - 图大小 < 阈值
+        //    - 没有外部依赖
+        //    - StateLens 是纯投影
+        // 3. 如果值得：展开 Subgraph，合并节点和边
+        // 4. 重映射 NodeId
+        // 5. 优化 CFG（死代码消除、Barrier 合并等）
+    }
+}
+```
+
 ## 最终 API 全景
 
 ```rust
@@ -409,7 +332,7 @@ builder.edge("a", "b", condition);
 builder.end("b");
 let graph: Graph<MyState> = builder.build()?;
 
-// ─── 层级 2：DSL / Graph Factory（lellm-agent）────
+// ─── 层级 2：DSL（lellm-agent）────
 
 // AgentBuilder — ReAct 模板
 let graph: Graph<AgentState> = AgentBuilder::new(model)
@@ -426,25 +349,28 @@ let loop_ = AgentBuilder::new(model)
     .build_loop();
 
 let result = loop_.invoke(messages).await?;
-let stream = loop_.invoke_stream(messages).await;
+let stream = loop_.invoke_stream(messages);
 
-// ─── 层级 4：组合（merge）────
+// ─── 层级 4：组合（Subgraph）────
 
-let mut builder = GraphBuilder::<AgentState, _>::new("workflow");
+let agent_graph = AgentBuilder::new(model).tools([...]).build();
+
+let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
 builder.node("preprocess", preprocess_node);
-
-let entry = builder.merge(
-    AgentBuilder::new(model).tools([...]).build(),
-    "agent"
-);
-
+builder.node("agent", NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)));
 builder.node("postprocess", postprocess_node);
-builder.edge("preprocess", entry.entry);
-builder.edge(entry.exit, "postprocess");
-builder.end("postprocess");
 
-let graph = builder.build()?;
+builder.edge("preprocess", "agent");
+builder.edge("agent", "postprocess");
+
+let graph = builder.build()?;  // 自动触发 Inline Pass（可选）
 // 只有一个 ExecutionEngine 跑整个图
+
+// ─── 层级 5：Compiler Pass（可选优化）────
+
+// 用户不需要手动调用 merge
+// Compiler 在 compile() 时自动决定是否内联 Subgraph
+// 基于图大小、调用频率等 profile 数据做决策
 ```
 
 ## 文件变动清单
@@ -452,65 +378,347 @@ let graph = builder.build()?;
 ### 删除
 | 文件 | 原因 |
 |------|------|
-| `lellm-agent/src/runtime/flow_node.rs` | AgentFlowNode 直接删除，无过渡期 |
+| `lellm-agent/src/runtime/flow_node.rs` | AgentFlowNode 直接删除，无过渡期 ✅ |
 
 ### 核心修改
-| 文件 | 改动 |
-|------|------|
-| `lellm-agent/src/runtime/builder.rs` | `build()` → `Graph<AgentState>`；新增 `build_loop()` → `ToolUseLoop`；实现 `GraphFactory<AgentState>` |
-| `lellm-agent/src/runtime/runtime.rs` | `ToolUseLoop` 重构为薄 Facade，持有 Graph |
-| `lellm-agent/src/runtime/mod.rs` | 模块导出调整 |
-| `lellm-agent/src/lib.rs` | 公开 API 调整，导出 `GraphFactory` |
-| `lellm-graph/src/graph.rs` | 新增 `GraphBuilder::merge()` |
+| 文件 | 改动 | 状态 |
+|------|------|------|
+| `lellm-agent/src/runtime/builder.rs` | `build()` → `Graph<AgentState>`；新增 `build_loop()` → `ToolUseLoop` | ✅ |
+| `lellm-agent/src/runtime/runtime.rs` | `ToolUseLoop` 重构为薄 Facade，持有 Graph | ✅ |
+| `lellm-agent/src/runtime/mod.rs` | 模块导出调整 | ✅ |
+| `lellm-agent/src/lib.rs` | 公开 API 调整 | ✅ |
+| `lellm-agent/src/runtime/typed_state.rs` | `AgentStateMerge` 添加 Clone | ✅ |
 
-### 新增
-| 文件 | 内容 |
-|------|------|
-| `lellm-agent/src/factory.rs` | `GraphFactory<S>` trait 定义 |
+### 新增（Phase 4：Subgraph 组合）
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `lellm-graph/src/subgraph_node.rs` | `SubgraphNode` 实现 — 运行时递归执行 | ⏸️ 待实现 |
+| `lellm-graph/src/state_lens.rs` | `StateLens` trait — 状态投影，不是状态转换 | ⏸️ 待实现 |
+
+### 新增（Phase 5：Compiler Inline Pass，可选优化）
+| 文件 | 内容 | 状态 |
+|------|------|------|
+| `lellm-graph/src/compiler/mod.rs` | Compiler 模块入口 | ⏸️ 待实现 |
+| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 自动 merge Subgraph | ⏸️ 待实现 |
 
 ### 示例重写
-| 文件 | 改动 |
-|------|------|
-| `lellm-agent/examples/calculator_graph.rs` | 使用 AgentBuilder → Graph |
-| `lellm-agent/examples/calculator_graph_mock.rs` | 使用 AgentBuilder → Graph |
-| `lellm-agent/examples/simple_agent.rs` | 使用 build_loop().invoke() |
-| `lellm-agent/examples/streaming_agent.rs` | 使用 build_loop().invoke_stream() |
-| `lellm-agent/examples/tool_definition.rs` | 使用 AgentBuilder → Graph |
-| `lellm-agent/examples/tool_use.rs` | 使用 AgentBuilder → Graph |
-| `lellm-agent/examples/system_prompt.rs` | 使用 AgentBuilder → Graph |
+| 文件 | 改动 | 状态 |
+|------|------|------|
+| `lellm-agent/examples/calculator_graph.rs` | 使用 AgentBuilder → Graph | ✅ |
+| `lellm-agent/examples/calculator_graph_mock.rs` | 使用 AgentBuilder → Graph | ✅ |
+| `lellm-agent/examples/simple_agent.rs` | 使用 build_loop().invoke() | ✅ |
+| `lellm-agent/examples/streaming_agent.rs` | 使用 build_loop().invoke_stream() | ✅ |
+| `lellm-agent/examples/tool_definition.rs` | 使用 AgentBuilder → Graph | ✅ |
+| `lellm-agent/examples/tool_use.rs` | 使用 AgentBuilder → Graph | ✅ |
+| `lellm-agent/examples/system_prompt.rs` | 使用 AgentBuilder → Graph | ✅ |
+
+### D7：StateLens — 状态投影，不是状态转换
+
+**核心决策：使用 StateLens，不是 StateAdapter。**
+
+**为什么不做 StateAdapter：**
+
+```rust
+// ❌ StateAdapter — 状态转换（有 clone/merge）
+trait StateAdapter<O, I> {
+    fn extract(&self, outer: &O) -> I;
+    fn merge(&self, inner: I, outer: &mut O);
+}
+```
+
+问题：
+- 需要 clone 和 merge，性能开销
+- 两个闭包容易不一致（extract 忘了 merge）
+- 生命周期复杂
+
+**为什么选择 StateLens：**
+
+```rust
+// ✅ StateLens — 状态投影（零拷贝）
+trait StateLens<O, I> {
+    fn get<'a>(&self, outer: &'a mut O) -> &'a mut I;
+}
+```
+
+优势：
+- 零拷贝，只有借用
+- Agent Graph 不知道 WorkflowState 存在
+- 保持 AgentBuilder 返回 Graph<AgentState> 不变
+- 符合 Rust 风格，生命周期清晰
+
+**使用示例：**
+
+```rust
+// WorkflowState 包含 AgentState
+struct WorkflowState {
+    planner: PlannerState,
+    agent: AgentState,
+    memory: MemoryState,
+}
+
+// StateLens 实现
+struct AgentLens;
+impl StateLens<WorkflowState, AgentState> for AgentLens {
+    fn get<'a>(&self, outer: &'a mut WorkflowState) -> &'a mut AgentState {
+        &mut outer.agent
+    }
+}
+
+// Subgraph 组合
+let agent_graph = AgentBuilder::new(model).tools([...]).build();
+
+let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
+builder.node(
+    "agent",
+    NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)),
+);
+
+// Agent Graph 只操作 &mut AgentState
+// 不知道 WorkflowState 存在
+```
+
+**借用边界设计：**
+
+```rust
+// ExecutionContext 负责运行时资源，不持有业务 State
+struct ExecutionContext<S> {
+    state: Option<S>,  // 业务 State（可选）
+    stream: Option<Arc<dyn StreamSink>>,
+    cancellation: CancellationToken,
+    // ...
+}
+
+// GraphRunner 在进入 Subgraph 时
+// 通过 StateLens 投影出 &mut AgentState
+// 退出 Subgraph 后，借用结束
+// 再继续操作 WorkflowState
+```
+
+**与 Adapter 的对比：**
+
+| 维度 | StateAdapter | StateLens |
+|------|-------------|-----------|
+| 语义 | 状态转换（Conversion） | 状态投影（Projection） |
+| 拷贝 | 需要 clone + merge | 零拷贝，只有借用 |
+| 复杂度 | 两个闭包，容易不一致 | 一个方法，简单清晰 |
+| 性能 | 有开销 | 无开销 |
+| 封装 | Agent 知道 WorkflowState | Agent 不知道 WorkflowState |
+
+**最终选择：StateLens**
+
+```rust
+// 用户 API
+builder.node(
+    "agent",
+    NodeKind::Subgraph(
+        SubgraphNode::new(agent_graph)
+            .lens(AgentLens)
+    ),
+);
+
+// 或者更简洁
+builder.subgraph("agent", agent_graph, AgentLens);
+```
+
+### D8：Checkpoint = Execution Frame Snapshot
+
+**核心洞察：checkpoint 不是保存 state，而是保存 execution position + state projection。**
+
+**checkpoint 的边界单位是 Graph Execution Frame，不是 WorkflowState 或 Node。**
+
+**三种直觉方案的问题：**
+
+❌ **方案 1：每个 Node checkpoint**
+- Subgraph 内部会有 10~100 steps（ReAct loop）
+- 你会在 loop 中间崩溃
+- checkpoint 粒度 ≠ 实际执行边界
+- 恢复时语义不一致
+
+❌ **方案 2：Subgraph entry/exit checkpoint**
+- Subgraph 内部是 loop graph，不是 atomic unit
+- entry/exit 无法表达 loop 中间状态
+- tool 已执行但 checkpoint 还没写，或者 checkpoint 已写但 tool 还没执行
+
+❌ **方案 3：用户显式 checkpoint**
+- 用户不会知道 ReAct loop 内部什么时候该存
+- 也不会知道 barrier / tool / llm 的隐含边界
+- 会破坏框架价值
+
+**正确模型：Graph Execution = Frame Stack**
+
+```rust
+struct Frame {
+    graph_id: String,
+    node_id: String,
+    state_snapshot: WorkflowState,  // 或者 CheckpointState
+    cursor: usize,  // 执行位置
+}
+
+struct FrameStack {
+    frames: Vec<Frame>,
+}
+```
+
+**Checkpoint 时机：自动 frame boundary checkpoint**
+
+- Node exit
+- Subgraph exit
+- Yield boundary（stream pause / barrier / tool boundary）
+
+**恢复粒度：永远恢复 Whole WorkflowState，但 replay frame**
+
+```rust
+// 恢复流程
+fn restore(checkpoint: Checkpoint) {
+    // 1. load WorkflowState
+    let state = load_state(checkpoint.state);
+
+    // 2. restore FrameStack
+    let frames = restore_frames(checkpoint.frames);
+
+    // 3. resume execution
+    resume_execution(state, frames);
+}
+```
+
+**序列化约束：Checkpoint State ≠ Runtime State**
+
+```rust
+// Runtime State（不可序列化）
+struct WorkflowState {
+    agent: AgentState,
+    planner: PlannerState,
+    cache: Arc<...>,  // ❌ 不可序列化
+    channels: mpsc::...,  // ❌ 不可序列化
+}
+
+// Checkpoint State（可序列化）
+struct CheckpointState {
+    agent: AgentCheckpoint,
+    planner: PlannerCheckpoint,
+    memory: MemoryCheckpoint,
+}
+
+// 核心原则：checkpoint = projection, not raw state
+impl WorkflowState {
+    fn checkpoint(&self) -> CheckpointState {
+        // 只序列化必要的字段
+        CheckpointState {
+            agent: self.agent.to_checkpoint(),
+            planner: self.planner.to_checkpoint(),
+            memory: self.memory.to_checkpoint(),
+        }
+    }
+}
+```
+
+**最终架构：**
+
+```rust
+// 1. WorkflowState（runtime）
+struct WorkflowState {
+    agent: AgentState,
+    planner: PlannerState,
+    memory: MemoryState,
+    // ... 其他 runtime 字段
+}
+
+// 2. StateLens
+trait StateLens {
+    fn project(&self, state: &WorkflowState) -> AgentStateView;
+}
+
+// 3. FrameStack
+struct Frame {
+    graph_id: String,
+    node_id: String,
+    state_snapshot: WorkflowState,
+    cursor: usize,
+}
+
+// 4. Checkpoint = FrameStack snapshot
+struct Checkpoint {
+    state: CheckpointState,  // 可序列化的 state projection
+    frames: Vec<Frame>,      // 执行位置
+}
+
+// 5. Checkpoint 时机
+// 自动 frame boundary checkpoint
+// 不是 node，不是 subgraph
+// 是 frame transition
+```
+
+**一句话总结：**
+
+checkpoint 不是保存 state，而是保存 execution position + state projection。
 
 ## 不做的事情
 
 1. **不公开 `build_react_graph()`** — Runtime 实现细节
-2. **不做 Subgraph Node（运行时压栈）** — 一期只做 Builder 阶段 AST Merge
-3. **不重命名 AgentBuilder** — 保持名字，用 GraphFactory trait 明确本质
-4. **不动 GraphBuilder 核心逻辑** — 它是原语，只加 merge()
-5. **不在 ToolUseLoop 中引入新执行循环** — 严格约束为 Graph 的 Facade
+2. **不做 GraphFactory Trait** — 保持命名约定，不需要 trait
+3. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass
+4. **不做 StateAdapter** — 使用 StateLens，零拷贝投影
+5. **不做 Node/Subgraph 级别 checkpoint** — 使用 Frame Boundary Checkpoint
+6. **不序列化 Runtime State** — 只序列化 Checkpoint State Projection
+7. **不重命名 AgentBuilder** — 保持名字
+8. **不动 GraphBuilder 核心逻辑** — 它是原语
+9. **不在 ToolUseLoop 中引入新执行循环** — 严格约束为 Graph 的 Facade
 
 ## 与 LangGraph 的对比
 
-| 维度 | LangGraph | LeLLM (当前) | LeLLM (目标) |
-|------|-----------|-------------|-------------|
-| 唯一 Runtime | StateGraph + compile | ExecutionEngine + ToolUseLoop | ExecutionEngine |
-| Agent 定义 | create_react_agent() (黑盒) | AgentBuilder → ToolUseLoop | AgentBuilder → Graph |
-| 便捷执行 | graph.invoke() | ToolUseLoop.execute() | ToolUseLoop.invoke() (薄 Facade) |
-| 自定义 Agent | StateGraph 手写 | GraphBuilder + AgentFlowNode | GraphBuilder 手写 / merge |
-| 组合 | 子图节点 | AgentFlowNode (双层引擎) | GraphBuilder::merge() (单层引擎) |
-| Checkpoint | 单层 | 双层（如果用了 AgentFlowNode） | 单层 |
-| Graph Factory 抽象 | 无 | 无 | `GraphFactory<S>` trait |
+| 维度 | LangGraph | LeLLM (v0.5) |
+|------|-----------|-------------|
+| 唯一 Runtime | StateGraph + compile | ExecutionEngine |
+| Agent 定义 | create_react_agent() (黑盒) | AgentBuilder → Graph |
+| 便捷执行 | graph.invoke() | ToolUseLoop.invoke() (薄 Facade) |
+| 自定义 Agent | StateGraph 手写 | GraphBuilder 手写 / SubgraphNode |
+| 组合 | 子图节点 | SubgraphNode (递归执行) |
+| Checkpoint | 单层 | 单层 ✅ |
+| Graph Factory 抽象 | 无 | 无（保持命名约定） |
 
-## 收益排序
+## 收益
 
-1. **AgentBuilder::build() → Graph** — 消除双重 Runtime，架构统一（最大收益）
-2. **统一 ExecutionEngine** — Checkpoint/Trace/Cancellation/Streaming 全部单层
-3. **GraphBuilder::merge() 编译期 AST 内联** — NodeId 稳定，Checkpoint 不需重映射
-4. **删除 AgentFlowNode** — 减少代码量，消除反模式
-5. **保留 AgentBuilder** — 保持 DSL 价值，build_react_graph() 保持私有
+1. **AgentBuilder::build() → Graph** — 消除双重 Runtime，架构统一（最大收益）✅
+2. **统一 ExecutionEngine** — Checkpoint/Trace/Cancellation/Streaming 全部单层 ✅
+3. **ToolUseLoop 重构为薄 Facade** — 持有预构建 Graph，不再每次重新构建 ✅
+4. **删除 AgentFlowNode** — 减少代码量，消除反模式 ✅
+5. **保留 AgentBuilder** — 保持 DSL 价值，build_react_graph() 保持私有 ✅
+6. **不做 GraphFactory Trait** — 符合 Rust 风格，统一命名约定 ⏸️
+7. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass ⏸️
+
+## 实现状态
+
+- [x] Phase 1：AgentBuilder::build() → Graph<AgentState>
+- [x] Phase 2：ToolUseLoop 重构为薄 Facade
+- [x] Phase 3：删除 AgentFlowNode
+- [ ] Phase 4：SubgraphNode + StateLens（待实现）
+- [ ] Phase 5：Compiler Inline Pass（可选优化）
+- [ ] Phase 6：Checkpoint = Execution Frame Snapshot（待实现）
 
 ## 时间线
 
-预估 2-3 天的工作量：
+已完成：Phase 1 + Phase 2 + Phase 3
 
-- **Day 1**：Phase 1 + Phase 2（AgentBuilder 返回 Graph，ToolUseLoop 重构为 Facade，GraphFactory trait）
-- **Day 2**：Phase 3 + Phase 4（删除 AgentFlowNode，实现 GraphBuilder::merge()）
-- **Day 3**：示例重写 + 文档更新
+待实现：Phase 4 + Phase 5 + Phase 6
+
+---
+
+## 附录：grill-me 讨论记录
+
+### 关键决策点
+
+1. **GraphFactory Trait** → 去掉，保持命名约定
+2. **ToolUseLoop** → 重构为持有预构建 Graph 的 Facade
+3. **GraphBuilder::merge()** → 不实现，Subgraph 作为原语，merge 作为 Compiler Pass
+4. **Subgraph 组合** → 运行时递归执行，通过 StateLens 投影状态
+5. **StateLens vs StateAdapter** → 选择 StateLens，零拷贝投影
+6. **Checkpoint** → Execution Frame Snapshot，不是 State 问题，是 Execution Control Problem
+
+### 最终结论
+
+- **两层世界划分**：DSL（稳定）和 Primitive（完全自由）
+- **不做中间层**：避免 "半开放 ReAct Graph"
+- **统一产物**：所有 Builder 都返回 Graph<S>
+- **统一 Runtime**：只有一个 ExecutionEngine
+- **零拷贝组合**：通过 StateLens 投影状态，不需要 clone/merge
+- **Checkpoint = Execution Position + State Projection**：不是保存 state，而是保存 execution position + state projection

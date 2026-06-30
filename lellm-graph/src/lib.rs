@@ -20,10 +20,12 @@ pub mod node_context;
 pub mod parallel_node;
 pub mod runtime_event;
 pub mod state;
+pub mod state_lens;
 pub mod statekey;
 pub mod store;
 pub mod stream_chunk;
 pub mod stream_emitter;
+pub mod subgraph_node;
 pub mod test_executor;
 pub mod workflow_state;
 
@@ -79,6 +81,10 @@ pub use node::{
     ExecutorOperation, FlowNode, LeafNode, NodeKind, ParallelErrorStrategy, ParallelNode,
     ParallelNodeBuilder, TaskFn, TaskNode,
 };
+
+// ─── StateLens + SubgraphNode ──────────────────────────────
+pub use state_lens::{IdentityLens, StateLens};
+pub use subgraph_node::SubgraphNode;
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;
