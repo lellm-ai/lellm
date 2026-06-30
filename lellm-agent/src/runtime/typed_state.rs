@@ -196,6 +196,7 @@ impl WorkflowState for AgentState {
 /// - compact_count: 累加
 /// - stop_reason: 优先取后者
 /// - last_response: 优先取后者
+#[derive(Clone)]
 pub struct AgentStateMerge;
 
 impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {

@@ -6,21 +6,22 @@
 //! # 架构分层
 //!
 //! ```text
-//! ToolUseLoop
-//! ├── model:       ResolvedModel     (Provider + model name)
-//! ├── executor:    ToolExecutor      (ToolCatalog + 执行引擎)
-//! ├── config:      ToolUseConfig     (纯参数, Clone + Send + Sync)
-//! └── deps:        ToolUseDeps       (策略服务, Arc 包裹)
+//! ToolUseLoop (薄 Facade)
+//! ├── graph:       Graph<AgentState>  (预构建的 ReAct Graph)
+//! └── config:      ToolUseConfig      (构建 ExecutionContext 的默认参数)
+//!
+//! AgentBuilder::build_loop() → ToolUseLoop
+//! AgentBuilder::build()      → Graph<AgentState>
 //! ```
 
 use lellm_core::{ChatResponse, LlmError, Message};
-use lellm_provider::ResolvedModel;
+use lellm_graph::Graph;
 use std::sync::Arc;
 
-use super::config::{ToolUseConfig, ToolUseDeps, build_request_messages_inner, empty_response};
-use super::context::LocalCompactor;
+use super::config::{ToolUseConfig, build_request_messages_inner, empty_response};
 use super::event::{AgentEvent, AgentStream, StopReason};
-use super::tools::{ToolExecutor, ToolSnapshot};
+use super::tools::ToolSnapshot;
+use super::typed_state::{AgentState, AgentStateMerge};
 
 // ─── 本轮解析数据 ────────────────────────────────────────────────
 
@@ -64,62 +65,45 @@ impl ToolUseResult {
 
 // ─── ToolUseLoop ────────────────────────────────────────────────
 
-/// 管理 LLM 与工具调用闭环。
+/// 薄 Facade — 持有预构建的 Graph，提供便捷执行 API。
 ///
-/// 内部全为 Arc/Clone，clone 为 O(1)，支持并发 execute。
+/// 不是独立的运行时，只是 Graph 的便捷包装。
+/// 内部调用 `Graph::run_inline()` / `Graph::run_stream()`，不创建独立的 ExecutionEngine。
+///
+/// # 架构
+///
+/// ```text
+/// AgentBuilder::build_loop() → ToolUseLoop
+/// AgentBuilder::build()      → Graph<AgentState>
+///
+/// ToolUseLoop {
+///     graph: Graph<AgentState>,  // 预构建的 ReAct Graph
+///     config: ToolUseConfig,     // 构建 ExecutionContext 的默认参数
+/// }
+/// ```
+///
+/// # 示例
+///
+/// ```ignore
+/// let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
+/// let result = loop_.invoke(messages).await?;
+/// println!("Answer: {}", result.response.text());
+/// ```
 #[derive(Clone)]
 pub struct ToolUseLoop {
-    model: ResolvedModel,
-    executor: ToolExecutor,
+    graph: Graph<AgentState, AgentStateMerge>,
     config: ToolUseConfig,
-    deps: ToolUseDeps,
 }
 
 impl ToolUseLoop {
-    pub fn new(
-        model: ResolvedModel,
-        executor: ToolExecutor,
-        config: ToolUseConfig,
-        deps: ToolUseDeps,
-    ) -> Self {
-        if config.stream_thinking {
-            let caps = model.provider.capabilities_for(&model.model);
-            if !caps.supports_stream_thinking {
-                tracing::warn!(
-                    provider = %model.provider.provider_id(),
-                    model = %model.model,
-                    "stream_thinking=true but provider does not support thinking deltas; \
-                     reasoning content will only be available in the final response"
-                );
-            }
-        }
-
-        Self {
-            model,
-            executor,
-            config,
-            deps,
-        }
+    /// 从预构建的 Graph 创建 Facade。
+    pub fn new(graph: Graph<AgentState, AgentStateMerge>, config: ToolUseConfig) -> Self {
+        Self { graph, config }
     }
 
-    /// 便捷构造 — 使用默认配置和依赖。
-    pub fn simple(model: ResolvedModel, executor: ToolExecutor) -> Self {
-        Self::new(
-            model,
-            executor,
-            ToolUseConfig::default(),
-            ToolUseDeps::default(),
-        )
-    }
-
-    /// 获取模型引用。
-    pub fn model(&self) -> &ResolvedModel {
-        &self.model
-    }
-
-    /// 获取执行器引用。
-    pub fn executor(&self) -> &ToolExecutor {
-        &self.executor
+    /// 获取 Graph 引用。
+    pub fn graph(&self) -> &Graph<AgentState, AgentStateMerge> {
+        &self.graph
     }
 
     /// 获取配置引用。
@@ -127,23 +111,9 @@ impl ToolUseLoop {
         &self.config
     }
 
-    /// 获取依赖引用。
-    pub fn deps(&self) -> &ToolUseDeps {
-        &self.deps
-    }
-
-    /// 构建 LlmInvoker（共享实例）。
-    fn build_invoker(&self) -> Arc<super::invoker::LlmInvoker> {
-        Arc::new(super::invoker::LlmInvoker::from_config(
-            self.model.clone(),
-            &self.config,
-            self.deps.fallback.clone(),
-        ))
-    }
-
     /// 非流式执行 — 执行 Agent 循环并返回结果。
     ///
-    /// 内部构建 `Graph<AgentState>`，调用 `run_inline()` 执行 ReAct 循环。
+    /// 内部使用预构建的 Graph，调用 `run_inline()` 执行 ReAct 循环。
     ///
     /// # 示例
     /// ```ignore
@@ -154,18 +124,6 @@ impl ToolUseLoop {
     pub async fn invoke(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
         let initial_messages = build_request_messages_inner(&self.config, &messages)?;
 
-        // 构建 ReAct Graph (Graph<AgentState, AgentStateMerge>)
-        let invoker = self.build_invoker();
-        let llm_node =
-            super::react::LLMNode::new("llm", invoker, self.executor.clone(), self.config.clone());
-        let tool_node =
-            super::react::ToolNode::new("tool", self.executor.clone(), self.config.clone());
-        let compactor_node = super::react::CompactorNode::new(
-            "compactor",
-            Arc::new(LocalCompactor::new()),
-            self.config.context_budget.clone(),
-        );
-        let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
         // 每轮 ReAct 迭代最坏 4 steps: budget_check + llm + post_llm_check + tool
         // N 轮最坏: 4*(N-1) + 3 = 4N-1 (最后一轮无 tool)
         // +1 buffer 应对 edge cases
@@ -181,7 +139,7 @@ impl ToolUseLoop {
             lellm_graph::CancellationToken::new(),
         );
 
-        graph
+        self.graph
             .run_inline(&mut exec_ctx, max_steps)
             .await
             .map_err(|e| lellm_core::LlmError::Provider {
@@ -212,7 +170,7 @@ impl ToolUseLoop {
 
     /// 流式执行，返回事件接收器。
     ///
-    /// 内部构建 `Graph<AgentState>`，调用 `run_inline()` + `AgentEventSink`。
+    /// 内部使用预构建的 Graph，调用 `run_inline()` + `AgentEventSink`。
     ///
     /// # 示例
     /// ```ignore
@@ -228,8 +186,7 @@ impl ToolUseLoop {
     /// ```
     pub fn invoke_stream(&self, messages: Vec<Message>) -> AgentStream {
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let invoker = self.build_invoker();
-        let executor = self.executor.clone();
+        let graph = self.graph.clone();
         let config = self.config.clone();
 
         tokio::spawn(async move {
@@ -247,28 +204,17 @@ impl ToolUseLoop {
                 }
             };
 
-            // 2. 构建 ReAct Graph
-            let llm_node =
-                super::react::LLMNode::new("llm", invoker, executor.clone(), config.clone());
-            let tool_node = super::react::ToolNode::new("tool", executor.clone(), config.clone());
-            let compactor_node = super::react::CompactorNode::new(
-                "compactor",
-                Arc::new(LocalCompactor::new()),
-                config.context_budget.clone(),
-            );
-            let graph = super::react::build_react_graph(llm_node, tool_node, compactor_node);
-
             // 每轮 ReAct 迭代最坏 4 steps: budget_check + llm + post_llm_check + tool
             let max_steps = config.max_iterations * 4 + 1;
 
-            // 3. 初始化 AgentState
+            // 2. 初始化 AgentState
             let agent_state = super::typed_state::AgentState::from_messages(initial_messages);
 
-            // 4. 创建 AgentEventSink (StreamChunk → AgentEvent 桥接)
+            // 3. 创建 AgentEventSink (StreamChunk → AgentEvent 桥接)
             let event_sink = super::event_bridge::AgentEventSink::new(tx.clone());
             let sink: std::sync::Arc<dyn lellm_graph::StreamSink> = std::sync::Arc::new(event_sink);
 
-            // 5. 创建 ExecutionContext 并调用 run_inline
+            // 4. 创建 ExecutionContext 并调用 run_inline
             let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
                 agent_state,
                 Some(sink),

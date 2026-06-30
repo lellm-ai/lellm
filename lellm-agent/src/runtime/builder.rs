@@ -299,8 +299,8 @@ impl AgentBuilder {
 
     /// 构建 ToolUseLoop — 便捷 Facade。
     ///
-    /// 返回 `ToolUseLoop`，提供 `invoke()` / `invoke_stream()` 等高级 API。
-    /// 内部仍然调用 `Graph::run_inline()`，只是封装了 State 初始化和结果提取。
+    /// 返回 `ToolUseLoop`，持有预构建的 Graph，提供 `invoke()` / `invoke_stream()` 等高级 API。
+    /// 内部调用 `Graph::run_inline()`，封装了 State 初始化和结果提取。
     ///
     /// # 示例
     /// ```ignore
@@ -311,8 +311,9 @@ impl AgentBuilder {
     ///     .await?;
     /// ```
     pub fn build_loop(self) -> ToolUseLoop {
-        let (model, executor, config, deps) = self.into_parts();
-        ToolUseLoop::new(model, executor, config, deps)
+        let config = self.config.clone();
+        let graph = self.build();
+        ToolUseLoop::new(graph, config)
     }
 
     /// 内部辅助 — 分解为 (Model, Executor, Config, Deps)。
