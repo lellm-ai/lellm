@@ -14,9 +14,7 @@ mod shared;
 #[path = "_shared/city_resolver.rs"]
 mod city_resolver;
 
-use lellm_agent::{
-    AgentBuilder, ToolArgs, ToolRegistration, ToolUseLoop, schemars::JsonSchema, serde::Deserialize,
-};
+use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
 use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
 use lellm_derive::Tool;
 use lellm_provider::LlmProvider;
@@ -66,17 +64,15 @@ fn http_get(url: &str) -> Result<String, ToolError> {
 
 // ─── 工具注册 ────────────────────────────────────────────────────
 
-fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<ToolRegistration> {
+fn register_weather_tools(
+    llm_provider: Option<Arc<dyn LlmProvider>>,
+) -> Vec<lellm_agent::ToolRegistration> {
     vec![
-        ToolRegistration::safe(ResolveCityArgs::tool_definition(), move |args| {
-            let address = args
-                .get("address")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+        // resolve_city：四级降级
+        ResolveCityArgs::safe(move |args| {
             let provider = llm_provider.clone();
             async move {
-                // 第一、二级：alias + 腾讯地图（阻塞线程）
+                let address = args.address;
                 let address_for_blocking = address.clone();
                 let mut result = tokio::task::spawn_blocking(move || {
                     city_resolver::resolve_city(&address_for_blocking)
@@ -106,21 +102,15 @@ fn register_weather_tools(llm_provider: Option<Arc<dyn LlmProvider>>) -> Vec<Too
                 )?))
             }
         }),
-        ToolRegistration::safe(HttpGetArgs::tool_definition(), |args| {
-            let url = args
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            async move {
-                let body = tokio::task::spawn_blocking(move || http_get(&url))
-                    .await
-                    .map_err(|e| ToolError {
-                        kind: ToolErrorKind::Internal,
-                        message: format!("任务失败: {e}"),
-                    })??;
-                Ok(serde_json::json!(body))
-            }
+        // http_get：通用 HTTP 请求
+        HttpGetArgs::safe(|args| async move {
+            let body = tokio::task::spawn_blocking(move || http_get(&args.url))
+                .await
+                .map_err(|e| ToolError {
+                    kind: ToolErrorKind::Internal,
+                    message: format!("任务失败: {e}"),
+                })??;
+            Ok(serde_json::json!(body))
         }),
     ]
 }

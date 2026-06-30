@@ -1,10 +1,10 @@
-//! 工具调用 — 使用真实 Provider 的 ReAct 循环（纯 http_get 版本）
+//! weather_agent_prompt — 天气查询链（纯 http_get 版本）
 //!
 //! 天气查询链：LLM 推理城市名 → `http_get` wttr.in → 解析为 JSON
 //! 核心设计：工具层不硬编码业务 API，仅提供通用 `http_get`。
 //!
 //! ```text
-//! OPENAI_API_KEY=sk-xxx cargo run --example tool_use_react [地址]
+//! OPENAI_API_KEY=sk-xxx cargo run --example weather_agent_prompt [地址]
 //! ```
 
 #[path = "_shared/shared.rs"]
