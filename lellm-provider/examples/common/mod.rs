@@ -17,12 +17,14 @@ pub fn create_openai_provider() -> CodecProvider<OpenAICompatCodec> {
 }
 
 /// 从环境变量创建 Anthropic Provider
+#[allow(dead_code)]
 pub fn create_anthropic_provider() -> CodecProvider<AnthropicCodec> {
     let codec = AnthropicCodec;
     CodecProvider::load(codec).expect("Anthropic provider env error")
 }
 
 /// 带自定义超时的 OpenAI Provider 工厂
+#[allow(dead_code)]
 pub fn create_openai_provider_with_timeout(timeout_secs: u64) -> CodecProvider<OpenAICompatCodec> {
     let codec = OpenAICompatCodec::openai();
     CodecProvider::builder(codec)

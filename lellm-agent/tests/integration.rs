@@ -1,7 +1,7 @@
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{
-    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, ParallelSafety, StaticCatalog,
+    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, StaticCatalog,
     ToolArgs, ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
@@ -86,6 +86,7 @@ fn test_tool_category() {
 
 #[derive(Deserialize, JsonSchema, Tool)]
 #[tool(name = "weather_search", description = "搜索天气信息")]
+#[allow(dead_code)]
 struct WeatherArgs {
     /// 城市名称
     city: String,
@@ -165,6 +166,7 @@ fn test_tool_definition_default_name() {
     // 不指定 name，应自动转换为 snake_case
     #[derive(Deserialize, JsonSchema, Tool)]
     #[tool(description = "测试默认命名")]
+    #[allow(dead_code)]
     struct MySearchTool {
         pub query: String,
     }
@@ -178,6 +180,7 @@ fn test_option_type_inference() {
     // 验证 Option<T> 正确推导内部类型
     #[derive(Deserialize, JsonSchema, Tool)]
     #[tool(name = "typed_test", description = "测试类型推导")]
+    #[allow(dead_code)]
     struct TypedTestArgs {
         /// 可选字符串
         opt_string: Option<String>,

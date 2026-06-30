@@ -13,7 +13,6 @@ pub struct RoundState {
 /// 工具执行的中间状态
 #[derive(Debug)]
 struct ToolTiming {
-    start: std::time::Instant,
     name: String,
 }
 
@@ -100,10 +99,7 @@ pub async fn observe_react_loop(
             AgentEvent::ToolStart { tool_call_id, name } => {
                 tool_timings.insert(
                     tool_call_id,
-                    ToolTiming {
-                        start: std::time::Instant::now(),
-                        name,
-                    },
+                    ToolTiming { name },
                 );
             }
 

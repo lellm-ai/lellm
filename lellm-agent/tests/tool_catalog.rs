@@ -11,7 +11,7 @@
 //! - Case 8: ToolSnapshot 基本行为
 
 use lellm_agent::{
-    BackoffStrategy, CompositeCatalog, ParallelSafety, RetryPolicy, StaticCatalog, ToolCatalog,
+    BackoffStrategy, CompositeCatalog, RetryPolicy, StaticCatalog, ToolCatalog,
     ToolExecutor, ToolRegistration, ToolSnapshot, execute_batch_with,
 };
 use lellm_core::{ToolCall, ToolDefinition, ToolErrorKind};

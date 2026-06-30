@@ -5,9 +5,9 @@
 //! 参见: `docs/adr/v04-execution-model-redesign.md` 决策 4 (Phase D)
 
 use lellm_graph::{
-    BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointId, CheckpointPolicy,
+    BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointId,
     CheckpointStoreError, InMemoryBlobStore, SerdeCheckpointCodec, State, TraceId,
-    TypedCheckpointStore,
+    TriggerPolicy, TypedCheckpointStore,
 };
 use uuid::Uuid;
 
@@ -143,13 +143,13 @@ async fn test_blob_store_operations() {
     assert_eq!(store.len(), 0);
 }
 
-/// 测试 CheckpointPolicy 枚举
+/// 测试 TriggerPolicy 枚举
 #[test]
 fn test_checkpoint_policy() {
-    let default_policy = CheckpointPolicy::default();
-    assert_eq!(default_policy, CheckpointPolicy::EveryNode);
-    assert_eq!(CheckpointPolicy::BarrierOnly, CheckpointPolicy::BarrierOnly);
-    assert_eq!(CheckpointPolicy::Manual, CheckpointPolicy::Manual);
+    let default_policy = TriggerPolicy::default();
+    assert_eq!(default_policy, TriggerPolicy::EveryNode);
+    assert_eq!(TriggerPolicy::BarrierOnly, TriggerPolicy::BarrierOnly);
+    assert_eq!(TriggerPolicy::Manual, TriggerPolicy::Manual);
 }
 
 /// 测试 CheckpointStoreError 变体
