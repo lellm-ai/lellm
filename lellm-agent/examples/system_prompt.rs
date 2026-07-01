@@ -43,7 +43,7 @@ fn create_agent_with_builder() -> ToolUseLoop {
 
     AgentBuilder::new(model)
         .system("你是一个简洁准确的助手。回答不超过两句话。使用技术术语。".to_string())
-        .build_loop()
+        .compile()
 }
 
 /// 使用糖衣 API 设置系统提示
@@ -146,7 +146,7 @@ async fn main() {
     };
 
     // 不设置 system_prompt，Agent 直接从用户消息推断任务
-    let agent3 = AgentBuilder::new(model3).build_loop();
+    let agent3 = AgentBuilder::new(model3).compile();
 
     let result3 = agent3
         .invoke(vec![Message::user_text(

@@ -194,7 +194,7 @@ fn create_react_agent() -> ToolUseLoop {
     AgentBuilder::new(model)
         .tools(tools)
         .max_iterations(10)
-        .build_loop()
+        .compile()
 }
 
 #[tokio::main]

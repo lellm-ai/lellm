@@ -36,8 +36,8 @@ fn create_simple_agent() -> ToolUseLoop {
     };
 
     // 无工具的 Agent — 仅包含一个 LLM 节点，不具备工具调用能力
-    // build_loop() 返回 ToolUseLoop，提供 invoke() 便捷 API
-    AgentBuilder::new(model).build_loop()
+    // compile() 返回 ToolUseLoop，提供 invoke() 便捷 API
+    AgentBuilder::new(model).compile()
 }
 
 #[tokio::main]

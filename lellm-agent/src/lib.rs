@@ -44,7 +44,7 @@ pub use lellm_core::Prompt;
 ///
 /// 快速创建一个无工具的 Agent。
 pub fn create_agent(model: ResolvedModel) -> ToolUseLoop {
-    AgentBuilder::new(model).build_loop()
+    AgentBuilder::new(model).compile()
 }
 
 /// 快速创建带工具的 Agent。
@@ -52,12 +52,12 @@ pub fn create_agent_with_tools(
     model: ResolvedModel,
     tools: impl IntoIterator<Item = ToolRegistration>,
 ) -> ToolUseLoop {
-    AgentBuilder::new(model).tools(tools).build_loop()
+    AgentBuilder::new(model).tools(tools).compile()
 }
 
 /// 快速创建带系统提示的 Agent。
 pub fn create_agent_with_system(model: ResolvedModel, system: impl Into<Prompt>) -> ToolUseLoop {
-    AgentBuilder::new(model).system(system).build_loop()
+    AgentBuilder::new(model).system(system).compile()
 }
 
 /// 完整配置的便捷创建。
@@ -71,5 +71,5 @@ pub fn create_agent_full(
         .system(system)
         .tools(tools)
         .max_iterations(max_iterations)
-        .build_loop()
+        .compile()
 }

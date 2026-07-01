@@ -186,7 +186,7 @@ fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
     .max_iterations(10)
     .max_output_tokens(8000)
     //.reasoning(lellm_core::ReasoningConfig::Disabled)
-    .build_loop()
+    .compile()
 }
 
 // ─── 主函数 ─────────────────────────────────────────────────────

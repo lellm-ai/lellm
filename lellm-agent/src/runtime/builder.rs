@@ -2,12 +2,13 @@
 //!
 //! 提供推荐的入口 API，一步构建 `Graph<AgentState>`。
 //!
-//! # 示例
+//! # 两层 API
+//!
 //! ```ignore
-//! use lellm_agent::{AgentBuilder, ToolRegistration};
+//! use lellm_agent::{AgentBuilder, ToolUseLoop};
 //! use lellm_core::Prompt;
 //!
-//! // 简单文本 — build() 返回 Graph<AgentState>
+//! // DSL 层 — build() 返回 Graph<AgentState>，可嵌入更大编排
 //! let graph = AgentBuilder::new(model)
 //!     .system("你是一个有帮助的助手。")
 //!     .tool(search_tool)
@@ -26,12 +27,16 @@
 //!     )
 //!     .build();
 //!
-//! // 便捷执行 — build_loop() 返回 ToolUseLoop Facade
+//! // Facade 层 — compile() 返回 ToolUseLoop，提供 invoke() 便捷 API
 //! let result = AgentBuilder::new(model)
 //!     .tools([search_tool, weather_tool])
-//!     .build_loop()
+//!     .compile()
 //!     .invoke(messages)
 //!     .await?;
+//!
+//! // 手动组合 — 等价于 compile()
+//! let graph = AgentBuilder::new(model).tools([...]).build();
+//! let agent = ToolUseLoop::new(graph, config);
 //! ```
 
 use std::sync::Arc;
@@ -436,20 +441,26 @@ impl AgentBuilder {
         ))
     }
 
-    /// 构建 ToolUseLoop — 便捷 Facade。
+    /// 编译为 ToolUseLoop — Facade 层。
     ///
     /// 返回 `ToolUseLoop`，持有共享的 Graph，提供 `invoke()` / `invoke_stream()` 等高级 API。
     /// 内部调用 `Graph::run_inline()`，封装了 State 初始化和结果提取。
+    ///
+    /// 等价于手动组合：
+    /// ```ignore
+    /// let graph = AgentBuilder::new(model).tools([...]).build();
+    /// let agent = ToolUseLoop::new(graph, config);
+    /// ```
     ///
     /// # 示例
     /// ```ignore
     /// let result = AgentBuilder::new(model)
     ///     .tools([search_tool, weather_tool])
-    ///     .build_loop()
+    ///     .compile()
     ///     .invoke(messages)
     ///     .await?;
     /// ```
-    pub fn build_loop(self) -> ToolUseLoop {
+    pub fn compile(self) -> ToolUseLoop {
         let config = self.config.clone();
         let graph = self.build();
         ToolUseLoop::new(graph, config)

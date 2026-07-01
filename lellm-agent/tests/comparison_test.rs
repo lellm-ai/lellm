@@ -131,7 +131,7 @@ fn build_agent(model: ResolvedModel, tools: Vec<ToolRegistration>) -> lellm_agen
     for tool in tools {
         builder = builder.tool(tool);
     }
-    builder.build_loop()
+    builder.compile()
 }
 
 // ─── Test 1: 简单文本响应（无工具） ─────────────────────────────
@@ -444,14 +444,14 @@ async fn compare_with_system_prompt() {
     let agent_new = AgentBuilder::new(model_new)
         .system("你是测试助手".to_string())
         .max_iterations(5)
-        .build_loop();
+        .compile();
     let result_new = agent_new.invoke(messages.clone()).await.unwrap();
 
     // 旧路径
     let agent_old = AgentBuilder::new(model_old)
         .system("你是测试助手".to_string())
         .max_iterations(5)
-        .build_loop();
+        .compile();
     let stream_old = agent_old.invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await
@@ -623,14 +623,14 @@ async fn compare_max_iterations_reached() {
     let agent_new = AgentBuilder::new(model_new)
         .tool(loop_reg.clone())
         .max_iterations(3)
-        .build_loop();
+        .compile();
     let result_new = agent_new.invoke(messages.clone()).await.unwrap();
 
     // 旧路径 — 明确返回 MaxIterationsReached
     let agent_old = AgentBuilder::new(model_old)
         .tool(loop_reg)
         .max_iterations(3)
-        .build_loop();
+        .compile();
     let stream_old = agent_old.invoke_stream(messages.clone());
     let result_old = collect_stream_result(stream_old)
         .await

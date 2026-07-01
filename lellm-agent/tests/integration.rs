@@ -28,7 +28,7 @@ async fn test_tool_use_loop_no_tool_calls() {
 
     let result = AgentBuilder::new(model)
         .max_iterations(5)
-        .build_loop()
+        .compile()
         .invoke(messages)
         .await
         .unwrap();
@@ -280,7 +280,7 @@ async fn test_builder_basic_build() {
         model: "test-model".to_string(),
     };
 
-    let agent = AgentBuilder::new(model).build_loop();
+    let agent = AgentBuilder::new(model).compile();
 
     let messages = vec![Message::user_text("hello")];
     let result = agent.invoke(messages).await.unwrap();
@@ -306,7 +306,7 @@ async fn test_builder_with_config() {
     let agent = AgentBuilder::new(model)
         .system("你是助手".to_string())
         .max_iterations(20)
-        .build_loop();
+        .compile();
 
     let messages = vec![Message::user_text("hello")];
     let result = agent.invoke(messages).await.unwrap();
@@ -347,7 +347,7 @@ async fn test_builder_with_tool() {
         model: "test".to_string(),
     };
 
-    let _agent = AgentBuilder::new(model).tool(reg).build_loop();
+    let _agent = AgentBuilder::new(model).tool(reg).compile();
 
     // 如果 build() 成功，说明 tool() 方法工作正常
 }
@@ -380,7 +380,7 @@ fn test_builder_chain_api() {
         .system("你是测试助手".to_string())
         .tool(reg)
         .max_iterations(15)
-        .build_loop();
+        .compile();
 }
 
 // ─── 糖衣 API 测试 ───

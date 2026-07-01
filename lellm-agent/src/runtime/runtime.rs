@@ -7,11 +7,11 @@
 //!
 //! ```text
 //! ToolUseLoop (薄 Facade)
-//! ├── graph:       Graph<AgentState>  (预构建的 ReAct Graph)
-//! └── config:      ToolUseConfig      (构建 ExecutionContext 的默认参数)
+//! ├── graph:  Graph<AgentState>  (预构建的 ReAct Graph)
+//! └── config: ToolUseConfig      (构建 ExecutionContext 的默认参数)
 //!
-//! AgentBuilder::build_loop() → ToolUseLoop
-//! AgentBuilder::build()      → Graph<AgentState>
+//! AgentBuilder::build()   → Arc<Graph<AgentState>>   (DSL 层)
+//! AgentBuilder::compile() → ToolUseLoop              (Facade 层)
 //! ```
 
 use lellm_core::{ChatResponse, LlmError, Message};
@@ -73,8 +73,8 @@ impl ToolUseResult {
 /// # 架构
 ///
 /// ```text
-/// AgentBuilder::build_loop() → ToolUseLoop
-/// AgentBuilder::build()      → Arc<Graph<AgentState>>
+/// AgentBuilder::build()   → Arc<Graph<AgentState>>   (DSL 层)
+/// AgentBuilder::compile() → ToolUseLoop              (Facade 层)
 ///
 /// ToolUseLoop {
 ///     graph: Arc<Graph<AgentState>>,  // 共享的 ReAct Graph
@@ -85,8 +85,8 @@ impl ToolUseResult {
 /// # 示例
 ///
 /// ```ignore
-/// let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
-/// let result = loop_.invoke(messages).await?;
+/// let agent = AgentBuilder::new(model).tools([...]).compile();
+/// let result = agent.invoke(messages).await?;
 /// println!("Answer: {}", result.response.text());
 /// ```
 #[derive(Clone)]
@@ -117,8 +117,8 @@ impl ToolUseLoop {
     ///
     /// # 示例
     /// ```ignore
-    /// let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
-    /// let result = loop_.invoke(messages).await?;
+    /// let agent = AgentBuilder::new(model).tools([...]).compile();
+    /// let result = agent.invoke(messages).await?;
     /// println!("Answer: {}", result.response.text());
     /// ```
     pub async fn invoke(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError> {
@@ -174,8 +174,8 @@ impl ToolUseLoop {
     ///
     /// # 示例
     /// ```ignore
-    /// let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
-    /// let mut stream = loop_.invoke_stream(messages);
+    /// let agent = AgentBuilder::new(model).tools([...]).compile();
+    /// let mut stream = agent.invoke_stream(messages);
     /// while let Some(event) = stream.recv().await {
     ///     match event {
     ///         AgentEvent::LoopEnd { result } => println!("Done: {}", result.response.text()),

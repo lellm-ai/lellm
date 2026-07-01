@@ -36,7 +36,7 @@ async fn main() {
         model: "streaming-model".to_string(),
     };
 
-    let agent = AgentBuilder::new(model).build_loop();
+    let agent = AgentBuilder::new(model).compile();
 
     println!("=== 流式 Agent 执行 ===\n");
 

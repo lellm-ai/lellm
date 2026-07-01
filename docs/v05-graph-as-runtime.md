@@ -72,7 +72,7 @@ AgentBuilder → ToolUseLoop → build_react_graph() → Graph<AgentState> → E
 
 **问题：** `AgentBuilder::build()` → `ToolUseLoop`（一个不透明的执行循环），用户看不到 ReAct loop 的内部结构，也无法定制。
 
-**解决方案：** AgentBuilder::build() 返回标准 Graph，用户可以直接用 `graph.run_inline()` 执行，或用 `build_loop().invoke()` 便捷执行。
+**解决方案：** AgentBuilder::build() 返回标准 Graph，用户可以直接用 `graph.run_inline()` 执行，或用 `compile().invoke()` 便捷执行。
 
 ### 3. 心智模型混乱 ✅
 
@@ -190,7 +190,7 @@ graph.run_inline(&mut engine, 100).await?;
 let result = extract_result(&state);
 
 // 使用 ToolUseLoop (便捷)
-let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
+let loop_ = AgentBuilder::new(model).tools([...]).compile();
 let result = loop_.invoke(messages).await?;
 ```
 
@@ -216,10 +216,10 @@ impl ToolUseLoop {
     pub fn invoke_stream(&self, messages: Vec<Message>) -> AgentStream;
 }
 
-// AgentBuilder 仍然提供 .build_loop() 作为便捷入口
+// AgentBuilder 仍然提供 .compile() 作为便捷入口
 impl AgentBuilder {
     pub fn build(self) -> Arc<Graph<AgentState, AgentStateMerge>> { ... }
-    pub fn build_loop(self) -> ToolUseLoop {
+    pub fn compile(self) -> ToolUseLoop {
         let config = self.config.clone();
         let graph = self.build();  // 返回 Arc<Graph>
         ToolUseLoop::new(graph, config)
@@ -476,7 +476,7 @@ let graph: Arc<Graph<AgentState>> = AgentBuilder::new(model)
 // ToolUseLoop — 高级 API 包装
 let loop_ = AgentBuilder::new(model)
     .tools([...])
-    .build_loop();
+    .compile();
 
 let result = loop_.invoke(messages).await?;
 let stream = loop_.invoke_stream(messages);
@@ -513,7 +513,7 @@ let graph = builder.build()?;  // 或 builder.compile()? 运行优化 pass
 ### 核心修改
 | 文件 | 改动 | 状态 |
 |------|------|------|
-| `lellm-agent/src/runtime/builder.rs` | `build()` → `Graph<AgentState>`；新增 `build_loop()` → `ToolUseLoop` | ✅ |
+| `lellm-agent/src/runtime/builder.rs` | `build()` → `Graph<AgentState>`；新增 `compile()` → `ToolUseLoop` | ✅ |
 | `lellm-agent/src/runtime/runtime.rs` | `ToolUseLoop` 重构为薄 Facade，持有 Graph | ✅ |
 | `lellm-agent/src/runtime/mod.rs` | 模块导出调整 | ✅ |
 | `lellm-agent/src/lib.rs` | 公开 API 调整 | ✅ |
@@ -558,8 +558,8 @@ let graph = builder.build()?;  // 或 builder.compile()? 运行优化 pass
 |------|------|------|
 | `lellm-agent/examples/calculator_graph.rs` | 使用 AgentBuilder → Graph | ✅ |
 | `lellm-agent/examples/calculator_graph_mock.rs` | 使用 AgentBuilder → Graph | ✅ |
-| `lellm-agent/examples/simple_agent.rs` | 使用 build_loop().invoke() | ✅ |
-| `lellm-agent/examples/streaming_agent.rs` | 使用 build_loop().invoke_stream() | ✅ |
+| `lellm-agent/examples/simple_agent.rs` | 使用 compile().invoke() | ✅ |
+| `lellm-agent/examples/streaming_agent.rs` | 使用 compile().invoke_stream() | ✅ |
 | `lellm-agent/examples/tool_definition.rs` | 使用 AgentBuilder → Graph | ✅ |
 | `lellm-agent/examples/tool_use.rs` | 使用 AgentBuilder → Graph | ✅ |
 | `lellm-agent/examples/system_prompt.rs` | 使用 AgentBuilder → Graph | ✅ |

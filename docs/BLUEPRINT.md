@@ -170,7 +170,7 @@ let graph: Arc<Graph<AgentState>> = AgentBuilder::new(model)
 // 便捷执行 — Facade
 let result = AgentBuilder::new(model)
     .tools([search_tool, weather_tool])
-    .build_loop()
+    .compile()
     .invoke(messages)
     .await?;
 ```

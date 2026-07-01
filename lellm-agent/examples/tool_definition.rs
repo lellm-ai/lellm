@@ -124,7 +124,7 @@ fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
         model: "test-model".to_string(),
     };
 
-    AgentBuilder::new(model).tools(tools).build_loop()
+    AgentBuilder::new(model).tools(tools).compile()
 }
 
 #[tokio::main]

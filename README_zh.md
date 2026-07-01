@@ -30,7 +30,7 @@ let loop_ = AgentBuilder::new(model)
     .system("你是一个有用的助手。")
     .tool(weather_tool)
     .max_iterations(10)
-    .build_loop();
+    .compile();
 
 let result = loop_.invoke(vec![Message::user_text("今天上海天气如何？")]).await?;
 ```
@@ -215,7 +215,7 @@ let loop_ = AgentBuilder::new(model)
     .tool(search_tool)
     .max_iterations(10)
     .max_output_tokens(8000)
-    .build_loop();
+    .compile();
 
 let result = loop_.invoke(vec![Message::user_text("今天上海天气如何？")]).await?;
 

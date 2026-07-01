@@ -6,7 +6,7 @@
 //! LeLLM v0.5 的设计：
 //! - `AgentBuilder::build()` 返回 `Arc<Graph<AgentState>>`
 //! - 可以直接用 `graph.run_inline()` 执行
-//! - 也可以用 `build_loop().invoke()` 便捷执行
+//! - 也可以用 `compile().invoke()` 便捷执行
 //!
 //! 使用 OpenAI 兼容的 LLaMA Provider：
 //!
@@ -65,7 +65,7 @@ fn build_agent() -> lellm_agent::ToolUseLoop {
             MultiplyArgs::safe(|args| async move { Ok(serde_json::json!(args.a * args.b)) }),
         ])
         .max_iterations(10)
-        .build_loop()
+        .compile()
 }
 
 #[tokio::main]
