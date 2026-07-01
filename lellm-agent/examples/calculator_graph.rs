@@ -3,8 +3,8 @@
 //! 对照 LangGraph 官方教程：
 //!   https://langchain-ai.github.io/langgraph/tutorials/quickstart/
 //!
-//! LeLLM 的设计：
-//! - `AgentBuilder::build()` 返回 `Graph<AgentState>`
+//! LeLLM v0.5 的设计：
+//! - `AgentBuilder::build()` 返回 `Arc<Graph<AgentState>>`
 //! - 可以直接用 `graph.run_inline()` 执行
 //! - 也可以用 `build_loop().invoke()` 便捷执行
 //!
