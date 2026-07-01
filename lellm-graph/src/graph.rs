@@ -366,8 +366,10 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
 
     /// P0-2: 设置 canonical hash — 由 DSL 层调用。
     ///
-    /// `GraphBuilder::build()` 默认设置 hash=0，
-    /// DSL 层（如 AgentBuilder）在 build 后覆盖为正确的 canonical hash。
+    /// ⚠️ 已废弃 — 优先使用 `GraphBuilder::canonical_hash()` 在构建时设置。
+    /// 此方法保留用于 `build_react_graph()` 等内部场景。
+    #[deprecated(since = "0.5.0", note = "使用 GraphBuilder::canonical_hash() 替代")]
+    #[doc(hidden)]
     pub fn set_canonical_hash(&mut self, hash: u64) {
         self.canonical_hash = hash;
     }
@@ -399,6 +401,8 @@ pub struct GraphBuilder<S: WorkflowState = State, M: MergeStrategy<S> = StateMer
     edges: Vec<Edge<S>>,
     start: Option<String>,
     end: Option<String>,
+    /// P0-2: 可选的 canonical hash — 如果 DSL 层设置了就使用，否则计算结构 hash。
+    canonical_hash: Option<u64>,
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
@@ -414,7 +418,16 @@ impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
             edges: Vec::new(),
             start: None,
             end: None,
+            canonical_hash: None,
         }
+    }
+
+    /// P0-2: 设置 canonical hash — 由 DSL 层（如 AgentBuilder）调用。
+    ///
+    /// 如果不设置，`build()` 会自动计算一个基于图结构的 hash。
+    pub fn canonical_hash(&mut self, hash: u64) -> &mut Self {
+        self.canonical_hash = Some(hash);
+        self
     }
 
     pub fn start(&mut self, node: impl Into<String>) -> &mut Self {
@@ -568,13 +581,16 @@ impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
             return Err(errors);
         }
 
+        // 计算临时结构 hash 用于验证（不依赖 HashMap 顺序）
+        let structural_hash = compute_structural_hash(&self.nodes, &self.edges);
+
         let graph = Graph {
             name: self.name,
             nodes: self.nodes,
             edges: self.edges,
             start,
             end,
-            canonical_hash: 0, // 默认值，DSL 层（如 AgentBuilder）会覆盖
+            canonical_hash: self.canonical_hash.unwrap_or(structural_hash),
         };
 
         if let Err(e) = graph.validate() {
@@ -591,6 +607,38 @@ impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// 构建并编译 — 在 `build()` 之后运行 Compiler Pass（如 InlinePass）。
+    ///
+    /// 与 `build()` 的区别：
+    /// - `build()` — 仅验证 AST，返回原始 Graph
+    /// - `compile()` — 验证 + 运行优化 pass，返回优化后的 Graph
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let graph = builder.compile()?;  // 自动运行 InlinePass
+    /// ```
+    pub fn compile(self) -> Result<Graph<S, M>, BuildErrors> {
+        use crate::compiler::CompilerPass;
+
+        let mut graph = self.build()?;
+
+        // 运行 Compiler Pass
+        let mut ctx = crate::compiler::CompilerContext::<S>::new();
+        let pass = crate::compiler::InlinePass::new();
+        pass.run(&mut graph, &mut ctx);
+
+        if ctx.debug {
+            tracing::debug!(
+                inlined = ctx.stats.inlined_count,
+                skipped = ctx.stats.not_inlined_count,
+                "compile passes complete"
+            );
+        }
+
+        Ok(graph)
+    }
 }
 
 // ─── Utilities ─────────────────────────────────────────────────
@@ -602,4 +650,36 @@ fn fnv_hash(s: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+/// 计算图结构 hash — 不依赖 HashMap 迭代顺序。
+///
+/// 对节点名和边定义排序后 hash，确保相同结构产生相同 hash。
+/// 用于 `build()` 时没有 DSL 层 canonical_hash 的 fallback。
+fn compute_structural_hash<S: WorkflowState, M: MergeStrategy<S>>(
+    nodes: &IndexMap<String, NodeKind<S, M>>,
+    edges: &[Edge<S>],
+) -> u64 {
+    let mut s = String::new();
+    // 节点名排序
+    let mut names: Vec<&str> = nodes.keys().map(|k| k.as_str()).collect();
+    names.sort();
+    s.push_str(&names.join(","));
+    s.push('|');
+    // 边排序
+    let mut edge_strs: Vec<String> = edges
+        .iter()
+        .map(|e| {
+            format!(
+                "{}->{}{:?}{}",
+                e.from,
+                e.to,
+                if e.condition.is_some() { "?" } else { "" },
+                if e.fallback { "!" } else { "" }
+            )
+        })
+        .collect();
+    edge_strs.sort();
+    s.push_str(&edge_strs.join(","));
+    fnv_hash(&s)
 }

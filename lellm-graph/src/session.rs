@@ -315,17 +315,15 @@ mod tests {
         builder1.start("a");
         builder1.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
         builder1.end("a");
-        let mut graph1 = builder1.build().unwrap();
-        graph1.set_canonical_hash(0x1111); // 设置不同的 hash
-        let graph1 = Arc::new(graph1);
+        builder1.canonical_hash(0x1111); // 设置不同的 hash
+        let graph1 = Arc::new(builder1.build().unwrap());
 
         let mut builder2 = GraphBuilder::<State, StateMerge>::new("test2");
         builder2.start("b");
         builder2.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
         builder2.end("b");
-        let mut graph2 = builder2.build().unwrap();
-        graph2.set_canonical_hash(0x2222); // 设置不同的 hash
-        let graph2 = Arc::new(graph2);
+        builder2.canonical_hash(0x2222); // 设置不同的 hash
+        let graph2 = Arc::new(builder2.build().unwrap());
 
         // 用 graph1 创建 checkpoint
         let session = ExecutionSession::new(State::new(), graph1);

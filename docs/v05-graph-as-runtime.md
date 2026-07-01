@@ -389,13 +389,12 @@ impl<S: WorkflowState> ExecutionSession<S> {
 // 用户不需要手动调用 merge
 // Compiler 在 compile() 时自动决定是否内联
 
-let graph = builder.build()?;  // 自动触发 Inline Pass
+let graph = builder.build()?;  // 不触发优化，仅验证 AST
+// 或
+let graph = builder.compile()?;  // 验证 + 运行 Compiler Pass（如 InlinePass）
 
-// 编译器内部流程：
-// 1. 分析 SubgraphNode
-// 2. 评估是否值得内联（基于图大小、调用频率等）
-// 3. 如果值得：展开 Subgraph，合并到外层 Graph
-// 4. 如果不值得：保持 Subgraph，运行时递归执行
+// ⚠️ 当前 InlinePass 为骨架实现，仅识别 Subgraph 并收集统计信息，
+// 不执行实际的内联展开。完整的内联逻辑待实现。
 ```
 
 **为什么不做 GraphBuilder::merge()：**
@@ -459,12 +458,13 @@ builder.node("a", node_a);
 builder.node("b", node_b);
 builder.edge("a", "b", condition);
 builder.end("b");
-let graph: Graph<MyState> = builder.build()?;
+let graph: Graph<MyState> = builder.build()?;  // 仅验证 AST
+// 或 builder.compile()?;  // 验证 + 运行 Compiler Pass
 
 // ─── 层级 2：DSL（lellm-agent）────
 
 // AgentBuilder — ReAct 模板
-let graph: Graph<AgentState> = AgentBuilder::new(model)
+let graph: Arc<Graph<AgentState>> = AgentBuilder::new(model)
     .system("你是一个助手")
     .tools([add, multiply])
     .max_iterations(10)
@@ -492,7 +492,7 @@ builder.node("postprocess", postprocess_node);
 builder.edge("preprocess", "agent");
 builder.edge("agent", "postprocess");
 
-let graph = builder.build()?;  // 自动触发 Inline Pass（可选）
+let graph = builder.build()?;  // 或 builder.compile()? 运行优化 pass
 // 只有一个 ExecutionEngine 跑整个图
 
 // ─── 层级 5：Compiler Pass（可选优化）────
@@ -517,6 +517,8 @@ let graph = builder.build()?;  // 自动触发 Inline Pass（可选）
 | `lellm-agent/src/runtime/mod.rs` | 模块导出调整 | ✅ |
 | `lellm-agent/src/lib.rs` | 公开 API 调整 | ✅ |
 | `lellm-agent/src/runtime/typed_state.rs` | `AgentStateMerge` 添加 Clone | ✅ |
+| `lellm-graph/src/graph.rs` | `GraphBuilder` 添加 `canonical_hash()` + `compile()`；`build()` 自动计算结构 hash | ✅ |
+| `lellm-graph/src/compiler/` | Compiler 模块 — `CompilerPass` trait + `InlinePass` 骨架 | ✅ |
 
 ### 新增（Phase 4：Subgraph 组合）
 | 文件 | 内容 | 状态 |
@@ -528,7 +530,7 @@ let graph = builder.build()?;  // 自动触发 Inline Pass（可选）
 | 文件 | 内容 | 状态 |
 |------|------|------|
 | `lellm-graph/src/compiler/mod.rs` | Compiler 模块入口 | ✅ |
-| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 骨架实现 | ✅ |
+| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 骨架实现（仅识别 + 统计，不执行内联） | ⏸️ |
 
 ### 新增（Phase 7：P0-1 Checkpoint Projection）
 | 文件 | 内容 | 状态 |
@@ -703,9 +705,12 @@ struct Frame<S: WorkflowState> {
 }
 
 struct FrameStack<S: WorkflowState> {
-    frames: Vec<Frame<S>>,
+    frames: Vec<Frame<S>>,  // Frame<S> 内部使用 S::Checkpoint
 }
 ```
+
+**前置约束：** `S::Checkpoint: Debug` — `Frame` / `FrameStack` / `SessionCheckpoint` 需要序列化，
+因此要求 `Checkpoint` 实现 `Debug`。如果用户的 Checkpoint 类型不含 Debug，需要包装一层。
 
 **Checkpoint 时机：自动 frame boundary checkpoint**
 
@@ -803,14 +808,25 @@ trait StateLens<Outer, Inner> {
 }
 
 // 3. FrameStack（在 ExecutionSession 中，不在 Engine 中）
-//    实际代码需要 S::Checkpoint: Debug 约束（Frame/FrameStack 序列化需要）
+//    S::Checkpoint: Debug 约束（Frame/FrameStack 序列化需要）
 struct ExecutionSession<S: WorkflowState> {
     state: S,
     frame_stack: FrameStack<S>,
-    graph: Graph<S>,
+    graph: Arc<Graph<S>>,  // D10: Arc 共享
 }
 
-// 4. Checkpoint = Session snapshot
+// 4a. Checkpoint<S> — 单 Graph 级别检查点
+//     用于 ExecutionEngine 内部，记录当前执行位置
+struct Checkpoint<S: WorkflowState> {
+    checkpoint_id: CheckpointId,
+    current_node: NodeId,
+    state: S::Checkpoint,  // P0-1: 投影
+    graph_hash: u64,
+    created_at: SystemTime,
+}
+
+// 4b. SessionCheckpoint<S> — 完整会话检查点
+//     用于 ExecutionSession，支持持久化恢复
 struct SessionCheckpoint<S: WorkflowState> {
     state: S::Checkpoint,  // P0-1: 投影，不是 raw state
     frames: FrameStack<S>,
@@ -974,6 +990,10 @@ impl WorkflowState for AgentState {
 
 **目标设计**：Graph Hash 来自 DSL 层的 canonical AST，不依赖 compiled graph 的节点顺序。
 
+**两层 Hash 机制**：
+- **DSL 层**（AgentBuilder）：计算基于 DSL 输入的 canonical hash，通过 `builder.canonical_hash(hash)` 设置
+- **Primitive 层**（GraphBuilder）：如果不设置，`build()` 自动计算结构 hash（排序节点名 + 边）
+
 ```rust
 // lellm-agent/src/runtime/builder.rs
 impl AgentBuilder {
@@ -981,7 +1001,7 @@ impl AgentBuilder {
     ///
     /// Hash 输入：
     /// - model provider + model name
-    /// - sorted tool names
+    /// - tool names（保持 DSL 插入顺序，见 D11）
     /// - system prompt hash
     /// - max_iterations
     /// - 其他影响 graph 结构的配置
@@ -995,13 +1015,10 @@ impl AgentBuilder {
         self.model.provider.hash(&mut hasher);
         self.model.name.hash(&mut hasher);
 
-        // 2. Tools (排序后 hash，顺序无关)
-        let mut tool_names: Vec<&str> = self.static_tools.iter()
-            .map(|t| t.name.as_str())
-            .collect();
-        tool_names.sort();
-        for name in &tool_names {
-            name.hash(&mut hasher);
+        // 2. Tools（保持 DSL 插入顺序，见 D11）
+        //    .tools([A, B]) != .tools([B, A])
+        for t in &self.static_tools {
+            t.name.hash(&mut hasher);
         }
 
         // 3. System prompt (hash 内容)
@@ -1130,12 +1147,13 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 3. **ToolUseLoop 重构为薄 Facade** — 持有预构建 Graph，不再每次重新构建 ✅
 4. **删除 AgentFlowNode** — 减少代码量，消除反模式 ✅
 5. **保留 AgentBuilder** — 保持 DSL 价值，build_react_graph() 保持私有 ✅
-6. **不做 GraphFactory Trait** — 符合 Rust 风格，统一命名约定 ⏸️
-7. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass ⏸️
-8. **Checkpoint Projection（P0-1）** — `type Checkpoint` 关联类型，强制 projection，序列化安全 ✅
-9. **Graph Hash 稳定性（P0-2）** — 从 DSL canonical form 计算，保持输入顺序 ✅
-10. **FrameStack 归属修正** — Engine 不持有 FrameStack，职责分离更清晰 ✅
-11. **Arc\<Graph\> 共享（D10）** — Graph 是 Immutable 的，多 Session 共享同一实例 ✅
+6. **不做 GraphFactory Trait** — 符合 Rust 风格，统一命名约定 ✅
+7. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass ✅
+8. **Compiler Pass 框架** — `compile()` 方法已接入，InlinePass 为骨架实现 ⏸️
+9. **Checkpoint Projection（P0-1）** — `type Checkpoint` 关联类型，强制 projection，序列化安全 ✅
+10. **Graph Hash 稳定性（P0-2）** — 从 DSL canonical form 计算，保持输入顺序 ✅
+11. **FrameStack 归属修正** — Engine 不持有 FrameStack，职责分离更清晰 ✅
+12. **Arc\<Graph\> 共享（D10）** — Graph 是 Immutable 的，多 Session 共享同一实例 ✅
 
 ## 实现状态
 
@@ -1143,7 +1161,7 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 - [x] Phase 2：ToolUseLoop 重构为薄 Facade
 - [x] Phase 3：删除 AgentFlowNode
 - [x] Phase 4：Subgraph 统一 — StateProjector + CompiledSubgraph + Engine dispatch
-- [x] Phase 5：Compiler Inline Pass（骨架实现）
+- [ ] Phase 5：Compiler Inline Pass（骨架实现，仅识别 + 统计，未执行实际内联）
 - [x] Phase 6：Checkpoint = Execution Frame Snapshot
 - [x] Phase 7：P0-1 Checkpoint Projection — `type Checkpoint` 关联类型
 - [x] Phase 8：P0-2 Graph Hash — canonical AST hash
@@ -1155,9 +1173,10 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 
 ## 时间线
 
-已完成：Phase 1 ~ Phase 11 全部完成
+已完成：Phase 1 ~ Phase 4, Phase 6 ~ Phase 11 全部完成
+进行中：Phase 5（Compiler Inline Pass 骨架实现，`compile()` 已接入流水线但内联逻辑未实现）
 
-v0.5 架构重构完成，P0 设计补丁已落地！
+v0.5 架构重构基本完成，P0 设计补丁已落地！
 
 ---
 

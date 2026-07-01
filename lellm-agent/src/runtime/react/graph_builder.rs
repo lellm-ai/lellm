@@ -90,10 +90,8 @@ pub(crate) fn build_react_graph(
     builder.edge_fallback("post_llm_check", "end");
     builder.edge("tool", "budget_check");
 
-    let mut graph = builder.build().expect("ReAct graph should be valid");
-
     // P0-2: 设置 canonical hash — 从 DSL 层计算，不依赖 compiled graph
-    graph.set_canonical_hash(canonical_hash);
+    builder.canonical_hash(canonical_hash);
 
-    graph
+    builder.build().expect("ReAct graph should be valid")
 }
