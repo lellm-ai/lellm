@@ -269,14 +269,13 @@ impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
     async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
         self.validate_request(request)?;
 
-        let body_json = serde_json::to_string_pretty(request)
-            .unwrap_or_else(|_| "<serialize error>".to_string());
+        let http_req = self.codec.encode(request, false)?;
+
+        let body_json = String::from_utf8_lossy(&http_req.body).to_string();
         tracing::trace!(
             request_body = %body_json,
             ">>> LLM ChatRequest (call)"
         );
-
-        let http_req = self.codec.encode(request, false)?;
 
         let resp = match tokio::time::timeout(self.config.timeout, self.send(http_req)).await {
             Ok(result) => result?,
@@ -297,14 +296,13 @@ impl<C: ProviderExtension + 'static> LlmProvider for CodecProvider<C> {
     async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
         self.validate_request(request)?;
 
-        let body_json = serde_json::to_string_pretty(request)
-            .unwrap_or_else(|_| "<serialize error>".to_string());
+        let http_req = self.codec.encode(request, true)?;
+
+        let body_json = String::from_utf8_lossy(&http_req.body).to_string();
         tracing::trace!(
             request_body = %body_json,
             ">>> LLM ChatRequest (stream)"
         );
-
-        let http_req = self.codec.encode(request, true)?;
 
         let resp = self
             .build_request_builder(&http_req)?
