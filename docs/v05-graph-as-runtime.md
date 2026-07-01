@@ -1126,7 +1126,7 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 
 ## 收益
 
-1. **AgentBuilder::build() → Graph** — 消除双重 Runtime，架构统一（最大收益）✅
+1. **AgentBuilder::build() → Arc\<Graph\>** — 消除双重 Runtime，架构统一（最大收益）✅
 2. **统一 ExecutionEngine** — Checkpoint/Trace/Cancellation/Streaming 全部单层 ✅
 3. **ToolUseLoop 重构为薄 Facade** — 持有预构建 Graph，不再每次重新构建 ✅
 4. **删除 AgentFlowNode** — 减少代码量，消除反模式 ✅
@@ -1134,8 +1134,9 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 6. **不做 GraphFactory Trait** — 符合 Rust 风格，统一命名约定 ⏸️
 7. **不做 GraphBuilder::merge()** — Subgraph 作为原语，merge 作为 Compiler Pass ⏸️
 8. **Checkpoint Projection（P0-1）** — `type Checkpoint` 关联类型，强制 projection，序列化安全 ✅
-9. **Graph Hash 稳定性（P0-2）** — 从 DSL canonical form 计算，不依赖 HashMap 顺序 ✅
+9. **Graph Hash 稳定性（P0-2）** — 从 DSL canonical form 计算，保持输入顺序 ✅
 10. **FrameStack 归属修正** — Engine 不持有 FrameStack，职责分离更清晰 ✅
+11. **Arc\<Graph\> 共享（D10）** — Graph 是 Immutable 的，多 Session 共享同一实例 ✅
 
 ## 实现状态
 
@@ -1178,10 +1179,11 @@ v0.5 架构重构完成，P0 设计补丁已落地！
 
 - **两层世界划分**：DSL（稳定）和 Primitive（完全自由）
 - **不做中间层**：避免 "半开放 ReAct Graph"
-- **统一产物**：所有 Builder 都返回 Graph<S>
+- **统一产物**：所有 Builder 都返回 Arc\<Graph\<S\>\>
 - **统一 Runtime**：只有一个 ExecutionEngine
 - **零拷贝组合**：通过 StateLens 投影状态，不需要 clone/merge
 - **Subgraph 是 Node**：在 Graph AST 中是 `NodeKind::Subgraph`；在 Runtime 中递归执行
 - **Engine 借用 State**：`ExecutionEngine<'a, S>` 持有 `&'a mut S`，调用方持有所有权
 - **Checkpoint = snapshot()**：通过 `type Checkpoint` 关联类型强制 projection
-- **Graph Hash = canonical**：从 DSL 层计算，不依赖 compiled graph 的 HashMap 顺序
+- **Graph = Arc**：Immutable 对象共享，不拷贝
+- **Hash = DSL 原貌**：不做语义归一化，精确反映用户构建
