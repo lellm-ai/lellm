@@ -1,40 +1,54 @@
-//! SubgraphSpec — Subgraph 的编译后表示。
-//!
-//! Subgraph 不是 Node，而是 ExecutionEngine 的控制流概念。
-//! SubgraphSpec 包含执行 Subgraph 所需的所有信息。
+//! SubgraphSpec — Builder 阶段的强类型 Subgraph 描述。
 //!
 //! # 设计理念
 //!
 //! ```text
 //! Builder 阶段：
-//!   builder.subgraph("agent", agent_graph, AgentLens)
+//!   SubgraphSpec<Outer, Inner, M, Lens>  (强类型)
 //!
-//! 编译后：
-//!   CompiledNodeKind::Subgraph(SubgraphSpec { graph_id, lens })
+//! 编译阶段：
+//!   CompiledSubgraph<Outer>  (类型擦除 Inner/Lens/M)
 //!
-//! ExecutionEngine 执行时：
-//!   match node.kind() {
-//!       CompiledNodeKind::Subgraph(spec) => {
-//!           self.execute_subgraph(spec).await;
-//!       }
-//!       // ...
+//! Engine 执行：
+//!   match node.kind {
+//!       NodeKind::Subgraph(spec) => self.execute_subgraph(spec).await,
 //!   }
 //! ```
 //!
-//! # 与 SubgraphNode 的区别
+//! # 与 CompiledSubgraph 的区别
 //!
-//! - SubgraphNode 是 Builder AST 中的节点
-//! - SubgraphSpec 是编译后的执行描述
-//! - SubgraphSpec 由 ExecutionEngine 直接执行，不经过 Node::execute()
+//! - SubgraphSpec：Builder 阶段，强类型，包含 Graph + Lens
+//! - CompiledSubgraph：编译后，类型擦除，可存入 NodeKind
+//! - SubgraphSpec 实现 `StateProjector` trait，可转换为 CompiledSubgraph
+//!
+//! # 状态投影
+//!
+//! 通过 `StateLens` 从外层 State 投影出内层 State：
+//!
+//! ```text
+//! WorkflowState
+//!     ↓ StateLens
+//! &mut AgentState
+//!     ↓
+//! Agent Graph 操作
+//!     ↓ 借用结束
+//! WorkflowState 继续
+//! ```
 
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::sync::Arc;
 
-use crate::Graph;
-use crate::MergeStrategy;
+use crate::compiled_subgraph::{CompiledSubgraph, StateProjector};
+use crate::error::GraphError;
+use crate::graph::Graph;
 use crate::state_lens::StateLens;
-use crate::workflow_state::WorkflowState;
+use crate::stream_emitter::StreamSink;
+use crate::workflow_state::{MergeStrategy, WorkflowState};
+use tokio_util::sync::CancellationToken;
 
-/// Subgraph 的编译后表示 — 由 ExecutionEngine 直接执行。
+/// Subgraph Builder 描述 — 强类型，包含 Graph + Lens。
 ///
 /// # 泛型参数
 ///
@@ -43,11 +57,12 @@ use crate::workflow_state::WorkflowState;
 /// - `M` — MergeStrategy 实现（用于 Graph）
 /// - `L` — StateLens 实现，用于状态投影
 ///
-/// # 设计原则
+/// # 使用方式
 ///
-/// - SubgraphSpec 不实现 Node trait
-/// - ExecutionEngine 直接执行 SubgraphSpec
-/// - 由 Engine 负责 Frame 管理、状态投影、Checkpoint 和恢复
+/// ```ignore
+/// let spec = SubgraphSpec::new(agent_graph, AgentLens);
+/// let compiled: CompiledSubgraph<WorkflowState> = spec.compile();
+/// ```
 pub struct SubgraphSpec<
     Outer: WorkflowState,
     Inner: WorkflowState,
@@ -73,6 +88,11 @@ impl<
     M: MergeStrategy<Inner>,
     L: StateLens<Outer, Inner>,
 > SubgraphSpec<Outer, Inner, M, L>
+where
+    Outer: 'static,
+    Inner: 'static,
+    M: 'static,
+    L: 'static,
 {
     /// 创建新的 SubgraphSpec。
     ///
@@ -107,12 +127,71 @@ impl<
     pub fn project<'a>(&self, outer: &'a mut Outer) -> &'a mut Inner {
         self.lens.get(outer)
     }
+
+    /// 编译为 CompiledSubgraph — 类型擦除 Inner/Lens/M。
+    pub fn compile(self) -> CompiledSubgraph<Outer> {
+        let max_steps = self.max_steps;
+        CompiledSubgraph::new(Arc::new(self), max_steps)
+    }
+}
+
+// ─── StateProjector 实现 ──────────────────────────────────────
+
+impl<
+    Outer: WorkflowState,
+    Inner: WorkflowState,
+    M: MergeStrategy<Inner>,
+    L: StateLens<Outer, Inner>,
+> StateProjector<Outer> for SubgraphSpec<Outer, Inner, M, L>
+where
+    Inner: 'static,
+    M: 'static,
+    L: 'static,
+{
+    /// 执行 Subgraph — 投影状态 + 递归执行内层 Graph。
+    ///
+    /// # 执行流程
+    ///
+    /// 1. 通过 Lens 投影出内层 State（`&mut Inner`）
+    /// 2. 创建内层 ExecutionEngine（借用 `&mut Inner`）
+    /// 3. 调用 `graph.run_inline()`
+    /// 4. inner_engine drop → 借用释放 → outer 可继续使用
+    fn execute<'a>(
+        &'a self,
+        outer: &'a mut Outer,
+        stream: Option<Arc<dyn StreamSink>>,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GraphError>> + Send + 'a>> {
+        Box::pin(async move {
+            // 1. 通过 Lens 投影出内层 State
+            let inner_ref = self.lens.get(outer);
+
+            // 2. 创建内层 ExecutionEngine（借用 inner_ref）
+            let mut inner_engine = crate::ExecutionEngine::new(inner_ref, stream, cancel);
+
+            // 3. 执行内层 Graph
+            self.graph
+                .run_inline(&mut inner_engine, self.max_steps)
+                .await?;
+
+            // 4. inner_engine drop → 借用释放 → outer 可继续使用
+            Ok(())
+        })
+    }
+
+    fn graph_name(&self) -> &str {
+        self.graph.name()
+    }
+
+    fn node_count(&self) -> usize {
+        self.graph.node_names().len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::State;
+    use crate::state::State;
 
     #[derive(Debug, PartialEq)]
     struct OuterState {
@@ -137,10 +216,6 @@ mod tests {
         let mut outer = OuterState {
             inner: InnerState { value: 42 },
         };
-
-        // 创建一个简单的 Graph 用于测试
-        // 注意：这里需要一个实际的 Graph，但为了测试我们只测试 projection
-        // 实际测试需要完整的 Graph 构建
 
         // 测试 Lens 投影
         let lens = TestLens;

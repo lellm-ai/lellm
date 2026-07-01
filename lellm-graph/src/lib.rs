@@ -7,6 +7,7 @@ pub mod barrier_wait;
 pub mod checkpoint;
 pub mod checkpoint_codec;
 pub mod checkpoint_policy;
+pub mod compiled_subgraph;
 pub mod compiler;
 pub mod error;
 pub mod event;
@@ -82,8 +83,11 @@ pub use graph_analysis::CycleAnalysis;
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
     ExecutorOperation, FlowNode, LeafNode, NodeKind, ParallelErrorStrategy, ParallelNode,
-    ParallelNodeBuilder, SubgraphNode, TaskFn, TaskNode,
+    ParallelNodeBuilder, TaskFn, TaskNode,
 };
+
+// ─── CompiledSubgraph + StateProjector ─────────────────────
+pub use compiled_subgraph::{CompiledSubgraph, StateProjector};
 
 // ─── StateLens + SubgraphSpec ──────────────────────────────
 pub use state_lens::{IdentityLens, StateLens};

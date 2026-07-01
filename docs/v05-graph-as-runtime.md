@@ -1140,21 +1140,23 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 
 ## 实现状态
 
-- [x] Phase 1：AgentBuilder::build() → Graph<AgentState>
+- [x] Phase 1：AgentBuilder::build() → Arc\<Graph\<AgentState\>\>
 - [x] Phase 2：ToolUseLoop 重构为薄 Facade
 - [x] Phase 3：删除 AgentFlowNode
-- [x] Phase 4：StateLens + SubgraphNode + SubgraphSpec
+- [x] Phase 4：Subgraph 统一 — StateProjector + CompiledSubgraph + Engine dispatch
 - [x] Phase 5：Compiler Inline Pass（骨架实现）
 - [x] Phase 6：Checkpoint = Execution Frame Snapshot
 - [x] Phase 7：P0-1 Checkpoint Projection — `type Checkpoint` 关联类型
 - [x] Phase 8：P0-2 Graph Hash — canonical AST hash
 - [x] Phase 9：ExecutionSession — FrameStack 归属修正
+- [x] Phase 10：D10 Arc\<Graph\> — 共享 Immutable 对象
+- [x] Phase 11：D11 DSL 原貌 Hash — 保持输入顺序
 
 > Status: Implemented (v0.5)
 
 ## 时间线
 
-已完成：Phase 1 ~ Phase 9 全部完成
+已完成：Phase 1 ~ Phase 11 全部完成
 
 v0.5 架构重构完成，P0 设计补丁已落地！
 
@@ -1167,13 +1169,15 @@ v0.5 架构重构完成，P0 设计补丁已落地！
 1. **GraphFactory Trait** → 去掉，保持命名约定
 2. **ToolUseLoop** → 重构为持有预构建 Graph 的 Facade
 3. **GraphBuilder::merge()** → 不实现，Subgraph 作为原语，merge 作为 Compiler Pass
-4. **Subgraph 组合** → Subgraph 是 Graph AST 的一种节点；ExecutionEngine 借用 State（`&'a mut S`），通过 StateLens 投影执行内层 Graph
+4. **Subgraph 统一** → 删除 SubgraphNode trait，使用 StateProjector + CompiledSubgraph 类型擦除；Engine 提供唯一 execute_subgraph() 实现
 5. **StateLens vs StateAdapter** → 选择 StateLens，零拷贝投影
 6. **Checkpoint** → 通过 `state.snapshot()` 获取投影快照，不依赖 Engine 持有所有权
 7. **ExecutionContext 所有权** → Engine 借用 State（`&'a mut S`），调用方持有所有权。Parallel 分支使用 `OwnedExecutionEngine<S>`
 8. **P0-1 Checkpoint Projection** → 引入 `type Checkpoint` 关联类型，强制 projection，序列化安全
-9. **P0-2 Graph Hash** → 从 DSL canonical form 计算，不依赖 HashMap 顺序
+9. **P0-2 Graph Hash** → 从 DSL canonical form 计算，保持输入顺序
 10. **FrameStack 归属** → Engine 不持有 FrameStack，职责分离到 ExecutionSession
+11. **Arc\<Graph\>** → Immutable 对象共享，多 Session 共享同一实例
+12. **DSL 原貌 Hash** → 不做语义归一化，精确反映用户构建
 
 ### 最终结论
 
@@ -1182,8 +1186,9 @@ v0.5 架构重构完成，P0 设计补丁已落地！
 - **统一产物**：所有 Builder 都返回 Arc\<Graph\<S\>\>
 - **统一 Runtime**：只有一个 ExecutionEngine
 - **零拷贝组合**：通过 StateLens 投影状态，不需要 clone/merge
-- **Subgraph 是 Node**：在 Graph AST 中是 `NodeKind::Subgraph`；在 Runtime 中递归执行
+- **Subgraph 是 Composite Node**：AST 中是 `NodeKind::Subgraph(CompiledSubgraph<S>)`；Engine 提供唯一 execute_subgraph() 实现
 - **Engine 借用 State**：`ExecutionEngine<'a, S>` 持有 `&'a mut S`，调用方持有所有权
 - **Checkpoint = snapshot()**：通过 `type Checkpoint` 关联类型强制 projection
 - **Graph = Arc**：Immutable 对象共享，不拷贝
 - **Hash = DSL 原貌**：不做语义归一化，精确反映用户构建
+- **Subgraph 类型擦除**：StateProjector trait 擦除 Inner/Lens/M，保留 Outer

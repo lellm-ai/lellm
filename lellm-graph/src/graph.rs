@@ -331,10 +331,11 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                     // ExecutorOperation 直接接收 &mut ExecutionEngine
                     p.execute(exec_ctx).await?;
                 }
-                NodeKind::Subgraph(_subgraph) => {
-                    // TODO: 实现 Subgraph 执行
-                    // 由 ExecutionEngine 负责 Frame 管理、状态投影、Checkpoint 和恢复
-                    tracing::warn!("Subgraph execution not yet implemented");
+                NodeKind::Subgraph(spec) => {
+                    // Subgraph 执行 — 通过 CompiledSubgraph 的 StateProjector 递归执行内层 Graph
+                    let stream = exec_ctx.stream_sink();
+                    let cancel = exec_ctx.cancel_token().clone();
+                    spec.execute(exec_ctx.state_mut(), stream, cancel).await?;
                 }
             }
 
