@@ -93,8 +93,8 @@ pub use compiled_subgraph::{CompiledSubgraph, StateProjector};
 pub use state_lens::{IdentityLens, StateLens};
 pub use subgraph_spec::SubgraphSpec;
 
-// ─── ExecutionSession + SessionCheckpoint ──────────────────
-pub use session::{ExecutionSession, SessionCheckpoint};
+// ─── ExecutionSession + SessionCheckpoint + SessionError ────
+pub use session::{ExecutionSession, SessionCheckpoint, SessionError};
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;

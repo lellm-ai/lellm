@@ -21,7 +21,7 @@ use super::guards::{BudgetCondition, CompactorNode, PostLLMGuard, StopConfig};
 use super::llm_node::LLMNode;
 use super::tool_node::ToolNode;
 
-/// 构建 ReAct 内部图。
+/// 构建 ReAct 内部图 — pub(crate)，Runtime 实现细节，不对外公开。
 ///
 /// 使用 `Graph<AgentState>` — 节点直接读写强类型 AgentState，零序列化。
 ///
@@ -29,7 +29,7 @@ use super::tool_node::ToolNode;
 ///
 /// `canonical_hash` 由 DSL 层（AgentBuilder）计算，从 DSL inputs（model, tools, system prompt）
 /// 得出，不依赖 compiled graph 的 HashMap 迭代顺序。
-pub fn build_react_graph(
+pub(crate) fn build_react_graph(
     llm_node: LLMNode,
     tool_node: ToolNode,
     compactor_node: CompactorNode,

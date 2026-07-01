@@ -23,7 +23,7 @@ async fn test_checkpoint_restore_roundtrip() {
     state.insert("user_id".to_string(), serde_json::json!("u123"));
     state.insert("step".to_string(), serde_json::json!(42));
 
-    let cp = Checkpoint::new("process_order", state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new("process_order", &state, TEST_GRAPH_HASH);
     let cp_id = cp.checkpoint_id.clone();
 
     // 保存
@@ -66,14 +66,16 @@ async fn test_load_latest_checkpoint() {
     assert!(latest.is_none());
 
     // 保存第一个 Checkpoint
-    let cp1 = Checkpoint::new("node_a", State::new(), TEST_GRAPH_HASH);
+    let state1 = State::new();
+    let cp1 = Checkpoint::new("node_a", &state1, TEST_GRAPH_HASH);
     typed
         .save_with_trace(&trace_id, &cp1, TEST_GRAPH_HASH)
         .await
         .expect("save cp1");
 
     // 保存第二个 Checkpoint
-    let cp2 = Checkpoint::new("node_b", State::new(), TEST_GRAPH_HASH);
+    let state2 = State::new();
+    let cp2 = Checkpoint::new("node_b", &state2, TEST_GRAPH_HASH);
     typed
         .save_with_trace(&trace_id, &cp2, TEST_GRAPH_HASH)
         .await
@@ -98,13 +100,15 @@ async fn test_trace_isolation() {
     let trace_a = TraceId::new();
     let trace_b = TraceId::new();
 
-    let cp_a = Checkpoint::new("node_a", State::new(), TEST_GRAPH_HASH);
+    let state_a = State::new();
+    let cp_a = Checkpoint::new("node_a", &state_a, TEST_GRAPH_HASH);
     typed
         .save_with_trace(&trace_a, &cp_a, TEST_GRAPH_HASH)
         .await
         .expect("save cp_a");
 
-    let cp_b = Checkpoint::new("node_b", State::new(), TEST_GRAPH_HASH);
+    let state_b = State::new();
+    let cp_b = Checkpoint::new("node_b", &state_b, TEST_GRAPH_HASH);
     typed
         .save_with_trace(&trace_b, &cp_b, TEST_GRAPH_HASH)
         .await
@@ -135,7 +139,8 @@ async fn test_graph_hash_mismatch_on_load() {
     let typed = TypedCheckpointStore::new(&store, codec);
 
     let trace_id = TraceId::new();
-    let cp = Checkpoint::new("node_a", State::new(), TEST_GRAPH_HASH);
+    let state_init = State::new();
+    let cp = Checkpoint::new("node_a", &state_init, TEST_GRAPH_HASH);
     let cp_id = cp.checkpoint_id.clone();
 
     typed

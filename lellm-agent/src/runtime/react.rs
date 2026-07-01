@@ -17,7 +17,7 @@ mod guards;
 mod llm_node;
 mod tool_node;
 
-pub use graph_builder::build_react_graph;
+pub(crate) use graph_builder::build_react_graph;
 pub use guards::{BudgetCondition, CompactorNode, PostLLMGuard, StopConfig};
 pub use llm_node::LLMNode;
 pub use tool_node::ToolNode;

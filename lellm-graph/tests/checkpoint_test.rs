@@ -17,7 +17,7 @@ const TEST_GRAPH_HASH: u64 = 0x1234_5678_9abc_def0;
 async fn test_serde_codec_roundtrip() {
     let codec = SerdeCheckpointCodec::<State>::new();
     let state = State::new();
-    let cp = Checkpoint::new("test_node", state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new("test_node", &state, TEST_GRAPH_HASH);
 
     let blob = codec
         .serialize(&cp, TEST_GRAPH_HASH)
@@ -38,7 +38,7 @@ async fn test_serde_codec_roundtrip() {
 async fn test_graph_hash_mismatch_rejected() {
     let codec = SerdeCheckpointCodec::<State>::new();
     let state = State::new();
-    let cp = Checkpoint::new("test_node", state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new("test_node", &state, TEST_GRAPH_HASH);
 
     let blob = codec
         .serialize(&cp, TEST_GRAPH_HASH)
@@ -65,7 +65,7 @@ async fn test_typed_store_save_and_load() {
 
     let trace_id = TraceId::new();
     let state = State::new();
-    let cp = Checkpoint::new("start", state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new("start", &state, TEST_GRAPH_HASH);
     let cp_id = cp.checkpoint_id.clone();
 
     typed

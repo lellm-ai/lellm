@@ -31,6 +31,33 @@ use crate::graph::Graph;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
 
+// ─── SessionError ──────────────────────────────────────────────
+
+/// Session 操作错误。
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    /// Graph Hash 不匹配 — Checkpoint 与当前 Graph 不兼容
+    #[error("graph hash mismatch: expected {expected:#018x}, got {actual:#018x}")]
+    GraphMismatch { expected: u64, actual: u64 },
+}
+
+impl PartialEq for SessionError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                SessionError::GraphMismatch {
+                    expected: e1,
+                    actual: a1,
+                },
+                SessionError::GraphMismatch {
+                    expected: e2,
+                    actual: a2,
+                },
+            ) => e1 == e2 && a1 == a2,
+        }
+    }
+}
+
 // ─── SessionCheckpoint ─────────────────────────────────────────
 
 /// 会话检查点 — 完整恢复快照。
@@ -117,22 +144,29 @@ where
     ///
     /// 调用方负责提供 `Arc<Graph>`（从 Runtime 获取），
     /// Session 不负责存储或查找 Graph。
-    pub fn restore(checkpoint: SessionCheckpoint<S>, graph: Arc<Graph<S, M>>) -> Self {
-        // P0-2: 校验 graph_hash
+    ///
+    /// # 错误
+    ///
+    /// 如果 `checkpoint.graph_hash` 与 `graph.canonical_hash()` 不匹配，
+    /// 返回 `SessionError::GraphMismatch`，拒绝恢复。
+    pub fn restore(
+        checkpoint: SessionCheckpoint<S>,
+        graph: Arc<Graph<S, M>>,
+    ) -> Result<Self, SessionError> {
+        // P0-2: 校验 graph_hash — 不匹配则拒绝恢复
         if checkpoint.graph_hash != graph.canonical_hash() {
-            tracing::warn!(
-                expected = format!("{:#018x}", checkpoint.graph_hash),
-                actual = format!("{:#018x}", graph.canonical_hash()),
-                "graph hash mismatch during restore"
-            );
+            return Err(SessionError::GraphMismatch {
+                expected: checkpoint.graph_hash,
+                actual: graph.canonical_hash(),
+            });
         }
 
         let state = S::restore(checkpoint.state);
-        Self {
+        Ok(Self {
             state,
             frame_stack: checkpoint.frames,
             graph,
-        }
+        })
     }
 
     /// 创建 checkpoint — 保存当前执行位置 + 状态投影。
@@ -267,10 +301,44 @@ mod tests {
         assert!(checkpoint.state.contains("key"));
 
         // 从 checkpoint 恢复
-        let restored_session = ExecutionSession::restore(checkpoint, graph);
+        let restored_session =
+            ExecutionSession::restore(checkpoint, graph).expect("restore should succeed");
 
         // 验证恢复后的状态
         assert!(restored_session.state().contains("key"));
+    }
+
+    #[test]
+    fn test_session_restore_graph_mismatch() {
+        // 验证 graph_hash 不匹配时返回错误
+        let mut builder1 = GraphBuilder::<State, StateMerge>::new("test1");
+        builder1.start("a");
+        builder1.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        builder1.end("a");
+        let mut graph1 = builder1.build().unwrap();
+        graph1.set_canonical_hash(0x1111); // 设置不同的 hash
+        let graph1 = Arc::new(graph1);
+
+        let mut builder2 = GraphBuilder::<State, StateMerge>::new("test2");
+        builder2.start("b");
+        builder2.node("b", NodeKind::Task(TaskNode::new("b", |_| Ok(()))));
+        builder2.end("b");
+        let mut graph2 = builder2.build().unwrap();
+        graph2.set_canonical_hash(0x2222); // 设置不同的 hash
+        let graph2 = Arc::new(graph2);
+
+        // 用 graph1 创建 checkpoint
+        let session = ExecutionSession::new(State::new(), graph1);
+        let checkpoint = session.checkpoint();
+
+        // 用 graph2 恢复 — 应该失败
+        let result = ExecutionSession::restore(checkpoint, graph2);
+        assert!(result.is_err());
+        // 验证错误信息包含 "graph hash mismatch"
+        match result {
+            Err(e) => assert!(format!("{}", e).contains("graph hash mismatch")),
+            Ok(_) => panic!("expected error"),
+        }
     }
 
     #[test]
