@@ -183,31 +183,31 @@ budget_check → llm → MyNode → post_llm_check → tool
 
 ```rust
 // 不用 ToolUseLoop (boilerplate)
-let graph = AgentBuilder::new(model).tools([...]).build();
+let graph = AgentBuilder::new(model).tools([...]).build();  // 返回 Arc<Graph>
 let state = AgentState::from_messages(messages);
-let mut engine = ExecutionContext::new(state, None, CancellationToken::new());
+let mut engine = ExecutionEngine::new(&mut state, None, CancellationToken::new());
 graph.run_inline(&mut engine, 100).await?;
-let result = extract_result(engine.state());
+let result = extract_result(&state);
 
 // 使用 ToolUseLoop (便捷)
 let loop_ = AgentBuilder::new(model).tools([...]).build_loop();
 let result = loop_.invoke(messages).await?;
 ```
 
-**关键约束：** ToolUseLoop 内部**只能**调用 `Graph::run_inline()` / `Graph::run_stream()`，不能有自己的执行循环。
+**关键约束：** ToolUseLoop 内部**只能**调用 `Graph::run_inline()`，不能有自己的执行循环。
 
 **结构设计：**
 
 ```rust
 /// 薄 Facade — 持有预构建的 Graph，提供便捷执行 API。
 pub struct ToolUseLoop {
-    graph: Graph<AgentState, AgentStateMerge>,  // 预构建的 ReAct Graph
-    config: ToolUseConfig,                       // 构建 ExecutionContext 的默认参数
+    graph: Arc<Graph<AgentState, AgentStateMerge>>,  // D10: Arc 共享
+    config: ToolUseConfig,
 }
 
 impl ToolUseLoop {
     /// 从预构建的 Graph 创建 Facade。
-    pub fn new(graph: Graph<AgentState, AgentStateMerge>, config: ToolUseConfig) -> Self;
+    pub fn new(graph: Arc<Graph<AgentState, AgentStateMerge>>, config: ToolUseConfig) -> Self;
 
     /// 便捷执行 — 内部调用 graph.run_inline()
     pub async fn invoke(&self, messages: Vec<Message>) -> Result<ToolUseResult, LlmError>;
@@ -218,10 +218,10 @@ impl ToolUseLoop {
 
 // AgentBuilder 仍然提供 .build_loop() 作为便捷入口
 impl AgentBuilder {
-    pub fn build(self) -> Graph<AgentState, AgentStateMerge> { ... }
+    pub fn build(self) -> Arc<Graph<AgentState, AgentStateMerge>> { ... }
     pub fn build_loop(self) -> ToolUseLoop {
         let config = self.config.clone();
-        let graph = self.build();
+        let graph = self.build();  // 返回 Arc<Graph>
         ToolUseLoop::new(graph, config)
     }
 }
@@ -240,7 +240,7 @@ Engine 只在执行期间借用。这使得 Subgraph 组合成为可能：
 调用方
   ├── state: S                （拥有所有权）
   ├── engine: Engine<'_, S>   （借用 &mut state）
-  │     └── SubgraphNode::execute()
+  │     └── CompiledSubgraph::execute()
   │           ├── lens.get(state) → &mut Inner
   │           ├── inner_engine: Engine<'_, Inner>  （借用 &mut inner）
   │           └── graph.run_inline(&mut inner_engine)
@@ -267,7 +267,7 @@ pub struct ExecutionEngine<'a, S: WorkflowState> {
 **Subgraph 执行流程：**
 
 ```rust
-// SubgraphNode::execute()
+// CompiledSubgraph::execute() (通过 StateProjector trait)
 pub async fn execute(
     &self,
     outer: &mut Outer,
@@ -311,7 +311,7 @@ let agent_graph = AgentBuilder::new(model).tools([...]).build();
 
 let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
 builder.node("init", init_node);
-builder.subgraph("agent", agent_graph, AgentLens);  // 语法糖
+builder.subgraph("agent", SubgraphSpec::new(agent_graph, AgentLens));  // 语法糖
 builder.node("summary", summary_node);
 
 builder.edge("init", "agent");
@@ -323,19 +323,20 @@ let graph = builder.build()?;
 **编译后：**
 
 ```rust
-// Builder AST
-NodeKind::Subgraph(SubgraphNode { graph, lens })
+// Builder 阶段（用户代码）
+let spec = SubgraphSpec::new(agent_graph, AgentLens);
+builder.subgraph("agent", spec);  // 语法糖
 
-// 编译后
-CompiledNodeKind::Subgraph {
-    graph_id: String,
-    lens: Box<dyn StateLens<Outer, Inner>>,
-}
+// 内部编译：SubgraphSpec → CompiledSubgraph
+NodeKind::Subgraph(CompiledSubgraph {
+    projector: Arc::new(spec),  // SubgraphSpec implements StateProjector
+    max_steps: 1000,
+})
 
-// ExecutionEngine 根据 Kind 执行
-match node.kind() {
-    CompiledNodeKind::Subgraph { graph_id, lens } => {
-        self.execute_subgraph(graph_id, lens).await;
+// Engine 执行
+match node.kind {
+    NodeKind::Subgraph(subgraph) => {
+        subgraph.execute(engine.state_mut(), stream, cancel).await;
     }
     // ...
 }
@@ -414,7 +415,7 @@ let graph = builder.compile()?;  // 验证 + 运行 Compiler Pass（如 InlinePa
 3. **Checkpoint 简化** — 不需要 merge 也能实现
    ```rust
    // Subgraph Checkpoint
-   Workflow → SubgraphNode → Checkpoint {
+   Workflow → SubgraphSpec → Checkpoint {
        node = "agent",
        subgraph_checkpoint = ...
    }
@@ -436,7 +437,7 @@ pub struct InlinePass;
 
 impl CompilerPass for InlinePass {
     fn run(&self, graph: &mut Graph) {
-        // 1. 识别所有 SubgraphNode
+        // 1. 识别所有 NodeKind::Subgraph 节点
         // 2. 评估每个 Subgraph 是否值得内联
         //    - 图大小 < 阈值
         //    - 没有外部依赖
@@ -456,10 +457,10 @@ impl CompilerPass for InlinePass {
 let mut builder = GraphBuilder::<MyState, _>::new("workflow");
 builder.node("a", node_a);
 builder.node("b", node_b);
-builder.edge("a", "b", condition);
+builder.edge("a", "b");           // 无条件边
+builder.edge_if("a", "b", cond); // 有条件边
 builder.end("b");
 let graph: Graph<MyState> = builder.build()?;  // 仅验证 AST
-// 或 builder.compile()?;  // 验证 + 运行 Compiler Pass
 
 // ─── 层级 2：DSL（lellm-agent）────
 
@@ -486,7 +487,7 @@ let agent_graph = AgentBuilder::new(model).tools([...]).build();
 
 let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
 builder.node("preprocess", preprocess_node);
-builder.node("agent", NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)));
+builder.subgraph("agent", SubgraphSpec::new(agent_graph, AgentLens));
 builder.node("postprocess", postprocess_node);
 
 builder.edge("preprocess", "agent");
@@ -523,7 +524,8 @@ let graph = builder.build()?;  // 或 builder.compile()? 运行优化 pass
 ### 新增（Phase 4：Subgraph 组合）
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| `lellm-graph/src/subgraph_node.rs` | `SubgraphNode` 实现 — 运行时递归执行 | ✅ |
+| `lellm-graph/src/subgraph_spec.rs` | `SubgraphSpec` — Builder 阶段强类型描述 | ✅ |
+| `lellm-graph/src/compiled_subgraph.rs` | `CompiledSubgraph` + `StateProjector` trait — 类型擦除执行器 | ✅ |
 | `lellm-graph/src/state_lens.rs` | `StateLens` trait — 状态投影，不是状态转换 | ✅ |
 
 ### 新增（Phase 5：Compiler Inline Pass，可选优化）
@@ -618,10 +620,7 @@ impl StateLens<WorkflowState, AgentState> for AgentLens {
 let agent_graph = AgentBuilder::new(model).tools([...]).build();
 
 let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
-builder.node(
-    "agent",
-    NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)),
-);
+builder.subgraph("agent", SubgraphSpec::new(agent_graph, AgentLens));
 
 // Agent Graph 只操作 &mut AgentState
 // 不知道 WorkflowState 存在
@@ -630,15 +629,17 @@ builder.node(
 **借用边界设计：**
 
 ```rust
-// ExecutionContext 负责运行时资源，不持有业务 State
-struct ExecutionContext<S> {
-    state: Option<S>,  // 业务 State（可选）
+// ExecutionEngine 借用 State，不拥有它（pub type ExecutionContext = ExecutionEngine）
+pub struct ExecutionEngine<'a, S: WorkflowState> {
+    state: &'a mut S,  // 借用，不是 Option<S>
     stream: Option<Arc<dyn StreamSink>>,
-    cancellation: CancellationToken,
+    cancel: CancellationToken,
+    mutations: Vec<S::Mutation>,
+    flow_events: Vec<FlowEvent>,
     // ...
 }
 
-// GraphRunner 在进入 Subgraph 时
+// Engine 在进入 Subgraph 时
 // 通过 StateLens 投影出 &mut AgentState
 // 退出 Subgraph 后，借用结束
 // 再继续操作 WorkflowState
@@ -658,16 +659,11 @@ struct ExecutionContext<S> {
 
 ```rust
 // 用户 API
-builder.node(
-    "agent",
-    NodeKind::Subgraph(
-        SubgraphNode::new(agent_graph)
-            .lens(AgentLens)
-    ),
-);
+let spec = SubgraphSpec::new(agent_graph, AgentLens);
+builder.subgraph("agent", spec);  // 语法糖
 
-// 或者更简洁
-builder.subgraph("agent", agent_graph, AgentLens);
+// 等价于：
+// builder.node("agent", NodeKind::Subgraph(spec.compile()));
 ```
 
 ### D8：Checkpoint = Execution Frame Snapshot
@@ -722,7 +718,14 @@ struct FrameStack<S: WorkflowState> {
 
 ```rust
 // 恢复流程
-fn restore(checkpoint: SessionCheckpoint<S>, graph: Graph<S>) -> ExecutionSession<S> {
+pub fn restore(
+    checkpoint: SessionCheckpoint<S>,
+    graph: Arc<Graph<S, M>>,
+) -> Result<Self, SessionError> {
+    // P0-2: 校验 graph_hash
+    if checkpoint.graph_hash != graph.canonical_hash() {
+        return Err(SessionError::GraphMismatch { ... });
+    }
     // 1. 从 checkpoint snapshot 恢复 State（P0-1）
     let state = S::restore(checkpoint.state);
 
@@ -730,7 +733,7 @@ fn restore(checkpoint: SessionCheckpoint<S>, graph: Graph<S>) -> ExecutionSessio
     let frames = checkpoint.frames;
 
     // 3. 创建 session，从最后一个 Frame 恢复执行
-    ExecutionSession { state, frame_stack: frames, graph }
+    Ok(Self { state, frame_stack: frames, graph })
 }
 ```
 
@@ -787,8 +790,9 @@ impl WorkflowState for AgentState {
 graph_hash = hash(nodes.keys())  // 每次 build 可能不同
 // ✅ 已修复：Graph.nodes 使用 IndexMap，但 DSL 层仍然计算 canonical_hash
 
-// ✅ 目标：来自 DSL canonical form（顺序无关）
-graph_hash = canonical_hash(model, sorted_tools, system_prompt)  // 永远相同
+// ✅ 目标：来自 DSL canonical form（不排序，保持输入顺序，见 D11）
+graph_hash = canonical_hash(model, tools_in_insertion_order, system_prompt)
+// .tools([A, B]) 和 .tools([B, A]) 产生不同 hash
 ```
 
 **最终架构：**
@@ -809,10 +813,13 @@ trait StateLens<Outer, Inner> {
 
 // 3. FrameStack（在 ExecutionSession 中，不在 Engine 中）
 //    S::Checkpoint: Debug 约束（Frame/FrameStack 序列化需要）
-struct ExecutionSession<S: WorkflowState> {
+struct ExecutionSession<S: WorkflowState, M: MergeStrategy<S>>
+where
+    S::Checkpoint: Debug,
+{
     state: S,
     frame_stack: FrameStack<S>,
-    graph: Arc<Graph<S>>,  // D10: Arc 共享
+    graph: Arc<Graph<S, M>>,  // D10: Arc 共享
 }
 
 // 4a. Checkpoint<S> — 单 Graph 级别检查点
@@ -916,6 +923,8 @@ pub struct AgentCheckpoint {
     pub messages: Vec<Message>,
     pub iterations: usize,
     pub output_tokens: usize,
+    pub reasoning_tokens: usize,
+    pub compact_count: usize,
     pub stop_reason: Option<StopReason>,
     pub total_tool_calls: usize,
     // 不包含: last_response（可重建）, Arc<dyn ...>, Sender 等
@@ -930,6 +939,8 @@ impl WorkflowState for AgentState {
             messages: self.messages.clone(),
             iterations: self.iterations,
             output_tokens: self.output_tokens,
+            reasoning_tokens: self.reasoning_tokens,
+            compact_count: self.compact_count,
             stop_reason: self.stop_reason.clone(),
             total_tool_calls: self.total_tool_calls,
         }
@@ -940,10 +951,11 @@ impl WorkflowState for AgentState {
             messages: checkpoint.messages,
             iterations: checkpoint.iterations,
             output_tokens: checkpoint.output_tokens,
+            reasoning_tokens: checkpoint.reasoning_tokens,
+            compact_count: checkpoint.compact_count,
             stop_reason: checkpoint.stop_reason,
             last_response: None,  // 重建时为空，下次 LLM 调用会填充
             total_tool_calls: checkpoint.total_tool_calls,
-            // ... 其他 runtime 字段使用默认值
         }
     }
 
@@ -1030,6 +1042,8 @@ impl AgentBuilder {
         // 4. 结构性配置
         self.config.max_iterations.hash(&mut hasher);
         self.config.max_output_tokens.hash(&mut hasher);
+        self.config.max_total_output_tokens.hash(&mut hasher);
+        self.config.max_total_reasoning_tokens.hash(&mut hasher);
 
         hasher.finish()
     }
@@ -1037,20 +1051,22 @@ impl AgentBuilder {
 
 // Graph 携带 canonical hash
 pub struct Graph<S: WorkflowState, M: MergeStrategy<S>> {
-    pub nodes: HashMap<String, NodeKind<S, M>>,
-    pub edges: Vec<Edge>,
-    pub canonical_hash: u64,  // 来自 DSL，不来自 nodes HashMap
-    // ...
+    pub(crate) name: String,
+    pub(crate) nodes: IndexMap<String, NodeKind<S, M>>,  // 插入顺序稳定
+    pub(crate) edges: Vec<Edge<S>>,
+    pub(crate) start: String,
+    pub(crate) end: String,
+    pub(crate) canonical_hash: u64,  // 来自 DSL，不来自 nodes 顺序
 }
 
 // Checkpoint 使用 canonical hash
-impl Checkpoint {
-    pub fn new(current_node: &str, state: S::Checkpoint, graph: &Graph<S, M>) -> Self {
+impl<S: WorkflowState> Checkpoint<S> {
+    pub fn new(current_node: impl Into<String>, state: &S, graph_hash: u64) -> Self {
         Self {
-            checkpoint_id: CheckpointId::new(),
+            checkpoint_id: CheckpointId(uuid::Uuid::new_v4()),
             current_node: NodeId(current_node.into()),
-            state,
-            graph_hash: graph.canonical_hash,  // 使用 canonical hash
+            state: state.snapshot(),  // P0-1: 使用 snapshot() 投影
+            graph_hash,
             created_at: SystemTime::now(),
         }
     }
@@ -1135,8 +1151,8 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 | 唯一 Runtime | StateGraph + compile | ExecutionEngine |
 | Agent 定义 | create_react_agent() (黑盒) | AgentBuilder → Graph |
 | 便捷执行 | graph.invoke() | ToolUseLoop.invoke() (薄 Facade) |
-| 自定义 Agent | StateGraph 手写 | GraphBuilder 手写 / SubgraphNode |
-| 组合 | 子图节点 | SubgraphNode (递归执行) |
+| 自定义 Agent | StateGraph 手写 | GraphBuilder 手写 / SubgraphSpec |
+| 组合 | 子图节点 | SubgraphSpec → CompiledSubgraph (递归执行) |
 | Checkpoint | 单层 | 单层 ✅ |
 | Graph Factory 抽象 | 无 | 无（保持命名约定） |
 
