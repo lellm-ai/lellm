@@ -17,14 +17,22 @@ cargo add lellm
 ```rust
 use lellm::agent::AgentBuilder;
 use lellm::core::Message;
+use lellm::provider::ResolvedModel;
+use std::sync::Arc;
 
-let agent = AgentBuilder::new(model)
+let model = ResolvedModel {
+    provider: Arc::new(provider),
+    model: "gpt-4o".into(),
+    context_window: None,
+};
+
+let loop_ = AgentBuilder::new(model)
     .system("你是一个有用的助手。")
     .tool(weather_tool)
     .max_iterations(10)
-    .build();
+    .build_loop();
 
-let result = agent.execute(vec![Message::user_text("今天上海天气如何？")]).await?;
+let result = loop_.invoke(vec![Message::user_text("今天上海天气如何？")]).await?;
 ```
 
 ---
@@ -202,14 +210,14 @@ let model = ResolvedModel {
     context_window: None,
 };
 
-let agent = AgentBuilder::new(model)
+let loop_ = AgentBuilder::new(model)
     .system("你是一个有用的助手。")
     .tool(search_tool)
     .max_iterations(10)
     .max_output_tokens(8000)
-    .build();
+    .build_loop();
 
-let result = agent.execute(vec![Message::user_text("今天上海天气如何？")]).await?;
+let result = loop_.invoke(vec![Message::user_text("今天上海天气如何？")]).await?;
 
 match result.stop_reason {
     StopReason::Complete => println!("完成，共 {} 轮", result.iterations),
