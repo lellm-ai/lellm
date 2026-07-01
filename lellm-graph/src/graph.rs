@@ -432,6 +432,40 @@ impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
         self
     }
 
+    /// 便捷方法 — 添加 Subgraph 节点。
+    ///
+    /// 自动将 [`SubgraphSpec`](crate::SubgraphSpec) 编译为 [`CompiledSubgraph`](crate::CompiledSubgraph)
+    /// 并注册为节点。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// use lellm_graph::{GraphBuilder, SubgraphSpec, StateLens};
+    ///
+    /// let agent_graph = AgentBuilder::new(model).tools([...]).build();
+    /// let spec = SubgraphSpec::new(agent_graph, AgentLens);
+    ///
+    /// let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
+    /// builder.subgraph("agent", spec);  // 语法糖
+    /// // 等价于:
+    /// // builder.node("agent", NodeKind::Subgraph(spec.compile()));
+    /// ```
+    pub fn subgraph<Inner: WorkflowState, IM: MergeStrategy<Inner>, L: crate::StateLens<S, Inner>>(
+        &mut self,
+        name: impl Into<String>,
+        spec: crate::SubgraphSpec<S, Inner, IM, L>,
+    ) -> &mut Self
+    where
+        S: 'static,
+        Inner: 'static,
+        IM: 'static,
+        L: 'static,
+    {
+        let compiled = spec.compile();
+        self.nodes.insert(name.into(), NodeKind::Subgraph(compiled));
+        self
+    }
+
     pub fn edge(
         &mut self,
         from: impl Into<String>,

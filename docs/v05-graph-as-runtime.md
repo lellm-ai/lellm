@@ -100,7 +100,7 @@ AgentBuilder → ToolUseLoop → build_react_graph() → Graph<AgentState> → E
 | `AgentBuilder::build()` | → `ToolUseLoop` | → `Graph<AgentState>` | **核心变更** ✅ |
 | `ToolUseLoop` | 独立的运行时 | **薄 Facade**，持有 `Graph<AgentState>` | 保留，提供 invoke() 等高级 API ✅ |
 | `AgentFlowNode` | 公开 struct | **直接删除** | 不再需要，无过渡期 ✅ |
-| `build_react_graph()` | `pub(crate)` | 保持 `pub(crate)` | **不公开**，Runtime 实现细节 |
+| `build_react_graph()` | `pub(crate)` | 保持 `pub(crate)` | **不公开**，Runtime 实现细节；返回裸 `Graph`，由 `AgentBuilder::build()` 包装 `Arc` |
 | `GraphFactory<S>` | 不存在 | **不实现** | 保持命名约定，不需要 trait |
 
 ### 两层世界划分
@@ -778,8 +778,9 @@ impl WorkflowState for AgentState {
 **Graph Hash 稳定性（P0-2）：**
 
 ```rust
-// ❌ 当前：来自 compiled graph（HashMap 顺序不确定）
+// ❌ 早期：来自 compiled graph（HashMap 顺序不确定）
 graph_hash = hash(nodes.keys())  // 每次 build 可能不同
+// ✅ 已修复：Graph.nodes 使用 IndexMap，但 DSL 层仍然计算 canonical_hash
 
 // ✅ 目标：来自 DSL canonical form（顺序无关）
 graph_hash = canonical_hash(model, sorted_tools, system_prompt)  // 永远相同
@@ -802,6 +803,7 @@ trait StateLens<Outer, Inner> {
 }
 
 // 3. FrameStack（在 ExecutionSession 中，不在 Engine 中）
+//    实际代码需要 S::Checkpoint: Debug 约束（Frame/FrameStack 序列化需要）
 struct ExecutionSession<S: WorkflowState> {
     state: S,
     frame_stack: FrameStack<S>,
@@ -955,22 +957,19 @@ impl WorkflowState for AgentState {
 
 ### P0-2: Graph Hash — 从 AST Canonical Form 计算
 
-**核心问题**：当前 `graph_hash: u64` 来自 compiled graph 的节点顺序，但 `HashMap` 迭代顺序不确定。
+**核心问题**：早期 `Graph.nodes` 使用 `HashMap`，迭代顺序不确定，导致 `graph_hash` 不稳定。
+**当前已修复**：`Graph.nodes` 已切换为 `IndexMap`（插入顺序稳定），但 DSL 层仍然应当计算 canonical_hash 并显式设置，而非依赖构建顺序。
 
 **问题场景**：
 
 ```rust
-// 第一次 build()
-let graph1 = AgentBuilder::new(model).tools([a, b, c]).build();
+// 早期问题：Graph.nodes 使用 HashMap，迭代顺序不确定
 // graph1.nodes: {"llm" → ..., "tool" → ..., "budget_check" → ...}
-// hash1 = hash(llm, tool, budget_check)
-
-// 第二次 build() — 相同输入
-let graph2 = AgentBuilder::new(model).tools([a, b, c]).build();
-// graph2.nodes: {"budget_check" → ..., "llm" → ..., "tool" → ...}  // HashMap 顺序不同
-// hash2 = hash(budget_check, llm, tool)
-
+// graph2.nodes: {"budget_check" → ..., "llm" → ..., "tool" → ...}  // 顺序可能不同
 // hash1 ≠ hash2 → checkpoint 失效！
+//
+// 当前 Graph.nodes 已切换为 IndexMap（插入顺序稳定），
+// 但 DSL 层仍然计算 canonical_hash 并显式设置，不依赖构建顺序。
 ```
 
 **目标设计**：Graph Hash 来自 DSL 层的 canonical AST，不依赖 compiled graph 的节点顺序。
@@ -1149,7 +1148,7 @@ AgentBuilder::new(model).tools([b, a]).canonical_hash()  // hash2 ≠ hash1
 - [x] Phase 7：P0-1 Checkpoint Projection — `type Checkpoint` 关联类型
 - [x] Phase 8：P0-2 Graph Hash — canonical AST hash
 - [x] Phase 9：ExecutionSession — FrameStack 归属修正
-- [x] Phase 10：D10 Arc\<Graph\> — 共享 Immutable 对象
+- [x] Phase 10：D10 Arc\<Graph\> — 共享 Immutable 对象（AgentBuilder/ToolUseLoop/ExecutionSession/SubgraphSpec 统一 Arc）
 - [x] Phase 11：D11 DSL 原貌 Hash — 保持输入顺序
 
 > Status: Implemented (v0.5)

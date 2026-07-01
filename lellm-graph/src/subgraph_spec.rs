@@ -69,8 +69,8 @@ pub struct SubgraphSpec<
     M: MergeStrategy<Inner>,
     L: StateLens<Outer, Inner>,
 > {
-    /// 内层 Graph
-    pub graph: Graph<Inner, M>,
+    /// 内层 Graph — Arc 共享，与 AgentBuilder::build() 返回类型一致（D10）。
+    pub graph: Arc<Graph<Inner, M>>,
 
     /// 状态投影器
     pub lens: L,
@@ -98,15 +98,17 @@ where
     ///
     /// # 参数
     ///
-    /// - `graph` — 内层 Graph
+    /// - `graph` — 内层 Graph（Arc 共享，与 AgentBuilder::build() 返回类型一致）
     /// - `lens` — 状态投影器
     ///
     /// # 示例
     ///
     /// ```ignore
+    /// let agent_graph = AgentBuilder::new(model).tools([...]).build();
     /// let spec = SubgraphSpec::new(agent_graph, AgentLens);
+    /// // agent_graph 仍然是 Arc<Graph<...>>，可直接传入，无需 clone
     /// ```
-    pub fn new(graph: Graph<Inner, M>, lens: L) -> Self {
+    pub fn new(graph: Arc<Graph<Inner, M>>, lens: L) -> Self {
         Self {
             graph,
             lens,

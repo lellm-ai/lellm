@@ -18,7 +18,7 @@
 //! # 示例
 //!
 //! ```ignore
-//! use lellm_graph::{StateLens, SubgraphNode, GraphBuilder, NodeKind};
+//! use lellm_graph::{StateLens, SubgraphSpec, GraphBuilder, NodeKind};
 //!
 //! // 定义 State
 //! struct WorkflowState {
@@ -34,14 +34,16 @@
 //!     }
 //! }
 //!
-//! // 使用 Subgraph
+//! // 使用 SubgraphSpec
 //! let agent_graph = AgentBuilder::new(model).tools([...]).build();
 //!
 //! let mut builder = GraphBuilder::<WorkflowState, _>::new("workflow");
 //! builder.node(
 //!     "agent",
-//!     NodeKind::Subgraph(SubgraphNode::new(agent_graph, AgentLens)),
+//!     NodeKind::Subgraph(SubgraphSpec::new(agent_graph, AgentLens).compile()),
 //! );
+//! // 或使用语法糖
+//! // builder.subgraph("agent", SubgraphSpec::new(agent_graph, AgentLens));
 //! ```
 
 use std::marker::PhantomData;

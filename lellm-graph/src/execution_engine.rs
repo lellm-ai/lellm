@@ -14,7 +14,7 @@
 //! 调用方
 //!   ├── state: S                （拥有所有权）
 //!   ├── engine: Engine<'_, S>   （借用 &mut state）
-//!   │     └── SubgraphNode::execute()
+//!   │     └── SubgraphSpec::execute()
 //!   │           ├── lens.get(state) → &mut Inner
 //!   │           ├── inner_engine: Engine<'_, Inner>  （借用 &mut inner）
 //!   │           └── graph.run_inline(&mut inner_engine)

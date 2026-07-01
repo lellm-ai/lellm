@@ -28,7 +28,6 @@ pub mod statekey;
 pub mod store;
 pub mod stream_chunk;
 pub mod stream_emitter;
-pub mod subgraph_node;
 pub mod subgraph_spec;
 pub mod test_executor;
 pub mod workflow_state;

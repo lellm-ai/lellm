@@ -405,11 +405,14 @@ pub(crate) async fn run_execution_loop<S, M>(
                 n.execute(&mut ctx).await.is_ok()
             }
             NodeKind::Parallel(p) => p.execute(&mut engine).await.is_ok(),
-            NodeKind::Subgraph(_subgraph) => {
-                // TODO: 实现 Subgraph 执行
-                // 由 ExecutionEngine 负责 Frame 管理、状态投影、Checkpoint 和恢复
-                tracing::warn!("Subgraph execution not yet implemented");
-                true
+            NodeKind::Subgraph(subgraph) => {
+                // Subgraph 执行 — 通过 StateProjector 投影状态 + 递归执行内层 Graph
+                let stream = engine.stream_sink();
+                let cancel = engine.cancel_token().clone();
+                subgraph
+                    .execute(engine.state_mut(), stream, cancel)
+                    .await
+                    .is_ok()
             }
         };
 
