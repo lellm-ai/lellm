@@ -1,17 +1,21 @@
 //! 工具系统 — 注册、定义、执行、目录抽象。
 //!
 //! 独立的工具子系统，被 runtime 层使用。
+//!
+//! `ToolArgs`, `ToolRegistration`, `ParallelSafety`, `ToolCategory` 已移至 `lellm-core`，
+//! 此处 re-export 以保持向后兼容。
 
-mod args;
 mod executor;
 
-pub use args::ToolArgs;
-pub use executor::{
-    BatchExecutionResult, ParallelSafety, ToolCategory, ToolExecutor, ToolRegistration,
-    execute_batch_with,
-};
+// Re-export from lellm-core for backward compatibility
+pub use lellm_core::{ParallelSafety, ToolArgs, ToolCategory, ToolRegistration};
+
+pub use executor::{BatchExecutionResult, ToolExecutor, execute_batch_with};
 
 /// 异步工具函数类型（executor 内部使用）
+///
+/// 通过 `ToolRegistration::execute()` 获取 `UnpinWrapper`，
+/// 内部解包为 `Pin<Box<dyn Future>>`。
 pub(crate) type ToolFn = std::sync::Arc<
     dyn Fn(
             &serde_json::Value,

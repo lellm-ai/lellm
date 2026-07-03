@@ -15,7 +15,7 @@ pub(crate) fn generate_schema_impl(struct_name: &syn::Ident) -> TokenStream2 {
             static SCHEMA: ::std::sync::LazyLock<serde_json::Value> =
                 ::std::sync::LazyLock::new(|| {
                     let full = ::serde_json::to_value(
-                        ::lellm_agent::schemars::schema_for!(#struct_name)
+                        ::lellm_core::schemars::schema_for!(#struct_name)
                     ).expect("schema generation failed");
                     #struct_name::extract_inner_schema(&full)
                 });
@@ -30,17 +30,17 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
         impl #struct_name {
             /// 从 schemars 完整 schema 中提取 inner schema（LazyLock 缓存）。
             pub fn __schema() -> serde_json::Value {
-                <#struct_name as ::lellm_agent::ToolArgs>::__schema()
+                <#struct_name as ::lellm_core::ToolArgs>::__schema()
             }
 
             /// 工具名称 — 向后兼容
             pub fn __name() -> &'static str {
-                <#struct_name as ::lellm_agent::ToolArgs>::NAME
+                <#struct_name as ::lellm_core::ToolArgs>::NAME
             }
 
             /// 工具描述 — 向后兼容
             pub fn __description() -> &'static str {
-                <#struct_name as ::lellm_agent::ToolArgs>::DESCRIPTION
+                <#struct_name as ::lellm_core::ToolArgs>::DESCRIPTION
             }
 
             fn extract_inner_schema(full: &serde_json::Value) -> serde_json::Value {
@@ -70,32 +70,34 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
             /// 便捷注册 — 并行安全（Safe）。
             ///
             /// 闭包接收反序列化后的 `#struct_name`，直接操作强类型参数。
-            pub fn safe<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
+            pub fn safe<F, Fut>(f: F) -> ::lellm_core::ToolRegistration
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
-                Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+                Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
-                ::lellm_agent::ToolRegistration::safe(
-                    <#struct_name as ::lellm_agent::ToolArgs>::tool_definition(),
+                ::lellm_core::ToolRegistration::safe(
+                    <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
-                            match ::serde_json::from_value::<#struct_name>(args.clone()) {
-                                Ok(parsed) => {
-                                    let f = ::std::sync::Arc::clone(&f);
-                                    Box::pin(async move { f(parsed).await })
+                        move |args: &serde_json::Value| -> ::lellm_core::UnpinWrapper<::lellm_core::ToolResult> {
+                            ::lellm_core::UnpinWrapper(Box::pin(async move {
+                                match ::serde_json::from_value::<#struct_name>(args.clone()) {
+                                    Ok(parsed) => {
+                                        let f = ::std::sync::Arc::clone(&f);
+                                        f(parsed).await
+                                    }
+                                    Err(e) => {
+                                        ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
+                                            kind: ::lellm_core::ToolErrorKind::InvalidInput,
+                                            message: format!(
+                                                "Failed to parse tool arguments: {}",
+                                                e
+                                            ),
+                                        })
+                                    }
                                 }
-                                Err(e) => Box::pin(async move {
-                                    ::lellm_agent::ToolResult::Err(::lellm_core::ToolError {
-                                        kind: ::lellm_core::ToolErrorKind::InvalidInput,
-                                        message: format!(
-                                            "Failed to parse tool arguments: {}",
-                                            e
-                                        ),
-                                    })
-                                }),
-                            }
+                            }))
                         }
                     }
                 )
@@ -103,67 +105,71 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
 
             /// 便捷注册 — 分类内互斥（CategoryExclusive）。
             pub fn category_exclusive<F, Fut>(
-                category: ::lellm_agent::ToolCategory,
+                category: ::lellm_core::ToolCategory,
                 f: F,
-            ) -> ::lellm_agent::ToolRegistration
+            ) -> ::lellm_core::ToolRegistration
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
-                Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+                Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
-                ::lellm_agent::ToolRegistration::category_exclusive(
-                    <#struct_name as ::lellm_agent::ToolArgs>::tool_definition(),
+                ::lellm_core::ToolRegistration::category_exclusive(
+                    <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     category,
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
-                            match ::serde_json::from_value::<#struct_name>(args.clone()) {
-                                Ok(parsed) => {
-                                    let f = ::std::sync::Arc::clone(&f);
-                                    Box::pin(async move { f(parsed).await })
+                        move |args: &serde_json::Value| -> ::lellm_core::UnpinWrapper<::lellm_core::ToolResult> {
+                            ::lellm_core::UnpinWrapper(Box::pin(async move {
+                                match ::serde_json::from_value::<#struct_name>(args.clone()) {
+                                    Ok(parsed) => {
+                                        let f = ::std::sync::Arc::clone(&f);
+                                        f(parsed).await
+                                    }
+                                    Err(e) => {
+                                        ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
+                                            kind: ::lellm_core::ToolErrorKind::InvalidInput,
+                                            message: format!(
+                                                "Failed to parse tool arguments: {}",
+                                                e
+                                            ),
+                                        })
+                                    }
                                 }
-                                Err(e) => Box::pin(async move {
-                                    ::lellm_agent::ToolResult::Err(::lellm_core::ToolError {
-                                        kind: ::lellm_core::ToolErrorKind::InvalidInput,
-                                        message: format!(
-                                            "Failed to parse tool arguments: {}",
-                                            e
-                                        ),
-                                    })
-                                }),
-                            }
+                            }))
                         }
                     }
                 )
             }
 
             /// 便捷注册 — 全局互斥（Exclusive）。
-            pub fn exclusive<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
+            pub fn exclusive<F, Fut>(f: F) -> ::lellm_core::ToolRegistration
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
-                Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+                Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
-                ::lellm_agent::ToolRegistration::exclusive(
-                    <#struct_name as ::lellm_agent::ToolArgs>::tool_definition(),
+                ::lellm_core::ToolRegistration::exclusive(
+                    <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| -> ::std::pin::Pin<Box<dyn ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static>> {
-                            match ::serde_json::from_value::<#struct_name>(args.clone()) {
-                                Ok(parsed) => {
-                                    let f = ::std::sync::Arc::clone(&f);
-                                    Box::pin(async move { f(parsed).await })
+                        move |args: &serde_json::Value| -> ::lellm_core::UnpinWrapper<::lellm_core::ToolResult> {
+                            ::lellm_core::UnpinWrapper(Box::pin(async move {
+                                match ::serde_json::from_value::<#struct_name>(args.clone()) {
+                                    Ok(parsed) => {
+                                        let f = ::std::sync::Arc::clone(&f);
+                                        f(parsed).await
+                                    }
+                                    Err(e) => {
+                                        ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
+                                            kind: ::lellm_core::ToolErrorKind::InvalidInput,
+                                            message: format!(
+                                                "Failed to parse tool arguments: {}",
+                                                e
+                                            ),
+                                        })
+                                    }
                                 }
-                                Err(e) => Box::pin(async move {
-                                    ::lellm_agent::ToolResult::Err(::lellm_core::ToolError {
-                                        kind: ::lellm_core::ToolErrorKind::InvalidInput,
-                                        message: format!(
-                                            "Failed to parse tool arguments: {}",
-                                            e
-                                        ),
-                                    })
-                                }),
-                            }
+                            }))
                         }
                     }
                 )

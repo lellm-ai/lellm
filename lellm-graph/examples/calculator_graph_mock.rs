@@ -49,13 +49,29 @@ struct MultiplyArgs {
 fn execute_tool(tc: &ToolCall) -> Value {
     match tc.name.as_str() {
         "add" => {
-            let a = tc.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let b = tc.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let a = tc
+                .arguments
+                .get("a")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let b = tc
+                .arguments
+                .get("b")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             Value::from(a + b)
         }
         "multiply" => {
-            let a = tc.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let b = tc.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let a = tc
+                .arguments
+                .get("a")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let b = tc
+                .arguments
+                .get("b")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             Value::from(a * b)
         }
         _ => Value::String(format!("未知工具: {}", tc.name)),
@@ -127,7 +143,9 @@ impl lellm_provider::LlmProvider for MockProvider {
             .collect();
 
         let events = vec![
-            Ok(ProviderEvent::Start { model: "mock".into() }),
+            Ok(ProviderEvent::Start {
+                model: "mock".into(),
+            }),
             Ok(ProviderEvent::Token { token: text }),
             Ok(ProviderEvent::ResponseComplete {
                 tool_calls,
@@ -222,7 +240,10 @@ impl LlmCallNode {
             KEY_MESSAGES.into(),
             messages_to_json(&new_messages),
         ));
-        ctx.record(StateMutation::Put(KEY_ITERATIONS.into(), Value::from(iterations + 1)));
+        ctx.record(StateMutation::Put(
+            KEY_ITERATIONS.into(),
+            Value::from(iterations + 1),
+        ));
 
         if !tool_calls.is_empty() {
             ctx.record(StateMutation::Put(
@@ -290,7 +311,10 @@ fn create_tool_execute() -> TaskNode<State> {
             msgs.push(Message::tool_result(tc, &tool_result));
         }
 
-        ctx.record(StateMutation::Put(KEY_MESSAGES.into(), messages_to_json(&msgs)));
+        ctx.record(StateMutation::Put(
+            KEY_MESSAGES.into(),
+            messages_to_json(&msgs),
+        ));
         ctx.record(StateMutation::Delete(KEY_TOOL_CALLS.into()));
         ctx.goto("budget_chk");
         Ok(())
@@ -315,14 +339,14 @@ fn build_graph(
         "llm_call",
         NodeKind::External(Arc::new(LlmCallNode::new(model))),
     );
-    builder.node(
-        "post_llm_route",
-        NodeKind::Task(create_post_llm_route()),
-    );
+    builder.node("post_llm_route", NodeKind::Task(create_post_llm_route()));
     builder.node("tool_execute", NodeKind::Task(create_tool_execute()));
     builder.node(
         "done",
-        NodeKind::Task(TaskNode::new("done", |_ctx: &mut NodeContext<'_, State>| Ok(()))),
+        NodeKind::Task(TaskNode::new(
+            "done",
+            |_ctx: &mut NodeContext<'_, State>| Ok(()),
+        )),
     );
 
     builder.edge("budget_chk", "llm_call");
@@ -393,13 +417,8 @@ async fn main() {
 
     let start = std::time::Instant::now();
 
-    let mut exec_ctx = lellm_graph::ExecutionEngine::new(
-        &mut state,
-        None,
-        CancellationToken::new(),
-        None,
-        None,
-    );
+    let mut exec_ctx =
+        lellm_graph::ExecutionEngine::new(&mut state, None, CancellationToken::new(), None, None);
 
     struct NoopStepCallback;
     impl<'e> lellm_graph::StepCallback<'e> for NoopStepCallback {

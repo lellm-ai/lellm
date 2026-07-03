@@ -107,7 +107,7 @@ impl ToolCatalog for McpCatalog {
                 cache_control: None,
             };
 
-            let reg = lellm_agent::ToolRegistration::safe(def, move |input: &serde_json::Value| {
+            let reg = lellm_core::ToolRegistration::safe(def, move |input: &serde_json::Value| {
                 let client = client.clone();
                 let name = name.clone();
                 let input = input.clone();

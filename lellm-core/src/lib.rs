@@ -11,6 +11,7 @@ pub mod message;
 pub mod prompt;
 pub mod request;
 pub mod response;
+pub mod tool;
 
 pub use error::{
     IntoToolError, IntoToolResult, LellmError, LlmError, MemoryError, ParseError, ToolError,
@@ -23,3 +24,4 @@ pub use message::{
 pub use prompt::Prompt;
 pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
 pub use response::{ChatResponse, TokenUsage};
+pub use tool::{ParallelSafety, ToolArgs, ToolCategory, ToolRegistration};

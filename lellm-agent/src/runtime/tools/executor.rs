@@ -2,134 +2,17 @@
 //!
 //! 通过 `ToolCatalog` 消费工具快照，不持有工具所有权。
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
-use lellm_core::{Message, ToolCall, ToolError, ToolErrorKind, ToolResult};
+use lellm_core::{
+    Message, ParallelSafety, ToolCall, ToolCategory, ToolError, ToolErrorKind, ToolRegistration,
+    ToolResult,
+};
 
 use super::super::event::AgentEvent;
 use super::super::retry::RetryPolicy;
 use super::{ToolCatalog, ToolFn, ToolSnapshot};
 use tokio::sync::mpsc::Sender;
-
-/// 工具安全分级
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParallelSafety {
-    Safe,
-    CategoryExclusive,
-    Exclusive,
-}
-
-/// 工具类别 — 用于 CategoryExclusive 的分组
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ToolCategory(pub Cow<'static, str>);
-
-impl ToolCategory {
-    pub const FILE_IO: Self = Self(Cow::Borrowed("file_io"));
-    pub const NETWORK: Self = Self(Cow::Borrowed("network"));
-    pub const DATABASE: Self = Self(Cow::Borrowed("database"));
-
-    pub fn custom(name: impl Into<Cow<'static, str>>) -> Self {
-        Self(name.into())
-    }
-}
-
-/// 工具注册信息 — Schema、安全分级、执行函数合一。
-///
-/// 用户通过 `ToolRegistration::safe()` 等工厂方法构造。
-/// 字段 `pub(crate)` — 外部通过工厂方法访问，内部通过 `ToolSnapshot` 消费。
-#[derive(Clone)]
-pub struct ToolRegistration {
-    pub(crate) definition: lellm_core::ToolDefinition,
-    pub(crate) safety: ParallelSafety,
-    pub(crate) category: Option<ToolCategory>,
-    pub(crate) func: ToolFn,
-}
-
-impl ToolRegistration {
-    /// 获取工具定义的引用。
-    pub fn definition(&self) -> &lellm_core::ToolDefinition {
-        &self.definition
-    }
-
-    /// 获取并行安全级别。
-    pub fn safety(&self) -> &ParallelSafety {
-        &self.safety
-    }
-
-    /// 获取工具类别（如果有）。
-    pub fn category(&self) -> Option<&ToolCategory> {
-        self.category.as_ref()
-    }
-
-    pub fn safe<F, Fut>(def: lellm_core::ToolDefinition, f: F) -> Self
-    where
-        F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
-    {
-        Self {
-            definition: def,
-            safety: ParallelSafety::Safe,
-            category: None,
-            func: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
-        }
-    }
-
-    /// 强类型便捷构造 — 自动反序列化参数。
-    ///
-    /// 与 `safe()` 的区别：闭包接收反序列化后的 `T`，而非原始 `serde_json::Value`。
-    /// 反序列化失败时返回 `ToolErrorKind::InvalidInput`。
-    pub fn safe_fn<T, F, Fut>(def: lellm_core::ToolDefinition, f: F) -> Self
-    where
-        T: for<'de> serde::Deserialize<'de> + Send + 'static,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
-    {
-        let f = Arc::new(f);
-        Self::safe(def, move |value| {
-            let f = Arc::clone(&f);
-            let result = serde_json::from_value::<T>(value.clone());
-            Box::pin(async move {
-                match result {
-                    Ok(parsed) => f(parsed).await,
-                    Err(e) => Err(ToolError::invalid_input(format!(
-                        "invalid tool arguments: {e}"
-                    ))),
-                }
-            })
-        })
-    }
-
-    pub fn category_exclusive<F, Fut>(
-        def: lellm_core::ToolDefinition,
-        category: ToolCategory,
-        f: F,
-    ) -> Self
-    where
-        F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
-    {
-        Self {
-            definition: def,
-            safety: ParallelSafety::CategoryExclusive,
-            category: Some(category),
-            func: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
-        }
-    }
-
-    pub fn exclusive<F, Fut>(def: lellm_core::ToolDefinition, f: F) -> Self
-    where
-        F: Fn(&serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = ToolResult> + Send + 'static,
-    {
-        Self {
-            definition: def,
-            safety: ParallelSafety::Exclusive,
-            category: None,
-            func: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
-        }
-    }
-}
 
 /// 批量执行结果 — 长度、顺序、完整性三重保证。
 ///
@@ -205,8 +88,9 @@ impl ToolExecutor {
     ) -> ToolResult {
         match snapshot.get(&call.name) {
             Some(entry) => {
+                let tool_fn = tool_fn_from_reg(entry);
                 self.retry_policy
-                    .execute_with_retry(&entry.func, &call.arguments)
+                    .execute_with_retry(&tool_fn, &call.arguments)
                     .await
             }
             None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
@@ -222,8 +106,9 @@ impl ToolExecutor {
     ) -> ToolResult {
         match snapshot.get(&call.name) {
             Some(entry) => {
+                let tool_fn = tool_fn_from_reg(entry);
                 self.retry_policy
-                    .execute_with_retry_and_emission(&entry.func, &call.arguments, tx, &call.id)
+                    .execute_with_retry_and_emission(&tool_fn, &call.arguments, tx, &call.id)
                     .await
             }
             None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
@@ -390,7 +275,10 @@ async fn run_parallel_indexed_with(
             let idx = *idx;
             tokio::spawn(async move {
                 let result = match tools.get(&call.name) {
-                    Some(entry) => rp.execute_with_retry(&entry.func, &call.arguments).await,
+                    Some(entry) => {
+                        let tool_fn = tool_fn_from_reg(entry);
+                        rp.execute_with_retry(&tool_fn, &call.arguments).await
+                    }
                     None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
                 };
                 (idx, Message::tool_result(&call, &result))
@@ -428,8 +316,9 @@ async fn run_serial_indexed_with(
     for (idx, call) in calls {
         let exec_result = match tools.get(&call.name) {
             Some(entry) => {
+                let tool_fn = tool_fn_from_reg(entry);
                 retry_policy
-                    .execute_with_retry(&entry.func, &call.arguments)
+                    .execute_with_retry(&tool_fn, &call.arguments)
                     .await
             }
             None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
@@ -437,4 +326,15 @@ async fn run_serial_indexed_with(
         results.push((idx, Message::tool_result(&call, &exec_result)));
     }
     results
+}
+
+// ─── Helper: 从 ToolRegistration 创建 ToolFn ─────────────────────
+
+fn tool_fn_from_reg(entry: &ToolRegistration) -> ToolFn {
+    Arc::new(move |args: &serde_json::Value| {
+        let wrapper = entry.execute(args);
+        // UnpinWrapper<T> -> Pin<Box<dyn Future<Output=T>>>
+        let inner: Pin<Box<dyn std::future::Future<Output = ToolResult> + Send>> = wrapper.0;
+        inner
+    })
 }

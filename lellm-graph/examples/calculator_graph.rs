@@ -48,13 +48,29 @@ struct MultiplyArgs {
 fn execute_tool(tc: &ToolCall) -> Value {
     match tc.name.as_str() {
         "add" => {
-            let a = tc.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let b = tc.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let a = tc
+                .arguments
+                .get("a")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let b = tc
+                .arguments
+                .get("b")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             Value::from(a + b)
         }
         "multiply" => {
-            let a = tc.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let b = tc.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let a = tc
+                .arguments
+                .get("a")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let b = tc
+                .arguments
+                .get("b")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
             Value::from(a * b)
         }
         _ => Value::String(format!("未知工具: {}", tc.name)),
@@ -178,7 +194,10 @@ impl LlmCallNode {
             KEY_MESSAGES.into(),
             messages_to_json(&new_messages),
         ));
-        ctx.record(StateMutation::Put(KEY_ITERATIONS.into(), Value::from(iterations + 1)));
+        ctx.record(StateMutation::Put(
+            KEY_ITERATIONS.into(),
+            Value::from(iterations + 1),
+        ));
 
         if !tool_calls.is_empty() {
             ctx.record(StateMutation::Put(
@@ -256,7 +275,10 @@ fn create_tool_execute() -> TaskNode<State> {
             msgs.push(tool_result_msg);
         }
 
-        ctx.record(StateMutation::Put(KEY_MESSAGES.into(), messages_to_json(&msgs)));
+        ctx.record(StateMutation::Put(
+            KEY_MESSAGES.into(),
+            messages_to_json(&msgs),
+        ));
         ctx.record(StateMutation::Delete(KEY_TOOL_CALLS.into()));
         ctx.goto("budget_chk");
         Ok(())
@@ -285,17 +307,17 @@ fn build_graph(
              The user speaks Chinese but you can respond in either language.",
         ))),
     );
-    builder.node(
-        "post_llm_route",
-        NodeKind::Task(create_post_llm_route()),
-    );
+    builder.node("post_llm_route", NodeKind::Task(create_post_llm_route()));
     builder.node("tool_execute", NodeKind::Task(create_tool_execute()));
     builder.node(
         "done",
-        NodeKind::Task(TaskNode::new("done", |_ctx: &mut NodeContext<'_, State>| {
-            tracing::info!("done");
-            Ok(())
-        })),
+        NodeKind::Task(TaskNode::new(
+            "done",
+            |_ctx: &mut NodeContext<'_, State>| {
+                tracing::info!("done");
+                Ok(())
+            },
+        )),
     );
 
     builder.edge("budget_chk", "llm_call");
@@ -334,10 +356,9 @@ async fn main() {
 
     println!("=== Calculator Graph (纯 graph, 无 lellm-agent) ===\n");
 
-    let provider = CodecProvider::load(
-        lellm_provider::providers::openai_compat::OpenAICompatCodec::openai(),
-    )
-    .expect("请设置 OPENAI_API_KEY 环境变量");
+    let provider =
+        CodecProvider::load(lellm_provider::providers::openai_compat::OpenAICompatCodec::openai())
+            .expect("请设置 OPENAI_API_KEY 环境变量");
 
     let model = ResolvedModel {
         provider: Arc::new(provider),
@@ -361,13 +382,8 @@ async fn main() {
 
     let start = std::time::Instant::now();
 
-    let mut exec_ctx = lellm_graph::ExecutionEngine::new(
-        &mut state,
-        None,
-        CancellationToken::new(),
-        None,
-        None,
-    );
+    let mut exec_ctx =
+        lellm_graph::ExecutionEngine::new(&mut state, None, CancellationToken::new(), None, None);
 
     match graph
         .run_inline(&mut exec_ctx, 50, &mut LoggingStepCallback)

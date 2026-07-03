@@ -268,7 +268,10 @@ impl LlmCallNode {
             KEY_MESSAGES.into(),
             messages_to_json(&new_messages),
         ));
-        ctx.record(StateMutation::Put(KEY_ITERATIONS.into(), Value::from(iterations + 1)));
+        ctx.record(StateMutation::Put(
+            KEY_ITERATIONS.into(),
+            Value::from(iterations + 1),
+        ));
 
         if !tool_calls.is_empty() {
             ctx.record(StateMutation::Put(
@@ -352,7 +355,10 @@ fn create_tool_execute() -> TaskNode<State> {
         }
 
         // 更新 state
-        ctx.record(StateMutation::Put(KEY_MESSAGES.into(), messages_to_json(&msgs)));
+        ctx.record(StateMutation::Put(
+            KEY_MESSAGES.into(),
+            messages_to_json(&msgs),
+        ));
         ctx.record(StateMutation::Delete(KEY_TOOL_CALLS.into()));
 
         // 跳回 budget_chk 继续循环
@@ -383,17 +389,17 @@ fn build_agent_graph(
              当用户提问时，优先判断是否需要使用工具。如果需要，调用工具获取结果后再回答。",
         ))),
     );
-    builder.node(
-        "post_llm_route",
-        NodeKind::Task(create_post_llm_route()),
-    );
+    builder.node("post_llm_route", NodeKind::Task(create_post_llm_route()));
     builder.node("tool_execute", NodeKind::Task(create_tool_execute()));
     builder.node(
         "done",
-        NodeKind::Task(TaskNode::new("done", |_ctx: &mut NodeContext<'_, State>| {
-            tracing::info!("agent done");
-            Ok(())
-        })),
+        NodeKind::Task(TaskNode::new(
+            "done",
+            |_ctx: &mut NodeContext<'_, State>| {
+                tracing::info!("agent done");
+                Ok(())
+            },
+        )),
     );
 
     // 边连接
@@ -475,10 +481,7 @@ async fn main() {
 
     let mut step_cb = LoggingStepCallback;
 
-    match graph
-        .run_inline(&mut exec_ctx, 50, &mut step_cb)
-        .await
-    {
+    match graph.run_inline(&mut exec_ctx, 50, &mut step_cb).await {
         Ok(()) => {
             let duration = start.elapsed();
             println!("\n=== 执行完成 ===");

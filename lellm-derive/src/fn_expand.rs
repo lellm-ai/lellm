@@ -103,15 +103,15 @@ pub(crate) fn expand_tool_for_fn(
         // 2. 自动生成的参数结构体
         /// Auto-generated tool arguments for `#fn_name`
         #[derive(
-            ::lellm_agent::serde::Deserialize,
-            ::lellm_agent::schemars::JsonSchema
+            ::lellm_core::serde::Deserialize,
+            ::lellm_core::schemars::JsonSchema
         )]
         #visibility struct #struct_name {
             #(#fields),*
         }
 
         // 3. ToolArgs trait 实现（含 LazyLock schema 缓存）
-        impl ::lellm_agent::ToolArgs for #struct_name {
+        impl ::lellm_core::ToolArgs for #struct_name {
             const NAME: &'static str = #name;
             const DESCRIPTION: &'static str = #description;
 
@@ -126,7 +126,7 @@ pub(crate) fn expand_tool_for_fn(
 
         // 6. 无依赖工厂函数 — 调用原始函数
         /// Auto-generated tool registration for `#fn_name` (no dependency injection).
-        #visibility fn #reg_fn_name() -> ::lellm_agent::ToolRegistration {
+        #visibility fn #reg_fn_name() -> ::lellm_core::ToolRegistration {
             #reg_fn_name_with(|args| async move {
                 #fn_name(#(#arg_refs),*) #await_suffix
             })
@@ -147,10 +147,10 @@ pub(crate) fn expand_tool_for_fn(
         ///     }
         /// }));
         /// ```
-        #visibility fn #reg_fn_name_with<F, Fut>(f: F) -> ::lellm_agent::ToolRegistration
+        #visibility fn #reg_fn_name_with<F, Fut>(f: F) -> ::lellm_core::ToolRegistration
         where
             F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
-            Fut: ::core::future::Future<Output = ::lellm_agent::ToolResult> + Send + 'static,
+            Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
         {
             #struct_name::safe(f)
         }
