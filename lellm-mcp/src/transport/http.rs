@@ -79,17 +79,15 @@ impl McpTransport for HttpTransport {
             tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
 
         // 验证连接：发送一个简单的 initialize 请求
+        let init_params = crate::protocol::InitializeParams::new("2024-11-05")
+            .with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
         let init_req = JsonRpcRequest::new(
             0,
             "initialize",
-            Some(serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "lellm-mcp",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            })),
+            Some(
+                serde_json::to_value(&init_params)
+                    .map_err(|e| McpError::Protocol(e.to_string()))?,
+            ),
         );
 
         let json =

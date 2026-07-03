@@ -23,6 +23,7 @@ uuid = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["openai-compat", "mock"] }
 lellm-core = { workspace = true, features = ["anyhow"] }
+lellm-derive = { path = "../lellm-derive" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 schemars = { workspace = true }

@@ -63,6 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let list_req = JsonRpcRequest::new(1, methods::TOOLS_LIST, None);
     let list_resp = client.request(list_req).await?;
 
+    println!("响应: {:?}", list_resp.result);
+
     let list_result: lellm_mcp::protocol::ListToolsResult =
         serde_json::from_value(match list_resp.result {
             lellm_mcp::protocol::JsonRpcResult::Success(v) => v,

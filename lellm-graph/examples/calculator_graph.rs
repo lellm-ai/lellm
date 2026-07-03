@@ -13,7 +13,8 @@
 //! ```
 
 use async_trait::async_trait;
-use lellm_core::{ChatRequest, ContentBlock, Message, ToolCall, ToolDefinition};
+use lellm_core::{ChatRequest, ContentBlock, ExecutableTool, Message, ToolCall, ToolDefinition};
+use lellm_derive::tool;
 use lellm_graph::{
     GraphBuilder, GraphError, NodeContext, NodeKind, State, StateMerge, StateMutation, TaskNode,
 };
@@ -29,69 +30,27 @@ const KEY_ITERATIONS: &str = "iterations";
 const KEY_TOOL_CALLS: &str = "tool_calls";
 const KEY_TEXT: &str = "text";
 
-// ─── 工具定义 ──────────────────────────────────────────────────
+// ─── 工具定义（#[tool] 宏自动生成 Schema + ExecutableTool）─────
 
-#[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
-struct AddArgs {
-    a: f64,
-    b: f64,
+#[tool(name = "add", description = "Add two numbers")]
+async fn add(a: f64, b: f64) -> lellm_core::ToolResult {
+    Ok(Value::from(a + b))
 }
 
-#[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
-struct MultiplyArgs {
-    a: f64,
-    b: f64,
+#[tool(name = "multiply", description = "Multiply two numbers")]
+async fn multiply(a: f64, b: f64) -> lellm_core::ToolResult {
+    Ok(Value::from(a * b))
 }
 
-fn execute_tool(tc: &ToolCall) -> Value {
-    match tc.name.as_str() {
-        "add" => {
-            let a = tc
-                .arguments
-                .get("a")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let b = tc
-                .arguments
-                .get("b")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            Value::from(a + b)
-        }
-        "multiply" => {
-            let a = tc
-                .arguments
-                .get("a")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let b = tc
-                .arguments
-                .get("b")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            Value::from(a * b)
-        }
-        _ => Value::String(format!("未知工具: {}", tc.name)),
-    }
+fn get_tools() -> Vec<ExecutableTool> {
+    vec![add_tool(), multiply_tool()]
 }
 
 fn get_tool_defs() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "add".to_string(),
-            description: "Add two numbers".to_string(),
-            parameters: ToolDefinition::compute_and_clean_schema::<AddArgs>(),
-            cache_control: None,
-        },
-        ToolDefinition {
-            name: "multiply".to_string(),
-            description: "Multiply two numbers".to_string(),
-            parameters: ToolDefinition::compute_and_clean_schema::<MultiplyArgs>(),
-            cache_control: None,
-        },
-    ]
+    get_tools()
+        .into_iter()
+        .map(|t| t.definition.clone())
+        .collect()
 }
 
 // ─── 辅助函数 ──────────────────────────────────────────────────
@@ -122,6 +81,11 @@ fn get_iterations(state: &State) -> usize {
         .and_then(|v| v.as_u64())
         .map(|v| v as usize)
         .unwrap_or(0)
+}
+
+/// 根据工具名称查找对应的 ExecutableTool
+fn find_tool<'a>(name: &str, tools: &'a [ExecutableTool]) -> Option<&'a ExecutableTool> {
+    tools.iter().find(|t| t.definition.name == name)
 }
 
 // ─── Graph 节点 ─────────────────────────────────────────────────
@@ -246,8 +210,8 @@ fn create_post_llm_route() -> TaskNode<State> {
     })
 }
 
-fn create_tool_execute() -> TaskNode<State> {
-    TaskNode::new("tool_execute", |ctx: &mut NodeContext<'_, State>| {
+fn create_tool_execute(tools: Arc<Vec<ExecutableTool>>) -> TaskNode<State> {
+    TaskNode::new("tool_execute", move |ctx: &mut NodeContext<'_, State>| {
         let tool_calls: Vec<ToolCall> = ctx
             .state()
             .get(KEY_TOOL_CALLS)
@@ -266,10 +230,18 @@ fn create_tool_execute() -> TaskNode<State> {
         let mut msgs = get_messages(ctx.state());
 
         for tc in &tool_calls {
-            let result = execute_tool(tc);
-            let result_str = result.to_string();
-            let tool_result: lellm_core::ToolResult = Ok(result);
-            let tool_result_msg = Message::tool_result(tc, &tool_result);
+            let tool =
+                find_tool(&tc.name, &tools).unwrap_or_else(|| panic!("未知工具: {}", tc.name));
+
+            // 直接调用 ExecutableTool::execute — 自动反序列化参数
+            let result: lellm_core::ToolResult = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(tool.execute(&tc.arguments))
+            });
+            let result_str = match &result {
+                Ok(v) => v.to_string(),
+                Err(e) => e.to_string(),
+            };
+            let tool_result_msg = Message::tool_result(tc, &result);
 
             tracing::info!(tool = %tc.name, result = %result_str, "tool_executed");
             msgs.push(tool_result_msg);
@@ -291,6 +263,7 @@ fn build_graph(
     model: ResolvedModel,
     max_iterations: usize,
 ) -> Result<lellm_graph::Graph<State, StateMerge>, lellm_graph::BuildErrors> {
+    let tools = Arc::new(get_tools());
     let mut builder = GraphBuilder::<State, StateMerge>::new("calculator_graph");
 
     builder.start("budget_chk");
@@ -308,7 +281,7 @@ fn build_graph(
         ))),
     );
     builder.node("post_llm_route", NodeKind::Task(create_post_llm_route()));
-    builder.node("tool_execute", NodeKind::Task(create_tool_execute()));
+    builder.node("tool_execute", NodeKind::Task(create_tool_execute(tools)));
     builder.node(
         "done",
         NodeKind::Task(TaskNode::new(

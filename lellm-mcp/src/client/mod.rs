@@ -54,6 +54,7 @@ impl McpClient {
         let params_value =
             serde_json::to_value(&params).map_err(|e| McpError::Protocol(e.to_string()))?;
 
+        tracing::debug!(params = %params_value, "Sending initialize request");
         let req = JsonRpcRequest::new(0, methods::INITIALIZE, Some(params_value));
         let resp = self.request(req).await?;
 

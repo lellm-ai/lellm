@@ -114,10 +114,15 @@ impl McpTransport for SseTransport {
             let mut event_stream = match client_clone
                 .get(&sse_url)
                 .header("Accept", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .header("Connection", "keep-alive")
                 .send()
                 .await
             {
-                Ok(resp) => resp.bytes_stream().eventsource(),
+                Ok(resp) => {
+                    tracing::debug!(status = %resp.status(), "SSE connection established");
+                    resp.bytes_stream().eventsource()
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "SSE connection failed");
                     return;
