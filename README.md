@@ -9,7 +9,7 @@ Build production AI systems in Rust with predictable runtime behavior, provider 
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.8-green)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.9-green)](./CHANGELOG.md)
 
 ```bash
 cargo add lellm
