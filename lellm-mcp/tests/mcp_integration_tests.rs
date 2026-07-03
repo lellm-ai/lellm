@@ -132,14 +132,11 @@ impl McpTransport for MockTransport {
 }
 
 // ============================================================================
-// Helper: 创建 McpClient（通过 block_in_place 规避 blocking_lock 问题）
+// Helper: 创建 McpClient
 // ============================================================================
 
-fn create_client(transport: MockTransport) -> lellm_mcp::McpClient {
-    std::thread::spawn(move || lellm_mcp::McpClient::with_transport(transport))
-        .join()
-        .unwrap()
-}
+// 注意：测试使用 #[tokio::test]，所以不能在其中 block_on
+// 这些测试需要手动处理 async
 
 // ============================================================================
 // ConnectionState 测试
