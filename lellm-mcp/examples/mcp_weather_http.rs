@@ -17,7 +17,7 @@ use lellm_mcp::transport::{HttpConfig, HttpTransport};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("TENCENT_MAP_KEY").expect("请设置环境变量 TENCENT_MAP_KEY");
 
-    let endpoint_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
+    let endpoint_url = format!("https://mcp.map.qq.com/mcp?key={}&format=1", api_key);
 
     println!("=== MCP Weather — QQ 地图 (HTTP) ===\n");
 
@@ -53,18 +53,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  - {}", tool.name);
     }
 
-    // 查询天气（陆家嘴 = 浦东新区，adcode: 310115）
-    let tool_name = "weather";
-
-    println!("\n查询陆家嘴天气 (adcode: 310115)...\n");
-
-    let call_resp = client
+    // 先用 geocoder 验证 API 正常
+    println!("\n验证 geocoder 工具...");
+    let geo_resp = client
         .request(JsonRpcRequest::new(
             2,
             methods::TOOLS_CALL,
             Some(serde_json::to_value(CallToolParams::new(
+                "geocoder",
+                Some(serde_json::json!({ "address": "天安门广场" })),
+            ))?),
+        ))
+        .await?;
+
+    match &geo_resp.result {
+        lellm_mcp::protocol::JsonRpcResult::Success(value) => {
+            let call_result: lellm_mcp::protocol::CallToolResult =
+                serde_json::from_value(value.clone())?;
+            for content in &call_result.content {
+                if let Some(text) = content.as_text() {
+                    println!("geocoder 结果: {}", text);
+                }
+            }
+        }
+        e => println!("geocoder 失败: {:?}", e),
+    }
+
+    // 查询天气
+    let tool_name = "weather";
+
+    println!("\n查询天安门天气...\n");
+
+    let call_resp = client
+        .request(JsonRpcRequest::new(
+            3,
+            methods::TOOLS_CALL,
+            Some(serde_json::to_value(CallToolParams::new(
                 tool_name,
-                Some(serde_json::json!({ "adcode": "310115" })),
+                Some(serde_json::json!({ "location": "116.397428,39.90923" })),
             ))?),
         ))
         .await?;
