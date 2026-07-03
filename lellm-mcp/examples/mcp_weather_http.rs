@@ -15,22 +15,24 @@ use lellm_mcp::transport::{HttpConfig, HttpTransport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key =
-        std::env::var("TENCENT_MAP_KEY").expect("请设置环境变量 TENCENT_MAP_KEY");
+    let api_key = std::env::var("TENCENT_MAP_KEY").expect("请设置环境变量 TENCENT_MAP_KEY");
 
     let endpoint_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
 
     println!("=== MCP Weather — QQ 地图 (HTTP) ===\n");
 
-    let config = HttpConfig::new(&endpoint_url)
-        .with_request_timeout(std::time::Duration::from_secs(60));
+    let config =
+        HttpConfig::new(&endpoint_url).with_request_timeout(std::time::Duration::from_secs(60));
     let transport = HttpTransport::new(config);
     let client = McpClient::with_transport(transport).await;
 
     // 连接 + 初始化
     client.connect().await?;
     let result = client.initialize().await?;
-    println!("✓ {} v{}", result.server_info.name, result.server_info.version);
+    println!(
+        "✓ {} v{}",
+        result.server_info.name, result.server_info.version
+    );
 
     // 列出可用工具
     let list_resp = client
@@ -75,8 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match call_resp.result {
         lellm_mcp::protocol::JsonRpcResult::Success(value) => {
-            let call_result: lellm_mcp::protocol::CallToolResult =
-                serde_json::from_value(value)?;
+            let call_result: lellm_mcp::protocol::CallToolResult = serde_json::from_value(value)?;
             for content in &call_result.content {
                 if let Some(text) = content.as_text() {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {

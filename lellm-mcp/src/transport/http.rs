@@ -1,16 +1,16 @@
 //! HTTP Transport — 通过 Streamable HTTP 通信。
 //!
 //! 架构：
-//! - connect() 验证连接
+//! - connect() 建立连接
 //! - request() 通过 HTTP POST 发送 JSON-RPC 请求，等待响应
-//! - 无状态通信，每次请求独立
+//! - 自动处理 mcp-session-id
 //!
 //! 参考：https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 
 use super::{ConnectionState, McpTransport, NotificationStream};
 use crate::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError};
@@ -24,7 +24,7 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// HTTP Transport 配置。
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
-    /// HTTP 端点 URL（如 https://mcp.map.baidu.com/mcp?ak=xxx）
+    /// HTTP 端点 URL（如 https://mcp.map.qq.com/mcp?key=xxx&format=0）
     pub endpoint_url: String,
     /// 单次请求超时（默认 30 秒）。
     pub request_timeout: std::time::Duration,
@@ -38,7 +38,6 @@ impl HttpConfig {
         }
     }
 
-    /// 设置请求超时。
     pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.request_timeout = timeout;
         self
@@ -53,10 +52,10 @@ pub struct HttpTransport {
 }
 
 struct HttpTransportInner {
-    /// HTTP 客户端
     client: reqwest::Client,
-    /// Notification 发送器（Streamable HTTP 可能在响应中包含 notification）
     notification_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
+    /// 服务器返回的 session ID，后续请求自动携带。
+    session_id: Mutex<Option<String>>,
 }
 
 impl HttpTransport {
@@ -81,6 +80,7 @@ impl McpTransport for HttpTransport {
         self.inner = Some(Arc::new(HttpTransportInner {
             client,
             notification_tx,
+            session_id: Mutex::new(None),
         }));
 
         self.state.send(ConnectionState::Ready).ok();
@@ -92,56 +92,104 @@ impl McpTransport for HttpTransport {
 
         let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
 
-        let response = inner
+        // 构建请求，自动携带 session-id
+        let mut builder = inner
             .client
             .post(&self.config.endpoint_url)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
+            .header("Accept", "application/json, text/event-stream");
+
+        if let Some(ref sid) = *inner.session_id.lock().await {
+            builder = builder.header("Mcp-Session-Id", sid);
+        }
+
+        let response = builder
             .body(json)
             .send()
             .await
             .map_err(|e| McpError::Network(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(McpError::Network(format!("HTTP {}", response.status())));
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(McpError::Network(format!("HTTP {}: {}", status, body)));
+        }
+
+        // 保存 session-id
+        if let Some(sid) = response.headers().get("mcp-session-id") {
+            if let Ok(sid_str) = sid.to_str() {
+                *inner.session_id.lock().await = Some(sid_str.to_string());
+            }
         }
 
         let content_type = response
             .headers()
             .get("content-type")
-            .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
+            .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
 
         if content_type.contains("text/event-stream") {
-            // SSE 响应：解析事件流
             let bytes = response
                 .bytes()
                 .await
                 .map_err(|e| McpError::Network(e.to_string()))?;
             let body = String::from_utf8_lossy(&bytes);
+            eprintln!("DEBUG: SSE body length = {}", body.len());
+            // 只打印前几行
+            for (i, line) in body.lines().take(5).enumerate() {
+                eprintln!("DEBUG: line {}: {:?}", i, &line[..line.len().min(200)]);
+            }
 
-            // 简单解析 SSE 事件（实际应该用 eventsource-stream）
+            // SSE 格式: 每个事件以空行分隔，包含 event:xxx 和 data:xxx
+            let mut current_event = String::new();
+            let mut current_data = String::new();
+
             for line in body.lines() {
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
-                    if let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(data) {
-                        match msg {
-                            crate::protocol::JsonRpcMessage::Response(resp) => {
-                                return Ok(resp);
+                eprintln!("DEBUG: line = {:?}", line);
+                if line.starts_with("event: ") {
+                    current_event = line[7..].to_string();
+                } else if line.starts_with("data: ") {
+                    current_data = line[6..].to_string();
+                } else if line.is_empty() && !current_data.is_empty() {
+                    // 空行表示事件结束，处理事件
+                    eprintln!(
+                        "DEBUG: Processing event = {:?}, data len = {}",
+                        current_event,
+                        current_data.len()
+                    );
+                    match current_event.as_str() {
+                        "message" => {
+                            if let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(
+                                &current_data,
+                            ) {
+                                match msg {
+                                    crate::protocol::JsonRpcMessage::Response(resp) => {
+                                        eprintln!("DEBUG: Found response with id = {}", resp.id);
+                                        return Ok(resp);
+                                    }
+                                    crate::protocol::JsonRpcMessage::Notification(notif) => {
+                                        let _ = inner.notification_tx.send(notif);
+                                    }
+                                    _ => {}
+                                }
                             }
-                            crate::protocol::JsonRpcMessage::Notification(notif) => {
-                                let _ = inner.notification_tx.send(notif);
-                            }
-                            _ => {}
+                        }
+                        "endpoint" => {
+                            tracing::debug!(endpoint = %current_data, "Received endpoint");
+                        }
+                        _ => {
+                            tracing::debug!(event = %current_event, "Unknown SSE event");
                         }
                     }
+                    current_event.clear();
+                    current_data.clear();
                 }
             }
 
+            eprintln!("DEBUG: No response found in SSE stream");
             Err(McpError::Protocol("No response in SSE stream".to_string()))
         } else {
-            // JSON 响应
             let body = response
                 .text()
                 .await
@@ -161,12 +209,8 @@ impl McpTransport for HttpTransport {
                 loop {
                     match rx.recv().await {
                         Ok(notif) => break Some((notif, rx)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            break None;
-                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
                     }
                 }
             }))

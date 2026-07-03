@@ -34,4 +34,3 @@ bridge = ["dep:lellm-agent"]
 
 [dev-dependencies]
 lellm-agent.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

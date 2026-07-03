@@ -26,41 +26,39 @@
 //! cargo run --example tool_use
 //! ```
 
-use lellm_agent::schemars::JsonSchema;
-use lellm_agent::serde::Deserialize;
 use lellm_agent::{AgentBuilder, ToolUseLoop};
-use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall};
-use lellm_derive::Tool;
+use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolResult};
+use lellm_derive::tool;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 
 // ─── 定义工具 ───────────────────────────────────────────────────
 
-#[allow(dead_code)]
-#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(
     name = "search_products",
     description = "搜索产品目录，返回匹配的产品列表"
 )]
-struct SearchProductsArgs {
-    /// 搜索关键词
-    query: String,
+async fn search_products(query: String) -> ToolResult {
+    Ok(serde_json::json!(format!(
+        "找到 5 个匹配\"{}\"的产品。前 5 个结果：WH-1000XM5, AirPods Pro, QC45, WF-1000XM4, HD600",
+        query
+    )))
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(name = "check_inventory", description = "检查指定产品的库存数量")]
-struct CheckInventoryArgs {
-    /// 产品 ID
-    product_id: String,
+async fn check_inventory(product_id: String) -> ToolResult {
+    Ok(serde_json::json!(format!(
+        "产品 {}：库存 10 件",
+        product_id
+    )))
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize, JsonSchema, Tool)]
 #[tool(name = "get_weather", description = "获取指定位置的天气信息")]
-struct GetWeatherArgs {
-    /// 城市或地点名称
-    location: String,
+async fn get_weather(location: String) -> ToolResult {
+    Ok(serde_json::json!(format!(
+        "{} 的天气：晴朗，25°C",
+        location
+    )))
 }
 
 // ─── 模拟 ReAct 循环的 Mock Provider ────────────────────────────
@@ -169,30 +167,12 @@ fn create_react_agent() -> ToolUseLoop {
         model: "react-model".to_string(),
     };
 
-    // 注册工具
-    let tools = vec![
-        SearchProductsArgs::safe(|args| async move {
-            Ok(serde_json::json!(format!(
-                "找到 5 个匹配\"{}\"的产品。前 5 个结果：WH-1000XM5, AirPods Pro, QC45, WF-1000XM4, HD600",
-                args.query
-            )))
-        }),
-        CheckInventoryArgs::safe(|args| async move {
-            Ok(serde_json::json!(format!(
-                "产品 {}：库存 10 件",
-                args.product_id
-            )))
-        }),
-        GetWeatherArgs::safe(|args| async move {
-            Ok(serde_json::json!(format!(
-                "{} 的天气：晴朗，25°C",
-                args.location
-            )))
-        }),
-    ];
-
     AgentBuilder::new(model)
-        .tools(tools)
+        .tools(vec![
+            search_products_tool(),
+            check_inventory_tool(),
+            get_weather_tool(),
+        ])
         .max_iterations(10)
         .compile()
 }
