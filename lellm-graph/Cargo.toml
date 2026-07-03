@@ -19,3 +19,12 @@ tracing.workspace = true
 thiserror.workspace = true
 futures = "0.3"
 uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+lellm-provider = { path = "../lellm-provider", features = ["openai-compat"] }
+lellm-core = { workspace = true, features = ["anyhow"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "pure_graph_agent"
+path = "examples/pure_graph_agent.rs"
