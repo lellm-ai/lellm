@@ -53,16 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  - {}", tool.name);
     }
 
-    // 查询天气
-    let city = "陆家嘴";
-    let tool_name = list_result
-        .tools
-        .iter()
-        .find(|t| t.name.contains("weather"))
-        .map(|t| t.name.as_str())
-        .unwrap_or("weather");
+    // 查询天气（陆家嘴 = 浦东新区，adcode: 310115）
+    let tool_name = "weather";
 
-    println!("\n查询 {} 天气 (工具: {})...\n", city, tool_name);
+    println!("\n查询陆家嘴天气 (adcode: 310115)...\n");
 
     let call_resp = client
         .request(JsonRpcRequest::new(
@@ -70,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             methods::TOOLS_CALL,
             Some(serde_json::to_value(CallToolParams::new(
                 tool_name,
-                Some(serde_json::json!({ "address": city })),
+                Some(serde_json::json!({ "adcode": "310115" })),
             ))?),
         ))
         .await?;
