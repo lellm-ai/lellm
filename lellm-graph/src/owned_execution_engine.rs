@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::event::FlowEvent;
 use crate::execution_engine::{
     ExecutionControl, ExecutionView, ExecutorState, NextAction, NodeMetadata,
 };
@@ -26,7 +25,6 @@ pub struct OwnedExecutionEngine<S: WorkflowState> {
     control: ExecutionControl,
     metadata: NodeMetadata,
     mutations: Vec<S::Mutation>,
-    flow_events: Vec<FlowEvent>,
 }
 
 impl<S: WorkflowState> OwnedExecutionEngine<S> {
@@ -39,7 +37,6 @@ impl<S: WorkflowState> OwnedExecutionEngine<S> {
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
             mutations: Vec::new(),
-            flow_events: Vec::new(),
         }
     }
 
@@ -97,7 +94,6 @@ impl<S: WorkflowState> ExecutorState<S> for OwnedExecutionEngine<S> {
             control: &mut self.control,
             metadata: &mut self.metadata,
             mutations: &mut self.mutations,
-            flow_events: &mut self.flow_events,
         }
     }
 
@@ -109,7 +105,6 @@ impl<S: WorkflowState> ExecutorState<S> for OwnedExecutionEngine<S> {
             control: &mut self.control,
             metadata: &mut self.metadata,
             mutations: &mut self.mutations,
-            flow_events: &mut self.flow_events,
         }
     }
 
@@ -131,13 +126,5 @@ impl<S: WorkflowState> ExecutorState<S> for OwnedExecutionEngine<S> {
 
     fn take_metadata(&mut self) -> NodeMetadata {
         std::mem::take(&mut self.metadata)
-    }
-
-    fn take_flow_events(&mut self) -> Vec<FlowEvent> {
-        std::mem::take(&mut self.flow_events)
-    }
-
-    fn emit_flow_event(&mut self, event: FlowEvent) {
-        self.flow_events.push(event);
     }
 }

@@ -22,9 +22,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::GraphError;
-use crate::event::FlowEvent;
 use crate::execution_engine::{ExecutionEngine, ExecutorState, OwnedExecutionEngine};
-use crate::ids::SpanId;
 use crate::node::FlowNode;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
@@ -201,15 +199,14 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
     /// 执行并行分支 — 创建独立的 OwnedExecutionEngine 给每个分支。
     pub async fn execute(&self, engine: &mut ExecutionEngine<'_, S>) -> Result<(), GraphError> {
         let start_time = Instant::now();
-        let span_id = SpanId::new();
         let branch_count = self.branches.len();
         let display_name = self.display_name();
 
-        engine.emit_flow_event(FlowEvent::ParallelStarted {
-            node_id: display_name.clone(),
-            branch_count,
-            span_id,
-        });
+        tracing::debug!(
+            parallel = %display_name,
+            branches = branch_count,
+            "parallel node started"
+        );
 
         // Clone typed state for each branch — each branch works on its own copy
         let base_state = engine.clone_state();
@@ -268,13 +265,12 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
         for (branch_name, result) in raw_results {
             match result {
                 Ok((state, branch_duration)) => {
-                    engine.emit_flow_event(FlowEvent::BranchCompleted {
-                        branch_name,
-                        node_id: display_name.clone(),
-                        span_id: SpanId::new(),
-                        success: true,
-                        duration: branch_duration,
-                    });
+                    tracing::debug!(
+                        parallel = %display_name,
+                        branch = %branch_name,
+                        duration_ms = branch_duration.as_millis(),
+                        "branch completed"
+                    );
                     branch_states.push(state);
                 }
                 Err(reason) => {
@@ -327,11 +323,11 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
         // Replace parent state with merged result
         engine.replace_state(merged);
 
-        engine.emit_flow_event(FlowEvent::ParallelCompleted {
-            node_id: display_name,
-            span_id,
-            duration: start_time.elapsed(),
-        });
+        tracing::debug!(
+            parallel = %display_name,
+            duration_ms = start_time.elapsed().as_millis(),
+            "parallel node completed"
+        );
 
         Ok(())
     }

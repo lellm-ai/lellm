@@ -417,6 +417,7 @@ impl AgentBuilder {
     ///     None,
     ///     CancellationToken::new(),
     ///     None,  // 不需要自动 checkpoint
+    ///     None,  // 不需要 Barrier
     /// );
     /// graph.run_inline(&mut ctx, max_steps).await?;
     /// ```

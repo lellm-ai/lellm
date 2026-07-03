@@ -3,6 +3,7 @@
 //! 通用工作流引擎（类似 LangGraph / Temporal / Prefect）。
 
 pub mod barrier_node;
+pub mod barrier_sink;
 pub mod barrier_wait;
 pub mod checkpoint;
 pub mod checkpoint_codec;
@@ -59,6 +60,11 @@ pub use checkpoint::{
 
 // ─── Checkpoint Policy ───────────────────────────────────────
 pub use checkpoint_policy::{RetentionPolicy, TriggerPolicy};
+
+// ─── Barrier Sink ──────────────────────────────────────────────
+pub use barrier_sink::{
+    BarrierOutcome, BarrierSink, ChannelBarrierSink, MockBarrierSink, NoopBarrierSink,
+};
 
 // ─── Checkpoint Codec ────────────────────────────────────────
 pub use checkpoint_codec::{CheckpointCodec, SerdeCheckpointCodec, TypedCheckpointStore};

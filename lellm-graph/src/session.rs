@@ -296,6 +296,7 @@ where
     ///     Some(stream),       // Stream 由调用者提供
     ///     cancel,
     ///     Some(&mut sink),    // 启用自动 checkpoint
+    ///     None,               // 不需要 Barrier Sink
     /// );
     /// session.run_with(&mut engine).await?;
     /// ```

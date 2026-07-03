@@ -8,7 +8,6 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::event::FlowEvent;
 use crate::execution_engine::{ExecutionControl, NodeMetadata};
 use crate::state::State;
 use crate::stream_chunk::StreamChunk;
@@ -27,7 +26,7 @@ pub use crate::execution_engine::ExecutionContext;
 /// 设计原则：
 /// - **只能读 State**（`&S`，不可变引用）
 /// - **只能 emit Mutation**（借用在 Engine 的 mutations buffer）
-/// - **只能 emit Stream / FlowEvent**
+/// - **只能 emit Stream**
 /// - **不能 replace_state / clone_state / fork / merge**
 ///
 /// 与 NodeContext 的区别：
@@ -46,8 +45,6 @@ pub struct LeafContext<'a, S: WorkflowState = State> {
     pub(crate) metadata: &'a mut NodeMetadata,
     /// Mutation 缓冲 — 借用在 ExecutionEngine 的 buffer
     pub(crate) mutations: &'a mut Vec<S::Mutation>,
-    /// FlowEvent 缓冲 — 借用在 ExecutionEngine 的 buffer
-    pub(crate) flow_events: &'a mut Vec<FlowEvent>,
 }
 
 impl<S: WorkflowState> LeafContext<'_, S> {
@@ -74,11 +71,6 @@ impl<S: WorkflowState> LeafContext<'_, S> {
         if let Some(stream) = self.stream {
             stream.emit(chunk);
         }
-    }
-
-    /// 发射控制面 FlowEvent（缓冲到 ExecutionEngine，供 Executor 收集转发）。
-    pub fn emit_flow_event(&mut self, event: FlowEvent) {
-        self.flow_events.push(event);
     }
 
     // ─── 取消检查 ─────────────────────────────────────────────
@@ -155,8 +147,6 @@ pub struct NodeContext<'a, S: WorkflowState = State> {
     pub(crate) metadata: &'a mut NodeMetadata,
     /// Mutation 缓冲 — 节点产生的强类型领域事件
     pub(crate) mutations: &'a mut Vec<S::Mutation>,
-    /// FlowEvent 缓冲 — 节点产生的控制面事件
-    pub(crate) flow_events: &'a mut Vec<FlowEvent>,
 }
 
 impl<S: WorkflowState> NodeContext<'_, S> {
@@ -197,11 +187,6 @@ impl<S: WorkflowState> NodeContext<'_, S> {
         if let Some(stream) = self.stream {
             stream.emit(chunk);
         }
-    }
-
-    /// 发射控制面 FlowEvent（缓冲到 ExecutionContext，供 Executor 收集转发）。
-    pub fn emit_flow_event(&mut self, event: FlowEvent) {
-        self.flow_events.push(event);
     }
 
     // ─── 取消检查 ─────────────────────────────────────────────

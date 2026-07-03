@@ -196,7 +196,7 @@ pub(crate) async fn run_execution_loop<S, M>(
     let restore_state = restore_from.as_ref().map(|cp| S::restore(cp.state.clone()));
     let mut engine_state = restore_state.unwrap_or(state);
     // execution_loop 是内部测试工具，不需要自动 checkpoint
-    let mut engine = ExecutionEngine::new(&mut engine_state, None, cancel.clone(), None);
+    let mut engine = ExecutionEngine::new(&mut engine_state, None, cancel.clone(), None, None);
     let mut current = if let Some(ref cp) = restore_from {
         cp.current_node.0.clone()
     } else {
@@ -438,18 +438,6 @@ pub(crate) async fn run_execution_loop<S, M>(
                 })
                 .await;
             break;
-        }
-
-        // 消费 FlowEvent 缓冲 → 转发为 GraphEvent::Node
-        let flow_events = engine.take_flow_events();
-        for fe in flow_events {
-            let _ = event_tx
-                .send(GraphEvent::Node {
-                    span_id,
-                    node_name: node_name.clone(),
-                    event: fe,
-                })
-                .await;
         }
 
         // commit mutations (Unit of Work) — 三段式流水线

@@ -348,11 +348,41 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             // Sink 自行决定是否记录、如何记录。
             exec_ctx.emit_checkpoint(&current, step);
 
-            // 消费 FlowEvent 缓冲（积累到 engine，执行结束后由调用者取用）
-            let _flow_events = exec_ctx.take_flow_events();
-
             // 提取控制信号
-            let (next_action, _signal) = exec_ctx.take_control();
+            let (next_action, signal) = exec_ctx.take_control();
+
+            // 处理 Barrier Pause 信号
+            if let Some(crate::execution_engine::ExecutionSignal::Pause {
+                barrier_id,
+                timeout,
+            }) = signal
+            {
+                let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await;
+                match outcome {
+                    crate::barrier_sink::BarrierOutcome::Decision(
+                        crate::event::BarrierDecision::Reroute { target },
+                    ) => {
+                        current = target;
+                        continue;
+                    }
+                    crate::barrier_sink::BarrierOutcome::Decision(
+                        crate::event::BarrierDecision::Approve
+                        | crate::event::BarrierDecision::Reject { .. }
+                        | crate::event::BarrierDecision::Modify { .. },
+                    ) => {
+                        // Approve/Reject/Modify — 继续正常路由
+                        // Modify 决策在 BarrierSink 内部处理（或通过 State 传递）
+                    }
+                    crate::barrier_sink::BarrierOutcome::TimedOut => {
+                        // 超时 — 默认 Reject 语义，继续正常路由
+                    }
+                    crate::barrier_sink::BarrierOutcome::Cancelled => {
+                        return Err(GraphError::Terminal(
+                            crate::error::TerminalError::BarrierCancelled { node: current },
+                        ));
+                    }
+                }
+            }
 
             // 处理路由
             match next_action {

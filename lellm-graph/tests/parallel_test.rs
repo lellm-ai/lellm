@@ -4,7 +4,7 @@
 
 use lellm_graph::State;
 use lellm_graph::{
-    FlowEvent, GraphBuilder, GraphError, GraphEvent, GraphExecution, NodeContext, NodeKind,
+    GraphBuilder, GraphError, GraphEvent, GraphExecution, NodeContext, NodeKind,
     ParallelErrorStrategy, ParallelNode, SimpleExecutor, StateExt, StateMutation, TaskNode,
 };
 use std::sync::Arc;
@@ -326,69 +326,6 @@ async fn test_parallel_collect_all() {
         result.is_err(),
         "should fail even with CollectAll when a branch fails"
     );
-}
-
-// ─── 流式事件 ────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_parallel_emits_events() {
-    let parallel = ParallelNode::builder()
-        .label("my_parallel")
-        .branch(
-            "fast",
-            Arc::new(TaskNode::new("fast", |_ctx: &mut NodeContext<'_>| Ok(()))),
-        )
-        .branch(
-            "also_fast",
-            Arc::new(TaskNode::new("also_fast", |_ctx: &mut NodeContext<'_>| {
-                Ok(())
-            })),
-        )
-        .build();
-
-    let mut g = GraphBuilder::new("parallel_events");
-    let _ = g.start("p");
-    let _ = g.node("p", NodeKind::Parallel(parallel));
-    let _ = g.end("p");
-    let graph = g.build().expect("build should succeed");
-
-    let GraphExecution { mut stream, handle } =
-        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
-
-    drop(handle);
-
-    let mut has_parallel_started = false;
-    let mut has_parallel_completed = false;
-    let mut branch_completed_count = 0;
-
-    while let Some(event) = stream.recv().await {
-        match &event {
-            GraphEvent::Node {
-                event: FlowEvent::ParallelStarted { branch_count, .. },
-                ..
-            } => {
-                has_parallel_started = true;
-                assert_eq!(*branch_count, 2);
-            }
-            GraphEvent::Node {
-                event: FlowEvent::BranchCompleted { .. },
-                ..
-            } => {
-                branch_completed_count += 1;
-            }
-            GraphEvent::Node {
-                event: FlowEvent::ParallelCompleted { .. },
-                ..
-            } => {
-                has_parallel_completed = true;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(has_parallel_started, "should emit ParallelStarted");
-    assert!(has_parallel_completed, "should emit ParallelCompleted");
-    assert_eq!(branch_completed_count, 2, "should emit 2 BranchCompleted");
 }
 
 // ─── Pipeline 集成 ───────────────────────────────────────────

@@ -169,8 +169,9 @@ where
             let inner_ref = self.lens.get(outer);
 
             // 2. 创建内层 ExecutionEngine（借用 inner_ref）
-            // Subgraph 内部不需要自动 checkpoint，传 None
-            let mut inner_engine = crate::ExecutionEngine::new(inner_ref, stream, cancel, None);
+            // Subgraph 内部不需要自动 checkpoint/barrier，传 None
+            let mut inner_engine =
+                crate::ExecutionEngine::new(inner_ref, stream, cancel, None, None);
 
             // 3. 执行内层 Graph
             self.graph

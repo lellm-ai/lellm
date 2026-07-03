@@ -39,13 +39,28 @@
 //!
 //! 节点只能通过 `record()` 声明变更意图，无法直接修改 State。
 //! 这保证了 Mutation Log 是唯一写入口，使 Replay、Trace、Parallel Merge、Undo 全部成立。
+//!
+//! # Sink 注入模型
+//!
+//! 所有高级能力通过 Sink 注入，Engine 不维护任何"事件缓冲"：
+//!
+//! ```text
+//! Graph::run_inline()
+//!         │
+//!         ▼
+//!    ExecutionEngine
+//!         │
+//!         ├── StreamSink        — 数据面流式输出
+//!         ├── CheckpointSink    — 恢复边界通知
+//!         └── BarrierSink       — Barrier 等待 + 决策注入
+//! ```
 
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::barrier_sink::BarrierSink;
 use crate::checkpoint::CheckpointSink;
-use crate::event::FlowEvent;
 use crate::stream_chunk::StreamChunk;
 use crate::stream_emitter::StreamSink;
 use crate::workflow_state::WorkflowState;
@@ -155,9 +170,6 @@ pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
     fn apply_batch(&mut self, mutations: impl IntoIterator<Item = S::Mutation>);
     fn take_control(&mut self) -> (NextAction, Option<ExecutionSignal>);
     fn take_metadata(&mut self) -> NodeMetadata;
-    fn take_flow_events(&mut self) -> Vec<FlowEvent>;
-    /// 发射控制面 FlowEvent（Composite 节点如 ParallelNode 需要）。
-    fn emit_flow_event(&mut self, event: FlowEvent);
 }
 
 // ─── ExecutionEngine ──────────────────────────────────────────
@@ -171,6 +183,13 @@ pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
 ///
 /// Engine 借用 `&'a mut S`，不拥有 State。调用方在 Engine 生命周期外持有所有权。
 /// 这使得 Subgraph 组合成为可能 — 外层 Engine 借用 Outer，内层 Engine 借用 Inner。
+///
+/// # Sink 注入
+///
+/// 所有高级能力通过 Sink 注入：
+/// - `stream` — 数据面流式输出
+/// - `checkpoint` — 恢复边界通知
+/// - `barrier` — Barrier 等待 + 决策注入
 ///
 /// # 三层 API
 ///
@@ -187,14 +206,15 @@ pub struct ExecutionEngine<'a, S: WorkflowState> {
     /// Checkpoint Sink — 可选。Engine 借用，不拥有 Checkpoint 生命周期。
     /// 在 commit() 之后通知 Sink 到达了合法的恢复边界。
     checkpoint: Option<&'a mut dyn CheckpointSink<S>>,
+    /// Barrier Sink — 可选。Engine 借用，不拥有 Barrier 生命周期。
+    /// 在检测到 Pause 信号时，通过 BarrierSink 等待外部决策。
+    barrier: Option<&'a mut dyn BarrierSink>,
     /// 控制信号 — 节点写入，Executor 读取
     control: ExecutionControl,
     /// 节点元数据 — 节点写入
     metadata: NodeMetadata,
     /// Mutation 缓冲 — 节点产生的强类型领域事件
     mutations: Vec<S::Mutation>,
-    /// FlowEvent 缓冲 — 节点产生的控制面事件
-    flow_events: Vec<FlowEvent>,
 }
 
 impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
@@ -202,23 +222,24 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
     ///
     /// Engine 借用 `state`，不拥有它。调用方在 Engine 外保持所有权。
     ///
-    /// `checkpoint` 是可选的 Checkpoint Sink——Engine 借用，不拥有生命周期。
-    /// 传 `None` 表示不需要自动 checkpoint（如 ToolUseLoop 简单调用）。
+    /// - `checkpoint` — 可选的 Checkpoint Sink（`None` = 不需要自动 checkpoint）
+    /// - `barrier` — 可选的 Barrier Sink（`None` = 遇到 Barrier 直接 Approve）
     pub fn new(
         state: &'a mut S,
         stream: Option<Arc<dyn StreamSink>>,
         cancel: CancellationToken,
         checkpoint: Option<&'a mut dyn CheckpointSink<S>>,
+        barrier: Option<&'a mut dyn BarrierSink>,
     ) -> Self {
         Self {
             state,
             stream,
             cancel,
             checkpoint,
+            barrier,
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
             mutations: Vec::new(),
-            flow_events: Vec::new(),
         }
     }
 
@@ -230,6 +251,22 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
         if let Some(ref mut sink) = self.checkpoint {
             use crate::checkpoint::FrameInfo;
             sink.on_checkpoint(self.state, &FrameInfo::new(node_id, step));
+        }
+    }
+
+    /// 等待 Barrier 决策（crate 内部使用）。
+    ///
+    /// 由 Graph::run_inline() 在检测到 Pause 信号时调用。
+    /// 无 BarrierSink 时，直接返回 Approve。
+    pub(crate) async fn wait_barrier(
+        &mut self,
+        barrier_id: &crate::event::BarrierId,
+        timeout: Option<std::time::Duration>,
+    ) -> crate::barrier_sink::BarrierOutcome {
+        if let Some(ref mut sink) = self.barrier {
+            sink.wait_decision(barrier_id, timeout).await
+        } else {
+            crate::barrier_sink::BarrierOutcome::Decision(crate::event::BarrierDecision::Approve)
         }
     }
 
@@ -248,11 +285,6 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
     /// 获取元数据（Executor 调用）。
     pub fn take_metadata(&mut self) -> NodeMetadata {
         std::mem::take(&mut self.metadata)
-    }
-
-    /// 消费 FlowEvent 缓冲（Executor 调用）。
-    pub fn take_flow_events(&mut self) -> Vec<FlowEvent> {
-        std::mem::take(&mut self.flow_events)
     }
 
     /// 获取状态引用。
@@ -346,7 +378,6 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
             control: &mut self.control,
             metadata: &mut self.metadata,
             mutations: &mut self.mutations,
-            flow_events: &mut self.flow_events,
         }
     }
 
@@ -358,7 +389,6 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
             control: &mut self.control,
             metadata: &mut self.metadata,
             mutations: &mut self.mutations,
-            flow_events: &mut self.flow_events,
         }
     }
 
@@ -380,14 +410,6 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
 
     fn take_metadata(&mut self) -> NodeMetadata {
         std::mem::take(&mut self.metadata)
-    }
-
-    fn take_flow_events(&mut self) -> Vec<FlowEvent> {
-        std::mem::take(&mut self.flow_events)
-    }
-
-    fn emit_flow_event(&mut self, event: FlowEvent) {
-        self.flow_events.push(event);
     }
 }
 

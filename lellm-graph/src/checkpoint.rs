@@ -456,6 +456,7 @@ mod tests {
             None,
             CancellationToken::new(),
             Some(&mut sink),
+            None,
         );
 
         // 执行
@@ -485,6 +486,7 @@ mod tests {
             None,
             CancellationToken::new(),
             Some(&mut sink),
+            None,
         );
 
         graph.run_inline(&mut engine, 100).await.unwrap();
