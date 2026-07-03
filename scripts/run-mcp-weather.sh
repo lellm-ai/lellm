@@ -1,5 +1,5 @@
 #!/bin/bash
-# 运行 MCP Weather 示例
+# 运行 MCP Geocoder 示例
 
 # 请在这里设置你的 API Key
 # export TENCENT_MAP_KEY="你的API_KEY"
@@ -11,5 +11,5 @@ if [ -z "$TENCENT_MAP_KEY" ]; then
     exit 1
 fi
 
-echo "=== 运行 MCP Weather 示例 ==="
-cargo run --example mcp_weather --features sse -p lellm-mcp
+echo "=== 运行 MCP Geocoder 示例 (SSE) ==="
+cargo run --example mcp_weather_sse --features sse -p lellm-mcp

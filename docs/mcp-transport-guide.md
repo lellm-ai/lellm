@@ -85,13 +85,13 @@ let transport = HttpTransport::new(config);
 ### SSE 示例
 
 ```bash
-QQ_MAP_KEY=your_api_key cargo run --example mcp_weather --features sse
+TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather_sse --features sse
 ```
 
 ### HTTP 示例
 
 ```bash
-QQ_MAP_KEY=your_api_key cargo run --example mcp_weather_http --features http
+TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather_http --features http
 ```
 
 ## Feature Gates
