@@ -411,8 +411,13 @@ impl AgentBuilder {
     /// let graph = AgentBuilder::new(model).tools([...]).build();
     ///
     /// // 直接执行
-    /// let state = AgentState::from_messages(messages);
-    /// let mut ctx = ExecutionContext::new(state, None, CancellationToken::new());
+    /// let mut state = AgentState::from_messages(messages);
+    /// let mut ctx = ExecutionContext::new(
+    ///     &mut state,
+    ///     None,
+    ///     CancellationToken::new(),
+    ///     None,  // 不需要自动 checkpoint
+    /// );
     /// graph.run_inline(&mut ctx, max_steps).await?;
     /// ```
     pub fn build(self) -> Arc<Graph<AgentState, AgentStateMerge>> {

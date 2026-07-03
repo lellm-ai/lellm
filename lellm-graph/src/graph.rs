@@ -343,6 +343,11 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             // commit mutations (Unit of Work) — 对 Parallel 是空操作
             exec_ctx.commit();
 
+            // checkpoint — 通知 Sink 到达了合法的恢复边界。
+            // 顺序：execute → commit → checkpoint → route
+            // Sink 自行决定是否记录、如何记录。
+            exec_ctx.emit_checkpoint(&current, step);
+
             // 消费 FlowEvent 缓冲（积累到 engine，执行结束后由调用者取用）
             let _flow_events = exec_ctx.take_flow_events();
 

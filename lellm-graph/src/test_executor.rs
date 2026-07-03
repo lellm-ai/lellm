@@ -47,7 +47,8 @@ impl SimpleExecutor {
         let mut execution_log: Vec<ExecutionEntry> = Vec::new();
 
         let cancel = CancellationToken::new();
-        let mut engine = ExecutionEngine::new(&mut state, None, cancel);
+        // TestExecutor 不需要自动 checkpoint
+        let mut engine = ExecutionEngine::new(&mut state, None, cancel, None);
 
         // 执行循环 — 与 run_inline 一致，但记录 ExecutionEntry
         let mut current = graph.start_node().to_string();

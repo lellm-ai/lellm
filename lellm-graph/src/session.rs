@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::checkpoint::FrameStack;
+use crate::checkpoint::{CheckpointSink, Frame, FrameInfo, FrameStack};
 use crate::graph::Graph;
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
@@ -55,6 +55,52 @@ impl PartialEq for SessionError {
                 },
             ) => e1 == e2 && a1 == a2,
         }
+    }
+}
+
+// ─── SessionCheckpointSink ─────────────────────────────────────
+
+/// Session 的 Checkpoint Sink — 将 checkpoint 事件写入 FrameStack。
+///
+/// 这是 CheckpointSink SPI 的实现之一。Engine 通过借用 `&dyn CheckpointSink<S>`
+/// 通知到达恢复边界，SessionCheckpointSink 负责将 Frame 推入 FrameStack。
+///
+/// # 设计原则
+///
+/// Engine 不知道 FrameStack 的存在，只调用 `sink.on_checkpoint(&state, &frame_info)`。
+/// SessionCheckpointSink 是适配器，将通用的 checkpoint 事件转换为 FrameStack 操作。
+pub struct SessionCheckpointSink<'a, S: WorkflowState = State>
+where
+    S::Checkpoint: Debug,
+{
+    frame_stack: &'a mut FrameStack<S>,
+    graph_name: String,
+}
+
+impl<'a, S: WorkflowState> SessionCheckpointSink<'a, S>
+where
+    S::Checkpoint: Debug,
+{
+    /// 创建 SessionCheckpointSink，绑定到 FrameStack。
+    pub fn new(frame_stack: &'a mut FrameStack<S>, graph_name: impl Into<String>) -> Self {
+        Self {
+            frame_stack,
+            graph_name: graph_name.into(),
+        }
+    }
+}
+
+impl<S: WorkflowState> CheckpointSink<S> for SessionCheckpointSink<'_, S>
+where
+    S::Checkpoint: Debug + Sync,
+{
+    fn on_checkpoint(&mut self, state: &S, frame: &FrameInfo) {
+        self.frame_stack.push(Frame {
+            graph_id: self.graph_name.clone(),
+            node_id: frame.node_id.clone(),
+            state: state.snapshot(),
+            cursor: frame.step,
+        });
     }
 }
 
@@ -239,10 +285,17 @@ where
     /// # 示例
     ///
     /// ```ignore
+    /// // 创建 Checkpoint Sink（可选）
+    /// let mut sink = SessionCheckpointSink::new(
+    ///     session.frame_stack_mut(),
+    ///     session.graph().name(),
+    /// );
+    ///
     /// let mut engine = ExecutionEngine::new(
-    ///     &mut session.state,
-    ///     Some(stream),  // Stream 由调用者提供
+    ///     session.state_mut(),
+    ///     Some(stream),       // Stream 由调用者提供
     ///     cancel,
+    ///     Some(&mut sink),    // 启用自动 checkpoint
     /// );
     /// session.run_with(&mut engine).await?;
     /// ```

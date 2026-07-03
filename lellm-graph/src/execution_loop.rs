@@ -195,7 +195,8 @@ pub(crate) async fn run_execution_loop<S, M>(
     // P0-1: checkpoint.state 是 S::Checkpoint，需要通过 restore() 转换为 S
     let restore_state = restore_from.as_ref().map(|cp| S::restore(cp.state.clone()));
     let mut engine_state = restore_state.unwrap_or(state);
-    let mut engine = ExecutionEngine::new(&mut engine_state, None, cancel.clone());
+    // execution_loop 是内部测试工具，不需要自动 checkpoint
+    let mut engine = ExecutionEngine::new(&mut engine_state, None, cancel.clone(), None);
     let mut current = if let Some(ref cp) = restore_from {
         cp.current_node.0.clone()
     } else {

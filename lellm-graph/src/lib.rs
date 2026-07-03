@@ -53,7 +53,8 @@ pub use statekey::{
 // ─── Checkpoint ──────────────────────────────────────────────
 #[allow(deprecated)]
 pub use checkpoint::{
-    Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy, CheckpointStoreError, NodeId,
+    Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy, CheckpointSink,
+    CheckpointStoreError, FrameInfo, MemorySink, NodeId, NoopCheckpointSink,
 };
 
 // ─── Checkpoint Policy ───────────────────────────────────────
@@ -96,7 +97,8 @@ pub use state_lens::{IdentityLens, StateLens};
 pub use subgraph_spec::SubgraphSpec;
 
 // ─── ExecutionSession + SessionCheckpoint + SessionError ────
-pub use session::{ExecutionSession, SessionCheckpoint, SessionError};
+pub use checkpoint::{Frame, FrameStack};
+pub use session::{ExecutionSession, SessionCheckpoint, SessionCheckpointSink, SessionError};
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;

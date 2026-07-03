@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::checkpoint::CheckpointSink;
 use crate::event::FlowEvent;
 use crate::stream_chunk::StreamChunk;
 use crate::stream_emitter::StreamSink;
@@ -183,6 +184,9 @@ pub struct ExecutionEngine<'a, S: WorkflowState> {
     stream: Option<Arc<dyn StreamSink>>,
     /// 取消令牌 — 消费者断开时触发
     cancel: CancellationToken,
+    /// Checkpoint Sink — 可选。Engine 借用，不拥有 Checkpoint 生命周期。
+    /// 在 commit() 之后通知 Sink 到达了合法的恢复边界。
+    checkpoint: Option<&'a mut dyn CheckpointSink<S>>,
     /// 控制信号 — 节点写入，Executor 读取
     control: ExecutionControl,
     /// 节点元数据 — 节点写入
@@ -197,19 +201,35 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
     /// 创建新的 ExecutionEngine。
     ///
     /// Engine 借用 `state`，不拥有它。调用方在 Engine 外保持所有权。
+    ///
+    /// `checkpoint` 是可选的 Checkpoint Sink——Engine 借用，不拥有生命周期。
+    /// 传 `None` 表示不需要自动 checkpoint（如 ToolUseLoop 简单调用）。
     pub fn new(
         state: &'a mut S,
         stream: Option<Arc<dyn StreamSink>>,
         cancel: CancellationToken,
+        checkpoint: Option<&'a mut dyn CheckpointSink<S>>,
     ) -> Self {
         Self {
             state,
             stream,
             cancel,
+            checkpoint,
             control: ExecutionControl::new(),
             metadata: NodeMetadata::default(),
             mutations: Vec::new(),
             flow_events: Vec::new(),
+        }
+    }
+
+    /// 通知 Checkpoint Sink 到达了合法的恢复边界（crate 内部使用）。
+    ///
+    /// 由 Graph::run_inline() 在 commit() 之后调用。
+    /// 这个方法在 Engine 内部同时访问 state 和 sink，避免借用冲突。
+    pub(crate) fn emit_checkpoint(&mut self, node_id: impl Into<String>, step: usize) {
+        if let Some(ref mut sink) = self.checkpoint {
+            use crate::checkpoint::FrameInfo;
+            sink.on_checkpoint(self.state, &FrameInfo::new(node_id, step));
         }
     }
 

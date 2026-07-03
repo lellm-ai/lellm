@@ -133,10 +133,12 @@ impl ToolUseLoop {
         let mut agent_state_init = super::typed_state::AgentState::from_messages(initial_messages);
 
         // 创建 ExecutionContext<AgentState> 并调用 run_inline
+        // ToolUseLoop 不需要自动 checkpoint，传 None
         let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
             &mut agent_state_init,
             None,
             lellm_graph::CancellationToken::new(),
+            None,
         );
 
         self.graph
@@ -215,10 +217,12 @@ impl ToolUseLoop {
             let sink: std::sync::Arc<dyn lellm_graph::StreamSink> = std::sync::Arc::new(event_sink);
 
             // 4. 创建 ExecutionContext 并调用 run_inline
+            // ToolUseLoop 不需要自动 checkpoint，传 None
             let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
                 &mut agent_state,
                 Some(sink),
                 lellm_graph::CancellationToken::new(),
+                None,
             );
 
             match graph.run_inline(&mut exec_ctx, max_steps).await {
