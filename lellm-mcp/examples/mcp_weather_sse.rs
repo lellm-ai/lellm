@@ -6,7 +6,7 @@
 //!
 //! 运行：
 //! ```bash
-//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather --features sse -p lellm-mcp
+//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather_sse --features sse -p lellm-mcp
 //! ```
 
 use lellm_mcp::client::McpClient;
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✓ {} 个工具\n", list_result.tools.len());
 
-    // 批量解析地址
+    // QQ 地图 geocoder 无批量接口，只能循环逐个调用
     let addresses = vec!["陆家嘴", "天安门", "奇台"];
 
     for addr in &addresses {

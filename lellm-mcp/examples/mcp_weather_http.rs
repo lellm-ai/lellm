@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("✓ {} 个工具\n", list_result.tools.len());
 
-    // 批量解析地址（geocoder 不支持批量，逐个调用）
+    // QQ 地图 geocoder 无批量接口，只能循环逐个调用
     let addresses = vec!["陆家嘴", "天安门", "奇台"];
 
     for addr in &addresses {
