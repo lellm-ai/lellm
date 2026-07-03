@@ -364,15 +364,6 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             }
         }
     }
-
-    /// 设置 canonical hash — 仅供内部兼容使用。
-    ///
-    /// 优先使用 `GraphBuilder::canonical_hash()` 在构建时设置。
-    #[deprecated(since = "0.5.0", note = "使用 GraphBuilder::canonical_hash() 替代")]
-    #[doc(hidden)]
-    pub fn set_canonical_hash(&mut self, hash: u64) {
-        self.canonical_hash = hash;
-    }
 }
 
 // ─── GraphBuilder, PendingEdge (移至 graph_builder 模块) ────
