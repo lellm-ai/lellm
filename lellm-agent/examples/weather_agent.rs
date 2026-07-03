@@ -14,9 +14,9 @@ mod shared;
 #[path = "_shared/city_resolver.rs"]
 mod city_resolver;
 
-use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
-use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
-use lellm_derive::Tool;
+use lellm_agent::AgentBuilder;
+use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, ToolResult, text_block};
+use lellm_derive::tool;
 use lellm_provider::LlmProvider;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
@@ -25,94 +25,78 @@ use std::sync::Arc;
 
 // ─── Tool 1: resolve_city ───────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema, Tool)]
+/// 将地址解析为 wttr.in 城市英文名。
+/// 四级降级：别名表 → 腾讯地图 → LLM → unknown。始终调用此工具，不要猜测。
+#[allow(unused_variables, dead_code)]
 #[tool(
     name = "resolve_city",
     description = "将地址解析为 wttr.in 城市英文名。四级降级：别名表 → 腾讯地图 → LLM → unknown。始终调用此工具，不要猜测。"
 )]
-#[allow(dead_code)]
-struct ResolveCityArgs {
-    /// 地址或地名（如 "浦东"、"新宿"、"曼哈顿"）
-    address: String,
+async fn resolve_city(address: String) -> ToolResult {
+    // provider 通过 _tool_with 闭包捕获
+    unreachable!("this function is registered via resolve_city_tool_with")
+}
+
+/// 注册 resolve_city 工具（注入 provider 依赖）
+fn register_resolve_city(provider: Arc<dyn LlmProvider>) -> lellm_agent::ExecutableTool {
+    resolve_city_tool_with(move |args| {
+        let p = provider.clone();
+        async move {
+            let address_for_blocking = args.address.clone();
+            let mut result = tokio::task::spawn_blocking(move || {
+                city_resolver::resolve_city(&address_for_blocking)
+            })
+            .await
+            .map_err(|e| ToolError {
+                kind: ToolErrorKind::Internal,
+                message: format!("任务失败: {e}"),
+            })?;
+
+            // 第三级 miss → 第四级：LLM 轻量推理
+            if result.source == "unknown" {
+                tracing::debug!(address = %args.address, "alias+tencent miss, trying LLM fallback");
+                if let Some(city) = city_resolver::resolve_via_llm(&p, &args.address).await {
+                    tracing::debug!(city = %city.city_en, "LLM fallback success");
+                    result = city;
+                }
+            }
+
+            Ok(serde_json::json!(serde_json::to_string(&result).map_err(
+                |e| ToolError {
+                    kind: ToolErrorKind::Internal,
+                    message: format!("序列化失败: {e}"),
+                }
+            )?))
+        }
+    })
 }
 
 // ─── Tool 2: http_get ───────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema, Tool)]
+/// 发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。
 #[tool(
     name = "http_get",
     description = "发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。"
 )]
-#[allow(dead_code)]
-struct HttpGetArgs {
-    /// 完整的请求 URL
-    url: String,
-}
-
-fn http_get(url: &str) -> Result<String, ToolError> {
-    reqwest::blocking::get(url)
-        .map_err(|e| ToolError {
-            kind: ToolErrorKind::Network,
-            message: format!("请求失败: {e}"),
-        })?
-        .text()
-        .map_err(|e| ToolError {
-            kind: ToolErrorKind::Internal,
-            message: format!("读取响应失败: {e}"),
-        })
-}
-
-// ─── 工具注册 ────────────────────────────────────────────────────
-
-fn register_weather_tools(
-    llm_provider: Option<Arc<dyn LlmProvider>>,
-) -> Vec<lellm_agent::ExecutableTool> {
-    vec![
-        // resolve_city：四级降级
-        ResolveCityArgs::safe(move |args| {
-            let provider = llm_provider.clone();
-            async move {
-                let address = args.address;
-                let address_for_blocking = address.clone();
-                let mut result = tokio::task::spawn_blocking(move || {
-                    city_resolver::resolve_city(&address_for_blocking)
-                })
-                .await
-                .map_err(|e| ToolError {
-                    kind: ToolErrorKind::Internal,
-                    message: format!("任务失败: {e}"),
-                })?;
-
-                // 第三级 miss → 第四级：LLM 轻量推理
-                if result.source == "unknown" {
-                    tracing::debug!(address = %address, "alias+tencent miss, trying LLM fallback");
-                    if let Some(ref p) = provider {
-                        if let Some(city) = city_resolver::resolve_via_llm(p, &address).await {
-                            tracing::debug!(city = %city.city_en, "LLM fallback success");
-                            result = city;
-                        }
-                    }
-                }
-
-                Ok(serde_json::json!(serde_json::to_string(&result).map_err(
-                    |e| ToolError {
-                        kind: ToolErrorKind::Internal,
-                        message: format!("序列化失败: {e}"),
-                    }
-                )?))
-            }
-        }),
-        // http_get：通用 HTTP 请求
-        HttpGetArgs::safe(|args| async move {
-            let body = tokio::task::spawn_blocking(move || http_get(&args.url))
-                .await
-                .map_err(|e| ToolError {
-                    kind: ToolErrorKind::Internal,
-                    message: format!("任务失败: {e}"),
-                })??;
-            Ok(serde_json::json!(body))
-        }),
-    ]
+async fn http_get(url: String) -> ToolResult {
+    let body = tokio::task::spawn_blocking(move || {
+        reqwest::blocking::get(&url)
+            .map_err(|e| ToolError {
+                kind: ToolErrorKind::Network,
+                message: format!("请求失败: {e}"),
+            })?
+            .text()
+            .map_err(|e| ToolError {
+                kind: ToolErrorKind::Internal,
+                message: format!("读取响应失败: {e}"),
+            })
+    })
+    .await
+    .map_err(|e| ToolError {
+        kind: ToolErrorKind::Internal,
+        message: format!("任务失败: {e}"),
+    })??;
+    Ok(serde_json::json!(body))
 }
 
 // ─── 分层 System Prompt — 最大化前缀缓存 ────────────────────────
@@ -171,7 +155,7 @@ fn build_system_prompt() -> Prompt {
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> lellm_agent::ToolUseLoop {
     // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
     let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
 
@@ -181,7 +165,10 @@ fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
         context_window: None,
     })
     .system(build_system_prompt())
-    .tools(register_weather_tools(Some(shared_provider)))
+    .tools(vec![
+        register_resolve_city(shared_provider),
+        http_get_tool(),
+    ])
     // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
     .max_iterations(10)
     .max_output_tokens(8000)

@@ -10,9 +10,9 @@
 #[path = "_shared/shared.rs"]
 mod shared;
 
-use lellm_agent::{AgentBuilder, ToolUseLoop, schemars::JsonSchema, serde::Deserialize};
-use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, text_block};
-use lellm_derive::Tool;
+use lellm_agent::AgentBuilder;
+use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, ToolResult, text_block};
+use lellm_derive::tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
@@ -20,40 +20,30 @@ use std::sync::Arc;
 
 // ─── 通用 HTTP GET 工具 ─────────────────────────────────────────
 
-#[derive(Deserialize, JsonSchema, Tool)]
+/// 发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。
 #[tool(
     name = "http_get",
     description = "发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。"
 )]
-#[allow(dead_code)]
-struct HttpGetArgs {
-    /// 完整的请求 URL
-    url: String,
-}
-
-fn http_get(url: &str) -> Result<String, ToolError> {
-    reqwest::blocking::get(url)
-        .map_err(|e| ToolError {
-            kind: ToolErrorKind::Network,
-            message: format!("请求失败: {e}"),
-        })?
-        .text()
-        .map_err(|e| ToolError {
-            kind: ToolErrorKind::Internal,
-            message: format!("读取响应失败: {e}"),
-        })
-}
-
-fn register_http_tools() -> Vec<lellm_agent::ExecutableTool> {
-    vec![HttpGetArgs::safe(|args| async move {
-        let body = tokio::task::spawn_blocking(move || http_get(&args.url))
-            .await
+async fn http_get(url: String) -> ToolResult {
+    let body = tokio::task::spawn_blocking(move || {
+        reqwest::blocking::get(&url)
+            .map_err(|e| ToolError {
+                kind: ToolErrorKind::Network,
+                message: format!("请求失败: {e}"),
+            })?
+            .text()
             .map_err(|e| ToolError {
                 kind: ToolErrorKind::Internal,
-                message: format!("任务失败: {e}"),
-            })??;
-        Ok(serde_json::json!(body))
-    })]
+                message: format!("读取响应失败: {e}"),
+            })
+    })
+    .await
+    .map_err(|e| ToolError {
+        kind: ToolErrorKind::Internal,
+        message: format!("任务失败: {e}"),
+    })??;
+    Ok(serde_json::json!(body))
 }
 
 // ─── 分层 System Prompt — 最大化前缀缓存 ────────────────────────
@@ -146,14 +136,14 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
-fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> ToolUseLoop {
+fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> lellm_agent::ToolUseLoop {
     AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
         model: "Qwen3.6".to_string(),
         context_window: None,
     })
     .system(build_system_prompt())
-    .tools(register_http_tools())
+    .tool(http_get_tool())
     // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
     .max_iterations(5)
     .max_output_tokens(8000)

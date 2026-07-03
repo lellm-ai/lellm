@@ -78,34 +78,6 @@ impl McpTransport for HttpTransport {
         let (notification_tx, _) =
             tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
 
-        // 验证连接：发送一个简单的 initialize 请求
-        let init_params = crate::protocol::InitializeParams::new("2024-11-05")
-            .with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
-        let init_req = JsonRpcRequest::new(
-            0,
-            "initialize",
-            Some(
-                serde_json::to_value(&init_params)
-                    .map_err(|e| McpError::Protocol(e.to_string()))?,
-            ),
-        );
-
-        let json =
-            serde_json::to_string(&init_req).map_err(|e| McpError::Protocol(e.to_string()))?;
-
-        let response = client
-            .post(&self.config.endpoint_url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
-            .body(json)
-            .send()
-            .await
-            .map_err(|e| McpError::Network(e.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(McpError::Network(format!("HTTP {}", response.status())));
-        }
-
         self.inner = Some(Arc::new(HttpTransportInner {
             client,
             notification_tx,
