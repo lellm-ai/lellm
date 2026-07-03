@@ -30,9 +30,22 @@ const KEY_MESSAGES: &str = "messages";
 const KEY_ITERATIONS: &str = "iterations";
 const KEY_TOOL_CALLS: &str = "tool_calls";
 
-// ─── 工具实现 ──────────────────────────────────────────────────
+// ─── 工具定义 ──────────────────────────────────────────────────
 
-/// 执行工具调用，返回结果 JSON Value
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct AddArgs {
+    a: f64,
+    b: f64,
+}
+
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct MultiplyArgs {
+    a: f64,
+    b: f64,
+}
+
 fn execute_tool(tc: &ToolCall) -> Value {
     match tc.name.as_str() {
         "add" => {
@@ -49,33 +62,18 @@ fn execute_tool(tc: &ToolCall) -> Value {
     }
 }
 
-/// 获取工具定义
 fn get_tool_defs() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "add".to_string(),
             description: "Add two numbers".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number", "description": "First number" },
-                    "b": { "type": "number", "description": "Second number" }
-                },
-                "required": ["a", "b"]
-            }),
+            parameters: ToolDefinition::compute_and_clean_schema::<AddArgs>(),
             cache_control: None,
         },
         ToolDefinition {
             name: "multiply".to_string(),
             description: "Multiply two numbers".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number", "description": "First number" },
-                    "b": { "type": "number", "description": "Second number" }
-                },
-                "required": ["a", "b"]
-            }),
+            parameters: ToolDefinition::compute_and_clean_schema::<MultiplyArgs>(),
             cache_control: None,
         },
     ]

@@ -29,70 +29,50 @@ const KEY_ITERATIONS: &str = "iterations";
 const KEY_TOOL_CALLS: &str = "tool_calls";
 const KEY_TEXT: &str = "text";
 
-// ─── 工具实现 ──────────────────────────────────────────────────
+// ─── 工具定义 ──────────────────────────────────────────────────
 
-fn add_numbers(a: f64, b: f64) -> Value {
-    let result = a + b;
-    if result.fract() == 0.0 {
-        Value::Number((result as i64).into())
-    } else {
-        Value::Number(serde_json::Number::from_f64(result).unwrap())
-    }
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct AddArgs {
+    a: f64,
+    b: f64,
 }
 
-fn multiply_numbers(a: f64, b: f64) -> Value {
-    let result = a * b;
-    if result.fract() == 0.0 {
-        Value::Number((result as i64).into())
-    } else {
-        Value::Number(serde_json::Number::from_f64(result).unwrap())
-    }
+#[derive(schemars::JsonSchema)]
+#[allow(dead_code)]
+struct MultiplyArgs {
+    a: f64,
+    b: f64,
 }
 
-/// 执行工具调用，返回结果 JSON Value
 fn execute_tool(tc: &ToolCall) -> Value {
     match tc.name.as_str() {
         "add" => {
             let a = tc.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let b = tc.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            add_numbers(a, b)
+            Value::from(a + b)
         }
         "multiply" => {
             let a = tc.arguments.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let b = tc.arguments.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            multiply_numbers(a, b)
+            Value::from(a * b)
         }
         _ => Value::String(format!("未知工具: {}", tc.name)),
     }
 }
 
-/// 获取工具定义
 fn get_tool_defs() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "add".to_string(),
             description: "Add two numbers".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number", "description": "First number" },
-                    "b": { "type": "number", "description": "Second number" }
-                },
-                "required": ["a", "b"]
-            }),
+            parameters: ToolDefinition::compute_and_clean_schema::<AddArgs>(),
             cache_control: None,
         },
         ToolDefinition {
             name: "multiply".to_string(),
             description: "Multiply two numbers".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "a": { "type": "number", "description": "First number" },
-                    "b": { "type": "number", "description": "Second number" }
-                },
-                "required": ["a", "b"]
-            }),
+            parameters: ToolDefinition::compute_and_clean_schema::<MultiplyArgs>(),
             cache_control: None,
         },
     ]

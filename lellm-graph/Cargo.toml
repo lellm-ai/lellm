@@ -25,6 +25,7 @@ lellm-provider = { path = "../lellm-provider", features = ["openai-compat", "moc
 lellm-core = { workspace = true, features = ["anyhow"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
+schemars = { workspace = true }
 
 [[example]]
 name = "pure_graph_agent"
