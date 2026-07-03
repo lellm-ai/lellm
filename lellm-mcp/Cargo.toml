@@ -21,11 +21,17 @@ futures-core.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+reqwest = { workspace = true, optional = true }
+eventsource-stream = { version = "0.2", optional = true }
+futures = { workspace = true, optional = true }
 
 [features]
 default = ["stdio", "bridge"]
 stdio = []
+sse = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
+http = ["dep:reqwest"]
 bridge = ["dep:lellm-agent"]
 
 [dev-dependencies]
 lellm-agent.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

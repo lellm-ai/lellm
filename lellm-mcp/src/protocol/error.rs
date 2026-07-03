@@ -34,6 +34,10 @@ pub enum McpError {
     /// IO 错误（子进程启动失败、管道断裂）
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    /// 网络错误（HTTP 请求失败等）
+    #[error("network error: {0}")]
+    Network(String),
 }
 
 impl McpError {

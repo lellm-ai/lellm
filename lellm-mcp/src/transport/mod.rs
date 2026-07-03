@@ -5,10 +5,18 @@
 //! - notifications() 返回独立流（不阻塞主流程）
 //! - 状态机由 McpClient 管理，Transport 不感知
 
+#[cfg(feature = "http")]
+mod http;
+#[cfg(feature = "sse")]
+mod sse;
 mod state;
 #[cfg(feature = "stdio")]
 mod stdio;
 
+#[cfg(feature = "http")]
+pub use http::{HttpConfig, HttpTransport};
+#[cfg(feature = "sse")]
+pub use sse::{SseConfig, SseTransport};
 pub use state::ConnectionState;
 #[cfg(feature = "stdio")]
 pub use stdio::{StdioConfig, StdioTransport};
