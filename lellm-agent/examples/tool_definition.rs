@@ -17,9 +17,7 @@
 
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
-use lellm_agent::{
-    AgentBuilder, ToolArgs, ToolCategory, ToolRegistration, ToolResult, ToolUseLoop,
-};
+use lellm_agent::{AgentBuilder, ExecutableTool, ToolArgs, ToolCategory, ToolResult, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition};
 use lellm_derive::{Tool, tool};
 use lellm_provider::{MockProvider, ResolvedModel};
@@ -60,10 +58,10 @@ struct WeatherArgs {
     include_forecast: bool,
 }
 
-// ─── Level 3: ToolRegistration::safe()（框架开发者）────────────
+// ─── Level 3: ExecutableTool::safe()（框架开发者）────────────
 
 /// 手动构造工具定义 — 不依赖宏
-fn register_manually() -> Vec<ToolRegistration> {
+fn register_manually() -> Vec<ExecutableTool> {
     let search_def = ToolDefinition {
         name: "manual_search".to_string(),
         description: "手动定义的搜索工具".to_string(),
@@ -77,7 +75,7 @@ fn register_manually() -> Vec<ToolRegistration> {
         cache_control: None,
     };
 
-    vec![ToolRegistration::safe(search_def, |args| {
+    vec![ExecutableTool::safe(search_def, |args| {
         let query = args
             .get("query")
             .and_then(|v| v.as_str())
@@ -88,12 +86,12 @@ fn register_manually() -> Vec<ToolRegistration> {
 }
 
 /// 使用 Level 1 注册工具
-fn register_level1() -> Vec<ToolRegistration> {
+fn register_level1() -> Vec<ExecutableTool> {
     vec![search_tool(), get_weather_tool()]
 }
 
 /// 使用 Level 2 注册工具
-fn register_level2() -> Vec<ToolRegistration> {
+fn register_level2() -> Vec<ExecutableTool> {
     vec![WeatherArgs::safe(|args| async move {
         let forecast = if args.include_forecast {
             "含预报"
@@ -110,7 +108,7 @@ fn register_level2() -> Vec<ToolRegistration> {
 }
 
 /// 构建带工具的 Agent
-fn create_agent(tools: Vec<ToolRegistration>) -> ToolUseLoop {
+fn create_agent(tools: Vec<ExecutableTool>) -> ToolUseLoop {
     let response = ChatResponse::new(
         vec![ContentBlock::text("已完成所有操作。")],
         TokenUsage::default(),
@@ -162,8 +160,8 @@ async fn main() {
     );
     println!();
 
-    // ─── Level 3: ToolRegistration ───
-    println!("=== Level 3: ToolRegistration::safe() ===");
+    // ─── Level 3: ExecutableTool ───
+    println!("=== Level 3: ExecutableTool::safe() ===");
     let manual = register_manually();
     for reg in &manual {
         println!(

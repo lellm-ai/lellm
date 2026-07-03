@@ -5,14 +5,14 @@
 //! - Case 2: Mock 动态目录 → snapshot → execute_batch_with
 //! - Case 3: execute_batch_with 工具不存在 → NotFound
 //! - Case 4: 热刷新（discover → call → refresh → new tool visible）
-//! - Case 5: ToolRegistration Clone 编译验证
+//! - Case 5: ExecutableTool Clone 编译验证
 //! - Case 6: CompositeCatalog 遮蔽策略
 //! - Case 7: 计数器验证 snapshot 调用次数
 //! - Case 8: ToolSnapshot 基本行为
 
 use lellm_agent::{
-    BackoffStrategy, CompositeCatalog, RetryPolicy, StaticCatalog, ToolCatalog, ToolExecutor,
-    ToolRegistration, ToolSnapshot, execute_batch_with,
+    BackoffStrategy, CompositeCatalog, ExecutableTool, RetryPolicy, StaticCatalog, ToolCatalog,
+    ToolExecutor, ToolSnapshot, execute_batch_with,
 };
 use lellm_core::{ToolCall, ToolDefinition, ToolErrorKind};
 use std::sync::{
@@ -23,9 +23,9 @@ use tokio::sync::Mutex;
 
 // ─── 辅助函数 ────────────────────────────────────────────────────
 
-fn make_echo_tool(name: &str) -> ToolRegistration {
+fn make_echo_tool(name: &str) -> ExecutableTool {
     let name_str = name.to_string();
-    ToolRegistration::safe(
+    ExecutableTool::safe(
         ToolDefinition {
             name: name_str.clone(),
             description: format!("echo {}", name_str),
@@ -47,9 +47,9 @@ fn make_echo_tool(name: &str) -> ToolRegistration {
     )
 }
 
-fn make_exclusive_tool(name: &str) -> ToolRegistration {
+fn make_exclusive_tool(name: &str) -> ExecutableTool {
     let name_str = name.to_string();
-    ToolRegistration::exclusive(
+    ExecutableTool::exclusive(
         ToolDefinition {
             name: name_str.clone(),
             description: format!("exclusive {}", name_str),
@@ -71,9 +71,9 @@ fn make_exclusive_tool(name: &str) -> ToolRegistration {
     )
 }
 
-fn make_category_tool(name: &str, cat: lellm_agent::ToolCategory) -> ToolRegistration {
+fn make_category_tool(name: &str, cat: lellm_agent::ToolCategory) -> ExecutableTool {
     let name_str = name.to_string();
-    ToolRegistration::category_exclusive(
+    ExecutableTool::category_exclusive(
         ToolDefinition {
             name: name_str.clone(),
             description: format!("category {}", name_str),
@@ -165,11 +165,11 @@ async fn test_static_batch() {
 
 /// 模拟 MCP 目录的可变工具集合。
 struct MockDynamicCatalog {
-    tools: Mutex<indexmap::IndexMap<String, ToolRegistration>>,
+    tools: Mutex<indexmap::IndexMap<String, ExecutableTool>>,
 }
 
 impl MockDynamicCatalog {
-    fn new(tools: Vec<ToolRegistration>) -> Self {
+    fn new(tools: Vec<ExecutableTool>) -> Self {
         let mut map = indexmap::IndexMap::new();
         for t in tools {
             map.insert(t.definition().name.clone(), t);
@@ -179,7 +179,7 @@ impl MockDynamicCatalog {
         }
     }
 
-    async fn add_tool(&self, tool: ToolRegistration) {
+    async fn add_tool(&self, tool: ExecutableTool) {
         self.tools
             .lock()
             .await
@@ -289,12 +289,12 @@ async fn test_snapshot_freezing_no_drift() {
 
 // ─── Case 5: Clone 编译验证 ─────────────────────────────────────
 
-/// 编译时验证：ToolRegistration 满足 Clone + Send + Sync
+/// 编译时验证：ExecutableTool 满足 Clone + Send + Sync
 fn assert_traits<T: Clone + Send + Sync>() {}
 
 #[test]
 fn test_tool_registration_traits() {
-    assert_traits::<ToolRegistration>();
+    assert_traits::<ExecutableTool>();
 }
 
 /// 编译时验证：Arc<dyn ToolCatalog> 可以克隆
@@ -330,11 +330,11 @@ async fn test_composite_catalog_shadowing() {
 /// 带调用计数的 Mock 目录
 struct CountingCatalog {
     counter: Arc<AtomicUsize>,
-    tools: Vec<ToolRegistration>,
+    tools: Vec<ExecutableTool>,
 }
 
 impl CountingCatalog {
-    fn new(counter: Arc<AtomicUsize>, tools: Vec<ToolRegistration>) -> Self {
+    fn new(counter: Arc<AtomicUsize>, tools: Vec<ExecutableTool>) -> Self {
         Self { counter, tools }
     }
 }

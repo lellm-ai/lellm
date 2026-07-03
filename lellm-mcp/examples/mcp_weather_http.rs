@@ -26,8 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     // 获取 API Key
-    let api_key =
-        std::env::var("QQ_MAP_KEY").expect("请设置环境变量 QQ_MAP_KEY (腾讯位置服务 API Key)");
+    let api_key = std::env::var("TENCENT_MAP_KEY")
+        .expect("请设置环境变量 TENCENT_MAP_KEY (腾讯位置服务 API Key)");
 
     // 构建 HTTP URL (Streamable HTTP)
     let endpoint_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = HttpTransport::new(config);
 
     // 创建 MCP Client
-    let client = McpClient::with_transport(transport);
+    let client = McpClient::with_transport_async(transport).await;
 
     // 连接
     println!("正在连接...");
@@ -75,10 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // 查询北京天气
-    println!("=== 查询北京天气 ===\n");
+    // 查询陆家嘴天气
+    println!("=== 查询陆家嘴天气 ===\n");
 
-    let city = "北京";
+    let city = "陆家嘴";
 
     println!("城市: {}\n", city);
 

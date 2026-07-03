@@ -12,7 +12,7 @@ use lellm_graph::{GraphError, LeafContext, LeafNode};
 use super::super::config::{ToolUseConfig, empty_response};
 use super::super::context::ContextBudget;
 use super::super::runtime::ResolvedRound;
-use super::super::tools::ToolExecutor;
+use super::super::tools::{ToolExecutor, ToolFn};
 use super::super::typed_state::{AgentMutation, AgentState};
 
 /// 工具执行节点。
@@ -78,8 +78,9 @@ impl LeafNode<AgentState> for ToolNode {
                 let start = std::time::Instant::now();
                 let result: lellm_core::ToolResult = match entry {
                     Some(reg) => {
-                        rp.execute_with_retry(&reg.func, &call_clone.arguments)
-                            .await
+                        let tool_fn: ToolFn =
+                            std::sync::Arc::new(move |args: &serde_json::Value| reg.execute(args));
+                        rp.execute_with_retry(&tool_fn, &call_clone.arguments).await
                     }
                     None => Err(lellm_core::ToolError::not_found(format!(
                         "unknown tool: {}",

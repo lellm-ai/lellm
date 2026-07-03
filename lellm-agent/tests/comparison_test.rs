@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use futures_util::stream;
-use lellm_agent::{AgentBuilder, ToolRegistration};
+use lellm_agent::{AgentBuilder, ExecutableTool};
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TokenUsage, ToolCall,
     ToolDefinition,
@@ -126,7 +126,7 @@ fn make_models(responses: Vec<ChatResponse>, model_name: &str) -> (ResolvedModel
     (m1, m2)
 }
 
-fn build_agent(model: ResolvedModel, tools: Vec<ToolRegistration>) -> lellm_agent::ToolUseLoop {
+fn build_agent(model: ResolvedModel, tools: Vec<ExecutableTool>) -> lellm_agent::ToolUseLoop {
     let mut builder = AgentBuilder::new(model).max_iterations(10);
     for tool in tools {
         builder = builder.tool(tool);
@@ -200,7 +200,7 @@ async fn compare_single_tool_call() {
         }),
         cache_control: None,
     };
-    let echo_reg = ToolRegistration::safe(echo_def, |args| {
+    let echo_reg = ExecutableTool::safe(echo_def, |args| {
         let m = args
             .get("msg")
             .and_then(|v| v.as_str())
@@ -322,7 +322,7 @@ async fn compare_multi_round_react() {
         }),
         cache_control: None,
     };
-    let add_reg = ToolRegistration::safe(add_def, |args| {
+    let add_reg = ExecutableTool::safe(add_def, |args| {
         let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
         let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
         async move { Ok(serde_json::json!(a + b)) }
@@ -480,7 +480,7 @@ async fn compare_tool_registered_but_not_called() {
         }),
         cache_control: None,
     };
-    let echo_reg = ToolRegistration::safe(echo_def, |args| {
+    let echo_reg = ExecutableTool::safe(echo_def, |args| {
         let m = args
             .get("msg")
             .and_then(|v| v.as_str())
@@ -613,7 +613,7 @@ async fn compare_max_iterations_reached() {
         cache_control: None,
     };
     let loop_reg =
-        ToolRegistration::safe(loop_def, |_| async move { Ok(serde_json::json!("looped")) });
+        ExecutableTool::safe(loop_def, |_| async move { Ok(serde_json::json!("looped")) });
 
     let (model_new, model_old) = make_models(responses.clone(), "test-model");
 

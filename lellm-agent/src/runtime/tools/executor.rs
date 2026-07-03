@@ -5,13 +5,12 @@
 use std::sync::Arc;
 
 use lellm_core::{
-    Message, ParallelSafety, ToolCall, ToolCategory, ToolError, ToolErrorKind, ToolRegistration,
-    ToolResult,
+    Message, ParallelSafety, ToolCall, ToolCategory, ToolError, ToolErrorKind, ToolResult,
 };
 
 use super::super::event::AgentEvent;
 use super::super::retry::RetryPolicy;
-use super::{ToolCatalog, ToolFn, ToolSnapshot};
+use super::{ExecutableTool, ToolCatalog, ToolFn, ToolSnapshot};
 use tokio::sync::mpsc::Sender;
 
 /// 批量执行结果 — 长度、顺序、完整性三重保证。
@@ -254,7 +253,7 @@ pub async fn execute_batch_with(
 
 impl ToolSnapshot {
     /// 克隆内部工具映射，供 spawn 使用。
-    pub fn clone_for_spawn(&self) -> Arc<indexmap::IndexMap<String, ToolRegistration>> {
+    pub fn clone_for_spawn(&self) -> Arc<indexmap::IndexMap<String, ExecutableTool>> {
         self.tools.clone()
     }
 }
@@ -262,7 +261,7 @@ impl ToolSnapshot {
 // ─── Safe group: 全并发 ──────────────────────────────────────────
 
 async fn run_parallel_indexed_with(
-    tools: &Arc<indexmap::IndexMap<String, ToolRegistration>>,
+    tools: &Arc<indexmap::IndexMap<String, ExecutableTool>>,
     retry_policy: &RetryPolicy,
     calls: Vec<(usize, ToolCall)>,
 ) -> Vec<(usize, Message)> {
@@ -308,7 +307,7 @@ async fn run_parallel_indexed_with(
 // ─── 组内串行 ────────────────────────────────────────────────────
 
 async fn run_serial_indexed_with(
-    tools: &Arc<indexmap::IndexMap<String, ToolRegistration>>,
+    tools: &Arc<indexmap::IndexMap<String, ExecutableTool>>,
     retry_policy: &RetryPolicy,
     calls: Vec<(usize, ToolCall)>,
 ) -> Vec<(usize, Message)> {
@@ -328,13 +327,9 @@ async fn run_serial_indexed_with(
     results
 }
 
-// ─── Helper: 从 ToolRegistration 创建 ToolFn ─────────────────────
+// ─── Helper: 从 ExecutableTool 获取 ToolFn ──────────────────────
 
-fn tool_fn_from_reg(entry: &ToolRegistration) -> ToolFn {
-    Arc::new(move |args: &serde_json::Value| {
-        let wrapper = entry.execute(args);
-        // UnpinWrapper<T> -> Pin<Box<dyn Future<Output=T>>>
-        let inner: Pin<Box<dyn std::future::Future<Output = ToolResult> + Send>> = wrapper.0;
-        inner
-    })
+fn tool_fn_from_reg(entry: &ExecutableTool) -> ToolFn {
+    let entry = entry.clone();
+    Arc::new(move |args: &serde_json::Value| entry.execute(args))
 }

@@ -52,7 +52,7 @@ use super::react::{CompactorNode, LLMNode, ToolNode, build_react_graph};
 use super::request_opts::RequestOptions;
 use super::retry::RetryPolicy;
 use super::runtime::ToolUseLoop;
-use super::tools::{CompositeCatalog, StaticCatalog, ToolCatalog, ToolExecutor, ToolRegistration};
+use super::tools::{CompositeCatalog, ExecutableTool, StaticCatalog, ToolCatalog, ToolExecutor};
 use super::typed_state::{AgentState, AgentStateMerge};
 
 /// Agent 链式构建器 — 推荐的 Agent 创建方式。
@@ -63,7 +63,7 @@ use super::typed_state::{AgentState, AgentStateMerge};
 pub struct AgentBuilder {
     model: ResolvedModel,
     /// 收集通过 `.tool()` 注册的本地静态工具（最高优先级）
-    static_tools: Vec<ToolRegistration>,
+    static_tools: Vec<ExecutableTool>,
     /// 收集通过 `.catalog()` 注册的动态目录（按注册顺序，先绑定的优先级高于后绑定的）
     catalogs: Vec<Arc<dyn ToolCatalog>>,
     config: ToolUseConfig,
@@ -166,13 +166,13 @@ impl AgentBuilder {
     }
 
     /// 注册工具。
-    pub fn tool(mut self, reg: ToolRegistration) -> Self {
+    pub fn tool(mut self, reg: ExecutableTool) -> Self {
         self.static_tools.push(reg);
         self
     }
 
     /// 批量注册工具。
-    pub fn tools(mut self, registrations: impl IntoIterator<Item = ToolRegistration>) -> Self {
+    pub fn tools(mut self, registrations: impl IntoIterator<Item = ExecutableTool>) -> Self {
         self.static_tools.extend(registrations);
         self
     }

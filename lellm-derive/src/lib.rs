@@ -48,12 +48,12 @@
 //! });
 //! ```
 //!
-//! ## Level 3: `ToolRegistration::safe()`（框架开发者）
+//! ## Level 3: `ExecutableTool::safe()`（框架开发者）
 //!
 //! ```ignore
-//! use lellm_agent::{ToolDefinition, ToolRegistration};
+//! use lellm_core::{ExecutableTool, ToolDefinition};
 //!
-//! let reg = ToolRegistration::safe(
+//! let reg = ExecutableTool::safe(
 //!     ToolDefinition {
 //!         name: "search".to_string(),
 //!         description: "搜索".to_string(),

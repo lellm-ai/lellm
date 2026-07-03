@@ -22,8 +22,8 @@ pub mod typed_state;
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
 pub use tools::{
-    BatchExecutionResult, CompositeCatalog, ParallelSafety, StaticCatalog, ToolArgs, ToolCatalog,
-    ToolCategory, ToolExecutor, ToolRegistration, ToolSnapshot, execute_batch_with,
+    BatchExecutionResult, CompositeCatalog, ExecutableTool, ParallelSafety, StaticCatalog,
+    ToolArgs, ToolCatalog, ToolCategory, ToolExecutor, ToolFn, ToolSnapshot, execute_batch_with,
 };
 
 // ─── 运行时 re-export ────────────────────────────────────────────

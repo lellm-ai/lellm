@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::tool::ToolDefinition;
+
 /// 统一的聊天请求。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -120,59 +122,6 @@ impl ChatRequest {
 pub enum ToolChoice {
     Tool { name: String },
     Any,
-}
-
-/// 工具定义（输入侧）。
-///
-/// Schema 由 `schemars` 在编译期生成，经 `compute_and_clean_schema` 清洗后
-/// 存入 `parameters` 字段。Codec 层按 Provider 需求进行二次适配。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-
-    /// 缓存控制标记。Anthropic 支持 Tool Definition 级别的缓存。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<crate::message::CacheControl>,
-}
-
-impl ToolDefinition {
-    /// 克隆并设置缓存标记。
-    pub fn with_cache(self, cache: crate::message::CacheControl) -> Self {
-        Self {
-            cache_control: Some(cache),
-            ..self
-        }
-    }
-
-    /// 从 `schemars::JsonSchema` 类型计算并清洗 JSON Schema。
-    ///
-    /// 供 `#[tool]` 宏生成的 `LazyLock` 调用，不在泛型函数中使用 `LazyLock`。
-    ///
-    /// **清洗规则：** 去除 `$schema`, `$id`, `title`, `description` 等根部元数据，
-    /// 保留 `type`, `properties`, `required`, `definitions` 等核心 JSON Schema 字段。
-    pub fn compute_and_clean_schema<S: schemars::JsonSchema>() -> serde_json::Value {
-        let root = schemars::schema_for!(S);
-        let val = serde_json::to_value(&root)
-            .expect("Failed to serialize JsonSchema; this is a bug in schemars");
-        Self::clean_schema(val)
-    }
-
-    /// 清洗 schemars 生成的 RootSchema，去除根部元数据噪音。
-    ///
-    /// 保留 `type`, `properties`, `required`, `definitions`, `additionalProperties`
-    /// 等核心 JSON Schema 字段。Codec 层在此基础上进行 Provider 特定的二次适配。
-    fn clean_schema(mut value: serde_json::Value) -> serde_json::Value {
-        if let Some(obj) = value.as_object_mut() {
-            // 去除标准 JSON Schema 根部的噪声元数据
-            obj.remove("$schema");
-            obj.remove("$id");
-            obj.remove("title");
-            obj.remove("description");
-        }
-        value
-    }
 }
 
 /// 推理配置 — 声明式控制模型的深度推理行为。

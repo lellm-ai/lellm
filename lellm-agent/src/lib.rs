@@ -14,10 +14,10 @@ pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, Tr
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, BatchExecutionResult,
     CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback,
-    FallbackAction, FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult,
-    LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy, StaticCatalog,
-    StopReason, ToolArgs, ToolCachePolicy, ToolCatalog, ToolCategory, ToolError, ToolErrorKind,
-    ToolExecutor, ToolRegistration, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
+    ExecutableTool, FallbackAction, FallbackContext, FallbackStrategy, IntoToolError,
+    IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy,
+    StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog, ToolCategory, ToolError,
+    ToolErrorKind, ToolExecutor, ToolFn, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
     ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
 };
 
@@ -33,7 +33,7 @@ pub use lellm_core::Prompt;
 ///
 /// # 示例
 /// ```ignore
-/// use lellm_agent::{create_agent, ToolRegistration};
+/// use lellm_agent::{create_agent, ExecutableTool};
 ///
 /// // 无工具的简单 Agent
 /// let agent = create_agent(model);
@@ -50,7 +50,7 @@ pub fn create_agent(model: ResolvedModel) -> ToolUseLoop {
 /// 快速创建带工具的 Agent。
 pub fn create_agent_with_tools(
     model: ResolvedModel,
-    tools: impl IntoIterator<Item = ToolRegistration>,
+    tools: impl IntoIterator<Item = ExecutableTool>,
 ) -> ToolUseLoop {
     AgentBuilder::new(model).tools(tools).compile()
 }
@@ -64,7 +64,7 @@ pub fn create_agent_with_system(model: ResolvedModel, system: impl Into<Prompt>)
 pub fn create_agent_full(
     model: ResolvedModel,
     system: impl Into<Prompt>,
-    tools: impl IntoIterator<Item = ToolRegistration>,
+    tools: impl IntoIterator<Item = ExecutableTool>,
     max_iterations: usize,
 ) -> ToolUseLoop {
     AgentBuilder::new(model)

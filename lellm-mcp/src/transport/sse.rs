@@ -126,18 +126,30 @@ impl McpTransport for SseTransport {
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.changed() => {
+                        tracing::debug!("SSE shutdown signal received");
+                        break;
+                    }
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(event)) => {
+                                tracing::debug!(event_type = %event.event, data_len = event.data.len(), "SSE event received");
                                 match event.event.as_str() {
                                     EVENT_ENDPOINT => {
-                                        // 获取 POST URL
+                                        // 获取 POST URL（可能是相对路径，需要拼接完整 URL）
                                         let post_url_str = event.data.clone();
-                                        tracing::debug!(post_url = %post_url_str, "Received endpoint");
-                                        *post_url_clone.lock().await = Some(post_url_str);
+                                        let full_url = if post_url_str.starts_with("http") {
+                                            post_url_str
+                                        } else {
+                                            // 从 SSE URL 提取 base URL
+                                            let base_url = sse_url.rsplit_once('/').map(|(base, _)| base).unwrap_or(&sse_url);
+                                            format!("{}{}", base_url, post_url_str)
+                                        };
+                                        tracing::debug!(post_url = %full_url, "Received endpoint");
+                                        *post_url_clone.lock().await = Some(full_url);
                                     }
                                     EVENT_MESSAGE => {
+                                        tracing::debug!(data = %event.data, "Received message event");
                                         // 解析 JSON-RPC 消息
                                         let msg: JsonRpcMessage = match serde_json::from_str(&event.data) {
                                             Ok(msg) => msg,
@@ -149,12 +161,16 @@ impl McpTransport for SseTransport {
 
                                         match msg {
                                             JsonRpcMessage::Response(resp) => {
+                                                tracing::debug!(id = resp.id, "Received response");
                                                 let mut p = pending_clone.lock().await;
                                                 if let Some(tx) = p.remove(&resp.id) {
                                                     let _ = tx.send(Ok(resp));
+                                                } else {
+                                                    tracing::warn!(id = resp.id, "No pending request for response");
                                                 }
                                             }
                                             JsonRpcMessage::Notification(notif) => {
+                                                tracing::debug!("Received notification");
                                                 let _ = notification_tx_clone.send(notif);
                                             }
                                             JsonRpcMessage::Request(_) => {
@@ -163,7 +179,7 @@ impl McpTransport for SseTransport {
                                         }
                                     }
                                     _ => {
-                                        tracing::debug!(event_type = %event.event, "Unknown SSE event");
+                                        tracing::debug!(event_type = %event.event, data = %event.data, "Unknown SSE event");
                                     }
                                 }
                             }
@@ -237,6 +253,7 @@ impl McpTransport for SseTransport {
 
         // 通过 HTTP POST 发送
         let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
+        tracing::debug!(method = %method, post_url = %post_url, "Sending request");
 
         let response = inner
             .client
@@ -249,9 +266,14 @@ impl McpTransport for SseTransport {
 
         // 检查 HTTP 状态
         if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::error!(status = %status, body = %body, "POST request failed");
             inner.pending.lock().await.remove(&id);
-            return Err(McpError::Network(format!("HTTP {}", response.status())));
+            return Err(McpError::Network(format!("HTTP {}: {}", status, body)));
         }
+
+        tracing::debug!(method = %method, "Request sent successfully");
 
         // 等待 SSE 推送的响应（带超时）
         match tokio::time::timeout(self.config.request_timeout, rx).await {

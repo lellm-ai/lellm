@@ -1,29 +1,19 @@
-//! 工具系统 — 注册、定义、执行、目录抽象。
+//! 工具系统 — 执行、目录抽象。
 //!
 //! 独立的工具子系统，被 runtime 层使用。
 //!
-//! `ToolArgs`, `ToolRegistration`, `ParallelSafety`, `ToolCategory` 已移至 `lellm-core`，
-//! 此处 re-export 以保持向后兼容。
+//! **分层：**
+//! - 协议层（lellm-core）：`ToolArgs`, `ToolDefinition`, `ParallelSafety`, `ToolCategory`
+//! - 可执行描述（lellm-core）：`ExecutableTool`, `ToolFn`
+//! - 运行时层（本模块）：`ToolExecutor`, `ToolCatalog`, `ToolSnapshot`
 
 mod executor;
 
-// Re-export from lellm-core for backward compatibility
-pub use lellm_core::{ParallelSafety, ToolArgs, ToolCategory, ToolRegistration};
+// Re-export protocol types from lellm-core
+pub use lellm_core::{ExecutableTool, ParallelSafety, ToolArgs, ToolCategory, ToolFn};
 
+// Re-export runtime types
 pub use executor::{BatchExecutionResult, ToolExecutor, execute_batch_with};
-
-/// 异步工具函数类型（executor 内部使用）
-///
-/// 通过 `ToolRegistration::execute()` 获取 `UnpinWrapper`，
-/// 内部解包为 `Pin<Box<dyn Future>>`。
-pub(crate) type ToolFn = std::sync::Arc<
-    dyn Fn(
-            &serde_json::Value,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = lellm_core::ToolResult> + Send>>
-        + Send
-        + Sync,
->;
 
 // ─── 工具快照 ────────────────────────────────────────────────────
 
@@ -33,13 +23,13 @@ pub(crate) type ToolFn = std::sync::Arc<
 /// `definitions` 通过 `OnceLock` 懒构建——大部分轮次不需要定义列表。
 pub struct ToolSnapshot {
     version: u64,
-    tools: std::sync::Arc<indexmap::IndexMap<String, ToolRegistration>>,
+    tools: std::sync::Arc<indexmap::IndexMap<String, ExecutableTool>>,
     definitions: std::sync::OnceLock<Vec<lellm_core::ToolDefinition>>,
 }
 
 impl ToolSnapshot {
     /// 从工具映射构建快照。
-    pub fn new(tools: indexmap::IndexMap<String, ToolRegistration>, version: u64) -> Self {
+    pub fn new(tools: indexmap::IndexMap<String, ExecutableTool>, version: u64) -> Self {
         Self {
             version,
             tools: std::sync::Arc::new(tools),
@@ -47,8 +37,8 @@ impl ToolSnapshot {
         }
     }
 
-    /// 按名称查找工具注册信息。
-    pub fn get(&self, name: &str) -> Option<&ToolRegistration> {
+    /// 按名称查找工具。
+    pub fn get(&self, name: &str) -> Option<&ExecutableTool> {
         self.tools.get(name)
     }
 
@@ -86,7 +76,7 @@ impl ToolSnapshot {
 /// **设计目标：**
 /// - 让 `ToolExecutor` 不关心工具来源（静态注册 vs MCP 发现）
 /// - 每轮迭代调用 `snapshot()` 一次，固定本轮工具集（避免同轮不一致）
-/// - `ToolRegistration` 必须 `Clone + Send + Sync`（快照在内存中传递）
+/// - `ExecutableTool` 必须 `Clone + Send + Sync`（快照在内存中传递）
 ///
 /// **快照时机：**
 /// - `ToolUseLoop::execute()` — 每轮迭代开始前调用一次
@@ -108,7 +98,7 @@ pub struct StaticCatalog {
 
 impl StaticCatalog {
     /// 从工具注册列表构建静态目录。
-    pub fn from_tools(tools: Vec<ToolRegistration>) -> Self {
+    pub fn from_tools(tools: Vec<ExecutableTool>) -> Self {
         let mut map = indexmap::IndexMap::with_capacity(tools.len());
         for reg in tools {
             map.insert(reg.definition.name.clone(), reg);

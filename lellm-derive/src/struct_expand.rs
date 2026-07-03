@@ -56,7 +56,7 @@ pub(crate) fn expand_tool_for_struct(
     Ok(quote! {
         #s
 
-        impl ::lellm_agent::ToolArgs for #struct_name {
+        impl ::lellm_core::ToolArgs for #struct_name {
             const NAME: &'static str = #name;
             const DESCRIPTION: &'static str = #description;
 
@@ -81,7 +81,7 @@ pub(crate) fn generate_tool_for_struct(
     let safe_methods = generate_safe_methods(struct_name);
 
     let generated = quote! {
-        impl ::lellm_agent::ToolArgs for #struct_name {
+        impl ::lellm_core::ToolArgs for #struct_name {
             const NAME: &'static str = #name;
             const DESCRIPTION: &'static str = #description;
 

@@ -22,6 +22,16 @@ pub use message::{
     text_block,
 };
 pub use prompt::Prompt;
-pub use request::{ChatRequest, ReasoningConfig, ToolChoice, ToolDefinition};
+pub use request::{ChatRequest, ReasoningConfig, ToolChoice};
 pub use response::{ChatResponse, TokenUsage};
-pub use tool::{ParallelSafety, ToolArgs, ToolCategory, ToolRegistration};
+#[allow(deprecated)]
+pub use tool::ToolRegistration;
+pub use tool::{
+    __tool_box, ExecutableTool, ParallelSafety, ToolArgParser, ToolArgs, ToolCategory,
+    ToolDefinition, ToolFn,
+};
+
+// Re-export for macro-generated code — ensures consistent serde/serde_json instances.
+pub use schemars;
+pub use serde;
+pub use serde_json;

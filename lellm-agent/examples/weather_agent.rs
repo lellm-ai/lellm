@@ -66,7 +66,7 @@ fn http_get(url: &str) -> Result<String, ToolError> {
 
 fn register_weather_tools(
     llm_provider: Option<Arc<dyn LlmProvider>>,
-) -> Vec<lellm_agent::ToolRegistration> {
+) -> Vec<lellm_agent::ExecutableTool> {
     vec![
         // resolve_city：四级降级
         ResolveCityArgs::safe(move |args| {

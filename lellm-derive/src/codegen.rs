@@ -11,10 +11,10 @@ use quote::quote;
 /// Generate the ToolArgs::__schema() impl with LazyLock caching.
 pub(crate) fn generate_schema_impl(struct_name: &syn::Ident) -> TokenStream2 {
     quote! {
-        fn __schema() -> serde_json::Value {
-            static SCHEMA: ::std::sync::LazyLock<serde_json::Value> =
+        fn __schema() -> ::lellm_core::serde_json::Value {
+            static SCHEMA: ::std::sync::LazyLock<::lellm_core::serde_json::Value> =
                 ::std::sync::LazyLock::new(|| {
-                    let full = ::serde_json::to_value(
+                    let full = ::lellm_core::serde_json::to_value(
                         ::lellm_core::schemars::schema_for!(#struct_name)
                     ).expect("schema generation failed");
                     #struct_name::extract_inner_schema(&full)
@@ -29,7 +29,7 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
     quote! {
         impl #struct_name {
             /// 从 schemars 完整 schema 中提取 inner schema（LazyLock 缓存）。
-            pub fn __schema() -> serde_json::Value {
+            pub fn __schema() -> ::lellm_core::serde_json::Value {
                 <#struct_name as ::lellm_core::ToolArgs>::__schema()
             }
 
@@ -43,7 +43,7 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
                 <#struct_name as ::lellm_core::ToolArgs>::DESCRIPTION
             }
 
-            fn extract_inner_schema(full: &serde_json::Value) -> serde_json::Value {
+            fn extract_inner_schema(full: &::lellm_core::serde_json::Value) -> ::lellm_core::serde_json::Value {
                 let source = if let Some(obj) = full.as_object() {
                     obj
                 } else {
@@ -51,42 +51,44 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
                 };
 
                 let skip = ["$schema", "title", "description", "definitions", "$id", "$ref"];
-                let mut cleaned = serde_json::Map::new();
+                let mut cleaned = ::lellm_core::serde_json::Map::new();
                 for (k, v) in source {
                     if !skip.contains(&k.as_str()) {
                         cleaned.insert(k.clone(), v.clone());
                     }
                 }
-                serde_json::Value::Object(cleaned)
+                ::lellm_core::serde_json::Value::Object(cleaned)
             }
         }
     }
 }
 
 /// Generate safe registration methods: safe(), category_exclusive(), exclusive().
+///
+/// These methods accept strong-typed closures and internally handle
+/// JSON deserialization + future boxing, returning `ExecutableTool`.
 pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
     quote! {
         impl #struct_name {
             /// 便捷注册 — 并行安全（Safe）。
             ///
             /// 闭包接收反序列化后的 `#struct_name`，直接操作强类型参数。
-            pub fn safe<F, Fut>(f: F) -> ::lellm_core::ToolRegistration
+            pub fn safe<F, Fut>(f: F) -> ::lellm_core::ExecutableTool
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
-                ::lellm_core::ToolRegistration::safe(
+                ::lellm_core::ExecutableTool::safe(
                     <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| -> ::lellm_core::UnpinWrapper<::lellm_core::ToolResult> {
-                            ::lellm_core::UnpinWrapper(Box::pin(async move {
-                                match ::serde_json::from_value::<#struct_name>(args.clone()) {
-                                    Ok(parsed) => {
-                                        let f = ::std::sync::Arc::clone(&f);
-                                        f(parsed).await
-                                    }
+                        move |args: &::lellm_core::serde_json::Value| {
+                            let args = args.clone();
+                            let f = ::std::sync::Arc::clone(&f);
+                            ::lellm_core::__tool_box(async move {
+                                match <#struct_name as ::lellm_core::ToolArgParser>::parse(args) {
+                                    Ok(parsed) => f(parsed).await,
                                     Err(e) => {
                                         ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
                                             kind: ::lellm_core::ToolErrorKind::InvalidInput,
@@ -97,7 +99,7 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                                         })
                                     }
                                 }
-                            }))
+                            })
                         }
                     }
                 )
@@ -107,24 +109,23 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
             pub fn category_exclusive<F, Fut>(
                 category: ::lellm_core::ToolCategory,
                 f: F,
-            ) -> ::lellm_core::ToolRegistration
+            ) -> ::lellm_core::ExecutableTool
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
-                ::lellm_core::ToolRegistration::category_exclusive(
+                ::lellm_core::ExecutableTool::category_exclusive(
                     <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     category,
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| -> ::lellm_core::UnpinWrapper<::lellm_core::ToolResult> {
-                            ::lellm_core::UnpinWrapper(Box::pin(async move {
-                                match ::serde_json::from_value::<#struct_name>(args.clone()) {
-                                    Ok(parsed) => {
-                                        let f = ::std::sync::Arc::clone(&f);
-                                        f(parsed).await
-                                    }
+                        move |args: &::lellm_core::serde_json::Value| {
+                            let args = args.clone();
+                            let f = ::std::sync::Arc::clone(&f);
+                            ::lellm_core::__tool_box(async move {
+                                match <#struct_name as ::lellm_core::ToolArgParser>::parse(args) {
+                                    Ok(parsed) => f(parsed).await,
                                     Err(e) => {
                                         ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
                                             kind: ::lellm_core::ToolErrorKind::InvalidInput,
@@ -135,30 +136,29 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                                         })
                                     }
                                 }
-                            }))
+                            })
                         }
                     }
                 )
             }
 
             /// 便捷注册 — 全局互斥（Exclusive）。
-            pub fn exclusive<F, Fut>(f: F) -> ::lellm_core::ToolRegistration
+            pub fn exclusive<F, Fut>(f: F) -> ::lellm_core::ExecutableTool
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
                 let f = ::std::sync::Arc::new(f);
-                ::lellm_core::ToolRegistration::exclusive(
+                ::lellm_core::ExecutableTool::exclusive(
                     <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     {
                         let f = ::std::sync::Arc::clone(&f);
-                        move |args: &serde_json::Value| -> ::lellm_core::UnpinWrapper<::lellm_core::ToolResult> {
-                            ::lellm_core::UnpinWrapper(Box::pin(async move {
-                                match ::serde_json::from_value::<#struct_name>(args.clone()) {
-                                    Ok(parsed) => {
-                                        let f = ::std::sync::Arc::clone(&f);
-                                        f(parsed).await
-                                    }
+                        move |args: &::lellm_core::serde_json::Value| {
+                            let args = args.clone();
+                            let f = ::std::sync::Arc::clone(&f);
+                            ::lellm_core::__tool_box(async move {
+                                match <#struct_name as ::lellm_core::ToolArgParser>::parse(args) {
+                                    Ok(parsed) => f(parsed).await,
                                     Err(e) => {
                                         ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
                                             kind: ::lellm_core::ToolErrorKind::InvalidInput,
@@ -169,7 +169,7 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                                         })
                                     }
                                 }
-                            }))
+                            })
                         }
                     }
                 )

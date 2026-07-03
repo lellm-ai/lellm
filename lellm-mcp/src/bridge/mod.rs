@@ -1,4 +1,4 @@
-//! Tool 桥接 — MCP 工具 → ToolRegistration。
+//! Tool 桥接 — MCP 工具 → ExecutableTool。
 //!
 //! 核心抽象：从 lellm-agent 复用 `ToolCatalog` trait。
 //! McpCatalog 实现 ToolCatalog，通过 MCP 协议动态发现工具。
@@ -107,7 +107,7 @@ impl ToolCatalog for McpCatalog {
                 cache_control: None,
             };
 
-            let reg = lellm_core::ToolRegistration::safe(def, move |input: &serde_json::Value| {
+            let reg = lellm_core::ExecutableTool::safe(def, move |input: &serde_json::Value| {
                 let client = client.clone();
                 let name = name.clone();
                 let input = input.clone();

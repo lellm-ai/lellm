@@ -44,7 +44,7 @@ fn http_get(url: &str) -> Result<String, ToolError> {
         })
 }
 
-fn register_http_tools() -> Vec<lellm_agent::ToolRegistration> {
+fn register_http_tools() -> Vec<lellm_agent::ExecutableTool> {
     vec![HttpGetArgs::safe(|args| async move {
         let body = tokio::task::spawn_blocking(move || http_get(&args.url))
             .await

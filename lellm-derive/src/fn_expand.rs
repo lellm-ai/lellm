@@ -126,7 +126,7 @@ pub(crate) fn expand_tool_for_fn(
 
         // 6. 无依赖工厂函数 — 调用原始函数
         /// Auto-generated tool registration for `#fn_name` (no dependency injection).
-        #visibility fn #reg_fn_name() -> ::lellm_core::ToolRegistration {
+        #visibility fn #reg_fn_name() -> ::lellm_core::ExecutableTool {
             #reg_fn_name_with(|args| async move {
                 #fn_name(#(#arg_refs),*) #await_suffix
             })
@@ -147,7 +147,7 @@ pub(crate) fn expand_tool_for_fn(
         ///     }
         /// }));
         /// ```
-        #visibility fn #reg_fn_name_with<F, Fut>(f: F) -> ::lellm_core::ToolRegistration
+        #visibility fn #reg_fn_name_with<F, Fut>(f: F) -> ::lellm_core::ExecutableTool
         where
             F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
             Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,

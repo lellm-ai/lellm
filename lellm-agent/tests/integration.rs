@@ -1,8 +1,8 @@
 use lellm_agent::schemars::JsonSchema;
 use lellm_agent::serde::Deserialize;
 use lellm_agent::{
-    AgentBuilder, ContextBudget, ContextCompactor, LocalCompactor, StaticCatalog, ToolArgs,
-    ToolCategory, ToolExecutor, ToolRegistration, estimate_message, estimate_tokens,
+    AgentBuilder, ContextBudget, ContextCompactor, ExecutableTool, LocalCompactor, StaticCatalog,
+    ToolArgs, ToolCategory, ToolExecutor, estimate_message, estimate_tokens,
 };
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
 use lellm_derive::Tool;
@@ -50,7 +50,7 @@ async fn test_tool_executor_snapshot_and_execute() {
         }),
         cache_control: None,
     };
-    let reg = ToolRegistration::safe(def, |args: &serde_json::Value| {
+    let reg = ExecutableTool::safe(def, |args: &serde_json::Value| {
         let text = args
             .get("text")
             .and_then(|v| v.as_str())
@@ -326,7 +326,7 @@ async fn test_builder_with_tool() {
         cache_control: None,
     };
 
-    let reg = ToolRegistration::safe(def, |args| {
+    let reg = ExecutableTool::safe(def, |args| {
         let m = args
             .get("msg")
             .and_then(|v| v.as_str())
@@ -373,7 +373,7 @@ fn test_builder_chain_api() {
         parameters: serde_json::json!({"type": "object", "properties": {}}),
         cache_control: None,
     };
-    let reg = ToolRegistration::safe(def, |_| async { Ok(serde_json::json!("done")) });
+    let reg = ExecutableTool::safe(def, |_| async { Ok(serde_json::json!("done")) });
 
     // 完整链式调用
     let _agent = AgentBuilder::new(model)
@@ -417,7 +417,7 @@ async fn test_create_agent_with_tools() {
         }),
         cache_control: None,
     };
-    let reg = ToolRegistration::safe(def, |args| {
+    let reg = ExecutableTool::safe(def, |args| {
         let n = args
             .get("name")
             .and_then(|v| v.as_str())
@@ -484,7 +484,7 @@ fn test_create_agent_full() {
         parameters: serde_json::json!({"type": "object", "properties": {}}),
         cache_control: None,
     };
-    let reg = ToolRegistration::safe(def, |_| async { Ok(serde_json::json!("ok")) });
+    let reg = ExecutableTool::safe(def, |_| async { Ok(serde_json::json!("ok")) });
 
     let _agent = lellm_agent::create_agent_full(model, "你是助手".to_string(), vec![reg], 20);
 }

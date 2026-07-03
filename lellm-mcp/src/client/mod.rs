@@ -14,13 +14,31 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// 通过给定 Transport 创建 Client。
+    /// 通过给定 Transport 创建 Client（同步版本，适合在 runtime 外使用）。
     pub fn with_transport<T>(transport: T) -> Self
     where
         T: McpTransport + 'static,
     {
         let transport = Arc::new(tokio::sync::Mutex::new(transport));
-        let state = transport.blocking_lock().state();
+        // 在同步上下文中使用 try_lock，如果失败则创建一个默认的 state receiver
+        let state = match transport.try_lock() {
+            Ok(t) => t.state(),
+            Err(_) => {
+                // 创建一个临时的 watch channel
+                let (_, rx) = tokio::sync::watch::channel(ConnectionState::Disconnected);
+                rx
+            }
+        };
+        Self { transport, state }
+    }
+
+    /// 通过给定 Transport 创建 Client（异步版本，推荐使用）。
+    pub async fn with_transport_async<T>(transport: T) -> Self
+    where
+        T: McpTransport + 'static,
+    {
+        let transport = Arc::new(tokio::sync::Mutex::new(transport));
+        let state = transport.lock().await.state();
         Self { transport, state }
     }
 
