@@ -21,10 +21,19 @@ futures = "0.3"
 uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-lellm-provider = { path = "../lellm-provider", features = ["openai-compat"] }
+lellm-provider = { path = "../lellm-provider", features = ["openai-compat", "mock"] }
 lellm-core = { workspace = true, features = ["anyhow"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
 
 [[example]]
 name = "pure_graph_agent"
 path = "examples/pure_graph_agent.rs"
+
+[[example]]
+name = "calculator_graph"
+path = "examples/calculator_graph.rs"
+
+[[example]]
+name = "calculator_graph_mock"
+path = "examples/calculator_graph_mock.rs"
