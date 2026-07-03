@@ -1,4 +1,4 @@
-//! MCP Weather Example — 使用 QQ 地图 MCP 服务器查询天气 (SSE Transport)
+//! MCP Geocoder Example — 使用 QQ 地图 MCP 服务器解析地址 (SSE Transport)
 //!
 //! 前置条件：
 //! 1. 在腾讯位置服务申请 API Key: https://lbs.qq.com/service/webService/webServiceGuide/overview
@@ -19,13 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
 
-    println!("=== MCP Weather — QQ 地图 (SSE) ===\n");
+    println!("=== MCP Geocoder — QQ 地图 (SSE) ===\n");
 
     let config = SseConfig::new(&sse_url).with_request_timeout(std::time::Duration::from_secs(60));
     let transport = SseTransport::new(config);
     let client = McpClient::with_transport(transport).await;
 
-    // 连接 + 初始化
     client.connect().await?;
     let result = client.initialize().await?;
     println!(
@@ -47,41 +46,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })?;
 
-    println!("✓ {} 个工具:", list_result.tools.len());
-    for tool in &list_result.tools {
-        println!("  - {}", tool.name);
-    }
+    println!("✓ {} 个工具\n", list_result.tools.len());
 
-    // 查询天气（陆家嘴经纬度: 121.505, 31.238）
-    let tool_name = "weather";
+    // 批量解析地址
+    let addresses = vec!["陆家嘴", "天安门", "奇台"];
 
-    println!("\n查询陆家嘴天气 (经纬度: 121.505,31.238)...\n");
+    for addr in &addresses {
+        println!("解析: {}", addr);
+        let resp = client
+            .request(JsonRpcRequest::new(
+                2,
+                methods::TOOLS_CALL,
+                Some(serde_json::to_value(CallToolParams::new(
+                    "geocoder",
+                    Some(serde_json::json!({ "address": addr })),
+                ))?),
+            ))
+            .await?;
 
-    let call_resp = client
-        .request(JsonRpcRequest::new(
-            2,
-            methods::TOOLS_CALL,
-            Some(serde_json::to_value(CallToolParams::new(
-                tool_name,
-                Some(serde_json::json!({ "location": "121.505,31.238" })),
-            ))?),
-        ))
-        .await?;
-
-    match call_resp.result {
-        lellm_mcp::protocol::JsonRpcResult::Success(value) => {
-            let call_result: lellm_mcp::protocol::CallToolResult = serde_json::from_value(value)?;
-            for content in &call_result.content {
-                if let Some(text) = content.as_text() {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    } else {
-                        println!("{}", text);
+        match resp.result {
+            lellm_mcp::protocol::JsonRpcResult::Success(value) => {
+                let call_result: lellm_mcp::protocol::CallToolResult =
+                    serde_json::from_value(value)?;
+                for content in &call_result.content {
+                    if let Some(text) = content.as_text() {
+                        println!("  {}\n", text);
                     }
                 }
             }
+            e => println!("  失败: {:?}\n", e),
         }
-        e => println!("请求失败: {:?}", e),
     }
 
     client.close().await?;

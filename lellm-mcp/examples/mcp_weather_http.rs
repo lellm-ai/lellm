@@ -1,4 +1,4 @@
-//! MCP Weather Example — 使用 QQ 地图 MCP 服务器查询天气 (HTTP Transport)
+//! MCP Geocoder Example — 使用 QQ 地图 MCP 服务器解析地址 (HTTP Transport)
 //!
 //! 前置条件：
 //! 1. 在腾讯位置服务申请 API Key: https://lbs.qq.com/service/webService/webServiceGuide/overview
@@ -17,16 +17,15 @@ use lellm_mcp::transport::{HttpConfig, HttpTransport};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("TENCENT_MAP_KEY").expect("请设置环境变量 TENCENT_MAP_KEY");
 
-    let endpoint_url = format!("https://mcp.map.qq.com/mcp?key={}&format=1", api_key);
+    let endpoint_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
 
-    println!("=== MCP Weather — QQ 地图 (HTTP) ===\n");
+    println!("=== MCP Geocoder — QQ 地图 (HTTP) ===\n");
 
     let config =
         HttpConfig::new(&endpoint_url).with_request_timeout(std::time::Duration::from_secs(60));
     let transport = HttpTransport::new(config);
     let client = McpClient::with_transport(transport).await;
 
-    // 连接 + 初始化
     client.connect().await?;
     let result = client.initialize().await?;
     println!(
@@ -48,67 +47,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })?;
 
-    println!("✓ {} 个工具:", list_result.tools.len());
-    for tool in &list_result.tools {
-        println!("  - {}", tool.name);
-    }
+    println!("✓ {} 个工具\n", list_result.tools.len());
 
-    // 先用 geocoder 验证 API 正常
-    println!("\n验证 geocoder 工具...");
-    let geo_resp = client
-        .request(JsonRpcRequest::new(
-            2,
-            methods::TOOLS_CALL,
-            Some(serde_json::to_value(CallToolParams::new(
-                "geocoder",
-                Some(serde_json::json!({ "address": "天安门广场" })),
-            ))?),
-        ))
-        .await?;
+    // 批量解析地址（geocoder 不支持批量，逐个调用）
+    let addresses = vec!["陆家嘴", "天安门", "奇台"];
 
-    match &geo_resp.result {
-        lellm_mcp::protocol::JsonRpcResult::Success(value) => {
-            let call_result: lellm_mcp::protocol::CallToolResult =
-                serde_json::from_value(value.clone())?;
-            for content in &call_result.content {
-                if let Some(text) = content.as_text() {
-                    println!("geocoder 结果: {}", text);
-                }
-            }
-        }
-        e => println!("geocoder 失败: {:?}", e),
-    }
+    for addr in &addresses {
+        println!("解析: {}", addr);
+        let resp = client
+            .request(JsonRpcRequest::new(
+                2,
+                methods::TOOLS_CALL,
+                Some(serde_json::to_value(CallToolParams::new(
+                    "geocoder",
+                    Some(serde_json::json!({ "address": addr })),
+                ))?),
+            ))
+            .await?;
 
-    // 查询天气
-    let tool_name = "weather";
-
-    println!("\n查询天安门天气...\n");
-
-    let call_resp = client
-        .request(JsonRpcRequest::new(
-            3,
-            methods::TOOLS_CALL,
-            Some(serde_json::to_value(CallToolParams::new(
-                tool_name,
-                Some(serde_json::json!({ "location": "116.397428,39.90923" })),
-            ))?),
-        ))
-        .await?;
-
-    match call_resp.result {
-        lellm_mcp::protocol::JsonRpcResult::Success(value) => {
-            let call_result: lellm_mcp::protocol::CallToolResult = serde_json::from_value(value)?;
-            for content in &call_result.content {
-                if let Some(text) = content.as_text() {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
-                        println!("{}", serde_json::to_string_pretty(&json)?);
-                    } else {
-                        println!("{}", text);
+        match resp.result {
+            lellm_mcp::protocol::JsonRpcResult::Success(value) => {
+                let call_result: lellm_mcp::protocol::CallToolResult =
+                    serde_json::from_value(value)?;
+                for content in &call_result.content {
+                    if let Some(text) = content.as_text() {
+                        println!("  {}\n", text);
                     }
                 }
             }
+            e => println!("  失败: {:?}\n", e),
         }
-        e => println!("请求失败: {:?}", e),
     }
 
     client.close().await?;
