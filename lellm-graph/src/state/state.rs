@@ -82,7 +82,7 @@ pub enum StateMutation {
     Delete(String),
 }
 
-impl crate::workflow_state::StateMutation<State> for StateMutation {
+impl crate::state::workflow_state::StateMutation<State> for StateMutation {
     fn apply(self, state: &mut State) {
         match self {
             StateMutation::Put(key, value) => {
@@ -95,7 +95,7 @@ impl crate::workflow_state::StateMutation<State> for StateMutation {
     }
 }
 
-impl crate::workflow_state::WorkflowState for State {
+impl crate::state::workflow_state::WorkflowState for State {
     /// State 本身就是可序列化的 Checkpoint（向后兼容）。
     type Checkpoint = State;
     type Mutation = StateMutation;
@@ -113,8 +113,8 @@ impl crate::workflow_state::WorkflowState for State {
 #[derive(Clone)]
 pub struct StateMerge;
 
-impl crate::workflow_state::MergeStrategy<State> for StateMerge {
-    fn merge(branches: Vec<State>) -> Result<State, crate::workflow_state::WorkflowError> {
+impl crate::state::workflow_state::MergeStrategy<State> for StateMerge {
+    fn merge(branches: Vec<State>) -> Result<State, crate::state::workflow_state::WorkflowError> {
         let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for state in branches {
             merged.extend(state.inner);
@@ -311,7 +311,7 @@ pub fn array_reducer(existing: &Value, new: &Value) -> Result<Value, String> {
 ///
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 #[derive(Debug)]
-pub struct GraphResult<S: crate::workflow_state::WorkflowState = State> {
+pub struct GraphResult<S: crate::state::workflow_state::WorkflowState = State> {
     /// 执行追踪 ID（关联本次执行的所有 SpanId）
     pub trace_id: crate::ids::TraceId,
     /// 最终状态
@@ -321,7 +321,7 @@ pub struct GraphResult<S: crate::workflow_state::WorkflowState = State> {
     /// 执行耗时
     pub duration: Duration,
     /// 执行追踪（可选，启用 TraceSink 时填充）
-    pub trace: Option<crate::trace::ExecutionTrace<S::Mutation>>,
+    pub trace: Option<crate::checkpoint::trace::ExecutionTrace<S::Mutation>>,
 }
 
 /// 单个节点执行记录。

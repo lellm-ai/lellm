@@ -11,12 +11,12 @@
 
 use async_trait::async_trait;
 
+use super::node_context::{LeafContext, NodeContext};
+use super::{FlowNode, LeafNode};
 use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId};
-use crate::node::{FlowNode, LeafNode};
-use crate::node_context::{LeafContext, NodeContext};
+use crate::state::workflow_state::WorkflowState;
 use crate::state::{State, StateMutation};
-use crate::workflow_state::WorkflowState;
 
 /// Barrier 超时后的默认行为。
 #[derive(Debug, Clone, Default)]

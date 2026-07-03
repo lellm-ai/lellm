@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
+use super::graph_analysis::{self, CycleAnalysis};
+use super::graph_builder::fnv_hash;
 use crate::error::{GraphDiagnostics, GraphError, TerminalError};
-use crate::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
-use crate::graph_analysis::{self, CycleAnalysis};
-use crate::graph_builder::fnv_hash;
+use crate::exec::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
-use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── StepCallback ─────────────────────────────────────────────
 
@@ -392,23 +392,23 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             {
                 let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await;
                 match outcome {
-                    crate::barrier_sink::BarrierOutcome::Decision(
+                    crate::node::barrier_sink::BarrierOutcome::Decision(
                         crate::event::BarrierDecision::Reroute { target },
                     ) => {
                         current = target;
                         continue;
                     }
-                    crate::barrier_sink::BarrierOutcome::Decision(
+                    crate::node::barrier_sink::BarrierOutcome::Decision(
                         crate::event::BarrierDecision::Approve
                         | crate::event::BarrierDecision::Reject { .. }
                         | crate::event::BarrierDecision::Modify { .. },
                     ) => {
                         // Approve/Reject/Modify — 继续正常路由
                     }
-                    crate::barrier_sink::BarrierOutcome::TimedOut => {
+                    crate::node::barrier_sink::BarrierOutcome::TimedOut => {
                         // 超时 — 默认 Reject 语义，继续正常路由
                     }
-                    crate::barrier_sink::BarrierOutcome::Cancelled => {
+                    crate::node::barrier_sink::BarrierOutcome::Cancelled => {
                         return Err(GraphError::Terminal(
                             crate::error::TerminalError::BarrierCancelled { node: current },
                         ));
@@ -435,4 +435,4 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
 
 // ─── GraphBuilder, PendingEdge (移至 graph_builder 模块) ────
 
-pub use crate::graph_builder::{GraphBuilder, PendingEdge};
+pub use super::graph_builder::{GraphBuilder, PendingEdge};

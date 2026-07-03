@@ -29,17 +29,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+pub use super::node_context::LeafContext;
+use super::node_context::NodeContext;
 use crate::error::GraphError;
-use crate::execution_engine::ExecutionEngine;
-pub use crate::node_context::LeafContext;
-use crate::node_context::NodeContext;
+use crate::exec::execution_engine::ExecutionEngine;
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
-use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── 子模块重新导出 ────────────────────────────────────────────
 
-pub use crate::barrier_node::{BarrierDefaultAction, BarrierNode};
-pub use crate::parallel_node::{ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder};
+pub use super::barrier_node::{BarrierDefaultAction, BarrierNode};
+pub use super::parallel_node::{ParallelErrorStrategy, ParallelNode, ParallelNodeBuilder};
 
 // ─── LeafNode Trait ───────────────────────────────────────────
 
@@ -118,7 +118,7 @@ pub enum NodeKind<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     ///
     /// CompiledSubgraph 持有类型擦除的 StateProjector，
     /// 包含 Graph + Lens + Merge 的执行逻辑。
-    Subgraph(crate::compiled_subgraph::CompiledSubgraph<S>),
+    Subgraph(super::compiled_subgraph::CompiledSubgraph<S>),
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> Clone for NodeKind<S, M> {

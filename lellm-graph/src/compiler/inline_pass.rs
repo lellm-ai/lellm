@@ -5,7 +5,7 @@ use super::pass::CompilerPass;
 use crate::Graph;
 use crate::MergeStrategy;
 use crate::node::NodeKind;
-use crate::workflow_state::WorkflowState;
+use crate::state::workflow_state::WorkflowState;
 
 /// Subgraph 内联优化 pass。
 ///

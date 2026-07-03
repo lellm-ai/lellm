@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use crate::checkpoint::CheckpointId;
-use crate::ids::{SpanId, TraceId};
+use crate::checkpoint::TraceId;
+use crate::ids::SpanId;
 
 // ─── RuntimeEvent ─────────────────────────────────────────────
 

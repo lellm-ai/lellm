@@ -31,8 +31,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::GraphError;
+use crate::state::workflow_state::WorkflowState;
 use crate::stream_emitter::StreamSink;
-use crate::workflow_state::WorkflowState;
 use tokio_util::sync::CancellationToken;
 
 // ─── StateProjector ────────────────────────────────────────────

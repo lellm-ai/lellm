@@ -40,12 +40,12 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::compiled_subgraph::{CompiledSubgraph, StateProjector};
+use super::compiled_subgraph::{CompiledSubgraph, StateProjector};
 use crate::error::GraphError;
 use crate::graph::Graph;
-use crate::state_lens::StateLens;
+use crate::state::state_lens::StateLens;
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::stream_emitter::StreamSink;
-use crate::workflow_state::{MergeStrategy, WorkflowState};
 use tokio_util::sync::CancellationToken;
 
 /// Subgraph Builder 描述 — 强类型，包含 Graph + Lens。

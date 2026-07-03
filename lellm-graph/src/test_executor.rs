@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::GraphError;
 use crate::event::{GraphExecution, GraphHandle};
-use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
+use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::TraceId;
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
@@ -173,7 +173,7 @@ impl SimpleExecutor {
 
         let handle = GraphHandle::new(decision_tx, cancel_tx);
 
-        tokio::spawn(crate::execution_loop::run_execution_loop(
+        tokio::spawn(crate::exec::execution_loop::run_execution_loop(
             graph,
             state,
             self.max_steps,

@@ -134,7 +134,7 @@ impl ToolUseLoop {
 
         // 创建 ExecutionContext<AgentState> 并调用 run_inline
         // ToolUseLoop 不需要自动 checkpoint/barrier，传 None
-        let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
+        let mut exec_ctx = lellm_graph::ExecutionContext::new(
             &mut agent_state_init,
             None,
             lellm_graph::CancellationToken::new(),
@@ -220,7 +220,7 @@ impl ToolUseLoop {
 
             // 4. 创建 ExecutionContext 并调用 run_inline
             // ToolUseLoop 不需要自动 checkpoint/barrier，传 None
-            let mut exec_ctx = lellm_graph::node_context::ExecutionContext::new(
+            let mut exec_ctx = lellm_graph::ExecutionContext::new(
                 &mut agent_state,
                 Some(sink),
                 lellm_graph::CancellationToken::new(),

@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::checkpoint::NodeId;
+use super::checkpoint::NodeId;
 
 // ─── TraceStep ─────────────────────────────────────────────────
 

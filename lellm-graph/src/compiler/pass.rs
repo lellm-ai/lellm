@@ -3,7 +3,7 @@
 use super::context::CompilerContext;
 use crate::Graph;
 use crate::MergeStrategy;
-use crate::workflow_state::WorkflowState;
+use crate::state::workflow_state::WorkflowState;
 
 /// 编译器优化 pass trait。
 ///

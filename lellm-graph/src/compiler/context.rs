@@ -1,6 +1,6 @@
 //! CompilerContext — 编译上下文。
 
-use crate::workflow_state::WorkflowState;
+use crate::state::workflow_state::WorkflowState;
 
 /// 编译上下文 — 包含配置和统计信息。
 pub struct CompilerContext<S: WorkflowState> {

@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 
+use super::{Edge, EdgeAnalysis, Graph};
 use crate::error::{BuildError, BuildErrors};
-use crate::graph::{Edge, EdgeAnalysis, Graph};
 use crate::node::NodeKind;
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
-use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── PendingEdge ──────────────────────────────────────────────
 

@@ -8,16 +8,16 @@
 
 use tokio_util::sync::CancellationToken;
 
-use crate::execution_engine::{ExecutionControl, NodeMetadata};
+use crate::exec::execution_engine::{ExecutionControl, NodeMetadata};
 use crate::state::State;
+use crate::state::workflow_state::WorkflowState;
 use crate::stream_chunk::StreamChunk;
 use crate::stream_emitter::StreamSink;
-use crate::workflow_state::WorkflowState;
 
 // ─── Backward Compat Re-exports ──────────────────────────────
 
 /// 向后兼容 — `ExecutionContext` 已迁移到 [`execution_engine`] 模块。
-pub use crate::execution_engine::ExecutionContext;
+pub use crate::exec::execution_engine::ExecutionContext;
 
 // ─── LeafContext (Borrowed View) ──────────────────────────────
 

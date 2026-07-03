@@ -7,7 +7,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::checkpoint::{CheckpointBlob, CheckpointId, CheckpointStoreError, TraceId};
+use super::checkpoint::{CheckpointBlob, CheckpointId, CheckpointStoreError, TraceId};
 
 // ─── BlobCheckpointStore Trait ─────────────────────────────────
 

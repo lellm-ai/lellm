@@ -44,7 +44,7 @@ use std::fmt::Debug;
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
-use crate::workflow_state::WorkflowState;
+use crate::state::workflow_state::WorkflowState;
 
 // ─── CheckpointId ──────────────────────────────────────────────
 
@@ -189,8 +189,6 @@ pub use crate::ids::TraceId;
 /// v0.5 使用 TriggerPolicy + RetentionPolicy 替代。
 #[allow(deprecated)]
 #[doc(inline)]
-pub use crate::checkpoint_policy::CheckpointPolicy;
-
 // ─── Phase 6: Execution Frame Snapshot ────────────────────────
 
 /// 执行帧 — 保存单个 Graph 的执行位置。

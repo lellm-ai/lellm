@@ -21,11 +21,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::FlowNode;
 use crate::error::GraphError;
-use crate::execution_engine::{ExecutionEngine, ExecutorState, OwnedExecutionEngine};
-use crate::node::FlowNode;
+use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, OwnedExecutionEngine};
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
-use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 /// 并行节点 — 同时执行多个分支，通过 MergeStrategy 合并 State。
 ///
@@ -216,7 +216,7 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
         let parent_stream = engine.stream_sink();
 
         // Clone branch data so async blocks own everything they need
-        let branches: Vec<(String, Arc<dyn crate::node::FlowNode<S>>)> = self
+        let branches: Vec<(String, Arc<dyn super::FlowNode<S>>)> = self
             .branches
             .iter()
             .map(|(n, nd)| (n.clone(), nd.clone()))

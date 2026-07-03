@@ -144,7 +144,7 @@ pub enum AgentMutation {
     SetLastResponse(ChatResponse),
 }
 
-impl lellm_graph::workflow_state::StateMutation<AgentState> for AgentMutation {
+impl lellm_graph::state::workflow_state::StateMutation<AgentState> for AgentMutation {
     fn apply(self, state: &mut AgentState) {
         match self {
             AgentMutation::AppendMessage(msg) => {

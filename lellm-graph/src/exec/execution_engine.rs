@@ -59,11 +59,11 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::barrier_sink::BarrierSink;
 use crate::checkpoint::CheckpointSink;
+use crate::node::barrier_sink::BarrierSink;
+use crate::state::workflow_state::WorkflowState;
 use crate::stream_chunk::StreamChunk;
 use crate::stream_emitter::StreamSink;
-use crate::workflow_state::WorkflowState;
 
 // ─── ExecutionSignal ──────────────────────────────────────────
 
@@ -163,8 +163,8 @@ pub trait ExecutionView<S: WorkflowState>: Send + Sync {
 /// 此 trait **不是 dyn compatible**（`build_node_context` 返回带生命周期的 `NodeContext`，
 /// `apply_batch` 使用泛型）。仅用于静态分发（`T: ExecutorState<S>`），不用于 `dyn ExecutorState<S>`。
 pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
-    fn build_node_context(&mut self) -> crate::node_context::NodeContext<'_, S>;
-    fn build_leaf_context(&mut self) -> crate::node_context::LeafContext<'_, S>;
+    fn build_node_context(&mut self) -> crate::node::node_context::NodeContext<'_, S>;
+    fn build_leaf_context(&mut self) -> crate::node::node_context::LeafContext<'_, S>;
     fn clone_state(&self) -> S;
     fn replace_state(&mut self, state: S);
     fn apply_batch(&mut self, mutations: impl IntoIterator<Item = S::Mutation>);
@@ -176,8 +176,8 @@ pub trait ExecutorState<S: WorkflowState>: ExecutionView<S> {
 
 /// 执行引擎 — **借用** State，持有 Mutation 缓冲、流发射器等运行时资源。
 ///
-/// 不对节点开发者公开。节点通过 [`NodeContext`](crate::node_context::NodeContext)
-/// 或 [`LeafContext`](crate::node_context::LeafContext) 能力视图交互。
+/// 不对节点开发者公开。节点通过 [`NodeContext`](crate::node::node_context::NodeContext)
+/// 或 [`LeafContext`](crate::node::node_context::LeafContext) 能力视图交互。
 ///
 /// # 状态所有权
 ///
@@ -262,11 +262,13 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
         &mut self,
         barrier_id: &crate::event::BarrierId,
         timeout: Option<std::time::Duration>,
-    ) -> crate::barrier_sink::BarrierOutcome {
+    ) -> crate::node::barrier_sink::BarrierOutcome {
         if let Some(ref mut sink) = self.barrier {
             sink.wait_decision(barrier_id, timeout).await
         } else {
-            crate::barrier_sink::BarrierOutcome::Decision(crate::event::BarrierDecision::Approve)
+            crate::node::barrier_sink::BarrierOutcome::Decision(
+                crate::event::BarrierDecision::Approve,
+            )
         }
     }
 
@@ -370,8 +372,8 @@ impl<'a, S: WorkflowState> ExecutionView<S> for ExecutionEngine<'a, S> {
 // ─── ExecutorState for ExecutionEngine ────────────────────────
 
 impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
-    fn build_node_context(&mut self) -> crate::node_context::NodeContext<'_, S> {
-        crate::node_context::NodeContext {
+    fn build_node_context(&mut self) -> crate::node::node_context::NodeContext<'_, S> {
+        crate::node::node_context::NodeContext {
             state: &mut self.state,
             stream: self.stream.as_deref(),
             cancel: &self.cancel,
@@ -381,8 +383,8 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
         }
     }
 
-    fn build_leaf_context(&mut self) -> crate::node_context::LeafContext<'_, S> {
-        crate::node_context::LeafContext {
+    fn build_leaf_context(&mut self) -> crate::node::node_context::LeafContext<'_, S> {
+        crate::node::node_context::LeafContext {
             state: &self.state,
             stream: self.stream.as_deref(),
             cancel: &self.cancel,
@@ -425,4 +427,4 @@ pub type ExecutionContext<'a, S> = ExecutionEngine<'a, S>;
 /// 与 `ExecutionEngine<'a, S>` 的区别：
 /// - `ExecutionEngine<'a, S>` 借用 `&'a mut S`，用于主执行路径
 /// - `OwnedExecutionEngine<S>` 拥有 `S`，用于需要独立 State 副本的场景（如 Parallel 分支）
-pub use crate::owned_execution_engine::OwnedExecutionEngine;
+pub use crate::exec::owned_execution_engine::OwnedExecutionEngine;

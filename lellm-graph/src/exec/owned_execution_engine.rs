@@ -1,7 +1,7 @@
 //! OwnedExecutionEngine — 拥有 State 所有权的执行引擎。
 //!
 //! 用于 Parallel 分支等需要独立 State 副本的场景。
-//! 与 [`ExecutionEngine`](crate::execution_engine::ExecutionEngine) 的区别：
+//! 与 [`ExecutionEngine`](crate::exec::execution_engine::ExecutionEngine) 的区别：
 //! - `ExecutionEngine<'a, S>` 借用 `&'a mut S`，用于主执行路径
 //! - `OwnedExecutionEngine<S>` 拥有 `S`，用于需要独立 State 副本的场景
 
@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::execution_engine::{
+use crate::exec::execution_engine::{
     ExecutionControl, ExecutionView, ExecutorState, NextAction, NodeMetadata,
 };
-use crate::node_context::{LeafContext, NodeContext};
+use crate::node::node_context::{LeafContext, NodeContext};
+use crate::state::workflow_state::WorkflowState;
 use crate::stream_chunk::StreamChunk;
 use crate::stream_emitter::StreamSink;
-use crate::workflow_state::WorkflowState;
 
 /// 拥有 State 所有权的执行引擎 — 用于 Parallel 分支等需要独立 State 的场景。
 pub struct OwnedExecutionEngine<S: WorkflowState> {

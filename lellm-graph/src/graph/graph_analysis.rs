@@ -2,9 +2,9 @@
 //!
 //! 从 graph.rs 拆分出来，保持核心文件精简。
 
+use super::{Edge, Graph};
 use crate::error::{DiagnosticCategory, GraphDiagnostics};
-use crate::graph::{Edge, Graph};
-use crate::workflow_state::{MergeStrategy, WorkflowState};
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── 环检测 ──────────────────────────────────────────────────────
 

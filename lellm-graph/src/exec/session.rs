@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{CheckpointSink, Frame, FrameInfo, FrameStack};
 use crate::graph::Graph;
+use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
-use crate::workflow_state::{MergeStrategy, WorkflowState};
 
 // ─── SessionError ──────────────────────────────────────────────
 
