@@ -15,10 +15,12 @@ pub mod execution_engine;
 pub mod execution_loop;
 pub mod graph;
 pub mod graph_analysis;
+pub mod graph_builder;
 pub mod ids;
 pub mod mutation_log;
 pub mod node;
 pub mod node_context;
+pub mod owned_execution_engine;
 pub mod parallel_node;
 pub mod runtime_event;
 pub mod session;
@@ -75,8 +77,9 @@ pub use event::{
 };
 
 // ─── Graph ───────────────────────────────────────────────────
-pub use graph::{Edge, Graph, GraphBuilder};
+pub use graph::{Edge, Graph};
 pub use graph_analysis::CycleAnalysis;
+pub use graph_builder::GraphBuilder;
 
 // ─── Nodes ───────────────────────────────────────────────────
 pub use node::{

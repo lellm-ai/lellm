@@ -532,26 +532,26 @@ let graph = builder.build()?;  // 或 builder.compile()? 运行优化 pass
 | 文件 | 内容 | 状态 |
 |------|------|------|
 | `lellm-graph/src/compiler/mod.rs` | Compiler 模块入口 | ✅ |
-| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 骨架实现（仅识别 + 统计，不执行内联） | ⏸️ |
+| `lellm-graph/src/compiler/inline_pass.rs` | Inline Pass — 骨架实现（仅识别 + 统计，不执行内联） | ✅(骨架) |
 
 ### 新增（Phase 7：P0-1 Checkpoint Projection）
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| `lellm-graph/src/workflow_state.rs` | 添加 `type Checkpoint` + `snapshot()` + `restore()` | ⏸️ |
-| `lellm-graph/src/checkpoint.rs` | `Checkpoint<S>` 使用 `S::Checkpoint` | ⏸️ |
-| `lellm-agent/src/runtime/typed_state.rs` | `AgentCheckpoint` 定义 + 实现 | ⏸️ |
+| `lellm-graph/src/workflow_state.rs` | 添加 `type Checkpoint` + `snapshot()` + `restore()` | ✅ |
+| `lellm-graph/src/checkpoint.rs` | `Checkpoint<S>` 使用 `S::Checkpoint` | ✅ |
+| `lellm-agent/src/runtime/typed_state.rs` | `AgentCheckpoint` 定义 + 实现 | ✅ |
 
 ### 新增（Phase 8：P0-2 Graph Hash）
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| `lellm-agent/src/runtime/builder.rs` | `canonical_hash()` 方法 | ⏸️ |
-| `lellm-graph/src/graph.rs` | `Graph` 携带 `canonical_hash` 字段 | ⏸️ |
+| `lellm-agent/src/runtime/builder.rs` | `canonical_hash()` 方法 | ✅ |
+| `lellm-graph/src/graph.rs` | `Graph` 携带 `canonical_hash` 字段 | ✅ |
 
 ### 新增（Phase 9：ExecutionSession）
 | 文件 | 内容 | 状态 |
 |------|------|------|
-| `lellm-graph/src/session.rs` | `ExecutionSession` — 持有 FrameStack | ⏸️ |
-| `lellm-graph/src/session.rs` | `SessionCheckpoint` — 完整恢复快照 | ⏸️ |
+| `lellm-graph/src/session.rs` | `ExecutionSession` — 持有 FrameStack | ✅ |
+| `lellm-graph/src/session.rs` | `SessionCheckpoint` — 完整恢复快照 | ✅ |
 
 ### 示例重写
 | 文件 | 改动 | 状态 |
@@ -860,8 +860,11 @@ checkpoint 不是保存 state，而是保存 execution position + state projecti
 
 ```rust
 // workflow_state.rs — 当前
-pub trait WorkflowState: Clone + Send + Sync + Serialize + DeserializeOwned {
+pub trait WorkflowState: Clone + Send + Sync {
+    type Checkpoint: Serialize + DeserializeOwned + Clone + Send;
     type Mutation: StateMutation<Self>;
+    fn snapshot(&self) -> Self::Checkpoint;
+    fn restore(checkpoint: Self::Checkpoint) -> Self;
     fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>);
 }
 
