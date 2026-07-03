@@ -396,7 +396,3 @@ impl ExecutableTool {
         })
     }
 }
-
-/// 向后兼容别名 — `ToolRegistration` 已重命名为 `ExecutableTool`。
-#[deprecated(since = "0.5.0", note = "Use `ExecutableTool` instead")]
-pub type ToolRegistration = ExecutableTool;

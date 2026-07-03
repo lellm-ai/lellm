@@ -24,8 +24,6 @@ pub use message::{
 pub use prompt::Prompt;
 pub use request::{ChatRequest, ReasoningConfig, ToolChoice};
 pub use response::{ChatResponse, TokenUsage};
-#[allow(deprecated)]
-pub use tool::ToolRegistration;
 pub use tool::{
     __tool_box, ExecutableTool, ParallelSafety, ToolArgParser, ToolArgs, ToolCategory,
     ToolDefinition, ToolFn, ToolSchema,
