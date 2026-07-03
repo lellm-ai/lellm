@@ -21,7 +21,7 @@ async fn handle_request(server: &SimpleMcp, req: JsonRpcRequest) -> JsonRpcRespo
                     "tools": { "listChanged": false }
                 },
                 "serverInfo": {
-                    "name": "lellm-mcp-server",
+                    "name": server.name(),
                     "version": env!("CARGO_PKG_VERSION")
                 }
             })

@@ -47,12 +47,17 @@ pub struct SimpleMcp {
 }
 
 impl SimpleMcp {
-    /// 创建新的 FastMCP 服务器。
+    /// 创建新的 SimpleMCP 服务器。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             tools: HashMap::new(),
         }
+    }
+
+    /// 获取服务器名称。
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// 注册工具。
