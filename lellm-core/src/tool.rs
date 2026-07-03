@@ -11,56 +11,71 @@
 
 use std::borrow::Cow;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::ToolResult;
 
-// ─── ToolArgParser ──────────────────────────────────────────────
-
-/// 工具参数解析 trait — 将原始 JSON Value 反序列化为强类型结构体。
-///
-/// **为什么需要这个 trait？**
-/// - `#[tool]` 宏生成的代码不知道 `serde_json` 的存在
-/// - 宏只依赖稳定的 `ToolArgParser::parse()` API
-/// - 所有解析策略（JSON、MessagePack、CBOR…）集中在 core 层
-/// - 以后更换序列化格式，只需修改此 trait 的实现
-///
-/// **依赖方向：**
-/// ```text
-/// lellm-derive
-///       │
-///       ▼
-/// ToolArgParser::parse()
-///       │
-///       ▼
-/// lellm-core
-///       │
-///       ▼
-/// serde_json
-/// ```
-pub trait ToolArgParser: Sized {
-    /// 从原始 JSON Value 解析工具参数。
-    ///
-    /// 解析失败时返回 `serde_json::Error`，调用方负责转换为 `ToolError`。
-    fn parse(value: serde_json::Value) -> Result<Self, serde_json::Error>;
-}
-
-impl<T> ToolArgParser for T
-where
-    T: for<'de> serde::Deserialize<'de>,
-{
-    fn parse(value: serde_json::Value) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(value)
-    }
-}
-
 // ─── ToolSchema ─────────────────────────────────────────────────
 
 /// 工具参数 Schema — 清洗后的 JSON Schema（不含 $schema, title 等元数据噪音）。
 ///
-/// 当前为 `serde_json::Value` 的别名，未来可替换为结构化类型。
-pub type ToolSchema = serde_json::Value;
+/// Newtype 封装，预留扩展空间（schema hash、version、validation 等）。
+/// 通过 `Deref` 透明访问内部 `serde_json::Value`。
+#[repr(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSchema(pub serde_json::Value);
+
+impl ToolSchema {
+    pub fn new(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+impl Deref for ToolSchema {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq<serde_json::Value> for ToolSchema {
+    fn eq(&self, other: &serde_json::Value) -> bool {
+        &self.0 == other
+    }
+}
+
+impl From<serde_json::Value> for ToolSchema {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ToolSchema> for serde_json::Value {
+    fn from(schema: ToolSchema) -> Self {
+        schema.0
+    }
+}
+
+impl serde::Serialize for ToolSchema {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolSchema {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde_json::Value::deserialize(deserializer).map(ToolSchema)
+    }
+}
 
 // ─── ToolArgs ───────────────────────────────────────────────────
 
@@ -68,6 +83,11 @@ pub type ToolSchema = serde_json::Value;
 ///
 /// 实现了此 trait 的结构体，即可通过 `tool_definition()` 方法
 /// 自动获得 `ToolDefinition`（含 JSON Schema）。
+///
+/// # 约束
+/// - `DeserializeOwned` — 可从任意 JSON Value 反序列化
+/// - `JsonSchema` — 可生成参数 Schema
+/// - `Send + Sync + 'static` — 可在异步运行时中安全传递
 ///
 /// # 示例
 /// ```ignore
@@ -79,19 +99,34 @@ pub type ToolSchema = serde_json::Value;
 /// }
 /// // 生成 SearchArgs struct + search_tool() 工厂函数
 /// ```
-pub trait ToolArgs: ToolArgParser {
+pub trait ToolArgs:
+    serde::de::DeserializeOwned + schemars::JsonSchema + Send + Sync + 'static
+{
     /// 工具名称（蛇形命名）
     const NAME: &'static str;
     /// 工具描述
     const DESCRIPTION: &'static str;
-    /// 由 `#[tool]` 宏生成的 JSON Schema（LazyLock 缓存）
-    fn __schema() -> ToolSchema;
-    /// 自动生成 ToolDefinition（含 JSON Schema）
+    /// JSON Schema（LazyLock 缓存）
+    fn schema() -> ToolSchema;
+
+    /// 从原始 JSON Value 反序列化工具参数。
+    ///
+    /// 默认实现调用 `serde_json::from_value()`，通常无需重写。
+    fn parse(value: serde_json::Value) -> Result<Self, serde_json::Error>
+    where
+        Self: Sized,
+    {
+        serde_json::from_value(value)
+    }
+
+    /// 自动生成 ToolDefinition（含 JSON Schema）。
+    ///
+    /// 默认实现无缓存。`#[tool]` 宏会生成带 `LazyLock` 缓存的覆盖版本。
     fn tool_definition() -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: Self::DESCRIPTION.to_string(),
-            parameters: Self::__schema(),
+            parameters: Self::schema().0,
             cache_control: None,
         }
     }
@@ -164,11 +199,11 @@ impl ToolDefinition {
     ///
     /// **清洗规则：** 去除 `$schema`, `$id`, `title`, `description` 等根部元数据，
     /// 保留 `type`, `properties`, `required`, `definitions` 等核心 JSON Schema 字段。
-    pub fn compute_and_clean_schema<S: schemars::JsonSchema>() -> serde_json::Value {
+    pub fn compute_and_clean_schema<S: schemars::JsonSchema>() -> ToolSchema {
         let root = schemars::schema_for!(S);
         let val = serde_json::to_value(&root)
             .expect("Failed to serialize JsonSchema; this is a bug in schemars");
-        Self::clean_schema(val)
+        ToolSchema(Self::clean_schema(val))
     }
 
     /// 清洗 schemars 生成的 RootSchema，去除根部元数据噪音。
@@ -325,11 +360,11 @@ impl ExecutableTool {
 
     /// 强类型便捷构造 — 自动反序列化参数（Safe）。
     ///
-    /// 与 `safe()` 的区别：闭包接收反序列化后的 `T`，而非原始 `serde_json::Value`。
+    /// 闭包接收反序列化后的 `T`，而非原始 `serde_json::Value`。
     /// 反序列化失败时返回 `ToolErrorKind::InvalidInput`。
     pub fn safe_fn<T, F, Fut>(def: ToolDefinition, f: F) -> Self
     where
-        T: ToolArgParser + Send + 'static,
+        T: ToolArgs + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ToolResult> + Send + 'static,
     {
@@ -355,7 +390,7 @@ impl ExecutableTool {
         f: F,
     ) -> Self
     where
-        T: ToolArgParser + Send + 'static,
+        T: ToolArgs + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ToolResult> + Send + 'static,
     {
@@ -377,7 +412,7 @@ impl ExecutableTool {
     /// 强类型便捷构造 — 自动反序列化参数（Exclusive）。
     pub fn exclusive_fn<T, F, Fut>(def: ToolDefinition, f: F) -> Self
     where
-        T: ToolArgParser + Send + 'static,
+        T: ToolArgs + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ToolResult> + Send + 'static,
     {

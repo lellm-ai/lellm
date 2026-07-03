@@ -197,7 +197,7 @@ fn test_backward_compat_methods() {
     assert_eq!(AddNumbersArgs::__name(), AddNumbersArgs::NAME);
     assert_eq!(AddNumbersArgs::__description(), AddNumbersArgs::DESCRIPTION);
     assert_eq!(
-        AddNumbersArgs::__schema(),
+        AddNumbersArgs::schema(),
         AddNumbersArgs::tool_definition().parameters
     );
 }

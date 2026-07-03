@@ -182,9 +182,9 @@ fn test_no_param_tool() {
 
 #[test]
 fn test_lazylock_schema_cache() {
-    let schema1 = AddNumbersArgs::__schema();
-    let schema2 = AddNumbersArgs::__schema();
-    let schema3 = AddNumbersArgs::__schema();
+    let schema1 = AddNumbersArgs::schema();
+    let schema2 = AddNumbersArgs::schema();
+    let schema3 = AddNumbersArgs::schema();
 
     assert_eq!(schema1, schema2);
     assert_eq!(schema2, schema3);

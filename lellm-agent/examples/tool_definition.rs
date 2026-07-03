@@ -136,7 +136,7 @@ async fn main() {
     );
     println!(
         "Schema: {}",
-        serde_json::to_string_pretty(&SearchArgs::__schema()).unwrap()
+        serde_json::to_string_pretty(&SearchArgs::schema()).unwrap()
     );
     println!();
 
@@ -156,7 +156,7 @@ async fn main() {
     );
     println!(
         "Schema: {}",
-        serde_json::to_string_pretty(&WeatherArgs::__schema()).unwrap()
+        serde_json::to_string_pretty(&WeatherArgs::schema()).unwrap()
     );
     println!();
 

@@ -156,7 +156,7 @@ fn test_tool_definition_generation() {
 
 #[test]
 fn test_tool_args_schema_backward_compat() {
-    let schema = WeatherArgs::__schema();
+    let schema = WeatherArgs::schema();
     let def_schema = WeatherArgs::tool_definition().parameters;
     assert_eq!(schema, def_schema);
 }

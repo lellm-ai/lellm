@@ -13,7 +13,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::ItemFn;
 
-use crate::codegen::{generate_compat_methods, generate_safe_methods, generate_schema_impl};
+use crate::codegen::{generate_compat_methods, generate_safe_methods, generate_tool_args_impl};
 use crate::helpers::{
     extract_doc_from_attrs, extract_fn_params, parse_tool_meta_tokens, snake_to_pascal,
 };
@@ -92,7 +92,7 @@ pub(crate) fn expand_tool_for_fn(
     let visibility = &func.vis;
 
     // Generate ToolArgs impl + helper methods
-    let schema_fn = generate_schema_impl(&struct_name);
+    let tool_args_impl = generate_tool_args_impl(&struct_name, &name, &description);
     let compat_methods = generate_compat_methods(&struct_name);
     let safe_methods = generate_safe_methods(&struct_name);
 
@@ -111,12 +111,7 @@ pub(crate) fn expand_tool_for_fn(
         }
 
         // 3. ToolArgs trait 实现（含 LazyLock schema 缓存）
-        impl ::lellm_core::ToolArgs for #struct_name {
-            const NAME: &'static str = #name;
-            const DESCRIPTION: &'static str = #description;
-
-            #schema_fn
-        }
+        #tool_args_impl
 
         // 4. 向后兼容方法
         #compat_methods

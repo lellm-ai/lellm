@@ -10,7 +10,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{DeriveInput, ItemStruct, Meta};
 
-use crate::codegen::{generate_compat_methods, generate_safe_methods, generate_schema_impl};
+use crate::codegen::{generate_compat_methods, generate_safe_methods, generate_tool_args_impl};
 use crate::helpers::{
     extract_doc_from_attrs, extract_helper_meta, parse_struct_meta, parse_tool_meta_tokens,
 };
@@ -49,19 +49,14 @@ pub(crate) fn expand_tool_for_struct(
         .retain(|attr| !(attr.path().is_ident("tool") && matches!(&attr.meta, Meta::List(_))));
 
     // Generate the same output as derive(Tool) would
-    let schema_fn = generate_schema_impl(struct_name);
+    let tool_args_impl = generate_tool_args_impl(struct_name, &name, &description);
     let compat_methods = generate_compat_methods(struct_name);
     let safe_methods = generate_safe_methods(struct_name);
 
     Ok(quote! {
         #s
 
-        impl ::lellm_core::ToolArgs for #struct_name {
-            const NAME: &'static str = #name;
-            const DESCRIPTION: &'static str = #description;
-
-            #schema_fn
-        }
+        #tool_args_impl
 
         #compat_methods
         #safe_methods
@@ -76,17 +71,12 @@ pub(crate) fn generate_tool_for_struct(
     let struct_name = &input.ident;
     let (name, description) = parse_struct_meta(&input.attrs, input);
 
-    let schema_fn = generate_schema_impl(struct_name);
+    let tool_args_impl = generate_tool_args_impl(struct_name, &name, &description);
     let compat_methods = generate_compat_methods(struct_name);
     let safe_methods = generate_safe_methods(struct_name);
 
     let generated = quote! {
-        impl ::lellm_core::ToolArgs for #struct_name {
-            const NAME: &'static str = #name;
-            const DESCRIPTION: &'static str = #description;
-
-            #schema_fn
-        }
+        #tool_args_impl
 
         #compat_methods
         #safe_methods
