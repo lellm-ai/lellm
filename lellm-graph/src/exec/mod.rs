@@ -7,5 +7,5 @@ pub(crate) mod session;
 
 pub use execution_engine::*;
 pub use execution_loop::*;
-pub use owned_execution_engine::*;
+pub use owned_execution_engine::OwnedExecutionEngine;
 pub use session::*;

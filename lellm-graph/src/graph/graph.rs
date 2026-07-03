@@ -433,6 +433,4 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
     }
 }
 
-// ─── GraphBuilder, PendingEdge (移至 graph_builder 模块) ────
-
-pub use super::graph_builder::{GraphBuilder, PendingEdge};
+// GraphBuilder, PendingEdge 已在 mod.rs 中 re-export

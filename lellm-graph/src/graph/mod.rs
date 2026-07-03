@@ -6,4 +6,4 @@ pub(crate) mod graph_builder;
 
 pub use graph::*;
 pub use graph_analysis::*;
-pub use graph_builder::*;
+pub use graph_builder::{GraphBuilder, PendingEdge};

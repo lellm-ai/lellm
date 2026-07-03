@@ -188,7 +188,6 @@ pub use crate::ids::TraceId;
 /// 向后兼容 — CheckpointPolicy 已迁移至 checkpoint_policy 模块。
 /// v0.5 使用 TriggerPolicy + RetentionPolicy 替代。
 #[allow(deprecated)]
-#[doc(inline)]
 // ─── Phase 6: Execution Frame Snapshot ────────────────────────
 
 /// 执行帧 — 保存单个 Graph 的执行位置。
