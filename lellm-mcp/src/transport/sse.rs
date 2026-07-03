@@ -93,7 +93,6 @@ impl SseTransport {
 impl McpTransport for SseTransport {
     async fn connect(&mut self) -> Result<(), McpError> {
         self.state.send(ConnectionState::Connecting).ok();
-        eprintln!("SSE: connecting to {}", self.config.sse_url);
 
         let client = reqwest::Client::new();
         let client_clone = client.clone();
@@ -120,26 +119,19 @@ impl McpTransport for SseTransport {
                 .send()
                 .await
             {
-                Ok(resp) => {
-                    eprintln!("SSE: connection established, status={}", resp.status());
-                    resp.bytes_stream().eventsource()
-                }
+                Ok(resp) => resp.bytes_stream().eventsource(),
                 Err(e) => {
-                    eprintln!("SSE: connection failed: {}", e);
+                    tracing::error!(error = %e, "SSE connection failed");
                     return;
                 }
             };
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => {
-                        eprintln!("SSE: shutdown signal received");
-                        break;
-                    }
+                    _ = shutdown_rx.changed() => break,
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(event)) => {
-                                eprintln!("SSE: event type={}, data_len={}", event.event, event.data.len());
                                 match event.event.as_str() {
                                     EVENT_ENDPOINT => {
                                         // 获取 POST URL（可能是相对路径，需要拼接完整 URL）
@@ -151,7 +143,6 @@ impl McpTransport for SseTransport {
                                             let base_url = sse_url.rsplit_once('/').map(|(base, _)| base).unwrap_or(&sse_url);
                                             format!("{}{}", base_url, post_url_str)
                                         };
-                                        eprintln!("SSE: received endpoint: {}", full_url);
                                         *post_url_clone.lock().await = Some(full_url);
                                     }
                                     EVENT_MESSAGE => {
@@ -195,11 +186,6 @@ impl McpTransport for SseTransport {
                             }
                             None => {
                                 tracing::info!("SSE stream ended");
-                                // 检查是否还有未完成的请求
-                                let pending_count = pending_clone.lock().await.len();
-                                if pending_count > 0 {
-                                    tracing::warn!(count = pending_count, "SSE ended with pending requests");
-                                }
                                 break;
                             }
                         }
@@ -227,8 +213,7 @@ impl McpTransport for SseTransport {
         let inner = self.inner.as_ref().unwrap();
         let mut retries = 0;
         while retries < 100 {
-            if let Some(url) = inner.post_url.lock().await.as_ref() {
-                eprintln!("SSE: got endpoint: {}", url);
+            if inner.post_url.lock().await.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -236,7 +221,6 @@ impl McpTransport for SseTransport {
         }
 
         if retries >= 100 {
-            eprintln!("SSE: timeout waiting for endpoint");
             self.state.send(ConnectionState::Disconnected).ok();
             return Err(McpError::Timeout);
         }
@@ -266,10 +250,6 @@ impl McpTransport for SseTransport {
 
         // 通过 HTTP POST 发送
         let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
-        eprintln!(
-            "SSE: sending request id={}, method={}, url={}",
-            id, method, post_url
-        );
 
         let response = inner
             .client
@@ -279,8 +259,6 @@ impl McpTransport for SseTransport {
             .send()
             .await
             .map_err(|e| McpError::Network(e.to_string()))?;
-
-        eprintln!("SSE: response status={}", response.status());
 
         // 检查 HTTP 状态
         if !response.status().is_success() {
