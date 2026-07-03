@@ -135,29 +135,17 @@ impl McpTransport for HttpTransport {
                 .await
                 .map_err(|e| McpError::Network(e.to_string()))?;
             let body = String::from_utf8_lossy(&bytes);
-            eprintln!("DEBUG: SSE body length = {}", body.len());
-            // 只打印前几行
-            for (i, line) in body.lines().take(5).enumerate() {
-                eprintln!("DEBUG: line {}: {:?}", i, &line[..line.len().min(200)]);
-            }
 
-            // SSE 格式: 每个事件以空行分隔，包含 event:xxx 和 data:xxx
+            // SSE 格式: event:xxx\ndata:xxx\n\n (冒号后可能有空格)
             let mut current_event = String::new();
             let mut current_data = String::new();
 
             for line in body.lines() {
-                eprintln!("DEBUG: line = {:?}", line);
-                if line.starts_with("event: ") {
-                    current_event = line[7..].to_string();
-                } else if line.starts_with("data: ") {
-                    current_data = line[6..].to_string();
+                if line.starts_with("event:") || line.starts_with("event: ") {
+                    current_event = line.trim_start_matches("event:").trim().to_string();
+                } else if line.starts_with("data:") || line.starts_with("data: ") {
+                    current_data = line.trim_start_matches("data:").trim().to_string();
                 } else if line.is_empty() && !current_data.is_empty() {
-                    // 空行表示事件结束，处理事件
-                    eprintln!(
-                        "DEBUG: Processing event = {:?}, data len = {}",
-                        current_event,
-                        current_data.len()
-                    );
                     match current_event.as_str() {
                         "message" => {
                             if let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(
@@ -165,7 +153,6 @@ impl McpTransport for HttpTransport {
                             ) {
                                 match msg {
                                     crate::protocol::JsonRpcMessage::Response(resp) => {
-                                        eprintln!("DEBUG: Found response with id = {}", resp.id);
                                         return Ok(resp);
                                     }
                                     crate::protocol::JsonRpcMessage::Notification(notif) => {
@@ -175,19 +162,13 @@ impl McpTransport for HttpTransport {
                                 }
                             }
                         }
-                        "endpoint" => {
-                            tracing::debug!(endpoint = %current_data, "Received endpoint");
-                        }
-                        _ => {
-                            tracing::debug!(event = %current_event, "Unknown SSE event");
-                        }
+                        _ => {}
                     }
                     current_event.clear();
                     current_data.clear();
                 }
             }
 
-            eprintln!("DEBUG: No response found in SSE stream");
             Err(McpError::Protocol("No response in SSE stream".to_string()))
         } else {
             let body = response
