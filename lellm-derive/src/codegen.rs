@@ -1,23 +1,26 @@
 //! Code generation functions for tool macros.
 //!
 //! Generates the TokenStream code for:
-//! - LazyLock schema caching
+//! - Schema caching (delegates to core's compute_and_clean_schema)
 //! - Backward-compatible methods (__schema, __name, __description)
 //! - Safe registration methods (safe, category_exclusive, exclusive)
+//!
+//! **原则：宏只拼 AST，所有运行逻辑都在 core。**
+//! 宏不直接引用 serde_json / schemars，只通过 core 的 API 调用。
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
-/// Generate the ToolArgs::__schema() impl with LazyLock caching.
+/// Generate the ToolArgs::__schema() impl.
+///
+/// 委托给 core 的 `ToolDefinition::compute_and_clean_schema::<T>()`，
+/// 宏不需要知道 serde_json / schemars 的存在。
 pub(crate) fn generate_schema_impl(struct_name: &syn::Ident) -> TokenStream2 {
     quote! {
-        fn __schema() -> ::lellm_core::serde_json::Value {
-            static SCHEMA: ::std::sync::LazyLock<::lellm_core::serde_json::Value> =
+        fn __schema() -> ::lellm_core::ToolSchema {
+            static SCHEMA: ::std::sync::LazyLock<::lellm_core::ToolSchema> =
                 ::std::sync::LazyLock::new(|| {
-                    let full = ::lellm_core::serde_json::to_value(
-                        ::lellm_core::schemars::schema_for!(#struct_name)
-                    ).expect("schema generation failed");
-                    #struct_name::extract_inner_schema(&full)
+                    ::lellm_core::ToolDefinition::compute_and_clean_schema::<#struct_name>()
                 });
             SCHEMA.clone()
         }
@@ -25,11 +28,13 @@ pub(crate) fn generate_schema_impl(struct_name: &syn::Ident) -> TokenStream2 {
 }
 
 /// Generate backward-compatible methods: __schema(), __name(), __description().
+///
+/// 不再生成 `extract_inner_schema()`——清洗逻辑已统一在 core 的 `clean_schema()` 中。
 pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 {
     quote! {
         impl #struct_name {
             /// 从 schemars 完整 schema 中提取 inner schema（LazyLock 缓存）。
-            pub fn __schema() -> ::lellm_core::serde_json::Value {
+            pub fn __schema() -> ::lellm_core::ToolSchema {
                 <#struct_name as ::lellm_core::ToolArgs>::__schema()
             }
 
@@ -42,66 +47,26 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
             pub fn __description() -> &'static str {
                 <#struct_name as ::lellm_core::ToolArgs>::DESCRIPTION
             }
-
-            fn extract_inner_schema(full: &::lellm_core::serde_json::Value) -> ::lellm_core::serde_json::Value {
-                let source = if let Some(obj) = full.as_object() {
-                    obj
-                } else {
-                    return full.clone();
-                };
-
-                let skip = ["$schema", "title", "description", "definitions", "$id", "$ref"];
-                let mut cleaned = ::lellm_core::serde_json::Map::new();
-                for (k, v) in source {
-                    if !skip.contains(&k.as_str()) {
-                        cleaned.insert(k.clone(), v.clone());
-                    }
-                }
-                ::lellm_core::serde_json::Value::Object(cleaned)
-            }
         }
     }
 }
 
 /// Generate safe registration methods: safe(), category_exclusive(), exclusive().
 ///
-/// These methods accept strong-typed closures and internally handle
-/// JSON deserialization + future boxing, returning `ExecutableTool`.
+/// 直接委托给 core 的 `ExecutableTool::safe_fn()` 等强类型工厂方法，
+/// 不再在宏中手动处理 parse / error / boxing。
 pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
     quote! {
         impl #struct_name {
             /// 便捷注册 — 并行安全（Safe）。
-            ///
-            /// 闭包接收反序列化后的 `#struct_name`，直接操作强类型参数。
             pub fn safe<F, Fut>(f: F) -> ::lellm_core::ExecutableTool
             where
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
-                let f = ::std::sync::Arc::new(f);
-                ::lellm_core::ExecutableTool::safe(
+                ::lellm_core::ExecutableTool::safe_fn(
                     <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
-                    {
-                        let f = ::std::sync::Arc::clone(&f);
-                        move |args: &::lellm_core::serde_json::Value| {
-                            let args = args.clone();
-                            let f = ::std::sync::Arc::clone(&f);
-                            ::lellm_core::__tool_box(async move {
-                                match <#struct_name as ::lellm_core::ToolArgParser>::parse(args) {
-                                    Ok(parsed) => f(parsed).await,
-                                    Err(e) => {
-                                        ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
-                                            kind: ::lellm_core::ToolErrorKind::InvalidInput,
-                                            message: format!(
-                                                "Failed to parse tool arguments: {}",
-                                                e
-                                            ),
-                                        })
-                                    }
-                                }
-                            })
-                        }
-                    }
+                    f,
                 )
             }
 
@@ -114,31 +79,10 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
-                let f = ::std::sync::Arc::new(f);
-                ::lellm_core::ExecutableTool::category_exclusive(
+                ::lellm_core::ExecutableTool::category_exclusive_fn(
                     <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     category,
-                    {
-                        let f = ::std::sync::Arc::clone(&f);
-                        move |args: &::lellm_core::serde_json::Value| {
-                            let args = args.clone();
-                            let f = ::std::sync::Arc::clone(&f);
-                            ::lellm_core::__tool_box(async move {
-                                match <#struct_name as ::lellm_core::ToolArgParser>::parse(args) {
-                                    Ok(parsed) => f(parsed).await,
-                                    Err(e) => {
-                                        ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
-                                            kind: ::lellm_core::ToolErrorKind::InvalidInput,
-                                            message: format!(
-                                                "Failed to parse tool arguments: {}",
-                                                e
-                                            ),
-                                        })
-                                    }
-                                }
-                            })
-                        }
-                    }
+                    f,
                 )
             }
 
@@ -148,30 +92,9 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
-                let f = ::std::sync::Arc::new(f);
-                ::lellm_core::ExecutableTool::exclusive(
+                ::lellm_core::ExecutableTool::exclusive_fn(
                     <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
-                    {
-                        let f = ::std::sync::Arc::clone(&f);
-                        move |args: &::lellm_core::serde_json::Value| {
-                            let args = args.clone();
-                            let f = ::std::sync::Arc::clone(&f);
-                            ::lellm_core::__tool_box(async move {
-                                match <#struct_name as ::lellm_core::ToolArgParser>::parse(args) {
-                                    Ok(parsed) => f(parsed).await,
-                                    Err(e) => {
-                                        ::lellm_core::ToolResult::Err(::lellm_core::ToolError {
-                                            kind: ::lellm_core::ToolErrorKind::InvalidInput,
-                                            message: format!(
-                                                "Failed to parse tool arguments: {}",
-                                                e
-                                            ),
-                                        })
-                                    }
-                                }
-                            })
-                        }
-                    }
+                    f,
                 )
             }
         }

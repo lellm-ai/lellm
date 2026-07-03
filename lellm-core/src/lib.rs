@@ -28,10 +28,9 @@ pub use response::{ChatResponse, TokenUsage};
 pub use tool::ToolRegistration;
 pub use tool::{
     __tool_box, ExecutableTool, ParallelSafety, ToolArgParser, ToolArgs, ToolCategory,
-    ToolDefinition, ToolFn,
+    ToolDefinition, ToolFn, ToolSchema,
 };
 
-// Re-export for macro-generated code — ensures consistent serde/serde_json instances.
+// Re-export for macro-generated code — ensures consistent serde/schemars instances.
 pub use schemars;
 pub use serde;
-pub use serde_json;

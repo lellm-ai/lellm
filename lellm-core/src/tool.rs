@@ -55,6 +55,13 @@ where
     }
 }
 
+// ─── ToolSchema ─────────────────────────────────────────────────
+
+/// 工具参数 Schema — 清洗后的 JSON Schema（不含 $schema, title 等元数据噪音）。
+///
+/// 当前为 `serde_json::Value` 的别名，未来可替换为结构化类型。
+pub type ToolSchema = serde_json::Value;
+
 // ─── ToolArgs ───────────────────────────────────────────────────
 
 /// 工具参数 trait — 由 `#[tool]` 宏自动生成。
@@ -78,7 +85,7 @@ pub trait ToolArgs: ToolArgParser {
     /// 工具描述
     const DESCRIPTION: &'static str;
     /// 由 `#[tool]` 宏生成的 JSON Schema（LazyLock 缓存）
-    fn __schema() -> serde_json::Value;
+    fn __schema() -> ToolSchema;
     /// 自动生成 ToolDefinition（含 JSON Schema）
     fn tool_definition() -> ToolDefinition {
         ToolDefinition {
