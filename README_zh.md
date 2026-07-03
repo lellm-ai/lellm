@@ -8,7 +8,7 @@ Rust 类型安全的 LLM 应用框架。
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.5-green)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.6-green)](./CHANGELOG.md)
 
 ```bash
 cargo add lellm
