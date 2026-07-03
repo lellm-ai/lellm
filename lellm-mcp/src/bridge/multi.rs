@@ -13,9 +13,6 @@ use lellm_core::{ToolDefinition, ToolError, ToolErrorKind};
 use super::{McpCatalog, ToolCatalog, ToolSnapshot};
 use crate::client::McpClient;
 use crate::protocol::{CallToolParams, JsonRpcRequest, methods};
-use crate::transport::{
-    HttpConfig, HttpTransport, SseConfig, SseTransport, StdioConfig, StdioTransport,
-};
 
 /// 服务器配置。
 #[derive(Debug, Clone)]
@@ -63,6 +60,7 @@ impl McpMultiClient {
     }
 
     /// 添加 stdio 服务器。
+    #[cfg(feature = "stdio")]
     pub async fn add_stdio(
         &mut self,
         name: impl Into<String>,
@@ -70,6 +68,7 @@ impl McpMultiClient {
         args: Vec<String>,
         env: Option<Vec<(String, String)>>,
     ) -> Result<(), crate::McpError> {
+        use crate::transport::{StdioConfig, StdioTransport};
         let config = StdioConfig::new(command, args).with_env(env);
         let transport = StdioTransport::new(config);
         let client = McpClient::with_transport(transport).await;
@@ -77,11 +76,13 @@ impl McpMultiClient {
     }
 
     /// 添加 SSE 服务器。
+    #[cfg(feature = "sse")]
     pub async fn add_sse(
         &mut self,
         name: impl Into<String>,
         url: impl Into<String>,
     ) -> Result<(), crate::McpError> {
+        use crate::transport::{SseConfig, SseTransport};
         let config = SseConfig::new(url);
         let transport = SseTransport::new(config);
         let client = McpClient::with_transport(transport).await;
@@ -89,11 +90,13 @@ impl McpMultiClient {
     }
 
     /// 添加 HTTP 服务器。
+    #[cfg(feature = "http")]
     pub async fn add_http(
         &mut self,
         name: impl Into<String>,
         url: impl Into<String>,
     ) -> Result<(), crate::McpError> {
+        use crate::transport::{HttpConfig, HttpTransport};
         let config = HttpConfig::new(url);
         let transport = HttpTransport::new(config);
         let client = McpClient::with_transport(transport).await;

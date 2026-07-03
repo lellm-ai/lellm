@@ -7,6 +7,9 @@
 pub mod protocol;
 pub mod transport;
 
+#[cfg(feature = "server")]
+pub mod server;
+
 #[cfg(feature = "bridge")]
 pub mod bridge;
 
@@ -22,3 +25,5 @@ pub use transport::{ConnectionState, McpTransport};
 pub use bridge::{McpCatalog, McpMultiClient, ToolCatalog};
 #[cfg(feature = "bridge")]
 pub use client::McpClient;
+#[cfg(feature = "server")]
+pub use server::SimpleMcp;

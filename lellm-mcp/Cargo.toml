@@ -24,12 +24,14 @@ thiserror.workspace = true
 reqwest = { workspace = true, optional = true }
 eventsource-stream = { version = "0.2", optional = true }
 futures = { workspace = true, optional = true }
+axum = { version = "0.8", optional = true }
 
 [features]
 default = ["stdio", "bridge"]
 stdio = []
 sse = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
 http = ["dep:reqwest"]
+server = ["dep:axum"]
 bridge = ["dep:lellm-agent"]
 
 [dev-dependencies]

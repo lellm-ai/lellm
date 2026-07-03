@@ -9,6 +9,24 @@ pub enum JsonRpcResult {
     Error(JsonRpcError),
 }
 
+impl Serialize for JsonRpcResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            JsonRpcResult::Success(value) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("result", value)?;
+                map.end()
+            }
+            JsonRpcResult::Error(error) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("error", error)?;
+                map.end()
+            }
+        }
+    }
+}
+
 /// JSON-RPC 2.0 Error。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
@@ -19,7 +37,7 @@ pub struct JsonRpcError {
 }
 
 /// JSON-RPC 2.0 Response。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: u64,
