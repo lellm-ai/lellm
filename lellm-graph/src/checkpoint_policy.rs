@@ -17,6 +17,19 @@
 
 use std::time::Duration;
 
+use crate::checkpoint::{Checkpoint, CheckpointStoreError, TraceId};
+
+/// Checkpoint 保存回调类型别名。
+pub type CheckpointSaveFn<S> = Box<
+    dyn Fn(
+            Checkpoint<S>,
+            TraceId,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), CheckpointStoreError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 // ─── TriggerPolicy ─────────────────────────────────────────────
 
 /// Checkpoint 触发策略 — 决定何时保存。

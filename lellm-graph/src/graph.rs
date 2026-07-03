@@ -14,12 +14,34 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 
 use crate::error::{GraphDiagnostics, GraphError, TerminalError};
-use crate::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
+use crate::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::graph_analysis::{self, CycleAnalysis};
 use crate::graph_builder::fnv_hash;
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::{State, StateMerge};
 use crate::workflow_state::{MergeStrategy, WorkflowState};
+
+// ─── StepCallback ─────────────────────────────────────────────
+
+/// 每步回调 — run_inline 在每个节点执行完成后调用。
+///
+/// 用于 wrapper（如 run_execution_loop）追踪 execution_log 或发射 per-node 事件。
+/// 回调在 commit + checkpoint 之后、take_control 之前调用。
+pub trait StepCallback<'e>: Send {
+    /// 节点执行完成后的回调。
+    ///
+    /// - `node_name` — 刚执行完的节点名
+    /// - `step` — 当前步数（从 1 开始）
+    /// - `duration` — 节点执行耗时
+    fn on_step(&mut self, node_name: &str, step: usize, duration: std::time::Duration);
+}
+
+/// 空回调 — 不执行任何操作。
+pub struct NoopStepCallback;
+
+impl<'e> StepCallback<'e> for NoopStepCallback {
+    fn on_step(&mut self, _node_name: &str, _step: usize, _duration: std::time::Duration) {}
+}
 
 // ─── Edge ──────────────────────────────────────────────────────
 
@@ -271,10 +293,10 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
 
     // ─── 内联执行 ────────────────────────────────────────────
 
-    /// 内联执行 — 不产生 RuntimeEvent，不 Checkpoint。
+    /// 内联执行 — 唯一的执行路径。
     ///
-    /// 接收 [`ExecutionEngine`]（拥有者），内部循环构建 [`NodeContext`]（能力视图）
-    /// 供节点使用。执行完毕后通过 `take_*` 消费 Mutation 和控制信号。
+    /// 接收 [`ExecutionEngine`]（借用 State），内部循环构建 [`NodeContext`]（能力视图）
+    /// 供节点使用。
     ///
     /// 数据流：
     /// ```text
@@ -282,14 +304,21 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
     ///   → build_node_context()  → NodeContext<'_, S>
     ///   → node.execute(ctx)     → 节点 record() Mutations
     ///   → drop(ctx)             → 释放借用
-    ///   → take_mutations()      → 消费 Mutation 缓冲
-    ///   → state.apply_batch()   → apply 到 State
+    ///   → commit()              → apply Mutations 到 State
+    ///   → emit_checkpoint()     → 通知 CheckpointSink
+    ///   → step_cb.on_step()     → 通知 wrapper（追踪/事件）
     ///   → take_control()        → 获取路由信号
     /// ```
-    pub async fn run_inline(
+    ///
+    /// # StepCallback
+    ///
+    /// 每步回调在 commit + checkpoint 之后、take_control 之前调用。
+    /// 用于 wrapper（如 `run_execution_loop`）追踪 execution_log 或发射 per-node 事件。
+    pub async fn run_inline<'cb>(
         &self,
         exec_ctx: &mut ExecutionEngine<'_, S>,
         max_steps: usize,
+        step_cb: &mut dyn StepCallback<'cb>,
     ) -> Result<(), GraphError> {
         let mut current = self.start_node().to_string();
         let mut step: usize = 0;
@@ -305,6 +334,8 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             let node = self.nodes.get(&current).ok_or_else(|| {
                 GraphError::Terminal(TerminalError::NodeNotFound(current.clone()))
             })?;
+
+            let node_start = std::time::Instant::now();
 
             // 根据 NodeKind 分发执行
             match node {
@@ -344,15 +375,17 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             exec_ctx.commit();
 
             // checkpoint — 通知 Sink 到达了合法的恢复边界。
-            // 顺序：execute → commit → checkpoint → route
-            // Sink 自行决定是否记录、如何记录。
+            // 顺序：execute → commit → checkpoint → step_cb → route
             exec_ctx.emit_checkpoint(&current, step);
+
+            // 每步回调 — 供 wrapper 追踪 execution_log / 发射 per-node 事件
+            step_cb.on_step(&current, step, node_start.elapsed());
 
             // 提取控制信号
             let (next_action, signal) = exec_ctx.take_control();
 
             // 处理 Barrier Pause 信号
-            if let Some(crate::execution_engine::ExecutionSignal::Pause {
+            if let Some(ExecutionSignal::Pause {
                 barrier_id,
                 timeout,
             }) = signal
@@ -371,7 +404,6 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                         | crate::event::BarrierDecision::Modify { .. },
                     ) => {
                         // Approve/Reject/Modify — 继续正常路由
-                        // Modify 决策在 BarrierSink 内部处理（或通过 State 传递）
                     }
                     crate::barrier_sink::BarrierOutcome::TimedOut => {
                         // 超时 — 默认 Reject 语义，继续正常路由

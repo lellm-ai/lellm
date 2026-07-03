@@ -460,7 +460,8 @@ mod tests {
         );
 
         // 执行
-        graph.run_inline(&mut engine, 100).await.unwrap();
+        let mut cb = crate::graph::NoopStepCallback;
+        graph.run_inline(&mut engine, 100, &mut cb).await.unwrap();
 
         // 验证：应该有 2 个 checkpoint（a 和 b）
         assert_eq!(sink.frames.len(), 2);
@@ -489,7 +490,8 @@ mod tests {
             None,
         );
 
-        graph.run_inline(&mut engine, 100).await.unwrap();
+        let mut cb = crate::graph::NoopStepCallback;
+        graph.run_inline(&mut engine, 100, &mut cb).await.unwrap();
         // NoopSink 不记录，无需断言
     }
 

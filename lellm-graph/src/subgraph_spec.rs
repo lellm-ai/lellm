@@ -173,9 +173,10 @@ where
             let mut inner_engine =
                 crate::ExecutionEngine::new(inner_ref, stream, cancel, None, None);
 
-            // 3. 执行内层 Graph
+            // 3. 执行内层 Graph（Subgraph 内部不需要 step 回调）
+            let mut cb = crate::graph::NoopStepCallback;
             self.graph
-                .run_inline(&mut inner_engine, self.max_steps)
+                .run_inline(&mut inner_engine, self.max_steps, &mut cb)
                 .await?;
 
             // 4. inner_engine drop → 借用释放 → outer 可继续使用

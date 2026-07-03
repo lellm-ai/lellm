@@ -304,7 +304,8 @@ where
         &mut self,
         engine: &mut crate::ExecutionEngine<'_, S>,
     ) -> Result<(), crate::GraphError> {
-        self.graph.run_inline(engine, usize::MAX).await
+        let mut cb = crate::graph::NoopStepCallback;
+        self.graph.run_inline(engine, usize::MAX, &mut cb).await
     }
 }
 

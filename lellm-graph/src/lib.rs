@@ -4,7 +4,6 @@
 
 pub mod barrier_node;
 pub mod barrier_sink;
-pub mod barrier_wait;
 pub mod checkpoint;
 pub mod checkpoint_codec;
 pub mod checkpoint_policy;
@@ -84,7 +83,7 @@ pub use event::{
 };
 
 // ─── Graph ───────────────────────────────────────────────────
-pub use graph::{Edge, Graph};
+pub use graph::{Edge, Graph, NoopStepCallback, StepCallback};
 pub use graph_analysis::CycleAnalysis;
 pub use graph_builder::GraphBuilder;
 

@@ -15,7 +15,7 @@
 //! ```
 
 use lellm_core::{ChatResponse, LlmError, Message};
-use lellm_graph::Graph;
+use lellm_graph::{Graph, NoopStepCallback};
 use std::sync::Arc;
 
 use super::config::{ToolUseConfig, build_request_messages_inner, empty_response};
@@ -142,8 +142,9 @@ impl ToolUseLoop {
             None,
         );
 
+        let mut cb = NoopStepCallback;
         self.graph
-            .run_inline(&mut exec_ctx, max_steps)
+            .run_inline(&mut exec_ctx, max_steps, &mut cb)
             .await
             .map_err(|e| lellm_core::LlmError::Provider {
                 provider: "react_graph".into(),
@@ -227,7 +228,8 @@ impl ToolUseLoop {
                 None,
             );
 
-            match graph.run_inline(&mut exec_ctx, max_steps).await {
+            let mut cb = NoopStepCallback;
+            match graph.run_inline(&mut exec_ctx, max_steps, &mut cb).await {
                 Ok(()) => {
                     // 执行成功，从 AgentState 提取结果
                     let state = exec_ctx.state();
