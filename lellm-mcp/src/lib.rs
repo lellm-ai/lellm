@@ -19,6 +19,6 @@ pub use protocol::{
 pub use transport::{ConnectionState, McpTransport};
 
 #[cfg(feature = "bridge")]
-pub use bridge::{McpCatalog, ToolCatalog};
+pub use bridge::{McpCatalog, McpMultiClient, ToolCatalog};
 #[cfg(feature = "bridge")]
 pub use client::McpClient;

@@ -2,6 +2,11 @@
 //!
 //! 核心抽象：从 lellm-agent 复用 `ToolCatalog` trait。
 //! McpCatalog 实现 ToolCatalog，通过 MCP 协议动态发现工具。
+//! McpMultiClient 支持多服务器，合并工具列表。
+
+mod multi;
+
+pub use multi::{McpMultiClient, ServerConfig};
 
 use std::sync::Arc;
 

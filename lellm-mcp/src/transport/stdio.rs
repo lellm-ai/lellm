@@ -48,6 +48,12 @@ impl StdioConfig {
         }
     }
 
+    /// 设置环境变量。
+    pub fn with_env(mut self, env: Option<Vec<(String, String)>>) -> Self {
+        self.env = env;
+        self
+    }
+
     /// 设置请求超时。
     pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.request_timeout = timeout;
