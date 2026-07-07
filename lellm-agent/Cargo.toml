@@ -29,7 +29,7 @@ default = []
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
 lellm-derive = { path = "../lellm-derive" }
-lellm-mcp = { path = "../lellm-mcp", features = ["bridge", "http"] }
+lellm-mcp = { path = "../lellm-mcp", features = ["bridge", "http", "sse"] }
 reqwest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yunli = "0.1"

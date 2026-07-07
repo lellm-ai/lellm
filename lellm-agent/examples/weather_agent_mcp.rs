@@ -2,15 +2,22 @@
 //!
 //! 工具链：`MCP resolve_city(腾讯地图) → http_get(wttr.in) → LLM 解析为 JSON`
 //!
-//! 通过 MCP HTTP 连接调用本地 Tencent Map Server 获取城市信息，
+//! 通过 MCP 连接调用本地 Tencent Map Server 获取城市信息，
 //! 替代原有的内嵌 resolve_city 四级降级逻辑。
 //!
+//! 支持两种传输模式：
+//! - HTTP (默认): MCP_SERVER_URL=http://localhost:3100/mcp
+//! - SSE: MCP_SERVER_URL=http://localhost:3100/sse
+//!
 //! ```text
-//! # 终端 1: 启动 MCP Server
+//! # 终端 1: 启动 MCP Server (HTTP 模式)
 //! TENCENT_MAP_KEY=xxx cargo run --example mcp_tencent_map_server --features server -p lellm-mcp
 //!
 //! # 终端 2: 运行 Weather Agent
 //! OPENAI_API_KEY=sk-xxx cargo run --example weather_agent_mcp [地址]
+//!
+//! # 或使用 SSE 模式
+//! MCP_TRANSPORT=sse cargo run --example weather_agent_mcp [地址]
 //! ```
 
 #[path = "_shared/shared.rs"]
@@ -19,7 +26,7 @@ mod shared;
 use lellm_agent::AgentBuilder;
 use lellm_core::{Message, ToolError, ToolErrorKind, ToolResult, text_block};
 use lellm_derive::tool;
-use lellm_mcp::transport::{HttpConfig, HttpTransport};
+use lellm_mcp::transport::{HttpConfig, HttpTransport, SseConfig, SseTransport};
 use lellm_mcp::{McpCatalog, McpClient};
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
@@ -102,13 +109,31 @@ fn build_system_prompt() -> lellm_core::Prompt {
 // ─── MCP Server 连接 ───────────────────────────────────────────
 
 /// 连接本地 Tencent Map MCP Server，返回 McpCatalog。
+///
+/// 根据 transport_type 选择传输模式：
+/// - "sse": 使用 SSE Transport（GET /sse + POST /messages）
+/// - 其他: 使用 HTTP Transport（POST /mcp）
 async fn connect_tencent_map_server(
     server_url: &str,
+    transport_type: &str,
 ) -> Result<Arc<dyn lellm_agent::ToolCatalog>, Box<dyn std::error::Error>> {
-    let transport = HttpTransport::new(
-        HttpConfig::new(server_url).with_request_timeout(std::time::Duration::from_secs(30)),
-    );
-    let client = McpClient::with_transport(transport).await;
+    let client = match transport_type {
+        "sse" => {
+            println!("Using SSE Transport");
+            let transport = SseTransport::new(
+                SseConfig::new(server_url).with_request_timeout(std::time::Duration::from_secs(30)),
+            );
+            McpClient::with_transport(transport).await
+        }
+        _ => {
+            println!("Using HTTP Transport");
+            let transport = HttpTransport::new(
+                HttpConfig::new(server_url)
+                    .with_request_timeout(std::time::Duration::from_secs(30)),
+            );
+            McpClient::with_transport(transport).await
+        }
+    };
 
     client.connect().await?;
     let init_result = client.initialize().await?;
@@ -133,9 +158,10 @@ async fn connect_tencent_map_server(
 async fn create_agent(
     provider: CodecProvider<OpenAICompatCodec>,
     mcp_server_url: &str,
+    transport_type: &str,
 ) -> Result<lellm_agent::ToolUseLoop, Box<dyn std::error::Error>> {
     // 连接 MCP Server
-    let mcp_catalog = connect_tencent_map_server(mcp_server_url).await?;
+    let mcp_catalog = connect_tencent_map_server(mcp_server_url, transport_type).await?;
 
     Ok(AgentBuilder::new(ResolvedModel {
         provider: Arc::new(provider),
@@ -163,13 +189,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .try_init();
 
-    // MCP Server 地址（可通过环境变量覆盖）
-    let mcp_server_url = std::env::var("MCP_SERVER_URL")
+    // MCP 传输模式: "sse" 或 "http" (默认)
+    let transport_type = std::env::var("MCP_TRANSPORT")
         .ok()
-        .unwrap_or_else(|| "http://localhost:3100/mcp".to_string());
+        .unwrap_or_else(|| "http".to_string());
+
+    // MCP Server 地址（可通过环境变量覆盖）
+    let mcp_server_url = match transport_type.as_str() {
+        "sse" => std::env::var("MCP_SERVER_URL")
+            .ok()
+            .unwrap_or_else(|| "http://localhost:3100/sse".to_string()),
+        _ => std::env::var("MCP_SERVER_URL")
+            .ok()
+            .unwrap_or_else(|| "http://localhost:3100/mcp".to_string()),
+    };
 
     println!("=== Weather Agent — MCP 版本 ===");
     println!("MCP Server: {}", mcp_server_url);
+    println!("Transport: {}", transport_type);
     println!();
 
     let provider =
@@ -180,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => "帮我查一下陆家嘴/新宿/阿尔卡吉/奇台的天气".to_string(),
     };
 
-    let agent = create_agent(provider, &mcp_server_url).await?;
+    let agent = create_agent(provider, &mcp_server_url, &transport_type).await?;
 
     let stream = agent.invoke_stream(vec![Message::user(text_block(question.clone()))]);
     shared::observe_react_loop(stream, &question).await
