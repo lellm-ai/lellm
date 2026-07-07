@@ -9,9 +9,15 @@
 //!
 //! 运行：
 //! ```bash
+//! # HTTP 模式 (默认)
 //! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_tencent_map_server --features server -p lellm-mcp
+//!
+//! # SSE 模式
+//! TENCENT_MAP_KEY=your_api_key MCP_TRANSPORT=sse cargo run --example mcp_tencent_map_server --features server -p lellm-mcp
+//!
 //! # 默认监听 0.0.0.0:3100
-//! # SSE 模式：GET /sse 建立连接，POST /messages/{session_id} 发送请求
+//! # HTTP 模式: POST /mcp
+//! # SSE 模式: GET /sse + POST /messages/{session_id}
 //! ```
 
 use lellm_mcp::SimpleMcp;
@@ -260,13 +266,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3100);
 
+    // 根据环境变量选择传输模式
+    let transport = std::env::var("MCP_TRANSPORT")
+        .ok()
+        .unwrap_or_else(|| "http".to_string());
+
     println!("=== Tencent Map MCP Server ===");
     println!("Listening on 0.0.0.0:{}", port);
     println!("Tools: resolve_city");
-    println!("Mode: SSE (GET /sse, POST /messages/{{session_id}})");
-    println!();
 
-    mcp.run_sse(port).await?;
+    match transport.as_str() {
+        "sse" => {
+            println!("Mode: SSE (GET /sse, POST /messages/{{session_id}})");
+            println!();
+            mcp.run_sse(port).await?;
+        }
+        _ => {
+            println!("Mode: HTTP (POST /mcp)");
+            println!();
+            mcp.run_http(port).await?;
+        }
+    }
 
     Ok(())
 }
