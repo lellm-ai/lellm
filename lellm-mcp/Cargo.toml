@@ -36,3 +36,6 @@ bridge = ["dep:lellm-agent"]
 
 [dev-dependencies]
 lellm-agent.workspace = true
+reqwest.workspace = true
+urlencoding = "2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
