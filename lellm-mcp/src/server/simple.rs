@@ -165,4 +165,12 @@ impl SimpleMcp {
         let server = std::sync::Arc::new(self);
         super::handler::run_http(server, port).await
     }
+
+    /// 以 SSE 模式运行服务器。
+    ///
+    /// - `port`: 监听端口
+    pub async fn run_sse(self, port: u16) -> Result<(), super::ServerError> {
+        let server = std::sync::Arc::new(self);
+        super::handler::run_sse(server, port).await
+    }
 }

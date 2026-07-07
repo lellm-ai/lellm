@@ -11,6 +11,7 @@
 //! ```bash
 //! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_tencent_map_server --features server -p lellm-mcp
 //! # 默认监听 0.0.0.0:3100
+//! # SSE 模式：GET /sse 建立连接，POST /messages/{session_id} 发送请求
 //! ```
 
 use lellm_mcp::SimpleMcp;
@@ -262,9 +263,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Tencent Map MCP Server ===");
     println!("Listening on 0.0.0.0:{}", port);
     println!("Tools: resolve_city");
+    println!("Mode: SSE (GET /sse, POST /messages/{{session_id}})");
     println!();
 
-    mcp.run_http(port).await?;
+    mcp.run_sse(port).await?;
 
     Ok(())
 }
