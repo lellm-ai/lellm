@@ -60,7 +60,7 @@ impl SimpleMcp {
         &self.name
     }
 
-    /// 注册工具。
+    /// 注册工具（使用默认空 schema）。
     ///
     /// - `name`: 工具名称
     /// - `description`: 工具描述
@@ -74,14 +74,31 @@ impl SimpleMcp {
         F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<serde_json::Value, String>> + Send + 'static,
     {
-        let name = name.into();
-        let description = description.into();
-
-        // 从 handler 签名推断参数 schema（简化版）
-        let input_schema = serde_json::json!({
+        let default_schema = serde_json::json!({
             "type": "object",
             "properties": {}
         });
+        self.tool_with_schema(name, description, default_schema, handler);
+    }
+
+    /// 注册工具（自定义 input_schema）。
+    ///
+    /// - `name`: 工具名称
+    /// - `description`: 工具描述
+    /// - `input_schema`: JSON Schema 描述参数结构
+    /// - `handler`: 异步处理函数，接收 JSON 参数，返回 JSON 结果
+    pub fn tool_with_schema<F, Fut>(
+        &mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+        handler: F,
+    ) where
+        F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+    {
+        let name = name.into();
+        let description = description.into();
 
         let executor: ToolFn = Arc::new(move |args| {
             let fut = handler(args);
