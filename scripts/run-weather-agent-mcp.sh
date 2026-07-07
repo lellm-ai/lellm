@@ -62,8 +62,13 @@ cd "$PROJECT_DIR"
 echo "=== Weather Agent — MCP 版本 ==="
 echo ""
 
-# 1. 启动 MCP Server
-echo "[1/3] 启动 Tencent Map MCP Server (port ${MCP_PORT})..."
+# 1. 编译 MCP Server（先行编译，避免等待超时）
+echo "[1/4] 编译 MCP Server..."
+cargo build --example mcp_tencent_map_server --features server -p lellm-mcp 2>&1 | tail -1
+echo "      ✓ 编译完成"
+
+# 2. 启动 MCP Server
+echo "[2/4] 启动 Tencent Map MCP Server (port ${MCP_PORT})..."
 TENCENT_MAP_KEY="$TENCENT_MAP_KEY" \
 MCP_SERVER_PORT="$MCP_PORT" \
 cargo run --example mcp_tencent_map_server --features server -p lellm-mcp \
@@ -71,15 +76,16 @@ cargo run --example mcp_tencent_map_server --features server -p lellm-mcp \
 MCP_PID=$!
 echo "      PID: $MCP_PID"
 
-# 2. 等待 MCP Server 就绪
-echo "[2/3] 等待 MCP Server 就绪..."
-MAX_WAIT=15
+# 3. 等待 MCP Server 就绪
+echo "[3/4] 等待 MCP Server 就绪..."
+MAX_WAIT=20
 WAITED=0
-while ! curl -sf "$MCP_URL" &>/dev/null; do
+PING='{"jsonrpc":"2.0","id":0,"method":"ping","params":{}}'
+while ! curl -sf -X POST -H "Content-Type: application/json" -d "$PING" "$MCP_URL" &>/dev/null; do
     if [[ $WAITED -ge $MAX_WAIT ]]; then
         echo "[ERROR] MCP Server 启动超时 (${MAX_WAIT}s)" >&2
         echo "[LOG] Server 日志:" >&2
-        cat /tmp/mcp_server.log >&2
+        tail -30 /tmp/mcp_server.log >&2
         exit 1
     fi
     sleep 0.5
@@ -87,8 +93,8 @@ while ! curl -sf "$MCP_URL" &>/dev/null; do
 done
 echo "      ✓ MCP Server 已就绪 (耗时 ${WAITED}x500ms)"
 
-# 3. 运行 Weather Agent
-echo "[3/3] 运行 Weather Agent..."
+# 4. 运行 Weather Agent
+echo "[4/4] 运行 Weather Agent..."
 echo ""
 
 if [[ $# -gt 0 ]]; then
