@@ -71,6 +71,7 @@ path = "examples/weather_agent.rs"
 [[example]]
 name = "weather_agent_mcp"
 path = "examples/weather_agent_mcp.rs"
+required-features = ["sse", "http"]
 
 [[example]]
 name = "mcp_multi"
