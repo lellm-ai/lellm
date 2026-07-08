@@ -39,8 +39,8 @@ struct ManagedServer {
     store: Arc<CatalogStore>,
     /// 取消令牌 — 用于停止后台任务。
     cancel: CancellationToken,
-    /// Watcher 的 JoinHandle — 用于等待任务退出。
-    watcher: tokio::task::JoinHandle<()>,
+    /// Watcher 的 JoinHandle — Transport 不支持 notifications 时为 None。
+    watcher: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// 多服务器 MCP 注册表。
@@ -79,19 +79,24 @@ impl McpServerRegistry {
         // 发现工具并创建 Catalog
         let catalog = McpCatalog::from_client(client_arc.clone()).await?;
 
-        // 创建 CatalogRefresher
-        let refresher = Arc::new(CatalogRefresher::from_catalog(client_arc.clone(), &catalog));
-
-        // 订阅 notifications
-        let rx = client_arc.subscribe_notifications().unwrap_or_else(|| {
-            let (tx, rx) = tokio::sync::broadcast::channel(1);
-            drop(tx);
-            rx
-        });
-
-        // 创建取消令牌并 spawn Watcher
+        // 创建取消令牌
         let cancel = CancellationToken::new();
-        let watcher = McpCatalogWatcher::new(refresher, rx).spawn(cancel.clone());
+
+        // 仅在 Transport 支持 notifications 时 spawn Watcher
+        let watcher = match client_arc.subscribe_notifications() {
+            Some(rx) => {
+                let refresher =
+                    Arc::new(CatalogRefresher::from_catalog(client_arc.clone(), &catalog));
+                Some(McpCatalogWatcher::new(refresher, rx).spawn(cancel.clone()))
+            }
+            None => {
+                tracing::debug!(
+                    server = %name,
+                    "transport does not support notifications, skipping watcher"
+                );
+                None
+            }
+        };
 
         tracing::info!(
             server = %name,
@@ -205,23 +210,27 @@ impl McpServerRegistry {
         // 第二步：等待所有 watcher 自然退出（带超时）
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         for entry in self.servers.values_mut() {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
+            if let Some(ref mut watcher) = entry.watcher {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let _ = tokio::time::timeout(remaining, watcher).await;
             }
-            // 等待 watcher 完成，带超时
-            let _ = tokio::time::timeout(remaining, &mut entry.watcher).await;
         }
 
         // 第三步：abort 仍未退出的 watcher
         for entry in self.servers.values_mut() {
-            entry.watcher.abort();
+            if let Some(watcher) = entry.watcher.as_mut() {
+                watcher.abort();
+            }
         }
 
         // 第四步：等待 abort 完成（短暂等待）
         for entry in self.servers.values_mut() {
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), &mut entry.watcher)
-                .await;
+            if let Some(watcher) = entry.watcher.as_mut() {
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(100), watcher).await;
+            }
         }
     }
 }
@@ -239,7 +248,9 @@ impl Drop for McpServerRegistry {
         // 注意：Drop 是同步的，不能调用 async 方法。
         // JoinHandle drop 会 detach 任务（不阻塞），abort 确保任务终止。
         for entry in self.servers.values_mut() {
-            entry.watcher.abort();
+            if let Some(watcher) = entry.watcher.as_mut() {
+                watcher.abort();
+            }
         }
     }
 }
@@ -251,14 +262,9 @@ impl ToolCatalog for McpServerRegistry {
 
         for entry in self.servers.values() {
             let snapshot = entry.store.load();
-            // ToolSnapshot 内部存储的是 IndexMap<String, ExecutableTool>
-            // 我们需要通过 definitions() 获取工具定义，然后重新构建快照
-            // 这里简化处理：直接使用各服务器的快照合并
-            for def in snapshot.definitions() {
-                // 从原始快照中获取 ExecutableTool
-                if let Some(tool) = snapshot.get(&def.name) {
-                    reg_map.insert(def.name.clone(), tool.clone());
-                }
+            // 直接迭代 (name, ExecutableTool)，零哈希查找
+            for (name, tool) in snapshot.iter() {
+                reg_map.insert(name.to_string(), tool.clone());
             }
         }
 

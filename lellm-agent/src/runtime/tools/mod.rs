@@ -67,6 +67,14 @@ impl ToolSnapshot {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    /// 迭代所有工具条目。
+    ///
+    /// Registry 合并快照时使用——直接遍历 `(name, ExecutableTool)`，
+    /// 无需 `definitions() → get(name)` 的绕圈。
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ExecutableTool)> {
+        self.tools.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 // ─── 工具目录抽象 ────────────────────────────────────────────────
