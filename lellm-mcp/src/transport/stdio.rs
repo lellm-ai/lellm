@@ -66,6 +66,9 @@ pub struct StdioTransport {
     config: StdioConfig,
     inner: Option<Arc<StdioTransportInner>>,
     state: watch::Sender<ConnectionState>,
+    /// 持有 watch channel 的 receiver，确保 sender 始终有 subscriber，send() 才能更新值。
+    #[allow(dead_code)]
+    _state_rx: watch::Receiver<ConnectionState>,
 }
 
 struct StdioTransportInner {
@@ -82,10 +85,12 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonRpcResponse, McpError>
 
 impl StdioTransport {
     pub fn new(config: StdioConfig) -> Self {
+        let (tx, rx) = watch::channel(ConnectionState::Disconnected);
         Self {
             config,
             inner: None,
-            state: watch::Sender::new(ConnectionState::Disconnected),
+            state: tx,
+            _state_rx: rx,
         }
     }
 }

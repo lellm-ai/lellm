@@ -60,6 +60,9 @@ pub struct SseTransport {
     config: SseConfig,
     inner: Option<Arc<SseTransportInner>>,
     state: watch::Sender<ConnectionState>,
+    /// 持有 watch channel 的 receiver，确保 sender 始终有 subscriber，send() 才能更新值。
+    #[allow(dead_code)]
+    _state_rx: watch::Receiver<ConnectionState>,
 }
 
 struct SseTransportInner {
@@ -81,10 +84,12 @@ type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonRpcResponse, McpError>
 
 impl SseTransport {
     pub fn new(config: SseConfig) -> Self {
+        let (tx, rx) = watch::channel(ConnectionState::Disconnected);
         Self {
             config,
             inner: None,
-            state: watch::Sender::new(ConnectionState::Disconnected),
+            state: tx,
+            _state_rx: rx,
         }
     }
 }
