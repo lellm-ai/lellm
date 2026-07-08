@@ -13,7 +13,7 @@ core = ["dep:lellm-core"]
 provider = ["dep:lellm-core", "dep:lellm-provider"]
 graph = ["dep:lellm-core", "dep:lellm-graph"]
 agent = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-provider", "dep:lellm-agent"]
-mcp = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-mcp", "dep:lellm-agent", "lellm-agent/mcp"]
+mcp = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-mcp", "dep:lellm-agent", "lellm-agent/mcp", "lellm-agent/sse", "lellm-agent/http"]
 derive = ["dep:lellm-derive"]
 full = ["graph", "provider", "agent", "mcp", "derive"]
 

@@ -27,7 +27,9 @@ indexmap.workspace = true
 
 [features]
 default = []
-mcp = ["dep:lellm-mcp", "tokio-util"]
+mcp = ["dep:lellm-mcp", "dep:tokio-util", "lellm-mcp/stdio"]
+sse = ["mcp", "lellm-mcp/sse"]
+http = ["mcp", "lellm-mcp/http"]
 
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
@@ -73,3 +75,4 @@ path = "examples/weather_agent_mcp.rs"
 [[example]]
 name = "mcp_multi"
 path = "examples/mcp_multi.rs"
+required-features = ["sse", "http"]

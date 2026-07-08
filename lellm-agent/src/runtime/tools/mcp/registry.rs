@@ -121,6 +121,41 @@ impl McpServerRegistry {
         Ok(catalog)
     }
 
+    /// 添加 stdio 服务器。
+    #[cfg(feature = "mcp")]
+    pub async fn add_stdio(
+        &mut self,
+        name: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: Option<Vec<(String, String)>>,
+    ) -> Result<McpCatalog, lellm_mcp::McpError> {
+        let client = McpClient::connect_stdio(command, args, env).await?;
+        self.register(name, client).await
+    }
+
+    /// 添加 SSE 服务器。
+    #[cfg(feature = "sse")]
+    pub async fn add_sse(
+        &mut self,
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<McpCatalog, lellm_mcp::McpError> {
+        let client = McpClient::connect_sse(url).await?;
+        self.register(name, client).await
+    }
+
+    /// 添加 HTTP 服务器。
+    #[cfg(feature = "http")]
+    pub async fn add_http(
+        &mut self,
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<McpCatalog, lellm_mcp::McpError> {
+        let client = McpClient::connect_http(url).await?;
+        self.register(name, client).await
+    }
+
     /// 获取所有服务器的工具列表。
     pub fn tool_names(&self) -> Vec<(&str, Vec<String>)> {
         self.servers

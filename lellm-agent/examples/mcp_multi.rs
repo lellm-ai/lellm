@@ -11,8 +11,6 @@
 //! ```
 
 use lellm_agent::{McpServerRegistry, ToolCatalog};
-use lellm_mcp::McpClient;
-use lellm_mcp::transport::{HttpConfig, HttpTransport, SseConfig, SseTransport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,19 +22,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 添加 SSE 服务器
     let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
-    let transport = SseTransport::new(SseConfig::new(&sse_url));
-    let mut client = McpClient::with_transport(transport);
-    client.connect().await?;
-    client.initialize().await?;
-    let _ = registry.register("qq-map-sse", client).await?;
+    let _ = registry.add_sse("qq-map-sse", &sse_url).await?;
 
     // 添加 HTTP 服务器
     let http_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
-    let transport = HttpTransport::new(HttpConfig::new(&http_url));
-    let mut client = McpClient::with_transport(transport);
-    client.connect().await?;
-    client.initialize().await?;
-    let _ = registry.register("qq-map-http", client).await?;
+    let _ = registry.add_http("qq-map-http", &http_url).await?;
 
     // 显示工具列表
     println!("已连接服务器:");

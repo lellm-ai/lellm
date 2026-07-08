@@ -170,4 +170,41 @@ impl McpClient {
     ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
         self.transport.subscribe_notifications()
     }
+
+    // ─── 便捷构造 ─────────────────────────────────────────────────
+
+    /// 创建 stdio 客户端并执行 connect + initialize。
+    #[cfg(feature = "stdio")]
+    pub async fn connect_stdio(
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: Option<Vec<(String, String)>>,
+    ) -> Result<Self, McpError> {
+        use crate::transport::{StdioConfig, StdioTransport};
+        let config = StdioConfig::new(command, args).with_env(env);
+        let transport = StdioTransport::new(config);
+        let mut client = Self::with_transport(transport);
+        client.connect().await?;
+        client.initialize().await.map(|_| client)
+    }
+
+    /// 创建 SSE 客户端并执行 connect + initialize。
+    #[cfg(feature = "sse")]
+    pub async fn connect_sse(url: impl Into<String>) -> Result<Self, McpError> {
+        use crate::transport::{SseConfig, SseTransport};
+        let transport = SseTransport::new(SseConfig::new(url));
+        let mut client = Self::with_transport(transport);
+        client.connect().await?;
+        client.initialize().await.map(|_| client)
+    }
+
+    /// 创建 HTTP 客户端并执行 connect + initialize。
+    #[cfg(feature = "http")]
+    pub async fn connect_http(url: impl Into<String>) -> Result<Self, McpError> {
+        use crate::transport::{HttpConfig, HttpTransport};
+        let transport = HttpTransport::new(HttpConfig::new(url));
+        let mut client = Self::with_transport(transport);
+        client.connect().await?;
+        client.initialize().await.map(|_| client)
+    }
 }
