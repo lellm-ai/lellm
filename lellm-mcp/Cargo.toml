@@ -3,13 +3,12 @@ name = "lellm-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MCP (Model Context Protocol) Client for LeLLM"
+description = "MCP (Model Context Protocol) Client / Server for LeLLM"
 documentation = "https://docs.rs/lellm-mcp"
 repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 lellm-core.workspace = true
-lellm-agent = { workspace = true, optional = true }
 
 async-trait.workspace = true
 indexmap.workspace = true
@@ -28,15 +27,33 @@ futures = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 
 [features]
-default = ["stdio", "bridge"]
+default = ["stdio"]
 stdio = []
 sse = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
 http = ["dep:reqwest"]
 server = ["dep:axum"]
-bridge = ["dep:lellm-agent"]
 
 [dev-dependencies]
-lellm-agent.workspace = true
 reqwest.workspace = true
 urlencoding = "2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "mcp_server"
+path = "examples/mcp_server.rs"
+required-features = ["server"]
+
+[[example]]
+name = "mcp_weather_sse"
+path = "examples/mcp_weather_sse.rs"
+required-features = ["sse"]
+
+[[example]]
+name = "mcp_weather_http"
+path = "examples/mcp_weather_http.rs"
+required-features = ["http"]
+
+[[example]]
+name = "mcp_tencent_map_server"
+path = "examples/mcp_tencent_map_server.rs"
+required-features = ["server"]

@@ -4,7 +4,7 @@
 //! - Registry 是所有后台任务的唯一 Owner
 //! - ManagedServer 封装单个服务器的所有资源
 //! - Drop Registry 时自动 cancel + join 所有后台任务
-//! - 用户 API 只暴露 add_xxx()，无需关心 Watcher 生命周期
+//! - 用户通过 `register(name, client)` 注册已连接的客户端
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::catalog::{CatalogRefresher, CatalogStore, McpCatalog};
 use super::watcher::McpCatalogWatcher;
 use super::{ToolCatalog, ToolSnapshot};
-use crate::client::McpClient;
+use lellm_mcp::client::McpClient;
 
 /// 服务器配置。
 #[derive(Debug, Clone)]
@@ -76,7 +76,7 @@ impl McpServerRegistry {
         &mut self,
         name: impl Into<String>,
         client: McpClient,
-    ) -> Result<McpCatalog, crate::McpError> {
+    ) -> Result<McpCatalog, lellm_mcp::McpError> {
         let name = name.into();
         let client_arc = Arc::new(client);
 
@@ -119,56 +119,6 @@ impl McpServerRegistry {
         );
 
         Ok(catalog)
-    }
-
-    /// 添加 stdio 服务器。
-    #[cfg(feature = "stdio")]
-    pub async fn add_stdio(
-        &mut self,
-        name: impl Into<String>,
-        command: impl Into<String>,
-        args: Vec<String>,
-        env: Option<Vec<(String, String)>>,
-    ) -> Result<McpCatalog, crate::McpError> {
-        use crate::transport::{StdioConfig, StdioTransport};
-        let config = StdioConfig::new(command, args).with_env(env);
-        let transport = StdioTransport::new(config);
-        let mut client = McpClient::with_transport(transport);
-        client.connect().await?;
-        client.initialize().await?;
-        self.register(name, client).await
-    }
-
-    /// 添加 SSE 服务器。
-    #[cfg(feature = "sse")]
-    pub async fn add_sse(
-        &mut self,
-        name: impl Into<String>,
-        url: impl Into<String>,
-    ) -> Result<McpCatalog, crate::McpError> {
-        use crate::transport::{SseConfig, SseTransport};
-        let config = SseConfig::new(url);
-        let transport = SseTransport::new(config);
-        let mut client = McpClient::with_transport(transport);
-        client.connect().await?;
-        client.initialize().await?;
-        self.register(name, client).await
-    }
-
-    /// 添加 HTTP 服务器。
-    #[cfg(feature = "http")]
-    pub async fn add_http(
-        &mut self,
-        name: impl Into<String>,
-        url: impl Into<String>,
-    ) -> Result<McpCatalog, crate::McpError> {
-        use crate::transport::{HttpConfig, HttpTransport};
-        let config = HttpConfig::new(url);
-        let transport = HttpTransport::new(config);
-        let mut client = McpClient::with_transport(transport);
-        client.connect().await?;
-        client.initialize().await?;
-        self.register(name, client).await
     }
 
     /// 获取所有服务器的工具列表。

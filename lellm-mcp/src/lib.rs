@@ -1,33 +1,26 @@
 //! lellm-mcp — MCP (Model Context Protocol) Client for LeLLM.
 //!
-//! MVP 原型：验证接口冻结是否正确。
+//! 纯 MCP 协议实现，不包含任何 Agent/工具集成逻辑。
 //!
-//! 仅实现：stdio transport + tools/list + tools/call + initialize
+//! 模块结构：
+//! - `protocol` — JSON-RPC 消息类型
+//! - `transport` — stdio / http / sse 传输层
+//! - `client` — McpClient（连接管理 + 协议层）
+//! - `server` — SimpleMcp（可选，server feature）
 
+pub mod client;
 pub mod protocol;
 pub mod transport;
 
 #[cfg(feature = "server")]
 pub mod server;
 
-#[cfg(feature = "bridge")]
-pub mod bridge;
-
-#[cfg(feature = "bridge")]
-pub mod client;
-
+pub use client::McpClient;
 pub use protocol::{
     JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
     RetryDisposition, TransportError,
 };
 pub use transport::{ConnectionState, McpTransport};
 
-#[cfg(feature = "bridge")]
-pub use bridge::{
-    CatalogRefresh, CatalogRefresher, CatalogStore, McpCatalog, McpCatalogWatcher,
-    McpServerRegistry, ServerConfig, ToolCatalog,
-};
-#[cfg(feature = "bridge")]
-pub use client::McpClient;
 #[cfg(feature = "server")]
 pub use server::SimpleMcp;

@@ -6,8 +6,12 @@
 //! - 协议层（lellm-core）：`ToolArgs`, `ToolDefinition`, `ParallelSafety`, `ToolCategory`
 //! - 可执行描述（lellm-core）：`ExecutableTool`, `ToolFn`
 //! - 运行时层（本模块）：`ToolExecutor`, `ToolCatalog`, `ToolSnapshot`
+//! - MCP 集成（可选）：`McpCatalog`, `McpServerRegistry` 等
 
 mod executor;
+
+#[cfg(feature = "mcp")]
+pub mod mcp;
 
 // Re-export protocol types from lellm-core
 pub use lellm_core::{ExecutableTool, ParallelSafety, ToolArgs, ToolCategory, ToolFn};

@@ -7,7 +7,7 @@
 //! `tokio::task::block_in_place` 来规避，或直接测试 Transport 层。
 
 use async_trait::async_trait;
-use lellm_mcp::ToolCatalog;
+use lellm_agent::{CatalogRefresher, McpCatalog, ToolCatalog};
 use lellm_mcp::protocol::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, McpError, ServerError,
     TransportError,
@@ -377,7 +377,7 @@ async fn test_catalog_discover_empty() {
     client.connect().await.unwrap();
     let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
+    let catalog = McpCatalog::from_client(client).await.unwrap();
     assert!(catalog.is_empty());
     assert_eq!(catalog.len(), 0);
 }
@@ -410,7 +410,7 @@ async fn test_catalog_discover_with_tools() {
     client.connect().await.unwrap();
     let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
+    let catalog = McpCatalog::from_client(client).await.unwrap();
     assert_eq!(catalog.len(), 2);
     assert!(!catalog.is_empty());
 }
@@ -435,7 +435,7 @@ async fn test_catalog_snapshot_structure() {
     client.connect().await.unwrap();
     let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
+    let catalog = McpCatalog::from_client(client).await.unwrap();
     let snapshot = catalog.snapshot().await;
 
     assert_eq!(snapshot.len(), 1);
@@ -460,7 +460,7 @@ async fn test_catalog_snapshot_versions_stable() {
     client.connect().await.unwrap();
     let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
+    let catalog = McpCatalog::from_client(client).await.unwrap();
 
     let snap1 = catalog.snapshot().await;
     let snap2 = catalog.snapshot().await;
@@ -488,14 +488,12 @@ async fn test_catalog_refresh() {
     client.connect().await.unwrap();
     let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::from_client(client.clone())
-        .await
-        .unwrap();
+    let catalog = McpCatalog::from_client(client.clone()).await.unwrap();
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("old_tool").is_some());
 
     // 使用 CatalogRefresher 刷新工具目录
-    let refresher = lellm_mcp::CatalogRefresher::from_catalog(client.clone(), &catalog);
+    let refresher = CatalogRefresher::from_catalog(client.clone(), &catalog);
     refresher.refresh_impl().await.unwrap();
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("new_tool").is_some());
@@ -510,7 +508,7 @@ async fn test_catalog_discover_error_response() {
     client.connect().await.unwrap();
     let client = Arc::new(client);
 
-    let result = lellm_mcp::McpCatalog::from_client(client).await;
+    let result = McpCatalog::from_client(client).await;
     assert!(result.is_err());
     assert!(matches!(result, Err(McpError::Server(_))));
 }
@@ -553,9 +551,7 @@ async fn test_full_mcp_flow() {
     assert_eq!(init.server_info.name, "mcp-server");
 
     // 3. 发现工具
-    let catalog = lellm_mcp::McpCatalog::from_client(client.clone())
-        .await
-        .unwrap();
+    let catalog = McpCatalog::from_client(client.clone()).await.unwrap();
     assert_eq!(catalog.len(), 2);
 
     // 4. 快照

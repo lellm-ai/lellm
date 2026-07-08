@@ -7,10 +7,12 @@
 //!
 //! 运行：
 //! ```bash
-//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features bridge,sse,http -p lellm-mcp
+//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features mcp -p lellm-agent
 //! ```
 
-use lellm_mcp::{McpServerRegistry, ToolCatalog};
+use lellm_agent::{McpServerRegistry, ToolCatalog};
+use lellm_mcp::McpClient;
+use lellm_mcp::transport::{HttpConfig, HttpTransport, SseConfig, SseTransport};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,12 +22,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut registry = McpServerRegistry::new();
 
-    // 添加多个服务器（这里用同一个服务器演示，实际可以连接不同服务器）
+    // 添加 SSE 服务器
     let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
-    let _ = registry.add_sse("qq-map-sse", &sse_url).await?;
+    let transport = SseTransport::new(SseConfig::new(&sse_url));
+    let mut client = McpClient::with_transport(transport);
+    client.connect().await?;
+    client.initialize().await?;
+    let _ = registry.register("qq-map-sse", client).await?;
 
+    // 添加 HTTP 服务器
     let http_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
-    let _ = registry.add_http("qq-map-http", &http_url).await?;
+    let transport = HttpTransport::new(HttpConfig::new(&http_url));
+    let mut client = McpClient::with_transport(transport);
+    client.connect().await?;
+    client.initialize().await?;
+    let _ = registry.register("qq-map-http", client).await?;
 
     // 显示工具列表
     println!("已连接服务器:");

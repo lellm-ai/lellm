@@ -48,3 +48,11 @@ pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, To
 
 // 流式事件翻译
 pub use stream_translation::{AgentStreamEvent, TranslationResult, translate_provider_event};
+
+// ─── MCP 集成 re-export (mcp feature) ────────────────────────────
+
+#[cfg(feature = "mcp")]
+pub use tools::mcp::{
+    CatalogRefresh, CatalogRefresher, CatalogStore, McpCatalog, McpCatalogWatcher,
+    McpServerRegistry, ServerConfig,
+};

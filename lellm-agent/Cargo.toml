@@ -11,6 +11,8 @@ repository = "https://github.com/lellm-ai/lellm"
 lellm-core = { workspace = true, features = ["anyhow"] }
 lellm-graph.workspace = true
 lellm-provider.workspace = true
+lellm-mcp = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,11 +27,12 @@ indexmap.workspace = true
 
 [features]
 default = []
+mcp = ["dep:lellm-mcp", "tokio-util"]
 
 [dev-dependencies]
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
 lellm-derive = { path = "../lellm-derive" }
-lellm-mcp = { path = "../lellm-mcp", features = ["bridge", "http", "sse"] }
+lellm-mcp = { path = "../lellm-mcp", features = ["stdio", "http", "sse"] }
 reqwest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 yunli = "0.1"
@@ -67,3 +70,6 @@ path = "examples/weather_agent.rs"
 name = "weather_agent_mcp"
 path = "examples/weather_agent_mcp.rs"
 
+[[example]]
+name = "mcp_multi"
+path = "examples/mcp_multi.rs"

@@ -7,15 +7,14 @@
 
 use std::sync::Arc;
 
+use lellm_mcp::protocol::JsonRpcNotification;
 use tokio_util::sync::CancellationToken;
-
-use crate::protocol::JsonRpcNotification;
 
 /// 工具目录刷新 trait — Watcher 通过此 trait 执行刷新，不依赖具体实现。
 #[async_trait::async_trait]
 pub trait CatalogRefresh: Send + Sync {
     /// 刷新工具目录。
-    async fn refresh(&self) -> Result<(), crate::McpError>;
+    async fn refresh(&self) -> Result<(), lellm_mcp::McpError>;
 }
 
 /// MCP 工具目录观察者。
@@ -61,7 +60,7 @@ impl McpCatalogWatcher {
                             Ok(notif) => {
                                 if matches!(
                                     notif.kind(),
-                                    crate::protocol::NotificationKind::ToolsListChanged
+                                    lellm_mcp::protocol::NotificationKind::ToolsListChanged
                                 ) {
                                     tracing::info!("tools/list_changed received, refreshing catalog");
                                     if let Err(e) = self.refresher.refresh().await {
@@ -87,7 +86,7 @@ impl McpCatalogWatcher {
 /// 为 CatalogRefresher 实现 CatalogRefresh trait。
 #[async_trait::async_trait]
 impl CatalogRefresh for super::CatalogRefresher {
-    async fn refresh(&self) -> Result<(), crate::McpError> {
+    async fn refresh(&self) -> Result<(), lellm_mcp::McpError> {
         self.refresh_impl().await
     }
 }

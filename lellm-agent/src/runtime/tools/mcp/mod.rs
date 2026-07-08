@@ -1,6 +1,6 @@
-//! Tool 桥接 — MCP 工具 → ExecutableTool。
+//! MCP 工具集成 — 将 MCP Server 暴露为 Agent 可消费的 ToolCatalog。
 //!
-//! 核心抽象：从 lellm-agent 复用 `ToolCatalog` trait。
+//! 核心抽象：
 //! - `CatalogStore` — 纯数据存储，使用 RwLock 实现读写分离
 //! - `McpCatalog` — 纯读接口，供 Agent/ToolExecutor 使用
 //! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
@@ -15,5 +15,5 @@ pub use catalog::{CatalogRefresher, CatalogStore, McpCatalog};
 pub use registry::{McpServerRegistry, ServerConfig};
 pub use watcher::{CatalogRefresh, McpCatalogWatcher};
 
-// 从 lellm-agent 复用 ToolCatalog trait 和 ToolSnapshot
-pub use lellm_agent::{ToolCatalog, ToolSnapshot};
+// Re-export ToolCatalog / ToolSnapshot from parent module for convenience
+pub use super::{ToolCatalog, ToolSnapshot};
