@@ -196,24 +196,14 @@ pub(super) fn make_tool_entry(
                 .map_err(|e| mcp_error_to_tool_error(&e))?;
 
             if call_result.is_error {
-                let err_text = call_result
-                    .content
-                    .iter()
-                    .filter_map(|c| c.as_text())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let err_text = crate::protocol::ContentBlock::flatten_text(&call_result.content);
                 return Err(ToolError {
                     kind: ToolErrorKind::Internal,
                     message: err_text,
                 });
             }
 
-            let text = call_result
-                .content
-                .iter()
-                .filter_map(|c| c.as_text())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = crate::protocol::ContentBlock::flatten_text(&call_result.content);
             Ok(serde_json::Value::String(text))
         }
     })

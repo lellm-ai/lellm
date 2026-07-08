@@ -128,4 +128,23 @@ impl ContentBlock {
             _ => None,
         }
     }
+
+    /// 将多个 ContentBlock 拼接为纯文本，忽略非 Text 类型。
+    ///
+    /// 对齐 `lellm_core::ContentBlock::flatten_text()` 的语义，
+    /// 分隔符为 `\n\n`。当存在非文本块时发出 warn 日志。
+    pub fn flatten_text(blocks: &[ContentBlock]) -> String {
+        let has_non_text = blocks.iter().any(|b| b.as_text().is_none());
+        if has_non_text {
+            tracing::warn!(
+                total = blocks.len(),
+                "MCP tool returned non-text content blocks that will be dropped"
+            );
+        }
+        blocks
+            .iter()
+            .filter_map(|b| b.as_text())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
 }
