@@ -15,13 +15,27 @@ pub struct JsonRpcRequest {
 
 impl JsonRpcRequest {
     /// 构造一个 JSON-RPC Request。
-    pub fn new(id: u64, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+    /// pub(crate) —— 只有 McpClient 能生成 request id。
+    pub(crate) fn new(
+        id: u64,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
             method_name: method.into(),
             params,
         }
+    }
+
+    /// 测试专用构造函数——仅供集成测试使用。
+    pub fn new_for_test(
+        id: u64,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(id, method, params)
     }
 }
 

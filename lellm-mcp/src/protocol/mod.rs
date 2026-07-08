@@ -11,7 +11,7 @@ mod notification;
 mod request;
 mod response;
 
-pub use error::McpError;
+pub use error::{McpError, RetryDisposition, ServerError, TransportError};
 pub use notification::{JsonRpcNotification, NotificationKind, methods as notification_methods};
 pub use request::{CallToolParams, ImplementationInfo, InitializeParams, JsonRpcRequest, methods};
 pub use response::{

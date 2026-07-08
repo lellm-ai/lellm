@@ -7,10 +7,12 @@
 //! `tokio::task::block_in_place` 来规避，或直接测试 Transport 层。
 
 use async_trait::async_trait;
-use futures_util::stream;
-use lellm_mcp::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult};
-use lellm_mcp::transport::{ConnectionState, McpTransport, NotificationStream};
-use lellm_mcp::{McpError, ToolCatalog};
+use lellm_mcp::ToolCatalog;
+use lellm_mcp::protocol::{
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, McpError, ServerError,
+    TransportError,
+};
+use lellm_mcp::transport::{ConnectionState, McpTransport};
 use std::sync::Arc;
 
 // ============================================================================
@@ -80,11 +82,11 @@ impl McpTransport for MockTransport {
             ok
         };
         if ok {
-            let _ = self.state_tx.send(ConnectionState::Ready);
+            self.state_tx.send_replace(ConnectionState::Ready);
             Ok(())
         } else {
-            let _ = self.state_tx.send(ConnectionState::Disconnected);
-            Err(McpError::Disconnected)
+            self.state_tx.send_replace(ConnectionState::Disconnected);
+            Err(McpError::Transport(TransportError::Disconnected))
         }
     }
 
@@ -102,23 +104,22 @@ impl McpTransport for MockTransport {
         match result {
             Some(Ok(v)) => Ok(Self::make_response(req.id, v)),
             Some(Err(msg)) => match msg {
-                "timeout" => Err(McpError::Timeout),
-                "disconnected" => Err(McpError::Disconnected),
-                "server_error" => Err(McpError::ServerError(msg.to_string())),
+                "timeout" => Err(McpError::Transport(TransportError::Timeout)),
+                "disconnected" => Err(McpError::Transport(TransportError::Disconnected)),
+                "server_error" => Err(McpError::Server(ServerError {
+                    code: -1,
+                    message: msg.to_string(),
+                })),
                 _ => Err(McpError::Protocol(msg.to_string())),
             },
-            None => Err(McpError::Disconnected),
+            None => Err(McpError::Transport(TransportError::Disconnected)),
         }
     }
 
-    fn notifications(&self) -> NotificationStream {
-        let rx = self.notif_tx.subscribe();
-        Box::pin(stream::unfold(rx, |mut rx| async move {
-            match rx.recv().await {
-                Ok(n) => Some((n, rx)),
-                Err(_) => None,
-            }
-        }))
+    fn subscribe_notifications(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
+        Some(self.notif_tx.subscribe())
     }
 
     async fn close(&mut self) -> Result<(), McpError> {
@@ -135,8 +136,8 @@ impl McpTransport for MockTransport {
 // Helper: 创建 McpClient
 // ============================================================================
 
-async fn create_client(transport: MockTransport) -> lellm_mcp::McpClient {
-    lellm_mcp::McpClient::with_transport(transport).await
+fn create_client(transport: MockTransport) -> lellm_mcp::McpClient {
+    lellm_mcp::McpClient::with_transport(transport)
 }
 
 // ============================================================================
@@ -178,12 +179,25 @@ async fn test_transport_connect_ok() {
 }
 
 #[tokio::test]
+async fn test_transport_state_after_connect() {
+    let mut transport = MockTransport::new();
+    transport.connect_ok(true);
+    transport.connect().await.unwrap();
+
+    let state = *transport.state().borrow();
+    assert_eq!(state, ConnectionState::Ready);
+}
+
+#[tokio::test]
 async fn test_transport_connect_fail() {
     let mut transport = MockTransport::new();
     transport.connect_ok(false);
     let result = transport.connect().await;
     assert!(result.is_err());
-    assert!(matches!(result, Err(McpError::Disconnected)));
+    assert!(matches!(
+        result,
+        Err(McpError::Transport(TransportError::Disconnected))
+    ));
 }
 
 #[tokio::test]
@@ -194,7 +208,7 @@ async fn test_transport_request_success() {
         .add_success(serde_json::json!({"status": "ok"}));
     transport.connect().await.unwrap();
 
-    let req = JsonRpcRequest::new(1, "ping", None);
+    let req = JsonRpcRequest::new_for_test(1, "ping", None);
     let result = transport.request(req).await.unwrap();
     assert_eq!(result.id, 1);
     if let JsonRpcResult::Success(v) = &result.result {
@@ -210,9 +224,12 @@ async fn test_transport_request_timeout() {
     transport.connect_ok(true).add_error("timeout");
     transport.connect().await.unwrap();
 
-    let req = JsonRpcRequest::new(1, "ping", None);
+    let req = JsonRpcRequest::new_for_test(1, "ping", None);
     let result = transport.request(req).await;
-    assert!(matches!(result, Err(McpError::Timeout)));
+    assert!(matches!(
+        result,
+        Err(McpError::Transport(TransportError::Timeout))
+    ));
 }
 
 #[tokio::test]
@@ -221,9 +238,9 @@ async fn test_transport_request_server_error() {
     transport.connect_ok(true).add_error("server_error");
     transport.connect().await.unwrap();
 
-    let req = JsonRpcRequest::new(1, "ping", None);
+    let req = JsonRpcRequest::new_for_test(1, "ping", None);
     let result = transport.request(req).await;
-    assert!(matches!(result, Err(McpError::ServerError(_))));
+    assert!(matches!(result, Err(McpError::Server(_))));
 }
 
 #[tokio::test]
@@ -245,7 +262,7 @@ async fn test_transport_multiple_requests() {
     transport.connect().await.unwrap();
 
     for i in 1..=3 {
-        let req = JsonRpcRequest::new(i, "test", None);
+        let req = JsonRpcRequest::new_for_test(i, "test", None);
         let resp = transport.request(req).await.unwrap();
         if let JsonRpcResult::Success(v) = &resp.result {
             assert_eq!(v["n"], i);
@@ -261,10 +278,13 @@ async fn test_transport_no_response_left() {
     transport.connect_ok(true); // no responses added
     transport.connect().await.unwrap();
 
-    let req = JsonRpcRequest::new(1, "ping", None);
+    let req = JsonRpcRequest::new_for_test(1, "ping", None);
     let result = transport.request(req).await;
     // 没有预设响应 → Disconnected
-    assert!(matches!(result, Err(McpError::Disconnected)));
+    assert!(matches!(
+        result,
+        Err(McpError::Transport(TransportError::Disconnected))
+    ));
 }
 
 // ============================================================================
@@ -275,7 +295,7 @@ async fn test_transport_no_response_left() {
 async fn test_client_connect() {
     let mut transport = MockTransport::new();
     transport.connect_ok(true);
-    let client = create_client(transport).await;
+    let mut client = create_client(transport);
     assert!(client.connect().await.is_ok());
 }
 
@@ -283,10 +303,12 @@ async fn test_client_connect() {
 async fn test_client_request_not_ready() {
     // 不连接直接请求，应返回 Disconnected
     let transport = MockTransport::new();
-    let client = create_client(transport).await;
-    let req = JsonRpcRequest::new(1, "ping", None);
-    let result = client.request(req).await;
-    assert!(matches!(result, Err(McpError::Disconnected)));
+    let client = create_client(transport);
+    let result: Result<serde_json::Value, _> = client.request("ping", None::<&()>).await;
+    assert!(matches!(
+        result,
+        Err(McpError::Transport(TransportError::Disconnected))
+    ));
 }
 
 #[tokio::test]
@@ -295,19 +317,19 @@ async fn test_client_request_forward() {
     transport
         .connect_ok(true)
         .add_success(serde_json::json!({}));
-    let client = create_client(transport).await;
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let req = JsonRpcRequest::new(1, "ping", None);
-    let result = client.request(req).await.unwrap();
-    assert_eq!(result.id, 1);
+    let result: serde_json::Value = client.request("ping", None::<&()>).await.unwrap();
+    assert_eq!(result, serde_json::json!({}));
 }
 
 #[tokio::test]
 async fn test_client_close() {
     let mut transport = MockTransport::new();
     transport.connect_ok(true);
-    let client = create_client(transport).await;
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
     assert!(client.close().await.is_ok());
 }
@@ -321,8 +343,9 @@ async fn test_client_initialize() {
     });
     let mut transport = MockTransport::new();
     transport.connect_ok(true).add_success(init_result);
-    let client = create_client(transport).await;
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
     let result = client.initialize().await.unwrap();
     assert_eq!(result.protocol_version, "2024-11-05");
@@ -334,7 +357,7 @@ async fn test_client_initialize() {
 async fn test_client_state_after_connect() {
     let mut transport = MockTransport::new();
     transport.connect_ok(true);
-    let client = create_client(transport).await;
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
 
     let state = *client.state().borrow();
@@ -350,10 +373,11 @@ async fn test_catalog_discover_empty() {
     let list_result = serde_json::json!({"tools": []});
     let mut transport = MockTransport::new();
     transport.connect_ok(true).add_success(list_result);
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::discover(client).await.unwrap();
+    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
     assert!(catalog.is_empty());
     assert_eq!(catalog.len(), 0);
 }
@@ -382,10 +406,11 @@ async fn test_catalog_discover_with_tools() {
     });
     let mut transport = MockTransport::new();
     transport.connect_ok(true).add_success(list_result);
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::discover(client).await.unwrap();
+    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
     assert_eq!(catalog.len(), 2);
     assert!(!catalog.is_empty());
 }
@@ -406,10 +431,11 @@ async fn test_catalog_snapshot_structure() {
     });
     let mut transport = MockTransport::new();
     transport.connect_ok(true).add_success(list_result);
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::discover(client).await.unwrap();
+    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
     let snapshot = catalog.snapshot().await;
 
     assert_eq!(snapshot.len(), 1);
@@ -423,20 +449,25 @@ async fn test_catalog_snapshot_structure() {
 }
 
 #[tokio::test]
-async fn test_catalog_snapshot_versions_increment() {
+async fn test_catalog_snapshot_versions_stable() {
+    // 新设计：version 在快照创建时固定，不变动的 catalog 返回相同 version
     let list_result = serde_json::json!({"tools": [
         {"name": "t1", "description": "tool 1", "inputSchema": {"type": "object"}}
     ]});
     let mut transport = MockTransport::new();
     transport.connect_ok(true).add_success(list_result);
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let catalog = lellm_mcp::McpCatalog::discover(client).await.unwrap();
+    let catalog = lellm_mcp::McpCatalog::from_client(client).await.unwrap();
 
     let snap1 = catalog.snapshot().await;
     let snap2 = catalog.snapshot().await;
-    assert!(snap2.version() > snap1.version());
+    // 未更新的 catalog 返回相同 version
+    assert_eq!(snap1.version(), snap2.version());
+    // 是同一个 Arc
+    assert!(std::sync::Arc::ptr_eq(&snap1, &snap2));
 }
 
 #[tokio::test]
@@ -453,14 +484,17 @@ async fn test_catalog_refresh() {
         .connect_ok(true)
         .add_success(list1)
         .add_success(list2);
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let mut catalog = lellm_mcp::McpCatalog::discover(client).await.unwrap();
+    let catalog = lellm_mcp::McpCatalog::from_client(client.clone())
+        .await
+        .unwrap();
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("old_tool").is_some());
 
-    catalog.refresh().await.unwrap();
+    catalog.update_tools().await.unwrap();
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("new_tool").is_some());
     assert!(catalog.snapshot().await.get("old_tool").is_none());
@@ -470,12 +504,13 @@ async fn test_catalog_refresh() {
 async fn test_catalog_discover_error_response() {
     let mut transport = MockTransport::new();
     transport.connect_ok(true).add_error("server_error");
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
-    let result = lellm_mcp::McpCatalog::discover(client).await;
+    let result = lellm_mcp::McpCatalog::from_client(client).await;
     assert!(result.is_err());
-    assert!(matches!(result, Err(McpError::ServerError(_))));
+    assert!(matches!(result, Err(McpError::Server(_))));
 }
 
 // ============================================================================
@@ -505,17 +540,18 @@ async fn test_full_mcp_flow() {
         .connect_ok(true)
         .add_success(init_resp)
         .add_success(tools_resp);
-    let client = Arc::new(create_client(transport).await);
+    let mut client = create_client(transport);
 
     // 1. 连接
     client.connect().await.unwrap();
+    let client = Arc::new(client);
 
     // 2. 初始化
     let init = client.initialize().await.unwrap();
     assert_eq!(init.server_info.name, "mcp-server");
 
     // 3. 发现工具
-    let catalog = lellm_mcp::McpCatalog::discover(client.clone())
+    let catalog = lellm_mcp::McpCatalog::from_client(client.clone())
         .await
         .unwrap();
     assert_eq!(catalog.len(), 2);

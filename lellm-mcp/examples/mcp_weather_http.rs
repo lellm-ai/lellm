@@ -10,7 +10,6 @@
 //! ```
 
 use lellm_mcp::client::McpClient;
-use lellm_mcp::protocol::{CallToolParams, JsonRpcRequest, methods};
 use lellm_mcp::transport::{HttpConfig, HttpTransport};
 
 #[tokio::main]
@@ -24,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config =
         HttpConfig::new(&endpoint_url).with_request_timeout(std::time::Duration::from_secs(60));
     let transport = HttpTransport::new(config);
-    let client = McpClient::with_transport(transport).await;
+    let mut client = McpClient::with_transport(transport);
 
     client.connect().await?;
     let result = client.initialize().await?;
@@ -34,19 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 列出可用工具
-    let list_resp = client
-        .request(JsonRpcRequest::new(1, methods::TOOLS_LIST, None))
-        .await?;
-
-    let list_result: lellm_mcp::protocol::ListToolsResult =
-        serde_json::from_value(match list_resp.result {
-            lellm_mcp::protocol::JsonRpcResult::Success(v) => v,
-            e => {
-                println!("获取工具列表失败: {:?}", e);
-                return Ok(());
-            }
-        })?;
-
+    let list_result = client.tools_list().await?;
     println!("✓ {} 个工具\n", list_result.tools.len());
 
     // QQ 地图 geocoder 无批量接口，只能循环逐个调用
@@ -54,28 +41,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for addr in &addresses {
         println!("解析: {}", addr);
-        let resp = client
-            .request(JsonRpcRequest::new(
-                2,
-                methods::TOOLS_CALL,
-                Some(serde_json::to_value(CallToolParams::new(
-                    "geocoder",
-                    Some(serde_json::json!({ "address": addr })),
-                ))?),
-            ))
-            .await?;
-
-        match resp.result {
-            lellm_mcp::protocol::JsonRpcResult::Success(value) => {
-                let call_result: lellm_mcp::protocol::CallToolResult =
-                    serde_json::from_value(value)?;
+        match client
+            .call_tool("geocoder", Some(serde_json::json!({ "address": addr })))
+            .await
+        {
+            Ok(call_result) => {
                 for content in &call_result.content {
                     if let Some(text) = content.as_text() {
                         println!("  {}\n", text);
                     }
                 }
             }
-            e => println!("  失败: {:?}\n", e),
+            Err(e) => {
+                println!("  失败: {}\n", e);
+            }
         }
     }
 

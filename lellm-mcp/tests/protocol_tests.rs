@@ -5,58 +5,9 @@
 
 use lellm_mcp::protocol::{
     CallToolParams, ContentBlock, ImplementationInfo, InitializeParams, JsonRpcMessage,
-    JsonRpcNotification, JsonRpcRequest, McpError, NotificationKind, methods, notification_methods,
+    JsonRpcNotification, McpError, NotificationKind, RetryDisposition, ServerError, TransportError,
+    methods, notification_methods,
 };
-
-// ============================================================================
-// JsonRpcRequest 测试
-// ============================================================================
-
-#[test]
-fn test_request_new() {
-    let req = JsonRpcRequest::new(1, "ping", None);
-    assert_eq!(req.jsonrpc, "2.0");
-    assert_eq!(req.id, 1);
-    assert_eq!(req.method_name, "ping");
-    assert!(req.params.is_none());
-}
-
-#[test]
-fn test_request_with_params() {
-    let params = serde_json::json!({"key": "value"});
-    let req = JsonRpcRequest::new(2, methods::TOOLS_LIST, Some(params.clone()));
-    assert_eq!(req.id, 2);
-    assert_eq!(req.method_name, methods::TOOLS_LIST);
-    assert_eq!(req.params, Some(params));
-}
-
-#[test]
-fn test_request_serialization() {
-    let req = JsonRpcRequest::new(1, "ping", None);
-    let json = serde_json::to_string(&req).unwrap();
-    assert!(json.contains("\"jsonrpc\":\"2.0\""));
-    assert!(json.contains("\"id\":1"));
-    assert!(json.contains("\"method\":\"ping\""));
-    // params 为 None 时不应出现在 JSON 中
-    assert!(!json.contains("\"params\""));
-}
-
-#[test]
-fn test_request_serialization_with_params() {
-    let params = serde_json::json!({"name": "test"});
-    let req = JsonRpcRequest::new(1, "tools/call", Some(params));
-    let json = serde_json::to_string(&req).unwrap();
-    assert!(json.contains("\"name\":\"test\""));
-}
-
-#[test]
-fn test_request_roundtrip() {
-    let req = JsonRpcRequest::new(42, "test-method", Some(serde_json::json!({"a": 1})));
-    let json = serde_json::to_value(&req).unwrap();
-    let decoded: JsonRpcRequest = serde_json::from_value(json).unwrap();
-    assert_eq!(decoded.id, 42);
-    assert_eq!(decoded.method_name, "test-method");
-}
 
 // ============================================================================
 // JsonRpcMessage 解析测试
@@ -332,32 +283,68 @@ fn test_notification_kind_other() {
 // ============================================================================
 
 #[test]
-fn test_mcp_error_is_retriable() {
-    assert!(McpError::Disconnected.is_retriable());
-    assert!(McpError::Timeout.is_retriable());
-    assert!(!McpError::Protocol("bad".into()).is_retriable());
-    assert!(!McpError::InvalidParams("bad".into()).is_retriable());
-    assert!(!McpError::ServerError("boom".into()).is_retriable());
-    assert!(!McpError::MethodNotFound("x".into()).is_retriable());
+fn test_mcp_error_retry_disposition() {
+    // Retriable errors
+    assert!(matches!(
+        McpError::Transport(TransportError::Disconnected).retry_disposition(),
+        RetryDisposition::Reconnect
+    ));
+    assert!(matches!(
+        McpError::Transport(TransportError::Timeout).retry_disposition(),
+        RetryDisposition::Immediate
+    ));
+    assert!(matches!(
+        McpError::Transport(TransportError::Http("network".into())).retry_disposition(),
+        RetryDisposition::Backoff
+    ));
+
+    // Non-retriable errors
+    assert!(matches!(
+        McpError::Protocol("bad".into()).retry_disposition(),
+        RetryDisposition::Never
+    ));
+    assert!(matches!(
+        McpError::InvalidParams("bad".into()).retry_disposition(),
+        RetryDisposition::Never
+    ));
+    assert!(matches!(
+        McpError::Server(ServerError {
+            code: -1,
+            message: "boom".into()
+        })
+        .retry_disposition(),
+        RetryDisposition::Never
+    ));
+    assert!(matches!(
+        McpError::MethodNotFound("x".into()).retry_disposition(),
+        RetryDisposition::Never
+    ));
 }
 
 #[test]
 fn test_mcp_error_display() {
-    let err = McpError::ServerError("database down".into());
-    assert_eq!(format!("{}", err), "server error: database down");
+    let err = McpError::Server(ServerError {
+        code: -1,
+        message: "database down".into(),
+    });
+    assert!(format!("{}", err).contains("database down"));
 
     let err = McpError::MethodNotFound("tools/list".into());
     assert_eq!(format!("{}", err), "method not found: tools/list");
 
-    let err = McpError::Disconnected;
+    let err = McpError::Transport(TransportError::Disconnected);
     assert_eq!(format!("{}", err), "connection disconnected");
 }
 
 #[test]
 fn test_mcp_error_from_io() {
     let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-    let mcp_err = McpError::from(io_err);
-    assert!(matches!(mcp_err, McpError::Io(_)));
+    let transport_err = TransportError::from(io_err);
+    let mcp_err = McpError::from(transport_err);
+    assert!(matches!(
+        mcp_err,
+        McpError::Transport(TransportError::Io(_))
+    ));
 }
 
 // ============================================================================

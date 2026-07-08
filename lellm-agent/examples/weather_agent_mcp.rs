@@ -123,7 +123,7 @@ async fn connect_tencent_map_server(
             let transport = SseTransport::new(
                 SseConfig::new(server_url).with_request_timeout(std::time::Duration::from_secs(30)),
             );
-            McpClient::with_transport(transport).await
+            McpClient::with_transport(transport)
         }
         _ => {
             println!("Using HTTP Transport");
@@ -131,10 +131,11 @@ async fn connect_tencent_map_server(
                 HttpConfig::new(server_url)
                     .with_request_timeout(std::time::Duration::from_secs(30)),
             );
-            McpClient::with_transport(transport).await
+            McpClient::with_transport(transport)
         }
     };
 
+    let mut client = client;
     client.connect().await?;
     let init_result = client.initialize().await?;
     println!(
@@ -142,8 +143,8 @@ async fn connect_tencent_map_server(
         init_result.server_info.name, init_result.server_info.version
     );
 
-    // McpCatalog::discover 内部会调用 tools/list 并缓存工具定义
-    let catalog = McpCatalog::discover(Arc::new(client)).await?;
+    // McpCatalog::from_client 内部会调用 tools/list 并缓存工具定义
+    let catalog = McpCatalog::from_client(Arc::new(client)).await?;
     println!("✓ MCP Tools: {}", catalog.len());
 
     if catalog.is_empty() {

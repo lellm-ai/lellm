@@ -106,19 +106,55 @@ lellm-mcp
 ```rust
 #[async_trait]
 pub trait McpTransport: Send + Sync + 'static {
-    type Stream: Stream<Item = JsonRpcNotification> + Send + 'static;
-
     async fn connect(&mut self) -> Result<(), McpError>;
     async fn request(
         &self,
         req: JsonRpcRequest,
     ) -> Result<JsonRpcResponse, McpError>;
-    fn notifications(&self) -> Self::Stream;
+    fn notifications(&self) -> NotificationStream;
     async fn close(&mut self) -> Result<(), McpError>;
+    fn state(&self) -> watch::Receiver<ConnectionState>;
 }
 ```
 
-**设计理由**：MCP 90% 是 request-response，notification 走独立流。`request()` 接收 `JsonRpcRequest` 结构体（含 method、params、id、timeout），内部管理请求-响应匹配。`connect()` / `close()` 使用 `&mut self` 以支持连接状态变更。
+**设计理由**：
+
+- `connect()` / `close()` 使用 `&mut self` 表达**生命周期切换**——borrow checker 保证 connect 过程中不会并发调用 connect
+- `request()` / `notifications()` / `state()` 使用 `&self`——JSON-RPC 天然支持并发请求
+- Transport 只负责"发出去，等响应"——不关心 id 怎么来的、method 是什么
+
+### McpClient — 协议层
+
+```rust
+pub struct McpClient {
+    transport: Box<dyn McpTransport>,
+    next_request_id: AtomicU64,          // 单调递增，重连不重置，Relaxed
+    protocol_version: Arc<Mutex<Option<String>>>,
+}
+
+impl McpClient {
+    /// 统一的请求入口 — 调用方只关心方法名、参数和返回类型。
+    pub async fn request<P, R>(
+        &self,
+        method: &'static str,
+        params: Option<P>,
+    ) -> Result<R, McpError>
+    where
+        P: Serialize,
+        R: DeserializeOwned;
+}
+```
+
+**关键决策**：
+
+| 决策 | 理由 |
+|------|------|
+| ID 由 McpClient 唯一生成 | Transport 不知道"第几个请求"，只负责传输 `request(id=N)` |
+| `JsonRpcRequest::new()` 改为 `pub(crate)` | 业务代码永远不接触 id，杜绝 `id=0` bug |
+| `request<R>(method, params)` 泛型返回 | 调用方直接拿到 `InitializeResult` / `CallToolResult`，不解析 `JsonRpcResponse` |
+| `next_request_id` 用 `AtomicU64` + `Relaxed` | 只需要唯一性，不需要 happens-before 保证 |
+| 重连不重置 ID | 日志可追踪（#381 → #382 → disconnect → #383），避免调试地狱 |
+| initialize / tools_call / ping 走同一入口 | 消除特殊路径，统一 ID 分配 |
 
 ### 连接状态机
 
@@ -128,17 +164,32 @@ Disconnected → Connecting → Initializing → Ready → Broken
                                          Connecting   Closed
 ```
 
-- 状态由 `McpClient` 管理，Transport 不感知
-- `request()` 在非 Ready 状态下 **Fail-fast**（返回 `McpError::Disconnected`），因使用 `&mut self` 可检查并更新连接状态
+- 状态由 **Transport 主动驱动**（SSE stream 结束、子进程退出等），通过 `watch::Sender<ConnectionState>` 发射
+- **McpClient 订阅** Transport 的状态变化，做 fail-fast 检查（`state.allows_request()`）
+- `request()` 在非 Ready 状态下 **Fail-fast**（由 McpClient 层检查状态后返回 `McpError::Disconnected`）
 - request-id 连续（monotonic counter，重连不重置）
 - notification 不重放（重连后是全新连接）
 
 ### 重连策略
 
-- 指数退避：100ms → 200ms → 400ms → ... → max 5s，最大 5 次
-- 可重试错误：`Disconnected`, `Timeout`
-- 不可重试错误：`Protocol`, `InvalidParams`
-- 重连后需重新 `initialize`（MCP 协议层逻辑）
+**核心原则：单一决策中心 — 恢复策略统一在 Agent/Runtime 层，McpClient 只提供原子能力。**
+
+| 层次 | 职责 | 是否知道重连 |
+|------|------|-------------|
+| Transport | 建立/维持连接，报告状态 | ❌ 不决定 |
+| McpClient | MCP 协议（initialize、request、pending） | ⚠️ 提供 `reconnect_once()` 能力，不做策略 |
+| Agent / Runtime | 生命周期、恢复策略、重试、Fallback | ✅ 唯一决策中心 |
+
+**为什么不在 McpClient 中自动重连：**
+
+1. **双重 Retry 灾难** — Agent Retry(3次) × McpClient Retry(5次) × connect_timeout(30s) = 25 分钟
+2. **Client 不知道全局状态** — Budget、Cancellation、Suspend、Checkpoint、备用 Tool……只有 Runtime 知道
+3. **统一可预测** — HTTP Client、MCP Client、OpenAI Client、Redis Client……所有恢复策略由 Runtime 统一管理
+
+**McpClient 提供的原子能力（无循环、无退避）：**
+- `connect()` — 建立连接
+- `reconnect_once()` — 单次重连（connect + initialize）
+- `ensure_initialized()` — 检查是否已初始化，未初始化则初始化一次
 
 ### StdioTransport
 
@@ -177,66 +228,157 @@ impl McpError {
 
 ---
 
-## 5. Tool 桥接
+## 5. Tool 桥接 — 五层架构 + 组合根
 
-### ToolCatalog 抽象
+**核心原则：一个对象只有一种失效原因（Single Reason to Change）。**
 
-```rust
-#[async_trait]
-pub trait ToolCatalog: Send + Sync {
-    async fn snapshot(&self) -> Arc<ToolSnapshot>;
-}
+### McpClient = Event Source
 
-pub struct StaticCatalog { ... }       // 现有行为
-pub struct McpCatalog { ... }          // MCP 动态目录（RwLock 保护）
-pub struct CompositeCatalog { ... }    // 静态 + 动态组合，将多个 Catalog 合并为一个快照
+```
+             McpClient  (Event Source)
+            /    |    \
+           /     |     \
+   Registry   Catalog   Metrics / Tracing
+           \     |     /
+            \    |    /
+         CompositeCatalog
+                |
+          ToolExecutor
 ```
 
-`ToolExecutor` 改为持有 `Arc<dyn ToolCatalog>`，每次查询最新快照。
+**Registry 和 Catalog 是兄弟消费者，不是父子关系。** 它们共同依赖 `McpClient`，但互相不知道对方的存在。
 
-### McpTool 桥接
+### 组合根（Composition Root）
+
+用户代码组装所有层，没有任何一层替另一层创建对象：
 
 ```rust
-pub struct McpTool {
-    server: Arc<McpClient>,
-    definition: ToolDefinition,
-    tool_name: String,
+let registry = McpServerRegistry::new();
+let client = registry.add_stdio(...).await?;  // Registry 提供 Client
+
+let catalog = McpCatalog::new(client.clone()); // Catalog 消费 Client
+composite.add_catalog(catalog);                // 组合层组装
+```
+
+### 各层职责
+
+| 层 | 职责 | 不知道什么 |
+|----|------|-----------|
+| `McpTransport` | 传输（发出去，等响应） | id 来源、method 含义 |
+| `McpClient` | 协议（ID 分配、initialize、request<R>、broadcast notifications） | 工具、Catalog、Registry |
+| `McpServerRegistry` | 多 Server 生命周期（便利 API） | 工具、Catalog |
+| `McpCatalog` | 发现（tools/list → ToolDefinition） | 闭包、Executor、Registry |
+| `McpToolFactory` | 适配（ToolDefinition + Client → Tool） | Catalog 组合、Agent |
+| `CompositeCatalog` | 组合（多个 Catalog → 一个快照） | MCP 细节 |
+
+### 关键决策
+
+| 决策 | 理由 |
+|------|------|
+| 删除 `McpMultiClient` | 四种失效原因混在一起 |
+| McpClient 是 Event Source | Registry、Catalog、Metrics 都是兄弟消费者 |
+| Registry 是便利 API | 不参与协议、Catalog 或 Tool 逻辑 |
+| Catalog 绑定单个 Client | 发现是 1:1 关系，组合由 CompositeCatalog 处理 |
+| Factory 独立 | Catalog 只做发现，不碰闭包 |
+| Tool 闭包 discover 时构建一次 | 缓存为 `Arc<Tool>`，snapshot() 只 clone Arc |
+| 路由由 Tool 自然完成 | 闭包已 capture `Arc<McpClient>`，不需要猜 JSON |
+
+### Notification — broadcast 模型
+
+```rust
+impl McpClient {
+    /// 订阅 notification — 任何人可以订阅，互不干扰。
+    fn subscribe_notifications(&self) -> broadcast::Receiver<JsonRpcNotification>;
+}
+```
+
+**为什么不用 `Stream`：** Stream 只能消费一次。`broadcast::Receiver` 允许多个订阅者（Catalog、Metrics、Tracing）。
+
+### Runtime / Data 分离
+
+**核心原则：数据对象不管理后台任务，所有后台任务由 Runtime 统一 spawn。**
+
+```rust
+// Data — 纯粹的缓存，零后台任务
+pub struct McpCatalog {
+    snapshot: ArcSwap<ToolSnapshot>,
 }
 
-impl McpTool {
-    pub fn into_registration(self, safety: Option<ParallelSafety>, trust: TrustLevel) -> ToolRegistration {
-        ToolRegistration {
-            definition: self.definition,
-            safety: safety.unwrap_or(ParallelSafety::Safe),
-            category: Some("mcp".into()),
-            func: Arc::new(move |args| {
-                let server = self.server.clone();
-                let tool_name = self.tool_name.clone();
-                async move { server.call_tool(&tool_name, args).await }
-            }),
-            trust,
+// Runtime — 消费 notification，驱动 refresh
+pub struct McpCatalogWatcher {
+    client: Arc<McpClient>,
+    catalog: Arc<McpCatalog>,
+}
+
+impl McpCatalogWatcher {
+    /// 由 Runtime 统一 spawn，不自己 spawn。
+    async fn run(self) {
+        let mut rx = self.client.subscribe_notifications();
+        loop {
+            let notif = rx.recv().await;
+            if notif.method == "notifications/tools/list_changed" {
+                let new_snapshot = self.client.tools_list().await;
+                self.catalog.store(Arc::new(new_snapshot));
+            }
         }
     }
 }
 ```
 
-### 默认安全级别
+**为什么这样拆：**
 
-远程工具默认 `ParallelSafety::Safe`（假设独立执行），可通过 `server.policy()` 覆盖。
+| 问题 | Catalog 自己 spawn task | Watcher 独立 + Runtime spawn |
+|------|------------------------|---------------------------|
+| Drop 谁 abort | 需要 JoinHandle + CancellationToken 塞进 Catalog | Runtime 统一 Drop → abort |
+| Arc 循环引用 | Catalog → Arc<Client> → task → Arc<Catalog> → Leak | 无循环，Runtime 持有 Watcher |
+| 生命周期 | 隐藏在数据对象内部，不可见 | 显式在 Runtime 中管理 |
+| 架构一致性 | 违背 Runtime/Data 分离 | 与 ExecutionSession/Checkpoint 风格一致 |
+
+**完整生命周期：**
+```
+Application
+     │
+     ▼
+Runtime
+     │
+     ├─ spawn CatalogWatcher.run()
+     ├─ spawn HealthChecker.run()
+     ├─ spawn Reconnector.run()
+     ▼
+McpClient
+     │
+     ▼
+Transport
+
+McpCatalog — 只是 ArcSwap<ToolSnapshot>，无后台任务
+```
+
+### ToolCatalog 抽象
+
+```rust
+pub trait ToolCatalog: Send + Sync {
+    async fn snapshot(&self) -> Arc<ToolSnapshot>;
+}
+```
+
+**McpCatalog 内部使用 `ArcSwap<ToolSnapshot>`** — Watcher refresh 时 store，外部 `snapshot()` 直接 load，零拷贝。
 
 ### 刷新机制（双模）
 
-- **Push** — Server 发 `notifications/tools/list_changed` → 自动刷新
-- **Pull** — 用户显式调用 `client.refresh_tools()`
+- **Push** — `notifications/tools/list_changed` → **McpCatalogWatcher** 收到 → 重新 `tools/list` → `ArcSwap::store(new_snapshot)`
+- **Pull** — 用户显式调用 `catalog.refresh()`
 
-### 错误映射
+### SSE POST URL — watch 替代 polling
 
-| McpError | ToolErrorKind |
-|----------|---------------|
-| `Timeout` | `Timeout` |
-| `Disconnected` | `Network` |
-| `Protocol` | `InvalidInput` |
-| Server 报错 | `Internal` |
+```rust
+// SSE reader 收到 endpoint 事件时：
+post_url.send_replace(Some(full_url));
+
+// connect() 等待处（零轮询）：
+post_url.borrow().is_some() || post_url.changed().await;
+```
+
+**为什么用 `watch` 而非 `oneshot`：** reconnect 时需要等待新的 endpoint，`watch` 天然支持多次通知。
 
 ---
 
@@ -302,9 +444,10 @@ McpConnected, McpDisconnected, McpReconnecting, McpToolRefreshed
 | 桥接到 ToolRegistration，不改执行逻辑 | 最小抽象增量 |
 | ToolCatalog 抽象动态工具 | MCP 工具天生动态 |
 | 远程工具默认 Safe | 大多数 MCP Server 自身管理并发 |
-| Transport 不感知状态机 | 保持传输层纯粹性 |
+| Transport 驱动状态机，McpClient 订阅 | Transport 最了解连接生死（SSE断开/子进程退出），由它驱动状态最自然；McpClient 只观察并做 fail-fast |
 | request() 非 Ready 时 fail-fast | 不阻塞，让 RetryPolicy 决定 |
-| 重连在 McpClient 层 | 重连后需重新 initialize（协议层逻辑） |
+| 重连策略在 Runtime 层 | 单一决策中心，避免双重 Retry 灾难；McpClient 只提供 reconnect_once() 原子能力 |
+| 协议恢复在 McpClient 层 | connect + initialize + capability negotiation 属于 MCP 协议，封装为 reconnect_once() |
 | 心跳在 McpClient 层 | ping 是 MCP 协议方法 |
 | 单连接，不做池 | 简单，后续可扩展 |
 | 审批在 Agent loop | 不侵入 ToolExecutor |

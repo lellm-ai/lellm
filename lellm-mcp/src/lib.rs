@@ -18,11 +18,12 @@ pub mod client;
 
 pub use protocol::{
     JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
+    RetryDisposition, TransportError,
 };
 pub use transport::{ConnectionState, McpTransport};
 
 #[cfg(feature = "bridge")]
-pub use bridge::{McpCatalog, McpMultiClient, ToolCatalog};
+pub use bridge::{McpCatalog, McpCatalogWatcher, McpServerRegistry, ServerConfig, ToolCatalog};
 #[cfg(feature = "bridge")]
 pub use client::McpClient;
 #[cfg(feature = "server")]

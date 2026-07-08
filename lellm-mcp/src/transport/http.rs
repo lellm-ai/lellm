@@ -12,8 +12,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 
-use super::{ConnectionState, McpTransport, NotificationStream};
-use crate::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError};
+use super::{ConnectionState, McpTransport};
+use crate::protocol::{
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, TransportError,
+};
 
 /// 通知 channel 容量。
 const NOTIFICATION_BUFFER: usize = 64;
@@ -88,7 +90,7 @@ impl McpTransport for HttpTransport {
     }
 
     async fn request(&self, req: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
-        let inner = self.inner.as_ref().ok_or(McpError::Disconnected)?;
+        let inner = self.inner.as_ref().ok_or_else(McpError::disconnected)?;
 
         let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
 
@@ -107,12 +109,15 @@ impl McpTransport for HttpTransport {
             .body(json)
             .send()
             .await
-            .map_err(|e| McpError::Network(e.to_string()))?;
+            .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(McpError::Network(format!("HTTP {}: {}", status, body)));
+            return Err(McpError::Transport(TransportError::Http(format!(
+                "HTTP {}: {}",
+                status, body
+            ))));
         }
 
         // 保存 session-id
@@ -133,7 +138,7 @@ impl McpTransport for HttpTransport {
             let bytes = response
                 .bytes()
                 .await
-                .map_err(|e| McpError::Network(e.to_string()))?;
+                .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
             let body = String::from_utf8_lossy(&bytes);
 
             // SSE 格式: event:xxx\ndata:xxx\n\n (冒号后可能有空格)
@@ -174,7 +179,7 @@ impl McpTransport for HttpTransport {
             let body = response
                 .text()
                 .await
-                .map_err(|e| McpError::Network(e.to_string()))?;
+                .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
 
             let resp: JsonRpcResponse =
                 serde_json::from_str(&body).map_err(|e| McpError::Protocol(e.to_string()))?;
@@ -183,21 +188,12 @@ impl McpTransport for HttpTransport {
         }
     }
 
-    fn notifications(&self) -> NotificationStream {
-        if let Some(inner) = &self.inner {
-            let rx = inner.notification_tx.subscribe();
-            Box::pin(futures_util::stream::unfold(rx, move |mut rx| async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(notif) => break Some((notif, rx)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
-                    }
-                }
-            }))
-        } else {
-            Box::pin(futures_util::stream::empty())
-        }
+    fn subscribe_notifications(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.notification_tx.subscribe())
     }
 
     async fn close(&mut self) -> Result<(), McpError> {

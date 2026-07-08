@@ -16,9 +16,9 @@ use futures_util::StreamExt;
 use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use super::{ConnectionState, McpTransport, NotificationStream};
+use super::{ConnectionState, McpTransport};
 use crate::protocol::{
-    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
+    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, TransportError,
 };
 
 /// SSE 事件类型常量。
@@ -63,8 +63,8 @@ pub struct SseTransport {
 }
 
 struct SseTransportInner {
-    /// HTTP POST 端点（从 SSE endpoint 事件获取）
-    post_url: Arc<Mutex<Option<String>>>,
+    /// HTTP POST 端点（从 SSE endpoint 事件获取，watch 替代 polling）
+    post_url: watch::Sender<Option<String>>,
     /// 待处理的请求
     pending: Arc<Mutex<PendingMap>>,
     /// Notification 发送器
@@ -99,14 +99,14 @@ impl McpTransport for SseTransport {
         let (notification_tx, _) =
             tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
         let (shutdown_tx, _) = watch::channel(false);
+        let (post_url_tx, _) = watch::channel::<Option<String>>(None);
 
         let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
-        let post_url: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         // 启动 SSE 连接
         let sse_url = self.config.sse_url.clone();
         let pending_clone = pending.clone();
-        let post_url_clone = post_url.clone();
+        let post_url_clone = post_url_tx.clone();
         let notification_tx_clone = notification_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
 
@@ -143,7 +143,8 @@ impl McpTransport for SseTransport {
                                             let base_url = sse_url.rsplit_once('/').map(|(base, _)| base).unwrap_or(&sse_url);
                                             format!("{}{}", base_url, post_url_str)
                                         };
-                                        *post_url_clone.lock().await = Some(full_url);
+                                        // watch::send_replace — 支持 reconnect 后更新
+                                        post_url_clone.send_replace(Some(full_url));
                                     }
                                     EVENT_MESSAGE => {
                                         tracing::debug!(data = %event.data, "Received message event");
@@ -193,15 +194,20 @@ impl McpTransport for SseTransport {
                 }
             }
 
-            // SSE 退出 → 清除所有 pending
-            let mut p = pending_clone.lock().await;
-            for (_, tx) in p.drain() {
-                let _ = tx.send(Err(McpError::Disconnected));
+            // SSE 退出 → 无锁清除所有 pending（mem::take）
+            let pending_to_fail = {
+                let mut p = pending_clone.lock().await;
+                std::mem::take(&mut *p)
+            };
+            for (_, tx) in pending_to_fail {
+                let _ = tx.send(Err(McpError::Transport(TransportError::Disconnected)));
             }
         });
 
+        let mut post_url_rx = post_url_tx.subscribe();
+
         self.inner = Some(Arc::new(SseTransportInner {
-            post_url,
+            post_url: post_url_tx,
             pending,
             notification_tx,
             client,
@@ -209,20 +215,19 @@ impl McpTransport for SseTransport {
             shutdown: shutdown_tx,
         }));
 
-        // 等待获取 POST URL（最多 10 秒）
-        let inner = self.inner.as_ref().unwrap();
-        let mut retries = 0;
-        while retries < 100 {
-            if inner.post_url.lock().await.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            retries += 1;
+        // 等待获取 POST URL（watch 事件驱动，零轮询）
+        let timeout = std::time::Duration::from_secs(10);
+        if post_url_rx.borrow().is_some() {
+            // 已经收到 endpoint
+        } else if let Err(_) = tokio::time::timeout(timeout, post_url_rx.changed()).await {
+            self.state.send(ConnectionState::Disconnected).ok();
+            return Err(McpError::Transport(TransportError::Timeout));
         }
 
-        if retries >= 100 {
+        // 验证 post_url 确实有值（changed 可能被 send_replace(None) 触发）
+        if post_url_rx.borrow().as_ref().is_none() {
             self.state.send(ConnectionState::Disconnected).ok();
-            return Err(McpError::Timeout);
+            return Err(McpError::Transport(TransportError::Timeout));
         }
 
         self.state.send(ConnectionState::Ready).ok();
@@ -230,15 +235,14 @@ impl McpTransport for SseTransport {
     }
 
     async fn request(&self, req: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
-        let inner = self.inner.as_ref().ok_or(McpError::Disconnected)?;
+        let inner = self.inner.as_ref().ok_or_else(McpError::disconnected)?;
 
         // 获取 POST URL
         let post_url = inner
             .post_url
-            .lock()
-            .await
+            .borrow()
             .clone()
-            .ok_or(McpError::Disconnected)?;
+            .ok_or_else(McpError::disconnected)?;
 
         // 分配 request id
         let id = req.id;
@@ -258,7 +262,7 @@ impl McpTransport for SseTransport {
             .body(json)
             .send()
             .await
-            .map_err(|e| McpError::Network(e.to_string()))?;
+            .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
 
         // 检查 HTTP 状态
         if !response.status().is_success() {
@@ -266,7 +270,10 @@ impl McpTransport for SseTransport {
             let body = response.text().await.unwrap_or_default();
             tracing::error!(status = %status, body = %body, "POST request failed");
             inner.pending.lock().await.remove(&id);
-            return Err(McpError::Network(format!("HTTP {}: {}", status, body)));
+            return Err(McpError::Transport(TransportError::Http(format!(
+                "HTTP {}: {}",
+                status, body
+            ))));
         }
 
         tracing::debug!(method = %method, "Request sent successfully");
@@ -274,7 +281,7 @@ impl McpTransport for SseTransport {
         // 等待 SSE 推送的响应（带超时）
         match tokio::time::timeout(self.config.request_timeout, rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(McpError::Disconnected),
+            Ok(Err(_)) => Err(McpError::Transport(TransportError::Disconnected)),
             Err(_elapsed) => {
                 // 超时 — 清理 pending entry
                 inner.pending.lock().await.remove(&id);
@@ -283,30 +290,17 @@ impl McpTransport for SseTransport {
                     timeout_ms = self.config.request_timeout.as_millis() as u64,
                     "MCP request timed out"
                 );
-                Err(McpError::Timeout)
+                Err(McpError::Transport(TransportError::Timeout))
             }
         }
     }
 
-    fn notifications(&self) -> NotificationStream {
-        if let Some(inner) = &self.inner {
-            let rx = inner.notification_tx.subscribe();
-            Box::pin(futures_util::stream::unfold(rx, move |mut rx| async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(notif) => break Some((notif, rx)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            break None;
-                        }
-                    }
-                }
-            }))
-        } else {
-            Box::pin(futures_util::stream::empty())
-        }
+    fn subscribe_notifications(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.notification_tx.subscribe())
     }
 
     async fn close(&mut self) -> Result<(), McpError> {
