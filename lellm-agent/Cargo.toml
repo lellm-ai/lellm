@@ -32,6 +32,7 @@ sse = ["mcp", "lellm-mcp/sse"]
 http = ["mcp", "lellm-mcp/http"]
 
 [dev-dependencies]
+lellm-agent = { path = ".", features = ["sse", "http"] }
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
 lellm-derive = { path = "../lellm-derive" }
 lellm-mcp = { path = "../lellm-mcp", features = ["stdio", "http", "sse"] }
@@ -71,9 +72,7 @@ path = "examples/weather_agent.rs"
 [[example]]
 name = "weather_agent_mcp"
 path = "examples/weather_agent_mcp.rs"
-required-features = ["sse", "http"]
 
 [[example]]
 name = "mcp_multi"
 path = "examples/mcp_multi.rs"
-required-features = ["sse", "http"]
