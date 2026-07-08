@@ -264,11 +264,18 @@ impl ToolCatalog for McpServerRegistry {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
         let mut reg_map = IndexMap::new();
 
-        for entry in self.servers.values() {
+        for (server_name, entry) in &self.servers {
             let snapshot = entry.store.load();
             // 直接迭代 (name, ExecutableTool)，零哈希查找
-            for (name, tool) in snapshot.iter() {
-                reg_map.insert(name.to_string(), tool.clone());
+            for (tool_name, tool) in snapshot.iter() {
+                if reg_map.contains_key(tool_name) {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        server = %server_name,
+                        "MCP tool name conflict — later server shadows earlier one"
+                    );
+                }
+                reg_map.insert(tool_name.to_string(), tool.clone());
             }
         }
 
