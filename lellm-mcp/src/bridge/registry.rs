@@ -7,6 +7,7 @@
 //! - 用户 API 只暴露 add_xxx()，无需关心 Watcher 生命周期
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +55,8 @@ struct ManagedServer {
 /// - Drop Registry 时自动 cancel + join 所有后台任务
 pub struct McpServerRegistry {
     servers: IndexMap<String, ManagedServer>,
+    /// 版本计数器——对齐 CompositeCatalog 模式，每次 snapshot() 自增。
+    version_counter: AtomicU64,
 }
 
 impl McpServerRegistry {
@@ -61,6 +64,7 @@ impl McpServerRegistry {
     pub fn new() -> Self {
         Self {
             servers: IndexMap::new(),
+            version_counter: AtomicU64::new(0),
         }
     }
 
@@ -268,6 +272,8 @@ impl ToolCatalog for McpServerRegistry {
             }
         }
 
-        Arc::new(ToolSnapshot::new(reg_map, 0))
+        // 版本计数器自增——对齐 CompositeCatalog 模式
+        let version = self.version_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        Arc::new(ToolSnapshot::new(reg_map, version))
     }
 }
