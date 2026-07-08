@@ -7,7 +7,6 @@
 //! - 用户通过 `register(name, client)` 注册已连接的客户端
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 use tokio_util::sync::CancellationToken;
@@ -55,8 +54,6 @@ struct ManagedServer {
 /// - Drop Registry 时自动 cancel + join 所有后台任务
 pub struct McpServerRegistry {
     servers: IndexMap<String, ManagedServer>,
-    /// 版本计数器——对齐 CompositeCatalog 模式，每次 snapshot() 自增。
-    version_counter: AtomicU64,
 }
 
 impl McpServerRegistry {
@@ -64,7 +61,6 @@ impl McpServerRegistry {
     pub fn new() -> Self {
         Self {
             servers: IndexMap::new(),
-            version_counter: AtomicU64::new(0),
         }
     }
 
@@ -119,41 +115,6 @@ impl McpServerRegistry {
         );
 
         Ok(catalog)
-    }
-
-    /// 添加 stdio 服务器。
-    #[cfg(feature = "mcp")]
-    pub async fn add_stdio(
-        &mut self,
-        name: impl Into<String>,
-        command: impl Into<String>,
-        args: Vec<String>,
-        env: Option<Vec<(String, String)>>,
-    ) -> Result<McpCatalog, lellm_mcp::McpError> {
-        let client = McpClient::connect_stdio(command, args, env).await?;
-        self.register(name, client).await
-    }
-
-    /// 添加 SSE 服务器。
-    #[cfg(feature = "sse")]
-    pub async fn add_sse(
-        &mut self,
-        name: impl Into<String>,
-        url: impl Into<String>,
-    ) -> Result<McpCatalog, lellm_mcp::McpError> {
-        let client = McpClient::connect_sse(url).await?;
-        self.register(name, client).await
-    }
-
-    /// 添加 HTTP 服务器。
-    #[cfg(feature = "http")]
-    pub async fn add_http(
-        &mut self,
-        name: impl Into<String>,
-        url: impl Into<String>,
-    ) -> Result<McpCatalog, lellm_mcp::McpError> {
-        let client = McpClient::connect_http(url).await?;
-        self.register(name, client).await
     }
 
     /// 获取所有服务器的工具列表。
@@ -248,9 +209,12 @@ impl Drop for McpServerRegistry {
 impl ToolCatalog for McpServerRegistry {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
         let mut reg_map = IndexMap::new();
+        let mut max_version = 0u64;
 
         for (server_name, entry) in &self.servers {
             let snapshot = entry.store.load();
+            // 跟踪最大版本号
+            max_version = max_version.max(snapshot.version());
             // 直接迭代 (name, ExecutableTool)，零哈希查找
             for (tool_name, tool) in snapshot.iter() {
                 if reg_map.contains_key(tool_name) {
@@ -264,8 +228,6 @@ impl ToolCatalog for McpServerRegistry {
             }
         }
 
-        // 版本计数器自增——对齐 CompositeCatalog 模式
-        let version = self.version_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        Arc::new(ToolSnapshot::new(reg_map, version))
+        Arc::new(ToolSnapshot::new(reg_map, max_version))
     }
 }

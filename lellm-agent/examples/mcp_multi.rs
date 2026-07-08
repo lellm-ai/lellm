@@ -7,10 +7,11 @@
 //!
 //! 运行：
 //! ```bash
-//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features mcp -p lellm-agent
+//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features "sse,http" -p lellm-agent
 //! ```
 
 use lellm_agent::{McpServerRegistry, ToolCatalog};
+use lellm_mcp::McpClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,11 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 添加 SSE 服务器
     let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
-    let _ = registry.add_sse("qq-map-sse", &sse_url).await?;
+    let client = McpClient::connect_sse(&sse_url).await?;
+    let _ = registry.register("qq-map-sse", client).await?;
 
     // 添加 HTTP 服务器
     let http_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
-    let _ = registry.add_http("qq-map-http", &http_url).await?;
+    let client = McpClient::connect_http(&http_url).await?;
+    let _ = registry.register("qq-map-http", client).await?;
 
     // 显示工具列表
     println!("已连接服务器:");
