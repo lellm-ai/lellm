@@ -494,7 +494,9 @@ async fn test_catalog_refresh() {
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("old_tool").is_some());
 
-    catalog.update_tools().await.unwrap();
+    // 使用 CatalogRefresher 刷新工具目录
+    let refresher = lellm_mcp::CatalogRefresher::from_catalog(client.clone(), &catalog);
+    refresher.refresh_impl().await.unwrap();
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("new_tool").is_some());
     assert!(catalog.snapshot().await.get("old_tool").is_none());

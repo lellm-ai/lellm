@@ -294,63 +294,76 @@ impl McpClient {
 
 **为什么不用 `Stream`：** Stream 只能消费一次。`broadcast::Receiver` 允许多个订阅者（Catalog、Metrics、Tracing）。
 
-### Runtime / Data 分离
+### 所有权模型 — Registry 统一管理
 
-**核心原则：数据对象不管理后台任务，所有后台任务由 Runtime 统一 spawn。**
+**核心原则：Registry 是所有后台任务的唯一 Owner，用户 API 只暴露 add_xxx()，无需关心 Watcher 生命周期。**
 
 ```rust
-// Data — 纯粹的缓存，零后台任务
+// 数据层 — 纯读接口，零后台任务
+pub struct CatalogStore {
+    snapshot: RwLock<Arc<ToolSnapshot>>,
+}
+
 pub struct McpCatalog {
-    snapshot: ArcSwap<ToolSnapshot>,
+    store: Arc<CatalogStore>,
 }
 
-// Runtime — 消费 notification，驱动 refresh
-pub struct McpCatalogWatcher {
+// 写入层 — 唯一的刷新接口
+pub struct CatalogRefresher {
     client: Arc<McpClient>,
-    catalog: Arc<McpCatalog>,
+    store: Arc<CatalogStore>,
 }
 
-impl McpCatalogWatcher {
-    /// 由 Runtime 统一 spawn，不自己 spawn。
-    async fn run(self) {
-        let mut rx = self.client.subscribe_notifications();
-        loop {
-            let notif = rx.recv().await;
-            if notif.method == "notifications/tools/list_changed" {
-                let new_snapshot = self.client.tools_list().await;
-                self.catalog.store(Arc::new(new_snapshot));
-            }
-        }
-    }
+// Watcher — 依赖 trait，不依赖具体类型（Command Pattern）
+pub struct McpCatalogWatcher {
+    refresher: Arc<dyn CatalogRefresh>,
+    rx: broadcast::Receiver<JsonRpcNotification>,
+}
+
+// 受管理的服务器实例
+struct ManagedServer {
+    _client: Arc<McpClient>,
+    store: Arc<CatalogStore>,
+    cancel: CancellationToken,
+    watcher: JoinHandle<()>,
+}
+
+// Registry — 所有权的唯一 Owner
+pub struct McpServerRegistry {
+    servers: IndexMap<String, ManagedServer>,
 }
 ```
 
 **为什么这样拆：**
 
-| 问题 | Catalog 自己 spawn task | Watcher 独立 + Runtime spawn |
-|------|------------------------|---------------------------|
-| Drop 谁 abort | 需要 JoinHandle + CancellationToken 塞进 Catalog | Runtime 统一 Drop → abort |
-| Arc 循环引用 | Catalog → Arc<Client> → task → Arc<Catalog> → Leak | 无循环，Runtime 持有 Watcher |
-| 生命周期 | 隐藏在数据对象内部，不可见 | 显式在 Runtime 中管理 |
-| 架构一致性 | 违背 Runtime/Data 分离 | 与 ExecutionSession/Checkpoint 风格一致 |
+| 问题 | Catalog 自己 spawn task | Registry 统一管理 |
+|------|------------------------|------------------|
+| Drop 谁 abort | 需要 JoinHandle + CancellationToken 塞进 Catalog | Registry Drop → cancel + join |
+| Arc 循环引用 | Catalog → Arc<Client> → task → Arc<Catalog> → Leak | 无循环，Registry 持有 ManagedServer |
+| 生命周期 | 隐藏在数据对象内部，不可见 | 显式在 Registry 中管理 |
+| API 复杂度 | 用户必须保存 JoinHandle | 用户只调用 add_xxx() |
+| 职责分离 | Watcher 依赖 Client + Catalog | Watcher 只依赖 CatalogRefresh trait |
 
 **完整生命周期：**
 ```
 Application
      │
      ▼
-Runtime
+McpServerRegistry (唯一 Owner)
      │
-     ├─ spawn CatalogWatcher.run()
-     ├─ spawn HealthChecker.run()
-     ├─ spawn Reconnector.run()
-     ▼
-McpClient
+     ├─ ManagedServer 1
+     │    ├─ client: Arc<McpClient>
+     │    ├─ store: Arc<CatalogStore>
+     │    ├─ cancel: CancellationToken
+     │    └─ watcher: JoinHandle
      │
-     ▼
-Transport
+     ├─ ManagedServer 2
+     │    └─ ...
+     │
+     └─ Drop → cancel all → join all → drop all
 
-McpCatalog — 只是 ArcSwap<ToolSnapshot>，无后台任务
+McpCatalog — 只是 Arc<CatalogStore>，无后台任务
+CatalogRefresher — 唯一写接口，Watcher 通过 trait 调用
 ```
 
 ### ToolCatalog 抽象
@@ -361,12 +374,26 @@ pub trait ToolCatalog: Send + Sync {
 }
 ```
 
-**McpCatalog 内部使用 `ArcSwap<ToolSnapshot>`** — Watcher refresh 时 store，外部 `snapshot()` 直接 load，零拷贝。
+**McpCatalog 内部使用 `Arc<CatalogStore>`** — Watcher refresh 时 store，外部 `snapshot()` 直接 load，零拷贝。
 
 ### 刷新机制（双模）
 
-- **Push** — `notifications/tools/list_changed` → **McpCatalogWatcher** 收到 → 重新 `tools/list` → `ArcSwap::store(new_snapshot)`
-- **Pull** — 用户显式调用 `catalog.refresh()`
+- **Push** — `notifications/tools/list_changed` → **McpCatalogWatcher** 收到 → 通过 `CatalogRefresh` trait 调用 `CatalogRefresher.refresh()` → `CatalogStore::store(new_snapshot)`
+- **Pull** — 用户显式调用 `refresher.refresh()`
+
+### CatalogRefresh trait — Command Pattern
+
+```rust
+#[async_trait]
+pub trait CatalogRefresh: Send + Sync {
+    async fn refresh(&self) -> Result<(), McpError>;
+}
+```
+
+**为什么用 trait：** Watcher 不依赖具体类型，只依赖刷新能力。这使得：
+- Watcher 可以复用不同的刷新实现（测试时可用 Mock）
+- 职责更清晰：Watcher 只负责监听通知，刷新逻辑由 CatalogRefresher 实现
+- 避免 Watcher 持有 Client 或 Catalog 的 Arc
 
 ### SSE POST URL — watch 替代 polling
 

@@ -23,7 +23,10 @@ pub use protocol::{
 pub use transport::{ConnectionState, McpTransport};
 
 #[cfg(feature = "bridge")]
-pub use bridge::{McpCatalog, McpCatalogWatcher, McpServerRegistry, ServerConfig, ToolCatalog};
+pub use bridge::{
+    CatalogRefresh, CatalogRefresher, CatalogStore, McpCatalog, McpCatalogWatcher,
+    McpServerRegistry, ServerConfig, ToolCatalog,
+};
 #[cfg(feature = "bridge")]
 pub use client::McpClient;
 #[cfg(feature = "server")]

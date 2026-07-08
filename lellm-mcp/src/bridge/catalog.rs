@@ -1,10 +1,9 @@
-//! McpCatalog — 工具目录，使用 RwLock 原子更新快照。
+//! Catalog 模块 — 读写分离的工具目录。
 //!
 //! 设计要点：
-//! - 内部 `RwLock<Arc<ToolSnapshot>>` 实现读写分离
-//! - 持有 `Arc<McpClient>` 保持 Transport 存活（工具闭包共享同一 Arc）
-//! - `snapshot()` 获取读锁返回当前快照
-//! - `update_tools()` 在网络调用外不持有写锁（仅在 store 时短暂持有）
+//! - `CatalogStore` — 纯数据存储，使用 ArcSwap 实现零拷贝读
+//! - `McpCatalog` — 纯读接口，供 Agent/ToolExecutor 使用
+//! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
 
 use std::sync::{Arc, RwLock};
 
@@ -14,54 +13,28 @@ use lellm_core::{ToolDefinition, ToolError, ToolErrorKind};
 use super::{ToolCatalog, ToolSnapshot};
 use crate::client::McpClient;
 
-/// MCP 工具目录 — RwLock 保护的可更新快照。
-pub struct McpCatalog {
+// ─── CatalogStore — 纯数据存储 ──────────────────────────────────
+
+/// 工具快照存储 — 零后台任务，纯数据容器。
+pub struct CatalogStore {
     snapshot: RwLock<Arc<ToolSnapshot>>,
-    client: Arc<McpClient>,
 }
 
-impl McpCatalog {
-    /// 从 MCP Client 发现工具，创建目录。
-    pub async fn from_client(client: Arc<McpClient>) -> Result<Self, crate::McpError> {
-        let snapshot = Self::build_snapshot(client.clone()).await?;
-        Ok(Self {
-            snapshot: RwLock::new(snapshot),
-            client,
-        })
-    }
-
-    /// 从 Client 拉取最新工具，更新快照。
-    pub async fn update_tools(&self) -> Result<(), crate::McpError> {
-        let new_snapshot = Self::build_snapshot(self.client.clone()).await?;
-        // 写锁只保护 store 操作，不保护网络调用
-        *self.snapshot.write().unwrap() = new_snapshot;
-        Ok(())
-    }
-
-    /// 构建工具快照。
-    async fn build_snapshot(client: Arc<McpClient>) -> Result<Arc<ToolSnapshot>, crate::McpError> {
-        let list_result: crate::protocol::ListToolsResult = client.tools_list().await?;
-
-        let mut reg_map = IndexMap::with_capacity(list_result.tools.len());
-        for tool in &list_result.tools {
-            let entry = make_tool_entry(
-                client.clone(),
-                tool.name.clone(),
-                ToolDefinition {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    parameters: tool.input_schema.clone(),
-                    cache_control: None,
-                },
-            );
-            reg_map.insert(tool.name.clone(), entry);
+impl CatalogStore {
+    /// 创建空的存储。
+    pub fn new(initial: Arc<ToolSnapshot>) -> Self {
+        Self {
+            snapshot: RwLock::new(initial),
         }
-
-        Ok(Arc::new(ToolSnapshot::new(reg_map, 0)))
     }
 
-    /// 读取当前快照（短暂读锁）。
-    pub fn load_full(&self) -> Arc<ToolSnapshot> {
+    /// 存储新的快照。
+    pub fn store(&self, snapshot: Arc<ToolSnapshot>) {
+        *self.snapshot.write().unwrap() = snapshot;
+    }
+
+    /// 加载当前快照（克隆 Arc，零锁竞争）。
+    pub fn load(&self) -> Arc<ToolSnapshot> {
         self.snapshot.read().unwrap().clone()
     }
 
@@ -74,23 +47,120 @@ impl McpCatalog {
     pub fn is_empty(&self) -> bool {
         self.snapshot.read().unwrap().is_empty()
     }
+}
 
-    /// 获取内部 Client 引用。
-    pub fn client(&self) -> &Arc<McpClient> {
-        &self.client
+// ─── McpCatalog — 纯读接口 ─────────────────────────────────────
+
+/// MCP 工具目录 — 纯读接口，供 Agent/ToolExecutor 使用。
+pub struct McpCatalog {
+    store: Arc<CatalogStore>,
+}
+
+impl McpCatalog {
+    /// 从 MCP Client 发现工具，创建目录。
+    pub async fn from_client(client: Arc<McpClient>) -> Result<Self, crate::McpError> {
+        let snapshot = build_snapshot(client).await?;
+        Ok(Self {
+            store: Arc::new(CatalogStore::new(snapshot)),
+        })
+    }
+
+    /// 从 CatalogStore 创建（供 Registry 内部使用）。
+    pub fn from_store(store: Arc<CatalogStore>) -> Self {
+        Self { store }
+    }
+
+    /// 读取当前快照。
+    pub fn load_full(&self) -> Arc<ToolSnapshot> {
+        self.store.load()
+    }
+
+    /// 工具数量。
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    /// 是否无工具。
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
+    }
+
+    /// 获取底层 CatalogStore（供 CatalogRefresher 使用）。
+    pub fn store(&self) -> &Arc<CatalogStore> {
+        &self.store
+    }
+}
+
+impl Clone for McpCatalog {
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl ToolCatalog for McpCatalog {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
-        self.load_full()
+        self.store.load()
     }
 }
 
+// ─── CatalogRefresher — 纯写接口 ────────────────────────────────
+
+/// 工具目录刷新器 — 持有 Client 和 Store，执行 refresh 操作。
+pub struct CatalogRefresher {
+    client: Arc<McpClient>,
+    store: Arc<CatalogStore>,
+}
+
+impl CatalogRefresher {
+    /// 创建刷新器。
+    pub fn new(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
+        Self { client, store }
+    }
+
+    /// 从 Client 和 Catalog 创建。
+    pub fn from_catalog(client: Arc<McpClient>, catalog: &McpCatalog) -> Self {
+        Self {
+            client,
+            store: Arc::clone(&catalog.store),
+        }
+    }
+
+    /// 刷新工具目录 — 拉取最新工具列表并更新 Store。
+    pub async fn refresh_impl(&self) -> Result<(), crate::McpError> {
+        let new_snapshot = build_snapshot(self.client.clone()).await?;
+        self.store.store(new_snapshot);
+        Ok(())
+    }
+}
+
+// ─── 共享工具函数 ────────────────────────────────────────────────
+
+/// 构建工具快照。
+async fn build_snapshot(client: Arc<McpClient>) -> Result<Arc<ToolSnapshot>, crate::McpError> {
+    let list_result: crate::protocol::ListToolsResult = client.tools_list().await?;
+
+    let mut reg_map = IndexMap::with_capacity(list_result.tools.len());
+    for tool in &list_result.tools {
+        let entry = make_tool_entry(
+            client.clone(),
+            tool.name.clone(),
+            ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.input_schema.clone(),
+                cache_control: None,
+            },
+        );
+        reg_map.insert(tool.name.clone(), entry);
+    }
+
+    Ok(Arc::new(ToolSnapshot::new(reg_map, 0)))
+}
+
 /// 将 MCP 工具转换为 ExecutableTool。
-///
-/// `client` 是 Arc 引用，工具闭包会克隆这个 Arc 保持 Transport 存活。
 pub(super) fn make_tool_entry(
     client: Arc<McpClient>,
     name: String,

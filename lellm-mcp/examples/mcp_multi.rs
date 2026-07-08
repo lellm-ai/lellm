@@ -22,10 +22,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 添加多个服务器（这里用同一个服务器演示，实际可以连接不同服务器）
     let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
-    registry.add_sse("qq-map-sse", &sse_url).await?;
+    let _ = registry.add_sse("qq-map-sse", &sse_url).await?;
 
     let http_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
-    registry.add_http("qq-map-http", &http_url).await?;
+    let _ = registry.add_http("qq-map-http", &http_url).await?;
 
     // 显示工具列表
     println!("已连接服务器:");

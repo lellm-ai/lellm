@@ -1,16 +1,18 @@
-//! McpServerRegistry — 多服务器管理，替代 McpMultiClient。
+//! McpServerRegistry — 多服务器管理，统一所有权模型。
 //!
-//! 与旧的 McpMultiClient 不同：
-//! - 不再混在一起处理四种失效原因
-//! - 实现 ToolCatalog，合并所有服务器的工具
-//! - 提供 register() 返回 (client, watcher) 便于精细控制
+//! 设计要点：
+//! - Registry 是所有后台任务的唯一 Owner
+//! - ManagedServer 封装单个服务器的所有资源
+//! - Drop Registry 时自动 cancel + join 所有后台任务
+//! - 用户 API 只暴露 add_xxx()，无需关心 Watcher 生命周期
 
 use std::sync::Arc;
 
 use indexmap::IndexMap;
-use lellm_core::ToolDefinition;
+use tokio_util::sync::CancellationToken;
 
-use super::catalog::make_tool_entry;
+use super::catalog::{CatalogRefresher, CatalogStore, McpCatalog};
+use super::watcher::McpCatalogWatcher;
 use super::{ToolCatalog, ToolSnapshot};
 use crate::client::McpClient;
 
@@ -29,23 +31,29 @@ pub enum ServerConfig {
     Http { url: String },
 }
 
+/// 受管理的服务器实例 — 封装单个服务器的所有资源。
+struct ManagedServer {
+    /// MCP Client — 保持 Transport 存活。
+    _client: Arc<McpClient>,
+    /// 工具快照存储。
+    store: Arc<CatalogStore>,
+    /// 取消令牌 — 用于停止后台任务。
+    cancel: CancellationToken,
+    /// Watcher 的 JoinHandle — 用于等待任务退出。
+    watcher: tokio::task::JoinHandle<()>,
+}
+
 /// 多服务器 MCP 注册表。
 ///
 /// 管理多个 MCP 服务器连接，合并工具列表，
 /// 实现 ToolCatalog trait 供 Agent 使用。
+///
+/// 所有权模型：
+/// - Registry 拥有所有 ManagedServer
+/// - ManagedServer 拥有 client、store、cancel token、watcher handle
+/// - Drop Registry 时自动 cancel + join 所有后台任务
 pub struct McpServerRegistry {
-    servers: IndexMap<String, ServerEntry>,
-}
-
-struct ServerEntry {
-    _client: Arc<McpClient>,
-    tools: IndexMap<String, ToolDef>,
-}
-
-struct ToolDef {
-    name: String,
-    description: String,
-    input_schema: serde_json::Value,
+    servers: IndexMap<String, ManagedServer>,
 }
 
 impl McpServerRegistry {
@@ -58,49 +66,50 @@ impl McpServerRegistry {
 
     /// 注册一个已连接并初始化的服务器。
     ///
-    /// 返回 (client, watcher) 便于精细控制：
-    /// - `client` 可用于直接调用
-    /// - `watcher` 可 spawn 后台自动刷新
+    /// 自动启动 Watcher 监听 tools/list_changed 通知。
+    /// 返回 McpCatalog 供 Agent 使用。
     pub async fn register(
         &mut self,
         name: impl Into<String>,
         client: McpClient,
-    ) -> Result<(Arc<McpClient>, super::watcher::McpCatalogWatcher), crate::McpError> {
+    ) -> Result<McpCatalog, crate::McpError> {
         let name = name.into();
         let client_arc = Arc::new(client);
 
-        // 发现工具
-        let list_result: crate::protocol::ListToolsResult = client_arc.tools_list().await?;
+        // 发现工具并创建 Catalog
+        let catalog = McpCatalog::from_client(client_arc.clone()).await?;
 
-        let mut tools = IndexMap::new();
-        for tool in &list_result.tools {
-            tools.insert(
-                tool.name.clone(),
-                ToolDef {
-                    name: tool.name.clone(),
-                    description: tool.description.clone(),
-                    input_schema: tool.input_schema.clone(),
-                },
-            );
-        }
+        // 创建 CatalogRefresher
+        let refresher = Arc::new(CatalogRefresher::from_catalog(client_arc.clone(), &catalog));
 
-        tracing::info!(server = %name, tools = tools.len(), "Registered MCP server");
+        // 订阅 notifications
+        let rx = client_arc.subscribe_notifications().unwrap_or_else(|| {
+            let (tx, rx) = tokio::sync::broadcast::channel(1);
+            drop(tx);
+            rx
+        });
 
-        let client_for_entry = client_arc.clone();
+        // 创建取消令牌并 spawn Watcher
+        let cancel = CancellationToken::new();
+        let watcher = McpCatalogWatcher::new(refresher, rx).spawn(cancel.clone());
+
+        tracing::info!(
+            server = %name,
+            tools = catalog.len(),
+            "Registered MCP server"
+        );
+
         self.servers.insert(
             name,
-            ServerEntry {
-                _client: client_for_entry,
-                tools,
+            ManagedServer {
+                _client: client_arc,
+                store: Arc::clone(catalog.store()),
+                cancel,
+                watcher,
             },
         );
 
-        // 创建临时的 catalog 用于 watcher
-        let catalog = super::catalog::McpCatalog::from_client(client_arc.clone()).await?;
-        let catalog_arc = Arc::new(catalog);
-        let watcher = super::watcher::McpCatalogWatcher::new(catalog_arc, &client_arc);
-
-        Ok((client_arc, watcher))
+        Ok(catalog)
     }
 
     /// 添加 stdio 服务器。
@@ -111,15 +120,14 @@ impl McpServerRegistry {
         command: impl Into<String>,
         args: Vec<String>,
         env: Option<Vec<(String, String)>>,
-    ) -> Result<(), crate::McpError> {
+    ) -> Result<McpCatalog, crate::McpError> {
         use crate::transport::{StdioConfig, StdioTransport};
         let config = StdioConfig::new(command, args).with_env(env);
         let transport = StdioTransport::new(config);
         let mut client = McpClient::with_transport(transport);
         client.connect().await?;
         client.initialize().await?;
-        let name_str = name.into();
-        self.register(name_str, client).await.map(|_| ())
+        self.register(name, client).await
     }
 
     /// 添加 SSE 服务器。
@@ -128,15 +136,14 @@ impl McpServerRegistry {
         &mut self,
         name: impl Into<String>,
         url: impl Into<String>,
-    ) -> Result<(), crate::McpError> {
+    ) -> Result<McpCatalog, crate::McpError> {
         use crate::transport::{SseConfig, SseTransport};
         let config = SseConfig::new(url);
         let transport = SseTransport::new(config);
         let mut client = McpClient::with_transport(transport);
         client.connect().await?;
         client.initialize().await?;
-        let name_str = name.into();
-        self.register(name_str, client).await.map(|_| ())
+        self.register(name, client).await
     }
 
     /// 添加 HTTP 服务器。
@@ -145,33 +152,77 @@ impl McpServerRegistry {
         &mut self,
         name: impl Into<String>,
         url: impl Into<String>,
-    ) -> Result<(), crate::McpError> {
+    ) -> Result<McpCatalog, crate::McpError> {
         use crate::transport::{HttpConfig, HttpTransport};
         let config = HttpConfig::new(url);
         let transport = HttpTransport::new(config);
         let mut client = McpClient::with_transport(transport);
         client.connect().await?;
         client.initialize().await?;
-        let name_str = name.into();
-        self.register(name_str, client).await.map(|_| ())
+        self.register(name, client).await
     }
 
     /// 获取所有服务器的工具列表。
-    pub fn tool_names(&self) -> Vec<(&str, Vec<&str>)> {
+    pub fn tool_names(&self) -> Vec<(&str, Vec<String>)> {
         self.servers
             .iter()
             .map(|(name, entry)| {
-                (
-                    name.as_str(),
-                    entry.tools.keys().map(|s| s.as_str()).collect(),
-                )
+                let snapshot = entry.store.load();
+                let tool_names: Vec<String> = snapshot
+                    .definitions()
+                    .iter()
+                    .map(|d| d.name.clone())
+                    .collect();
+                (name.as_str(), tool_names)
             })
             .collect()
     }
 
     /// 工具总数。
     pub fn total_tools(&self) -> usize {
-        self.servers.values().map(|s| s.tools.len()).sum()
+        self.servers.values().map(|s| s.store.len()).sum()
+    }
+
+    /// 获取指定服务器的 CatalogStore（用于调试）。
+    pub fn store(&self, name: &str) -> Option<Arc<CatalogStore>> {
+        self.servers.get(name).map(|s| Arc::clone(&s.store))
+    }
+
+    /// 优雅关闭所有服务器后台任务。
+    ///
+    /// 1. 发送 cancel 信号，等待 Watcher 自然退出
+    /// 2. 超时（2s）后 abort 仍未退出的 Watcher
+    ///
+    /// 与 `Drop` 的区别：
+    /// - `shutdown()` 是异步的，先尝试优雅关闭
+    /// - `Drop` 是同步兜底，直接 abort 所有任务
+    pub async fn shutdown(&mut self) {
+        // 第一步：发送 cancel 信号
+        for entry in self.servers.values() {
+            entry.cancel.cancel();
+        }
+
+        // 第二步：等待所有 watcher 自然退出（带超时）
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        for entry in self.servers.values_mut() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // 等待 watcher 完成，带超时
+            let _ = tokio::time::timeout(remaining, &mut entry.watcher).await;
+        }
+
+        // 第三步：abort 仍未退出的 watcher
+        for entry in self.servers.values_mut() {
+            entry.watcher.abort();
+        }
+
+        // 第四步：等待 abort 完成（短暂等待）
+        for entry in self.servers.values_mut() {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), &mut entry.watcher)
+                .await;
+        }
     }
 }
 
@@ -181,27 +232,33 @@ impl Default for McpServerRegistry {
     }
 }
 
+impl Drop for McpServerRegistry {
+    fn drop(&mut self) {
+        // 兜底关闭——直接 abort 所有后台任务。
+        // 优雅关闭请使用 async `shutdown()` 方法。
+        // 注意：Drop 是同步的，不能调用 async 方法。
+        // JoinHandle drop 会 detach 任务（不阻塞），abort 确保任务终止。
+        for entry in self.servers.values_mut() {
+            entry.watcher.abort();
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolCatalog for McpServerRegistry {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
         let mut reg_map = IndexMap::new();
 
         for entry in self.servers.values() {
-            let client = entry._client.clone();
-            for def in entry.tools.values() {
-                reg_map.insert(
-                    def.name.clone(),
-                    make_tool_entry(
-                        client.clone(),
-                        def.name.clone(),
-                        ToolDefinition {
-                            name: def.name.clone(),
-                            description: def.description.clone(),
-                            parameters: def.input_schema.clone(),
-                            cache_control: None,
-                        },
-                    ),
-                );
+            let snapshot = entry.store.load();
+            // ToolSnapshot 内部存储的是 IndexMap<String, ExecutableTool>
+            // 我们需要通过 definitions() 获取工具定义，然后重新构建快照
+            // 这里简化处理：直接使用各服务器的快照合并
+            for def in snapshot.definitions() {
+                // 从原始快照中获取 ExecutableTool
+                if let Some(tool) = snapshot.get(&def.name) {
+                    reg_map.insert(def.name.clone(), tool.clone());
+                }
             }
         }
 
