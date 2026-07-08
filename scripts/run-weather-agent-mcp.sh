@@ -80,6 +80,7 @@ echo "      ✓ 编译完成"
 echo "[2/4] 启动 Tencent Map MCP Server (port ${MCP_PORT})..."
 TENCENT_MAP_KEY="$TENCENT_MAP_KEY" \
 MCP_SERVER_PORT="$MCP_PORT" \
+MCP_TRANSPORT="$MCP_TRANSPORT" \
 cargo run --example mcp_tencent_map_server --features server -p lellm-mcp \
     &>/tmp/mcp_server.log &
 MCP_PID=$!

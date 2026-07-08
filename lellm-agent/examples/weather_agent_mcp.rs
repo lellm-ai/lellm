@@ -28,7 +28,6 @@ use lellm_agent::McpCatalog;
 use lellm_core::{Message, ToolError, ToolErrorKind, ToolResult, text_block};
 use lellm_derive::tool;
 use lellm_mcp::McpClient;
-use lellm_mcp::transport::{HttpConfig, HttpTransport, SseConfig, SseTransport};
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
@@ -121,28 +120,13 @@ async fn connect_tencent_map_server(
     let client = match transport_type {
         "sse" => {
             println!("Using SSE Transport");
-            let transport = SseTransport::new(
-                SseConfig::new(server_url).with_request_timeout(std::time::Duration::from_secs(30)),
-            );
-            McpClient::with_transport(transport)
+            McpClient::connect_sse(server_url).await?
         }
         _ => {
             println!("Using HTTP Transport");
-            let transport = HttpTransport::new(
-                HttpConfig::new(server_url)
-                    .with_request_timeout(std::time::Duration::from_secs(30)),
-            );
-            McpClient::with_transport(transport)
+            McpClient::connect_http(server_url).await?
         }
     };
-
-    let mut client = client;
-    client.connect().await?;
-    let init_result = client.initialize().await?;
-    println!(
-        "✓ MCP Connected: {} v{}",
-        init_result.server_info.name, init_result.server_info.version
-    );
 
     // McpCatalog::from_client 内部会调用 tools/list 并缓存工具定义
     let catalog = McpCatalog::from_client(Arc::new(client)).await?;
