@@ -155,6 +155,15 @@ impl CatalogRefresher {
     }
 }
 
+/// 为 CatalogRefresher 实现 CatalogRefresh trait。
+/// Watcher 通过此 trait 触发刷新，不依赖具体实现。
+#[async_trait::async_trait]
+impl super::watcher::CatalogRefresh for CatalogRefresher {
+    async fn refresh(&self) -> Result<(), lellm_mcp::McpError> {
+        self.refresh_impl().await
+    }
+}
+
 // ─── 共享工具函数 ────────────────────────────────────────────────
 
 /// 构建工具快照。
