@@ -76,8 +76,10 @@ impl McpServerRegistry {
         let name = name.into();
         let client_arc = Arc::new(client);
 
-        // 发现工具并创建 Catalog
-        let catalog = McpCatalog::from_client(client_arc.clone()).await?;
+        // 发现工具并创建共享的 CatalogStore
+        let snapshot = super::catalog::build_snapshot(client_arc.clone(), 0).await?;
+        let store = Arc::new(CatalogStore::new(snapshot));
+        let catalog = McpCatalog::from_store(Arc::clone(&store));
 
         // 创建取消令牌
         let cancel = CancellationToken::new();
@@ -85,8 +87,10 @@ impl McpServerRegistry {
         // 仅在 Transport 支持 notifications 时 spawn Watcher
         let watcher = match client_arc.subscribe_notifications() {
             Some(rx) => {
-                let refresher =
-                    Arc::new(CatalogRefresher::from_catalog(client_arc.clone(), &catalog));
+                let refresher = Arc::new(CatalogRefresher::new(
+                    client_arc.clone(),
+                    Arc::clone(&store),
+                ));
                 Some(McpCatalogWatcher::new(refresher, rx).spawn(cancel.clone()))
             }
             None => {
@@ -108,7 +112,7 @@ impl McpServerRegistry {
             name,
             ManagedServer {
                 _client: client_arc,
-                store: Arc::clone(catalog.store()),
+                store,
                 cancel,
                 watcher,
             },

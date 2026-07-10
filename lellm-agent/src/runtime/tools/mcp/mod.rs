@@ -11,7 +11,9 @@ mod catalog;
 mod registry;
 mod watcher;
 
-pub use catalog::{CatalogRefresher, CatalogStore, McpCatalog};
+pub(crate) use catalog::CatalogRefresher;
+pub(crate) use catalog::CatalogStore;
+pub use catalog::McpCatalog;
 pub use registry::{McpServerRegistry, ServerConfig};
 pub use watcher::{CatalogRefresh, McpCatalogWatcher};
 

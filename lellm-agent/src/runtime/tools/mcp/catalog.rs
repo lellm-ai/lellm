@@ -2,6 +2,7 @@
 //!
 //! 设计要点：
 //! - `CatalogStore` — 纯数据存储，使用 RwLock 实现读写分离
+//! - `CatalogStoreWrite` — 写操作 trait，仅 `CatalogRefresher` 和 `Registry` 可见
 //! - `McpCatalog` — 纯读接口，供 Agent/ToolExecutor 使用
 //! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
 
@@ -12,6 +13,7 @@ use indexmap::IndexMap;
 use lellm_core::{ToolDefinition, ToolError, ToolErrorKind};
 use lellm_mcp::client::McpClient;
 
+use super::watcher::CatalogRefresh;
 use super::{ToolCatalog, ToolSnapshot};
 
 // ─── CatalogStore — 纯数据存储 ──────────────────────────────────
@@ -19,7 +21,7 @@ use super::{ToolCatalog, ToolSnapshot};
 /// 工具快照存储 — 零后台任务，纯数据容器。
 ///
 /// 维护单调递增的版本计数器（对齐 `CompositeCatalog` 模式），
-/// 每次 `next_version()` 自增，`store_raw()` 直接替换快照。
+/// 读方法直接在 impl 上，写方法收敛到 `CatalogStoreWrite` trait。
 pub struct CatalogStore {
     snapshot: RwLock<Arc<ToolSnapshot>>,
     version: AtomicU64,
@@ -27,22 +29,12 @@ pub struct CatalogStore {
 
 impl CatalogStore {
     /// 创建存储，记录初始快照的版本号。
-    pub fn new(initial: Arc<ToolSnapshot>) -> Self {
+    pub(crate) fn new(initial: Arc<ToolSnapshot>) -> Self {
         let initial_version = initial.version();
         Self {
             snapshot: RwLock::new(initial),
             version: AtomicU64::new(initial_version),
         }
-    }
-
-    /// 自增版本号并返回新值——供 `CatalogRefresher` 在 build_snapshot 时使用。
-    pub fn next_version(&self) -> u64 {
-        self.version.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    /// 直接存储快照（不修改版本号）——版本号由调用方在 build_snapshot 时传入。
-    pub fn store_raw(&self, snapshot: Arc<ToolSnapshot>) {
-        *self.snapshot.write().unwrap() = snapshot;
     }
 
     /// 加载当前快照（克隆 Arc，零锁竞争）。
@@ -58,6 +50,24 @@ impl CatalogStore {
     /// 是否无工具。
     pub fn is_empty(&self) -> bool {
         self.snapshot.read().unwrap().is_empty()
+    }
+}
+
+/// CatalogStore 写操作 trait —— crate 内部可见，`McpCatalog` 无法暴露写入能力。
+pub(crate) trait CatalogStoreWrite {
+    /// 自增版本号并返回新值。
+    fn next_version(&self) -> u64;
+    /// 直接存储快照（不修改版本号）。
+    fn store_raw(&self, snapshot: Arc<ToolSnapshot>);
+}
+
+impl CatalogStoreWrite for CatalogStore {
+    fn next_version(&self) -> u64 {
+        self.version.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn store_raw(&self, snapshot: Arc<ToolSnapshot>) {
+        *self.snapshot.write().unwrap() = snapshot;
     }
 }
 
@@ -78,8 +88,16 @@ impl McpCatalog {
     }
 
     /// 从 CatalogStore 创建（供 Registry 内部使用）。
-    pub fn from_store(store: Arc<CatalogStore>) -> Self {
+    pub(crate) fn from_store(store: Arc<CatalogStore>) -> Self {
         Self { store }
+    }
+
+    /// 创建工具目录刷新器 — 返回 `CatalogRefresh` trait object，隐藏内部实现。
+    ///
+    /// 调用方持有 `Arc<dyn CatalogRefresh>`，通过 `refresh()` 触发刷新。
+    /// 刷新器内部持有 `CatalogStore` 的写入权限。
+    pub fn create_refresher(&self, client: Arc<McpClient>) -> Arc<dyn CatalogRefresh> {
+        Arc::new(CatalogRefresher::new(client, Arc::clone(&self.store)))
     }
 
     /// 读取当前快照。
@@ -95,11 +113,6 @@ impl McpCatalog {
     /// 是否无工具。
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
-    }
-
-    /// 获取底层 CatalogStore（供 CatalogRefresher 使用）。
-    pub fn store(&self) -> &Arc<CatalogStore> {
-        &self.store
     }
 }
 
@@ -127,21 +140,14 @@ pub struct CatalogRefresher {
 }
 
 impl CatalogRefresher {
-    /// 创建刷新器。
+    /// 创建刷新器 — 持有 Client 和 Store，执行 refresh 操作。
     pub fn new(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
         Self { client, store }
     }
 
-    /// 从 Client 和 Catalog 创建。
-    pub fn from_catalog(client: Arc<McpClient>, catalog: &McpCatalog) -> Self {
-        Self {
-            client,
-            store: Arc::clone(&catalog.store),
-        }
-    }
-
     /// 刷新工具目录 — 拉取最新工具列表并更新 Store。
     pub async fn refresh_impl(&self) -> Result<(), lellm_mcp::McpError> {
+        use CatalogStoreWrite;
         let version = self.store.next_version();
         let new_snapshot = build_snapshot(self.client.clone(), version).await?;
         self.store.store_raw(new_snapshot);
@@ -152,7 +158,7 @@ impl CatalogRefresher {
 // ─── 共享工具函数 ────────────────────────────────────────────────
 
 /// 构建工具快照。
-async fn build_snapshot(
+pub(super) async fn build_snapshot(
     client: Arc<McpClient>,
     version: u64,
 ) -> Result<Arc<ToolSnapshot>, lellm_mcp::McpError> {

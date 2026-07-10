@@ -7,7 +7,7 @@
 //! `tokio::task::block_in_place` 来规避，或直接测试 Transport 层。
 
 use async_trait::async_trait;
-use lellm_agent::{CatalogRefresher, McpCatalog, ToolCatalog};
+use lellm_agent::{CatalogRefresh, McpCatalog, ToolCatalog};
 use lellm_mcp::protocol::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, McpError, ServerError,
     TransportError,
@@ -492,9 +492,9 @@ async fn test_catalog_refresh() {
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("old_tool").is_some());
 
-    // 使用 CatalogRefresher 刷新工具目录
-    let refresher = CatalogRefresher::from_catalog(client.clone(), &catalog);
-    refresher.refresh_impl().await.unwrap();
+    // 使用 CatalogRefresh trait 刷新工具目录
+    let refresher = catalog.create_refresher(client.clone());
+    refresher.refresh().await.unwrap();
     assert_eq!(catalog.len(), 1);
     assert!(catalog.snapshot().await.get("new_tool").is_some());
     assert!(catalog.snapshot().await.get("old_tool").is_none());
