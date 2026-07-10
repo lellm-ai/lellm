@@ -106,7 +106,7 @@ pub fn transform(event: &ProviderEvent) -> Vec<AgentStreamEvent> {
             // 由 LLMNode 直接从 ProviderEvent 中提取。
             let _ = tool_calls; // 目前不转换，供未来扩展
             if let Some(u) = usage {
-                events.push(AgentStreamEvent::Usage(u.clone()));
+                events.push(AgentStreamEvent::Usage(*u));
             }
             events.push(AgentStreamEvent::ResponseComplete);
             events

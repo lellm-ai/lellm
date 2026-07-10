@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::checkpoint::{Checkpoint, CheckpointBlob, CheckpointStoreError};
+use super::checkpoint_data::{Checkpoint, CheckpointBlob, CheckpointStoreError};
 use super::store::BlobCheckpointStore;
 use crate::state::State;
 use crate::state::workflow_state::WorkflowState;
@@ -149,7 +149,7 @@ where
     /// 写入 Blob 作为 correctness invariant。
     pub async fn save_with_trace(
         &self,
-        trace_id: &super::checkpoint::TraceId,
+        trace_id: &super::checkpoint_data::TraceId,
         checkpoint: &Checkpoint<S>,
         graph_hash: u64,
     ) -> Result<(), CheckpointStoreError> {
@@ -162,7 +162,7 @@ where
     /// 校验 `graph_hash`：不匹配则返回 `GraphMismatch` 错误。
     pub async fn load(
         &self,
-        id: &super::checkpoint::CheckpointId,
+        id: &super::checkpoint_data::CheckpointId,
         expected_hash: u64,
     ) -> Result<Option<Checkpoint<S>>, CheckpointStoreError> {
         match self.store.load(id).await? {
@@ -176,7 +176,7 @@ where
     /// 校验 `graph_hash`：不匹配则返回 `GraphMismatch` 错误。
     pub async fn load_latest(
         &self,
-        trace_id: &super::checkpoint::TraceId,
+        trace_id: &super::checkpoint_data::TraceId,
         expected_hash: u64,
     ) -> Result<Option<Checkpoint<S>>, CheckpointStoreError> {
         match self.store.load_latest(trace_id).await? {

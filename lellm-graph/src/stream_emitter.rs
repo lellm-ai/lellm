@@ -133,13 +133,14 @@ impl StreamSink for NoopSink {
 ///           └── Branch B → emit → → StreamHub → all sinks
 /// ```
 /// StreamSink 不要求 Debug，故 StreamHub 也不 derive Debug。
+#[derive(Default)]
 pub struct StreamHub {
     sinks: Vec<Arc<dyn StreamSink>>,
 }
 
 impl StreamHub {
     pub fn new() -> Self {
-        Self { sinks: Vec::new() }
+        Self::default()
     }
 
     /// 注册一个 sink。

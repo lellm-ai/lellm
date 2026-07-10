@@ -90,12 +90,13 @@ impl<S: WorkflowState> CheckpointConfig<S> {
         self
     }
 
+    #[allow(clippy::collapsible_if)]
     pub async fn apply_retention(
         &self,
         trace_id: &TraceId,
     ) -> Result<(), crate::checkpoint::CheckpointStoreError> {
         if let Some(keep) = self.retention.prune_keep() {
-            if let Some(ref store) = self.store {
+            if let Some(store) = &self.store {
                 let pruned = store.prune(trace_id, keep).await?;
                 if pruned > 0 {
                     tracing::debug!(pruned, keep, "checkpoint pruned");
@@ -129,6 +130,7 @@ impl<S: WorkflowState> CheckpointSaveSink<S> {
     }
 }
 
+#[allow(clippy::collapsible_if)]
 impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
     fn on_checkpoint(&mut self, state: &S, frame: &FrameInfo) {
         let save_fn = self.save_fn.clone();
@@ -142,7 +144,7 @@ impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
             match save_fn(cp, trace_id).await {
                 Ok(()) => {
                     if let Some(keep) = retention.prune_keep() {
-                        if let Some(ref s) = store {
+                        if let Some(s) = &store {
                             if let Err(e) = s.prune(&trace_id, keep).await {
                                 tracing::warn!(error = %e, "checkpoint retention failed");
                             }
@@ -209,6 +211,7 @@ impl StepCallback<'_> for EventStepCallback {
 ///   ├── CheckpointSaveSink  — Checkpoint 保存（可选）
 ///   └── graph.run_inline()  — 唯一执行路径
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_execution_loop<S, M>(
     graph: Arc<Graph<S, M>>,
     state: S,

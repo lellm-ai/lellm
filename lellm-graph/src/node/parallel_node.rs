@@ -238,7 +238,8 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
 
                     let mut branch_ctx = child_engine.build_node_context();
                     let ok = node.execute(&mut branch_ctx).await.is_ok();
-                    drop(branch_ctx);
+                    // branch_ctx goes out of scope here; explicit drop removed
+                    // (NodeContext only holds references, drop() is a no-op)
 
                     if !ok {
                         return (branch_name, Err("branch execution failed".into()));
@@ -255,8 +256,8 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
             .collect();
 
         // Execute all branches concurrently (no spawn, just concurrent polling)
-        let raw_results: Vec<(String, Result<(S, std::time::Duration), String>)> =
-            futures::future::join_all(branch_futures).await;
+        type BranchResult<S> = (String, Result<(S, std::time::Duration), String>);
+        let raw_results: Vec<BranchResult<S>> = futures::future::join_all(branch_futures).await;
 
         // Process results in branch order
         let mut branch_states: Vec<S> = Vec::with_capacity(branch_count);

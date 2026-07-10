@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::checkpoint::NodeId;
+use super::checkpoint_data::NodeId;
 
 // ─── TraceStep ─────────────────────────────────────────────────
 

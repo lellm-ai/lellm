@@ -189,7 +189,6 @@ pub use crate::ids::TraceId;
 /// v0.5 使用 TriggerPolicy + RetentionPolicy 替代。
 #[allow(deprecated)]
 // ─── Phase 6: Execution Frame Snapshot ────────────────────────
-
 /// 执行帧 — 保存单个 Graph 的执行位置。
 ///
 /// 可序列化 — 用于 SessionCheckpoint 持久化。

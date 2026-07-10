@@ -154,7 +154,7 @@ impl<S: WorkflowState> NodeContext<'_, S> {
 
     /// 获取类型化状态（只读）。
     pub fn state(&self) -> &S {
-        &self.state
+        self.state
     }
 
     /// 替换整个状态（仅组合节点使用，如 ParallelNode）。

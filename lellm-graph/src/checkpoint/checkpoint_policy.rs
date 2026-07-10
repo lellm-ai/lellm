@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use super::checkpoint::{Checkpoint, CheckpointStoreError, TraceId};
+use super::checkpoint_data::{Checkpoint, CheckpointStoreError, TraceId};
 
 /// Checkpoint 保存回调类型别名。
 pub type CheckpointSaveFn<S> = Box<

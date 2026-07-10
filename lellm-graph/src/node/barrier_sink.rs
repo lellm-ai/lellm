@@ -154,6 +154,8 @@ impl BarrierSink for ChannelBarrierSink {
         // 先检查通配缓存 — clone 决策后再返回，避免借用冲突
         {
             let cache_guard = self.wildcard_cache.try_read();
+            // 不能合并 if-let：内层需要先 clone 决策值，再返回，避免借用冲突
+            #[allow(clippy::collapsible_if)]
             if let Ok(cache) = cache_guard {
                 if let Some(decision) = cache.get(&barrier_id.node_id) {
                     let decision = decision.clone();
@@ -169,7 +171,7 @@ impl BarrierSink for ChannelBarrierSink {
         let barrier_id = barrier_id.clone();
 
         Box::pin(async move {
-            let outcome = if let Some(dur) = timeout {
+            if let Some(dur) = timeout {
                 tokio::select! {
                     biased;
                     _ = cancel_rx.recv() => {
@@ -222,8 +224,7 @@ impl BarrierSink for ChannelBarrierSink {
                         None => BarrierOutcome::Cancelled,
                     },
                 }
-            };
-            outcome
+            }
         })
     }
 }

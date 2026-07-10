@@ -291,7 +291,7 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
 
     /// 获取状态引用。
     pub fn state(&self) -> &S {
-        &self.state
+        self.state
     }
 
     /// 获取状态可变引用（Executor 内部使用）。
@@ -355,7 +355,7 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
 
 impl<'a, S: WorkflowState> ExecutionView<S> for ExecutionEngine<'a, S> {
     fn state(&self) -> &S {
-        &self.state
+        self.state
     }
 
     fn emit(&self, chunk: StreamChunk) {
@@ -374,7 +374,7 @@ impl<'a, S: WorkflowState> ExecutionView<S> for ExecutionEngine<'a, S> {
 impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
     fn build_node_context(&mut self) -> crate::node::node_context::NodeContext<'_, S> {
         crate::node::node_context::NodeContext {
-            state: &mut self.state,
+            state: self.state,
             stream: self.stream.as_deref(),
             cancel: &self.cancel,
             control: &mut self.control,
@@ -385,7 +385,7 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
 
     fn build_leaf_context(&mut self) -> crate::node::node_context::LeafContext<'_, S> {
         crate::node::node_context::LeafContext {
-            state: &self.state,
+            state: self.state,
             stream: self.stream.as_deref(),
             cancel: &self.cancel,
             control: &mut self.control,

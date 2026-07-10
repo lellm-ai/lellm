@@ -134,7 +134,7 @@ impl LeafNode<AgentState> for LLMNode {
                             .iter()
                             .filter(|b| matches!(b, ContentBlock::ToolCall(_)))
                             .count();
-                        usage = u.clone();
+                        usage = *u;
                         continue;
                     }
 

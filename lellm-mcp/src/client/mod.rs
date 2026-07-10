@@ -123,6 +123,8 @@ impl McpClient {
         let params_value = if inject_protocol_version {
             if let Some(ref ver) = *self.protocol_version.lock().await {
                 let mut params = params_value.unwrap_or_else(|| serde_json::json!({}));
+                // 不能合并：内层需要可变引用存活足够久以完成 insert
+                #[allow(clippy::collapsible_if)]
                 if let Some(obj) = params.as_object_mut() {
                     if !obj.contains_key("protocolVersion") {
                         obj.insert(

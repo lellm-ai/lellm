@@ -1,11 +1,11 @@
 //! 状态管理 — State, WorkflowState, StateKey, StateLens。
 
-pub mod state;
+pub mod state_core;
 pub mod state_lens;
 pub mod statekey;
 pub mod workflow_state;
 
-pub use state::*;
+pub use state_core::*;
 pub use statekey::*;
 // NOTE: workflow_state::StateMutation trait is NOT re-exported here
 // to avoid ambiguity with state::StateMutation enum.

@@ -78,16 +78,16 @@ impl<S: WorkflowState, M: MergeStrategy<S>> GraphBuilder<S, M> {
     }
 
     /// 便捷方法 — 添加 Subgraph 节点。
-    pub fn subgraph<Inner: WorkflowState, IM: MergeStrategy<Inner>, L: crate::StateLens<S, Inner>>(
+    pub fn subgraph<Inner, IM, L>(
         &mut self,
         name: impl Into<String>,
         spec: crate::SubgraphSpec<S, Inner, IM, L>,
     ) -> &mut Self
     where
         S: 'static,
-        Inner: 'static,
-        IM: 'static,
-        L: 'static,
+        Inner: WorkflowState + 'static,
+        IM: MergeStrategy<Inner> + 'static,
+        L: crate::StateLens<S, Inner> + 'static,
     {
         let compiled = spec.compile();
         self.nodes.insert(name.into(), NodeKind::Subgraph(compiled));

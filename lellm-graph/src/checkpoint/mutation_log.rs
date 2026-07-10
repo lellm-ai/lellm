@@ -23,8 +23,8 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::checkpoint::NodeId;
-use super::checkpoint::{CheckpointId, CheckpointStoreError, TraceId};
+use super::checkpoint_data::NodeId;
+use super::checkpoint_data::{CheckpointId, CheckpointStoreError, TraceId};
 
 // ─── MutationLogEntry ──────────────────────────────────────────
 
