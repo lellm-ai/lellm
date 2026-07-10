@@ -296,6 +296,31 @@ impl McpServerRegistry {
         self.servers.get(name).map(|s| Arc::clone(&s.store))
     }
 
+    /// 移除一个已注册的服务器。
+    ///
+    /// 立即 cancel 该服务器的后台任务（Watcher），
+    /// 并从 `tool_index` 中清理工具名（Error 策略下）。
+    ///
+    /// 返回被移除的服务器名（如果存在）。
+    pub fn remove(&mut self, name: &str) -> Option<String> {
+        let _server = self.servers.shift_remove(name);
+
+        // 清理 tool_index（仅 Error 策略下有效）
+        if matches!(&self.conflict_policy, NameConflictPolicy::Error) {
+            let to_remove: Vec<String> = self
+                .tool_index
+                .iter()
+                .filter(|(_, s)| *s == name)
+                .map(|(t, _)| t.clone())
+                .collect();
+            for tool_name in to_remove {
+                self.tool_index.shift_remove(&tool_name);
+            }
+        }
+
+        Some(name.to_string())
+    }
+
     /// 优雅关闭所有服务器后台任务。
     ///
     /// 每个 server 独立处理：cancel → 等待 → abort（不互相影响）
