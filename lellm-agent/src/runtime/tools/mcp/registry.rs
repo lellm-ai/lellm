@@ -5,7 +5,7 @@
 //! - ManagedServer 封装单个服务器的所有资源
 //! - Drop Registry 时自动 cancel + join 所有后台任务
 //! - 工具名冲突默认 Fail-Fast（注册时报错）
-//! - 可选 Prefix / Override / Custom 策略
+//! - Registry 只做 merge，不修改 Tool Identity
 
 use std::sync::Arc;
 
@@ -15,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 use super::catalog::{CatalogRefresher, CatalogStore, McpCatalog};
 use super::watcher::McpCatalogWatcher;
 use super::{ToolCatalog, ToolSnapshot};
-use lellm_core::ExecutableTool;
 use lellm_mcp::client::McpClient;
 
 // ─── 冲突策略 ────────────────────────────────────────────────────
@@ -47,18 +46,18 @@ impl std::error::Error for NameConflictError {}
 /// 工具名冲突解决策略。
 ///
 /// 默认 `Error`（Fail-Fast）——注册时立即报错，不静默覆盖。
+///
+/// **注意**：Registry 只做 merge，不修改 Tool Identity。
+/// 如需前缀化，请使用 `PrefixCatalog` Decorator（未来版本）。
 #[derive(Debug, Clone, Default)]
 pub enum NameConflictPolicy {
     /// 注册时检测到冲突立即返回 `RegistryError::NameConflict`。
     /// **默认策略**。
     #[default]
     Error,
-    /// 后注册的服务器覆盖先注册的（原行为）。
+    /// 后注册的服务器覆盖先注册的。
     /// ⚠️ 生产环境慎用——配置错误不会立即暴露。
     Override,
-    /// 使用 `{server_name}{separator}{tool_name}` 作为注册名。
-    /// 在 `snapshot()` 合并时应用前缀，不修改原始 ToolDefinition。
-    Prefix { separator: String },
 }
 
 /// Registry 操作错误。
@@ -131,6 +130,9 @@ struct ManagedServer {
 /// 管理多个 MCP 服务器连接，合并工具列表，
 /// 实现 ToolCatalog trait 供 Agent 使用。
 ///
+/// Registry 只做 merge，不修改 Tool Identity。
+/// 如需前缀化，请使用 Decorator 模式（如 `PrefixCatalog`）。
+///
 /// 所有权模型：
 /// - Registry 拥有所有 ManagedServer
 /// - ManagedServer 拥有 client、store、cancel token、watcher handle
@@ -198,10 +200,7 @@ impl McpServerRegistry {
         // 仅在 Transport 支持 notifications 时 spawn Watcher
         let watcher = match client_arc.subscribe_notifications() {
             Some(rx) => {
-                let refresher = super::catalog::CatalogRefresher::new(
-                    Arc::clone(&client_arc),
-                    Arc::clone(&store),
-                );
+                let refresher = CatalogRefresher::new(Arc::clone(&client_arc), Arc::clone(&store));
                 Some(McpCatalogWatcher::new(Arc::new(refresher), rx).spawn(cancel.clone()))
             }
             None => {
@@ -236,7 +235,7 @@ impl McpServerRegistry {
     /// 检查工具名冲突。
     ///
     /// `Error` 策略下，注册时立即报错；
-    /// `Override` / `Prefix` 策略下，不报错（snapshot 合并时处理）。
+    /// `Override` 策略下，不报错（snapshot 合并时处理）。
     fn check_conflicts(
         &self,
         server_name: &str,
@@ -393,37 +392,10 @@ impl ToolCatalog for McpServerRegistry {
                         }
                         reg_map.insert(tool_name.to_string(), tool.clone());
                     }
-                    NameConflictPolicy::Prefix { separator } => {
-                        let prefixed = format!("{server_name}{separator}{tool_name}");
-                        // 创建带前缀名的新 ExecutableTool
-                        let prefixed_tool = create_prefixed_tool(&prefixed, tool);
-                        reg_map.insert(prefixed, prefixed_tool);
-                    }
                 }
             }
         }
 
         Arc::new(ToolSnapshot::new(reg_map, max_version))
     }
-}
-
-/// 创建带前缀名的 ExecutableTool 包装。
-///
-/// 新的 ToolDefinition 使用 `prefixed_name`，
-/// 但内部闭包仍然调用原始工具（使用原始 MCP 工具名）。
-fn create_prefixed_tool(prefixed_name: &str, original: &ExecutableTool) -> ExecutableTool {
-    let original = original.clone();
-    ExecutableTool::safe(
-        lellm_core::ToolDefinition {
-            name: prefixed_name.to_string(),
-            description: original.definition.description.clone(),
-            parameters: original.definition.parameters.clone(),
-            cache_control: original.definition.cache_control.clone(),
-        },
-        move |input: &serde_json::Value| {
-            let orig = original.clone();
-            let input = input.clone();
-            async move { orig.execute(&input).await }
-        },
-    )
 }
