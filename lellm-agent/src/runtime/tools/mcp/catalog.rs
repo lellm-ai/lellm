@@ -1,9 +1,20 @@
-//! Catalog 模块 — 读写分离的工具目录。
+//! Catalog 模块 — 单 Server MCP 工具目录。
+//!
+//! `McpCatalog` 是 `ToolCatalog` 的实现之一，定位与 `StaticCatalog`、
+//! `McpServerRegistry`、`CompositeCatalog` 平级：
+//!
+//! ```text
+//! ToolCatalog
+//!     ├── StaticCatalog        ← 本地静态工具
+//!     ├── McpCatalog           ← 单个 MCP Server
+//!     ├── McpServerRegistry    ← 多个 MCP Server
+//!     └── CompositeCatalog     ← 任意 Catalog 的组合
+//! ```
 //!
 //! 设计要点：
-//! - `CatalogStore` — 纯数据存储，使用 RwLock 实现读写分离
-//! - `CatalogStoreWrite` — 写操作 trait，仅 `CatalogRefresher` 和 `Registry` 可见
-//! - `McpCatalog` — 纯读接口，供 Agent/ToolExecutor 使用
+//! - `CatalogStore` — 纯数据存储（`pub(crate)`），使用 RwLock 实现读写分离
+//! - `CatalogStoreWrite` — 写操作 trait，仅 `CatalogRefresher` 可见
+//! - `McpCatalog` — 单 Server 目录，持有 Client 引用 + 工具快照
 //! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,13 +27,13 @@ use lellm_mcp::client::McpClient;
 use super::watcher::CatalogRefresh;
 use super::{ToolCatalog, ToolSnapshot};
 
-// ─── CatalogStore — 纯数据存储 ──────────────────────────────────
+// ─── CatalogStore — 纯数据存储（内部实现细节）────────────────────
 
 /// 工具快照存储 — 零后台任务，纯数据容器。
 ///
 /// 维护单调递增的版本计数器（对齐 `CompositeCatalog` 模式），
 /// 读方法直接在 impl 上，写方法收敛到 `CatalogStoreWrite` trait。
-pub struct CatalogStore {
+pub(crate) struct CatalogStore {
     snapshot: RwLock<Arc<ToolSnapshot>>,
     version: AtomicU64,
 }
@@ -38,17 +49,17 @@ impl CatalogStore {
     }
 
     /// 加载当前快照（克隆 Arc，零锁竞争）。
-    pub fn load(&self) -> Arc<ToolSnapshot> {
+    pub(crate) fn load(&self) -> Arc<ToolSnapshot> {
         self.snapshot.read().unwrap().clone()
     }
 
     /// 工具数量。
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.snapshot.read().unwrap().len()
     }
 
     /// 是否无工具。
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.snapshot.read().unwrap().is_empty()
     }
 }
@@ -71,33 +82,54 @@ impl CatalogStoreWrite for CatalogStore {
     }
 }
 
-// ─── McpCatalog — 纯读接口 ─────────────────────────────────────
+// ─── McpCatalog — 单 Server 工具目录 ─────────────────────────────
 
-/// MCP 工具目录 — 纯读接口，供 Agent/ToolExecutor 使用。
+/// 单个 MCP Server 的工具目录。
+///
+/// 与 `StaticCatalog`、`McpServerRegistry`、`CompositeCatalog` 平级，
+/// 都是 `ToolCatalog` 的实现。适用于只需要连接一个 MCP Server 的场景。
+///
+/// # 示例
+///
+/// ```rust,ignore
+/// let client = McpClient::connect_stdio(cmd).await?;
+/// let catalog = McpCatalog::discover(client.into()).await?;
+///
+/// let agent = AgentBuilder::new(model)
+///     .catalog(Arc::new(catalog))
+///     .build();
+/// ```
 pub struct McpCatalog {
+    client: Arc<McpClient>,
     store: Arc<CatalogStore>,
 }
 
 impl McpCatalog {
-    /// 从 MCP Client 发现工具，创建目录。
-    pub async fn from_client(client: Arc<McpClient>) -> Result<Self, lellm_mcp::McpError> {
-        let snapshot = build_snapshot(client, 0).await?;
+    /// 通过 MCP `tools/list` 发现工具，创建目录。
+    ///
+    /// 执行一次 `tools/list` 远程调用，构建工具快照。
+    /// 返回的 `McpCatalog` 持有 `client` 引用，保持 Transport 存活。
+    pub async fn discover(client: Arc<McpClient>) -> Result<Self, lellm_mcp::McpError> {
+        let snapshot = build_snapshot(client.clone(), 0).await?;
         Ok(Self {
+            client,
             store: Arc::new(CatalogStore::new(snapshot)),
         })
     }
 
-    /// 从 CatalogStore 创建（供 Registry 内部使用）。
-    pub(crate) fn from_store(store: Arc<CatalogStore>) -> Self {
-        Self { store }
+    /// 获取持有的 MCP Client 引用。
+    ///
+    /// 用于后续扩展（如 Prompt、Resource、Sampling 等需要 Client 的场景）。
+    pub fn client(&self) -> Arc<McpClient> {
+        Arc::clone(&self.client)
     }
 
-    /// 创建工具目录刷新器 — 返回 `CatalogRefresh` trait object，隐藏内部实现。
-    ///
-    /// 调用方持有 `Arc<dyn CatalogRefresh>`，通过 `refresh()` 触发刷新。
-    /// 刷新器内部持有 `CatalogStore` 的写入权限。
-    pub fn create_refresher(&self, client: Arc<McpClient>) -> Arc<dyn CatalogRefresh> {
-        Arc::new(CatalogRefresher::new(client, Arc::clone(&self.store)))
+    /// 创建工具目录刷新器 — 返回 `Arc<dyn CatalogRefresh>`，隐藏内部实现。
+    pub fn create_refresher(&self) -> Arc<dyn CatalogRefresh> {
+        Arc::new(CatalogRefresher::new(
+            Arc::clone(&self.client),
+            Arc::clone(&self.store),
+        ))
     }
 
     /// 读取当前快照。
@@ -114,11 +146,22 @@ impl McpCatalog {
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
     }
+
+    /// 拆分为内部组件（供 `McpServerRegistry` 内部使用）。
+    pub(crate) fn into_parts(self) -> (Arc<McpClient>, Arc<CatalogStore>) {
+        (self.client, self.store)
+    }
+
+    /// 从 Client 和 Store 创建（供 `McpServerRegistry` 内部使用）。
+    pub(crate) fn from_parts(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
+        Self { client, store }
+    }
 }
 
 impl Clone for McpCatalog {
     fn clone(&self) -> Self {
         Self {
+            client: Arc::clone(&self.client),
             store: Arc::clone(&self.store),
         }
     }
@@ -131,22 +174,22 @@ impl ToolCatalog for McpCatalog {
     }
 }
 
-// ─── CatalogRefresher — 纯写接口 ────────────────────────────────
+// ─── CatalogRefresher — 纯写接口（内部实现细节）──────────────────
 
 /// 工具目录刷新器 — 持有 Client 和 Store，执行 refresh 操作。
-pub struct CatalogRefresher {
+pub(crate) struct CatalogRefresher {
     client: Arc<McpClient>,
     store: Arc<CatalogStore>,
 }
 
 impl CatalogRefresher {
-    /// 创建刷新器 — 持有 Client 和 Store，执行 refresh 操作。
-    pub fn new(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
+    /// 创建刷新器。
+    pub(crate) fn new(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
         Self { client, store }
     }
 
     /// 刷新工具目录 — 拉取最新工具列表并更新 Store。
-    pub async fn refresh_impl(&self) -> Result<(), lellm_mcp::McpError> {
+    pub(crate) async fn refresh_impl(&self) -> Result<(), lellm_mcp::McpError> {
         use CatalogStoreWrite;
         let version = self.store.next_version();
         let new_snapshot = build_snapshot(self.client.clone(), version).await?;
@@ -158,7 +201,7 @@ impl CatalogRefresher {
 /// 为 CatalogRefresher 实现 CatalogRefresh trait。
 /// Watcher 通过此 trait 触发刷新，不依赖具体实现。
 #[async_trait::async_trait]
-impl super::watcher::CatalogRefresh for CatalogRefresher {
+impl CatalogRefresh for CatalogRefresher {
     async fn refresh(&self) -> Result<(), lellm_mcp::McpError> {
         self.refresh_impl().await
     }

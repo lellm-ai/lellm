@@ -179,17 +179,18 @@ impl McpServerRegistry {
         let name = name.into();
         let client_arc = Arc::new(client);
 
-        // 发现工具并创建共享的 CatalogStore
-        let snapshot = super::catalog::build_snapshot(client_arc.clone(), 0).await?;
+        // 复用 McpCatalog::discover 进行工具发现
+        let catalog = McpCatalog::discover(client_arc.clone()).await?;
 
         // 冲突检测
+        let snapshot = catalog.load_full();
         self.check_conflicts(&name, snapshot.definitions())?;
 
         // 注册工具名到全局索引（Error 策略）
         self.register_tool_names(&name, snapshot.definitions());
 
-        let store = Arc::new(CatalogStore::new(snapshot));
-        let catalog = McpCatalog::from_store(Arc::clone(&store));
+        // 拆分 catalog 获取内部组件
+        let (client_arc, store) = catalog.into_parts();
 
         // 创建取消令牌
         let cancel = CancellationToken::new();
@@ -197,11 +198,11 @@ impl McpServerRegistry {
         // 仅在 Transport 支持 notifications 时 spawn Watcher
         let watcher = match client_arc.subscribe_notifications() {
             Some(rx) => {
-                let refresher = Arc::new(CatalogRefresher::new(
-                    client_arc.clone(),
+                let refresher = super::catalog::CatalogRefresher::new(
+                    Arc::clone(&client_arc),
                     Arc::clone(&store),
-                ));
-                Some(McpCatalogWatcher::new(refresher, rx).spawn(cancel.clone()))
+                );
+                Some(McpCatalogWatcher::new(Arc::new(refresher), rx).spawn(cancel.clone()))
             }
             None => {
                 tracing::debug!(
@@ -214,21 +215,22 @@ impl McpServerRegistry {
 
         tracing::info!(
             server = %name,
-            tools = catalog.len(),
+            tools = store.len(),
             "Registered MCP server"
         );
 
         self.servers.insert(
             name,
             ManagedServer {
-                client: client_arc,
-                store,
+                client: Arc::clone(&client_arc),
+                store: Arc::clone(&store),
                 cancel,
                 watcher,
             },
         );
 
-        Ok(catalog)
+        // 重新构建 McpCatalog 返回给用户
+        Ok(McpCatalog::from_parts(client_arc, store))
     }
 
     /// 检查工具名冲突。

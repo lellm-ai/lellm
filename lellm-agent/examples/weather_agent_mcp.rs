@@ -128,8 +128,8 @@ async fn connect_tencent_map_server(
         }
     };
 
-    // McpCatalog::from_client 内部会调用 tools/list 并缓存工具定义
-    let catalog = McpCatalog::from_client(Arc::new(client)).await?;
+    // McpCatalog::discover 内部会调用 tools/list 并缓存工具定义
+    let catalog = McpCatalog::discover(Arc::new(client)).await?;
     println!("✓ MCP Tools: {}", catalog.len());
 
     if catalog.is_empty() {
