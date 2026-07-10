@@ -11,10 +11,10 @@ mod catalog;
 mod registry;
 mod watcher;
 
-pub(crate) use catalog::CatalogRefresher;
-pub(crate) use catalog::CatalogStore;
 pub use catalog::McpCatalog;
-pub use registry::{McpServerRegistry, ServerConfig};
+pub use registry::{
+    McpServerRegistry, NameConflictError, NameConflictPolicy, RegistryError, ServerConfig,
+};
 pub use watcher::{CatalogRefresh, McpCatalogWatcher};
 
 // Re-export ToolCatalog / ToolSnapshot from parent module for convenience

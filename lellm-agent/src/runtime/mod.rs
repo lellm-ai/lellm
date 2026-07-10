@@ -52,7 +52,10 @@ pub use stream_translation::{AgentStreamEvent, TranslationResult, translate_prov
 // ─── MCP 集成 re-export (mcp feature) ────────────────────────────
 
 #[cfg(feature = "mcp")]
-pub use tools::mcp::{McpCatalog, McpCatalogWatcher, McpServerRegistry, ServerConfig};
+pub use tools::mcp::{
+    McpCatalog, McpCatalogWatcher, McpServerRegistry, NameConflictError, NameConflictPolicy,
+    RegistryError, ServerConfig,
+};
 
 #[cfg(feature = "mcp")]
 pub use tools::mcp::CatalogRefresh;

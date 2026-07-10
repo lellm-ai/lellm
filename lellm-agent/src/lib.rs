@@ -24,7 +24,10 @@ pub use runtime::{
 // ─── MCP 集成 re-export (mcp feature) ────────────────────────────
 
 #[cfg(feature = "mcp")]
-pub use runtime::{CatalogRefresh, McpCatalog, McpCatalogWatcher, McpServerRegistry, ServerConfig};
+pub use runtime::{
+    CatalogRefresh, McpCatalog, McpCatalogWatcher, McpServerRegistry, NameConflictError,
+    NameConflictPolicy, RegistryError, ServerConfig,
+};
 
 // 从 core 再导出 Prompt
 pub use lellm_core::Prompt;

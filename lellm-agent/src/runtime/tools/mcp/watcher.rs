@@ -85,7 +85,7 @@ impl McpCatalogWatcher {
 
 /// 为 CatalogRefresher 实现 CatalogRefresh trait。
 #[async_trait::async_trait]
-impl CatalogRefresh for super::CatalogRefresher {
+impl CatalogRefresh for super::catalog::CatalogRefresher {
     async fn refresh(&self) -> Result<(), lellm_mcp::McpError> {
         self.refresh_impl().await
     }
