@@ -115,8 +115,9 @@ pub enum ServerConfig {
 
 /// 受管理的服务器实例 — 封装单个服务器的所有资源。
 struct ManagedServer {
-    /// MCP Client — 保持 Transport 存活。
-    _client: Arc<McpClient>,
+    /// MCP Client — 持有 Arc 保持 Transport 存活。
+    /// 如果不持有，McpClient 可能被 Drop → Transport 关闭。
+    client: Arc<McpClient>,
     /// 工具快照存储。
     store: Arc<CatalogStore>,
     /// 取消令牌 — 用于停止后台任务。
@@ -220,7 +221,7 @@ impl McpServerRegistry {
         self.servers.insert(
             name,
             ManagedServer {
-                _client: client_arc,
+                client: client_arc,
                 store,
                 cancel,
                 watcher,
