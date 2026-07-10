@@ -295,34 +295,26 @@ impl McpServerRegistry {
 
     /// 优雅关闭所有服务器后台任务。
     ///
-    /// 1. 发送 cancel 信号，等待 Watcher 自然退出
-    /// 2. 超时（2s）后 abort 仍未退出的 Watcher
+    /// 每个 server 独立处理：cancel → 等待 → abort（不互相影响）
+    /// 然后短暂等待 abort 完成。
     ///
     /// 与 `Drop` 的区别：
     /// - `shutdown()` 是异步的，先尝试优雅关闭
     /// - `Drop` 是同步兜底，直接 abort 所有任务
     pub async fn shutdown(&mut self) {
-        for entry in self.servers.values() {
+        // 第 1 遍：每个 server 独立 cancel → 等待 → abort
+        for entry in self.servers.values_mut() {
             entry.cancel.cancel();
-        }
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        for entry in self.servers.values_mut() {
             if let Some(ref mut watcher) = entry.watcher {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), &mut *watcher)
+                    .await;
+                if !watcher.is_finished() {
+                    watcher.abort();
                 }
-                let _ = tokio::time::timeout(remaining, watcher).await;
             }
         }
 
-        for entry in self.servers.values_mut() {
-            if let Some(watcher) = entry.watcher.as_mut() {
-                watcher.abort();
-            }
-        }
-
+        // 第 2 遍：短暂等待 abort 完成
         for entry in self.servers.values_mut() {
             if let Some(watcher) = entry.watcher.as_mut() {
                 let _ = tokio::time::timeout(std::time::Duration::from_millis(100), watcher).await;
