@@ -99,12 +99,13 @@ impl McpTransport for HttpTransport {
 
         let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
 
-        // 构建请求，自动携带 session-id
+        // 构建请求，自动携带 session-id 和超时
         let mut builder = inner
             .client
             .post(&self.config.endpoint_url)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
+            .header("Accept", "application/json, text/event-stream")
+            .timeout(self.config.request_timeout);
 
         if let Some(ref sid) = *inner.session_id.lock().await {
             builder = builder.header("Mcp-Session-Id", sid);
@@ -150,32 +151,54 @@ impl McpTransport for HttpTransport {
             let mut current_event = String::new();
             let mut current_data = String::new();
 
+            // 辅助：处理一个完整的 SSE 帧
+            let process_frame = |event: &str,
+                                 data: &str,
+                                 req_id: u64|
+             -> Option<Result<JsonRpcResponse, McpError>> {
+                if event != "message" || data.is_empty() {
+                    return None;
+                }
+                let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(&data) else {
+                    return None;
+                };
+                match msg {
+                    crate::protocol::JsonRpcMessage::Response(resp) => {
+                        if resp.id != req_id {
+                            Some(Err(McpError::Protocol(format!(
+                                "Response ID mismatch: expected {}, got {}",
+                                req_id, resp.id
+                            ))))
+                        } else {
+                            Some(Ok(resp))
+                        }
+                    }
+                    crate::protocol::JsonRpcMessage::Notification(notif) => {
+                        let _ = inner.notification_tx.send(notif);
+                        None
+                    }
+                    _ => None,
+                }
+            };
+
             for line in body.lines() {
                 if line.starts_with("event:") || line.starts_with("event: ") {
                     current_event = line.trim_start_matches("event:").trim().to_string();
                 } else if line.starts_with("data:") || line.starts_with("data: ") {
                     current_data = line.trim_start_matches("data:").trim().to_string();
                 } else if line.is_empty() && !current_data.is_empty() {
-                    match current_event.as_str() {
-                        "message" => {
-                            if let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(
-                                &current_data,
-                            ) {
-                                match msg {
-                                    crate::protocol::JsonRpcMessage::Response(resp) => {
-                                        return Ok(resp);
-                                    }
-                                    crate::protocol::JsonRpcMessage::Notification(notif) => {
-                                        let _ = inner.notification_tx.send(notif);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
+                    if let Some(result) = process_frame(&current_event, &current_data, req.id) {
+                        return result;
                     }
                     current_event.clear();
                     current_data.clear();
+                }
+            }
+
+            // Flush: 处理最后一个帧（可能没有尾随空行）
+            if !current_data.is_empty() {
+                if let Some(result) = process_frame(&current_event, &current_data, req.id) {
+                    return result;
                 }
             }
 
@@ -189,6 +212,12 @@ impl McpTransport for HttpTransport {
             let resp: JsonRpcResponse =
                 serde_json::from_str(&body).map_err(|e| McpError::Protocol(e.to_string()))?;
 
+            if resp.id != req.id {
+                return Err(McpError::Protocol(format!(
+                    "Response ID mismatch: expected {}, got {}",
+                    req.id, resp.id
+                )));
+            }
             Ok(resp)
         }
     }

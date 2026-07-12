@@ -237,30 +237,40 @@ impl CompositeCatalog {
 #[async_trait::async_trait]
 impl ToolCatalog for CompositeCatalog {
     async fn snapshot(&self) -> std::sync::Arc<ToolSnapshot> {
-        let mut merged = indexmap::IndexMap::new();
+        // merged 追踪工具来源，以便正确记录冲突信息
+        let mut merged: indexmap::IndexMap<String, (ExecutableTool, String)> =
+            indexmap::IndexMap::new();
         let mut conflicts = Vec::new();
 
         // 反向遍历（从低优先级到高优先级），高优先级自然覆盖低优先级
-        for (idx, source) in self.sources.iter().rev().enumerate() {
+        for (rev_idx, source) in self.sources.iter().rev().enumerate() {
+            let original_idx = self.sources.len() - 1 - rev_idx;
             let snap = source.snapshot().await;
-            let snap_tools = &snap.tools;
-            let source_name = format!("source_{}", idx);
-            for (name, tool) in snap_tools.iter() {
-                if merged.contains_key(name) {
+            let source_name = format!("source_{}", original_idx);
+            for (name, tool) in snap.iter() {
+                if let Some((_, existing_source)) = merged.get(name) {
                     tracing::warn!(
                         tool_name = %name,
+                        winner = %source_name,
+                        loser = %existing_source,
                         "Tool conflict detected in CompositeCatalog. Higher priority tool shadows the lower one."
                     );
                     conflicts.push(CatalogConflict {
-                        tool_name: name.clone(),
+                        tool_name: name.to_string(),
                         winner: source_name.clone(),
-                        loser: format!("source_{}", idx + 1),
+                        loser: existing_source.clone(),
                         policy: self.conflict_policy,
                     });
                 }
-                merged.insert(name.clone(), tool.clone());
+                merged.insert(name.to_string(), (tool.clone(), source_name.clone()));
             }
         }
+
+        // 提取纯工具映射（丢弃来源追踪信息）
+        let tools: indexmap::IndexMap<String, ExecutableTool> = merged
+            .into_iter()
+            .map(|(name, (tool, _source))| (name, tool))
+            .collect();
 
         // 存储冲突信息
         if !conflicts.is_empty() {
@@ -271,6 +281,6 @@ impl ToolCatalog for CompositeCatalog {
             .version_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        std::sync::Arc::new(ToolSnapshot::new(merged, version))
+        std::sync::Arc::new(ToolSnapshot::new(tools, version))
     }
 }
