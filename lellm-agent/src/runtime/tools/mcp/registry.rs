@@ -6,8 +6,10 @@
 //! - Drop Registry 时自动 cancel + join 所有后台任务
 //! - 工具名冲突默认 Fail-Fast（注册时报错）
 //! - Registry 只做 merge，不修改 Tool Identity
+//! - Registry 不实现 ToolCatalog，通过 catalog() 返回 RegistryCatalog
 
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use indexmap::IndexMap;
 use tokio_util::sync::CancellationToken;
@@ -116,6 +118,7 @@ pub enum ServerConfig {
 struct ManagedServer {
     /// MCP Client — 持有 Arc 保持 Transport 存活。
     /// 如果不持有，McpClient 可能被 Drop → Transport 关闭。
+    #[allow(dead_code)]
     client: Arc<McpClient>,
     /// 工具快照存储。
     store: Arc<CatalogStore>,
@@ -125,10 +128,21 @@ struct ManagedServer {
     watcher: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl Drop for ManagedServer {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = &self.watcher {
+            handle.abort();
+        }
+    }
+}
+
 /// 多服务器 MCP 注册表。
 ///
-/// 管理多个 MCP 服务器连接，合并工具列表，
-/// 实现 ToolCatalog trait 供 Agent 使用。
+/// 管理多个 MCP 服务器连接，通过 `catalog()` 生成工具目录。
+/// Registry 不实现 `ToolCatalog`，职责分离：
+/// - Registry：连接、重连、Watcher、关闭
+/// - RegistryCatalog：snapshot、merge、NameConflictPolicy
 ///
 /// Registry 只做 merge，不修改 Tool Identity。
 /// 如需前缀化，请使用 Decorator 模式（如 `PrefixCatalog`）。
@@ -143,6 +157,8 @@ pub struct McpServerRegistry {
     tool_index: IndexMap<String, String>,
     /// 冲突解决策略。
     conflict_policy: NameConflictPolicy,
+    /// 工具快照存储索引（RegistryCatalog 共享读取）。
+    stores: Arc<RwLock<IndexMap<String, Arc<CatalogStore>>>>,
 }
 
 impl McpServerRegistry {
@@ -152,6 +168,7 @@ impl McpServerRegistry {
             servers: IndexMap::new(),
             tool_index: IndexMap::new(),
             conflict_policy: NameConflictPolicy::default(),
+            stores: Arc::new(RwLock::new(IndexMap::new())),
         }
     }
 
@@ -219,7 +236,7 @@ impl McpServerRegistry {
         );
 
         self.servers.insert(
-            name,
+            name.clone(),
             ManagedServer {
                 client: Arc::clone(&client_arc),
                 store: Arc::clone(&store),
@@ -227,6 +244,12 @@ impl McpServerRegistry {
                 watcher,
             },
         );
+
+        // 更新 stores 索引（RegistryCatalog 共享读取）
+        self.stores
+            .write()
+            .unwrap()
+            .insert(name, Arc::clone(&store));
 
         // 重新构建 McpCatalog 返回给用户
         Ok(McpCatalog::from_parts(client_arc, store))
@@ -291,18 +314,23 @@ impl McpServerRegistry {
     }
 
     /// 获取指定服务器的 CatalogStore（用于调试）。
+    #[allow(dead_code)]
     pub(crate) fn store(&self, name: &str) -> Option<Arc<CatalogStore>> {
         self.servers.get(name).map(|s| Arc::clone(&s.store))
     }
 
     /// 移除一个已注册的服务器。
     ///
-    /// 立即 cancel 该服务器的后台任务（Watcher），
+    /// 通过 `ManagedServer::drop()` (RAII) 自动 cancel 后台任务，
     /// 并从 `tool_index` 中清理工具名（Error 策略下）。
     ///
     /// 返回被移除的服务器名（如果存在）。
     pub fn remove(&mut self, name: &str) -> Option<String> {
+        // shift_remove 取出 ManagedServer → 触发 Drop → cancel + abort
         let _server = self.servers.shift_remove(name);
+
+        // 清理 stores 索引
+        self.stores.write().unwrap().shift_remove(name);
 
         // 清理 tool_index（仅 Error 策略下有效）
         if matches!(&self.conflict_policy, NameConflictPolicy::Error) {
@@ -317,7 +345,7 @@ impl McpServerRegistry {
             }
         }
 
-        Some(name.to_string())
+        _server.map(|_| name.to_string())
     }
 
     /// 优雅关闭所有服务器后台任务。
@@ -348,6 +376,21 @@ impl McpServerRegistry {
             }
         }
     }
+
+    /// 生成工具目录快照。
+    ///
+    /// 返回 `RegistryCatalog`，实现 `ToolCatalog` trait，
+    /// 供 Agent/ToolExecutor 使用。
+    ///
+    /// Registry 不实现 `ToolCatalog`，职责分离：
+    /// - Registry：连接、重连、Watcher、关闭
+    /// - RegistryCatalog：snapshot、merge、NameConflictPolicy
+    pub fn catalog(&self) -> Arc<dyn ToolCatalog> {
+        Arc::new(RegistryCatalog {
+            stores: Arc::clone(&self.stores),
+            conflict_policy: self.conflict_policy.clone(),
+        })
+    }
 }
 
 impl Default for McpServerRegistry {
@@ -358,22 +401,36 @@ impl Default for McpServerRegistry {
 
 impl Drop for McpServerRegistry {
     fn drop(&mut self) {
-        for entry in self.servers.values_mut() {
-            if let Some(watcher) = entry.watcher.as_mut() {
-                watcher.abort();
-            }
-        }
+        // servers.clear() → ManagedServer::drop() → cancel + abort (RAII)
+        self.servers.clear();
     }
 }
 
+// ─── RegistryCatalog — 工具聚合视图 ───────────────────────────────
+
+/// 多服务器工具目录聚合视图。
+///
+/// 由 `McpServerRegistry::catalog()` 生成，专门负责工具聚合：
+/// - snapshot：合并所有服务器的工具快照
+/// - merge：按 NameConflictPolicy 处理冲突
+///
+/// 与 `McpServerRegistry` 职责分离：
+/// - Registry 管生命周期（连接、Watcher、关闭）
+/// - RegistryCatalog 管工具聚合（snapshot、merge）
+struct RegistryCatalog {
+    stores: Arc<RwLock<IndexMap<String, Arc<CatalogStore>>>>,
+    conflict_policy: NameConflictPolicy,
+}
+
 #[async_trait::async_trait]
-impl ToolCatalog for McpServerRegistry {
+impl ToolCatalog for RegistryCatalog {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
+        let stores = self.stores.read().unwrap();
         let mut reg_map = IndexMap::new();
         let mut max_version = 0u64;
 
-        for (server_name, entry) in &self.servers {
-            let snapshot = entry.store.load();
+        for (server_name, store) in stores.iter() {
+            let snapshot = store.load();
             max_version = max_version.max(snapshot.version());
 
             for (tool_name, tool) in snapshot.iter() {

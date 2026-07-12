@@ -77,7 +77,6 @@ struct StdioTransportInner {
     stdin: Mutex<tokio::process::ChildStdin>,
     pending: Arc<Mutex<PendingMap>>,
     notification_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
-    next_id: std::sync::atomic::AtomicU64,
     shutdown: watch::Sender<bool>,
 }
 
@@ -112,9 +111,13 @@ impl McpTransport for StdioTransport {
             }
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| McpError::Transport(TransportError::Io(e)))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                self.state.send(ConnectionState::Disconnected).ok();
+                return Err(McpError::Transport(TransportError::Io(e)));
+            }
+        };
 
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stdin = child.stdin.take().expect("stdin should be piped");
@@ -153,6 +156,7 @@ impl McpTransport for StdioTransport {
         let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
 
         let notification_tx_for_loop = notification_tx.clone();
+        let state_tx = self.state.clone();
         tokio::spawn({
             let pending = Arc::clone(&pending);
             let mut shutdown = shutdown_tx.subscribe();
@@ -196,7 +200,9 @@ impl McpTransport for StdioTransport {
                     }
                 }
 
-                // read_loop 退出 → 无锁清除所有 pending（mem::take）
+                // read_loop 退出 → 更新状态 → 清理 pending
+                state_tx.send(ConnectionState::Disconnected).ok();
+
                 let pending_to_fail = {
                     let mut p = pending.lock().await;
                     std::mem::take(&mut *p)
@@ -212,7 +218,6 @@ impl McpTransport for StdioTransport {
             stdin: Mutex::new(stdin),
             pending,
             notification_tx,
-            next_id: std::sync::atomic::AtomicU64::new(1),
             shutdown: shutdown_tx,
         }));
 
@@ -223,12 +228,9 @@ impl McpTransport for StdioTransport {
     async fn request(&self, req: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         let inner = self.inner.as_ref().ok_or_else(McpError::disconnected)?;
 
-        // 分配 request id
-        let id = inner
-            .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 直接使用 McpClient 生成的 request id
+        let id = req.id;
         let method = req.method_name.clone();
-        let req = JsonRpcRequest::new(id, req.method_name.clone(), req.params.clone());
 
         // 注册 pending
         let (tx, rx) = oneshot::channel();

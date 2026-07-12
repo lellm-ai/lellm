@@ -41,8 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("\n共 {} 个工具\n", registry.total_tools());
 
-    // 获取 ToolCatalog 快照，直接调用工具
-    let snapshot = registry.snapshot().await;
+    // 通过 catalog() 获取 ToolCatalog 视图，再获取快照
+    let snapshot = registry.catalog().snapshot().await;
 
     // 调用 geocoder 工具（通过 snapshot 中的 ExecutableTool）
     let addresses = vec!["陆家嘴", "天安门", "奇台"];

@@ -114,6 +114,7 @@ impl McpTransport for SseTransport {
         let post_url_clone = post_url_tx.clone();
         let notification_tx_clone = notification_tx.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let state_tx = self.state.clone();
 
         let sse_handle = tokio::spawn(async move {
             let mut event_stream = match client_clone
@@ -127,6 +128,7 @@ impl McpTransport for SseTransport {
                 Ok(resp) => resp.bytes_stream().eventsource(),
                 Err(e) => {
                     tracing::error!(error = %e, "SSE connection failed");
+                    state_tx.send(ConnectionState::Disconnected).ok();
                     return;
                 }
             };
@@ -199,7 +201,9 @@ impl McpTransport for SseTransport {
                 }
             }
 
-            // SSE 退出 → 无锁清除所有 pending（mem::take）
+            // SSE 退出 → 更新状态 → 清理 pending
+            state_tx.send(ConnectionState::Disconnected).ok();
+
             let pending_to_fail = {
                 let mut p = pending_clone.lock().await;
                 std::mem::take(&mut *p)
@@ -249,7 +253,7 @@ impl McpTransport for SseTransport {
             .clone()
             .ok_or_else(McpError::disconnected)?;
 
-        // 分配 request id
+        // 直接使用 McpClient 生成的 request id
         let id = req.id;
         let method = req.method_name.clone();
 

@@ -149,22 +149,67 @@ impl McpClient {
 
 | 决策 | 理由 |
 |------|------|
-| ID 由 McpClient 唯一生成 | Transport 不知道"第几个请求"，只负责传输 `request(id=N)` |
-| `JsonRpcRequest::new()` 改为 `pub(crate)` | 业务代码永远不接触 id，杜绝 `id=0` bug |
+| **整个系统只有 `McpClient` 持有 `next_id: AtomicU64`** | Transport 永远不生成/修改 Request ID，只负责传输已带 id 的 Request。这是唯一的 ID 来源 |
+| **所有 `Transport` 只发送调用方提供的 `JsonRpcRequest`，绝不重新构造或修改其中的 `id`** | 保证 trait 语义一致——`request(JsonRpcRequest)` = "发送这个完整的请求" |
+| `JsonRpcRequest::new()` 调用点收敛到 `McpClient` | 整个工程只有 `McpClient` 一处生成 Request，其他位置出现 `JsonRpcRequest::new()` 即表示有人越权 |
 | `request<R>(method, params)` 泛型返回 | 调用方直接拿到 `InitializeResult` / `CallToolResult`，不解析 `JsonRpcResponse` |
 | `next_request_id` 用 `AtomicU64` + `Relaxed` | 只需要唯一性，不需要 happens-before 保证 |
 | 重连不重置 ID | 日志可追踪（#381 → #382 → disconnect → #383），避免调试地狱 |
 | initialize / tools_call / ping 走同一入口 | 消除特殊路径，统一 ID 分配 |
 
+**请求生命周期（职责链）：**
+
+```
+Caller
+    │
+    ▼
+McpClient
+    ├── next_id.fetch_add()
+    ├── JsonRpcRequest { id, method, params }
+    ▼
+Transport
+    ├── serde_json::to_string()
+    ├── write_all()
+    ├── pending.insert(id)
+    ▼
+Server
+```
+
+Transport 永远不知道：
+
+- 当前是第几个请求
+- ID 是否连续
+- 是否重连
+- 是否跨 Transport
+
+它只负责：**发送一个已经带好 id 的 Request。**
+
 ### 连接状态机
 
 ```
-Disconnected → Connecting → Initializing → Ready → Broken
-                                            ↓ (重连)    ↓ (不可恢复)
-                                         Connecting   Closed
+Disconnected → Connecting → Initializing → Ready → Disconnected
+                                            ↓ (主动关闭)
+                                          Closed
 ```
 
+**状态语义：**
+
+| 状态           | 含义                                       | 是否允许 request |
+| -------------- | ------------------------------------------ | ---------------- |
+| Disconnected   | 当前没有可用连接（启动前、意外断开、重连前） | ❌                |
+| Connecting     | Transport 正在建立连接                       | ❌                |
+| Initializing   | MCP initialize 阶段                         | ❌                |
+| Ready          | 可以发送请求                                 | ✅                |
+| Closed         | 用户主动关闭，不会再重连                     | ❌                |
+
+**关键决策（Grill 2026-07-12）：**
+
+- **不引入 `Broken` 状态** — `Broken` 是瞬时错误事件，不是稳定状态。连接意外断开直接回到 `Disconnected`。错误原因通过 `McpError` 或日志/事件传递，不编码进 `ConnectionState`。
+- **`Disconnected` 统一表示"当前没有可用连接"** — 无论原因是尚未连接、连接意外断开，还是等待下一次重连。
+- **`Closed` 只表示主动关闭** — `client.close()` 或 Drop。与意外断开（`Disconnected`）严格区分。
+
 - 状态由 **Transport 主动驱动**（SSE stream 结束、子进程退出等），通过 `watch::Sender<ConnectionState>` 发射
+- **Transport 读取循环退出时，必须先发送 `Disconnected` 状态，再清理 pending requests** — 确保 `request()` 检查 `allows_request()` 时立即 fail-fast，不再向已死亡的连接写入数据
 - **McpClient 订阅** Transport 的状态变化，做 fail-fast 检查（`state.allows_request()`）
 - `request()` 在非 Ready 状态下 **Fail-fast**（由 McpClient 层检查状态后返回 `McpError::Disconnected`）
 - request-id 连续（monotonic counter，重连不重置）
@@ -266,10 +311,17 @@ composite.add_catalog(catalog);                // 组合层组装
 |----|------|-----------|
 | `McpTransport` | 传输（发出去，等响应） | id 来源、method 含义 |
 | `McpClient` | 协议（ID 分配、initialize、request<R>、broadcast notifications） | 工具、Catalog、Registry |
-| `McpServerRegistry` | 多 Server 生命周期（便利 API） | 工具、Catalog |
+| `McpServerRegistry` | 多 Server 生命周期（连接、重连、Watcher、关闭） | 工具合并、Catalog |
+| `RegistryCatalog` | 工具聚合（snapshot、merge、NameConflictPolicy） | 连接、Watcher |
 | `McpCatalog` | 发现（tools/list → ToolDefinition） | 闭包、Executor、Registry |
-| `McpToolFactory` | 适配（ToolDefinition + Client → Tool） | Catalog 组合、Agent |
 | `CompositeCatalog` | 组合（多个 Catalog → 一个快照） | MCP 细节 |
+
+**关键决策（Grill 2026-07-12）：**
+
+- **`McpServerRegistry` 不实现 `ToolCatalog`** — Registry 只管 Server 生命周期，Catalog 只管工具聚合。变化原因完全不同。
+- **`RegistryCatalog` 作为独立适配层** — 专门负责 merge/snapshot/conflict policy，实现 `ToolCatalog`。Registry 通过 `catalog()` 方法返回 `Arc<dyn ToolCatalog>`。
+- **类比 `Router::service()` 而非 `impl Service for Router`** — Registry **可以生成 Catalog**，但 **Registry 不应该自己就是 Catalog**。
+- 高级用户可以完全绕过 Registry，自行组合多个 `McpCatalog` 到 `CompositeCatalog`。
 
 ### 关键决策
 
@@ -328,6 +380,15 @@ struct ManagedServer {
     watcher: JoinHandle<()>,
 }
 
+impl Drop for ManagedServer {
+    fn drop(&mut self) {
+        self.cancel.cancel();  // 优雅退出
+        if let Some(handle) = &self.watcher {
+            handle.abort();    // 兜底保证退出
+        }
+    }
+}
+
 // Registry — 所有权的唯一 Owner
 pub struct McpServerRegistry {
     servers: IndexMap<String, ManagedServer>,
@@ -338,11 +399,18 @@ pub struct McpServerRegistry {
 
 | 问题 | Catalog 自己 spawn task | Registry 统一管理 |
 |------|------------------------|------------------|
-| Drop 谁 abort | 需要 JoinHandle + CancellationToken 塞进 Catalog | Registry Drop → cancel + join |
+| Drop 谁 abort | 需要 JoinHandle + CancellationToken 塞进 Catalog | ManagedServer::drop() → cancel + abort (RAII) |
 | Arc 循环引用 | Catalog → Arc<Client> → task → Arc<Catalog> → Leak | 无循环，Registry 持有 ManagedServer |
 | 生命周期 | 隐藏在数据对象内部，不可见 | 显式在 Registry 中管理 |
 | API 复杂度 | 用户必须保存 JoinHandle | 用户只调用 add_xxx() |
 | 职责分离 | Watcher 依赖 Client + Catalog | Watcher 只依赖 CatalogRefresh trait |
+
+**为什么 `ManagedServer` 实现 `Drop`：**
+
+- `CancellationToken` 被 drop 时**不会**自动 cancel — 只是丢弃引用
+- Watcher task 会一直存活（`rx.recv()` 阻塞），泄漏 `Arc<McpClient>`、`Arc<CatalogStore>`
+- `ManagedServer::drop()` 统一负责：`cancel.cancel()` + `watcher.abort()`
+- 无论通过 `remove()`、`shutdown()` 还是 Registry 整体 drop，资源都会正确回收
 
 **完整生命周期：**
 ```
@@ -360,11 +428,18 @@ McpServerRegistry (唯一 Owner)
      ├─ ManagedServer 2
      │    └─ ...
      │
-     └─ Drop → cancel all → join all → drop all
+     └─ Drop → ManagedServer::drop() → cancel + abort (RAII)
 
 McpCatalog — 只是 Arc<CatalogStore>，无后台任务
 CatalogRefresher — 唯一写接口，Watcher 通过 trait 调用
 ```
+
+**关键决策（Grill 2026-07-12）：**
+
+- **`ManagedServer` 实现 `Drop`（RAII）** — `cancel.cancel()` + `watcher.abort()` 统一在 `ManagedServer::drop()` 中完成。
+- **`remove()` 只需 `shift_remove()`** — 取出的 `ManagedServer` 自动触发 `drop()`，无需手工 cancel。
+- **`Registry::drop()` 只需 `servers.clear()`** — 依赖 `ManagedServer::drop()` 完成资源回收。
+- **`shutdown()` 保留为异步优雅关闭** — 先尝试 `cancel()` → 等待 → `abort()`，用于需要优雅关闭的场景。
 
 ### ToolCatalog 抽象
 
@@ -468,6 +543,10 @@ McpConnected, McpDisconnected, McpReconnecting, McpToolRefreshed
 
 | 决策 | 理由 |
 |------|------|
+| Request ID 唯一来源是 McpClient | Transport 永远不生成/修改 ID，只传输已带 id 的 Request |
+| Transport 读取循环退出时必须发送 Disconnected | 确保 fail-fast 检查有效，不再向死亡连接写入数据 |
+| ManagedServer 实现 Drop (RAII) | CancellationToken drop 不会自动 cancel，必须显式 cancel + abort |
+| Registry 不实现 ToolCatalog | Registry 管生命周期，RegistryCatalog 管工具聚合 |
 | 桥接到 ToolRegistration，不改执行逻辑 | 最小抽象增量 |
 | ToolCatalog 抽象动态工具 | MCP 工具天生动态 |
 | 远程工具默认 Safe | 大多数 MCP Server 自身管理并发 |
