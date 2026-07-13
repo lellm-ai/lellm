@@ -16,7 +16,9 @@ use indexmap::IndexMap;
 use super::graph_analysis::{self, CycleAnalysis};
 use super::graph_builder::fnv_hash;
 use crate::error::{GraphDiagnostics, GraphError, TerminalError};
+use crate::event::BarrierId;
 use crate::exec::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
+use crate::ids::SpanId;
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
@@ -34,6 +36,17 @@ pub trait StepCallback<'e>: Send {
     /// - `step` — 当前步数（从 1 开始）
     /// - `duration` — 节点执行耗时
     fn on_step(&mut self, node_name: &str, step: usize, duration: std::time::Duration);
+
+    /// Barrier 等待回调 — run_inline 在遇到 Barrier Pause 信号后、等待决策前调用。
+    ///
+    /// 默认空实现 — 非流式执行路径无需此事件。
+    fn on_barrier_waiting(
+        &mut self,
+        _barrier_id: &BarrierId,
+        _node_name: &str,
+        _span_id: SpanId,
+    ) {
+    }
 }
 
 /// 空回调 — 不执行任何操作。
@@ -390,6 +403,8 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                 timeout,
             }) = signal
             {
+                let span_id = SpanId::new();
+                step_cb.on_barrier_waiting(&barrier_id, &current, span_id);
                 let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await;
                 match outcome {
                     crate::node::barrier_sink::BarrierOutcome::Decision(

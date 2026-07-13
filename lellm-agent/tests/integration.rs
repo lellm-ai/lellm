@@ -65,7 +65,7 @@ async fn test_tool_executor_snapshot_and_execute() {
     let call = ToolCall {
         id: "1".to_string(),
         name: "echo".to_string(),
-        arguments: serde_json::json!({"text": "hello"})),
+        arguments: serde_json::json!({"text": "hello"}),
     };
 
     let snapshot = executor.snapshot().await;
@@ -255,7 +255,7 @@ async fn test_tool_safe_execution() {
     let call = ToolCall {
         id: "1".to_string(),
         name: "greet_tool".to_string(),
-        arguments: serde_json::json!({"name": "世界"})),
+        arguments: serde_json::json!({"name": "世界"}),
     };
 
     let snapshot = executor.snapshot().await;

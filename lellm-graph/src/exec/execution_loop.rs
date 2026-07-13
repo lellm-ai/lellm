@@ -12,9 +12,10 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint::{Checkpoint, CheckpointSink, FrameInfo, TraceId};
-use crate::event::{BarrierDecisionMessage, GraphEvent};
+use crate::event::{BarrierDecisionMessage, BarrierId, GraphEvent};
 use crate::exec::execution_engine::ExecutionEngine;
 use crate::graph::{Graph, StepCallback};
+use crate::ids::SpanId;
 use crate::node::barrier_sink::ChannelBarrierSink;
 use crate::state::workflow_state::WorkflowState;
 use crate::state::{ExecutionEntry, GraphResult};
@@ -161,17 +162,19 @@ impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
 
 // ─── EventStepCallback ──────────────────────────────────────────
 
-/// StepCallback 实现 — 用于 run_execution_loop 追踪执行日志。
-struct EventStepCallback {
+/// StepCallback 实现 — 用于 run_execution_loop 追踪执行日志 + 发射 BarrierWaiting 事件。
+struct EventStepCallback<S: WorkflowState> {
     start_time: Instant,
     execution_log: Vec<ExecutionEntry>,
+    event_tx: Option<tokio::sync::mpsc::Sender<GraphEvent<S>>>,
 }
 
-impl EventStepCallback {
-    fn new(start_time: Instant) -> Self {
+impl<S: WorkflowState> EventStepCallback<S> {
+    fn new(start_time: Instant, event_tx: tokio::sync::mpsc::Sender<GraphEvent<S>>) -> Self {
         Self {
             start_time,
             execution_log: Vec::new(),
+            event_tx: Some(event_tx),
         }
     }
 
@@ -180,7 +183,7 @@ impl EventStepCallback {
     }
 }
 
-impl StepCallback<'_> for EventStepCallback {
+impl<S: WorkflowState + Send + 'static> StepCallback<'_> for EventStepCallback<S> {
     fn on_step(&mut self, node_name: &str, step: usize, duration: Duration) {
         let node_end = self
             .start_time
@@ -194,6 +197,21 @@ impl StepCallback<'_> for EventStepCallback {
             success: true,
             error: None,
         });
+    }
+
+    fn on_barrier_waiting(
+        &mut self,
+        barrier_id: &BarrierId,
+        node_name: &str,
+        span_id: SpanId,
+    ) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.try_send(GraphEvent::BarrierWaiting {
+                barrier_id: barrier_id.clone(),
+                node_name: node_name.to_string(),
+                span_id,
+            });
+        }
     }
 }
 
@@ -246,7 +264,7 @@ pub(crate) async fn run_execution_loop<S, M>(
     let _ = event_tx.send(GraphEvent::GraphStart { trace_id }).await;
 
     // step_cb 在 Engine 外部创建，以便在 Engine drop 后获取 execution_log
-    let mut step_cb = EventStepCallback::new(start_time);
+    let mut step_cb = EventStepCallback::new(start_time, event_tx.clone());
 
     // 在块作用域中创建 Engine，限制借用生命周期
     let result = {
