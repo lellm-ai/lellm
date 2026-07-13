@@ -20,7 +20,7 @@ pub use protocol::{
     JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
     RetryDisposition, TransportError,
 };
-pub use transport::{ConnectionState, McpTransport};
+pub use transport::{ConnectionState, McpTransport, TransportCapabilities};
 
 #[cfg(feature = "server")]
 pub use server::SimpleMcp;

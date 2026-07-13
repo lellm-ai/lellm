@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot, watch};
 
-use super::{ConnectionState, McpTransport};
+use super::{ConnectionState, McpTransport, TransportCapabilities};
 use crate::protocol::{
     JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, TransportError,
 };
@@ -275,6 +275,12 @@ impl McpTransport for StdioTransport {
         self.inner
             .as_ref()
             .map(|inner| inner.notification_tx.subscribe())
+    }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities {
+            notifications: true,
+        }
     }
 
     async fn close(&mut self) -> Result<(), McpError> {

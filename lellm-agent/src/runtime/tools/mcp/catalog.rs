@@ -18,7 +18,7 @@
 //! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 
 use indexmap::IndexMap;
 use lellm_core::{ToolDefinition, ToolError, ToolErrorKind};
@@ -151,11 +151,6 @@ impl McpCatalog {
     pub(crate) fn into_parts(self) -> (Arc<McpClient>, Arc<CatalogStore>) {
         (self.client, self.store)
     }
-
-    /// 从 Client 和 Store 创建（供 `McpServerRegistry` 内部使用）。
-    pub(crate) fn from_parts(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
-        Self { client, store }
-    }
 }
 
 impl Clone for McpCatalog {
@@ -176,23 +171,35 @@ impl ToolCatalog for McpCatalog {
 
 // ─── CatalogRefresher — 纯写接口（内部实现细节）──────────────────
 
-/// 工具目录刷新器 — 持有 Client 和 Store，执行 refresh 操作。
+/// 工具目录刷新器 — 持有 Client（Weak）和 Store，执行 refresh 操作。
+///
+/// 使用 `Weak<McpClient>` 避免 Watcher 反向延长 Client 的生命周期。
+/// 当 Client 被移除（`Registry::remove()`），Watcher 下一次刷新时自动退出。
 pub(crate) struct CatalogRefresher {
-    client: Arc<McpClient>,
+    client: Weak<McpClient>,
     store: Arc<CatalogStore>,
 }
 
 impl CatalogRefresher {
     /// 创建刷新器。
     pub(crate) fn new(client: Arc<McpClient>, store: Arc<CatalogStore>) -> Self {
-        Self { client, store }
+        Self {
+            client: Arc::downgrade(&client),
+            store,
+        }
     }
 
     /// 刷新工具目录 — 拉取最新工具列表并更新 Store。
+    ///
+    /// 如果 Client 已被 Drop（服务器被移除），返回 `McpError::Transport(Disconnected)`。
     pub(crate) async fn refresh_impl(&self) -> Result<(), lellm_mcp::McpError> {
         use CatalogStoreWrite;
+        let client = self
+            .client
+            .upgrade()
+            .ok_or_else(lellm_mcp::McpError::disconnected)?;
         let version = self.store.next_version();
-        let new_snapshot = build_snapshot(self.client.clone(), version).await?;
+        let new_snapshot = build_snapshot(client, version).await?;
         self.store.store_raw(new_snapshot);
         Ok(())
     }

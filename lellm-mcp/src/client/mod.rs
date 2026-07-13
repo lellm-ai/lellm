@@ -15,7 +15,7 @@ use super::protocol::{
     CallToolParams, CallToolResult, InitializeParams, InitializeResult, JsonRpcNotification,
     JsonRpcRequest, ListToolsResult, McpError, ServerError, TransportError, methods,
 };
-use super::transport::{ConnectionState, McpTransport};
+use super::transport::{ConnectionState, McpTransport, TransportCapabilities};
 
 /// MCP Client。
 ///
@@ -171,6 +171,11 @@ impl McpClient {
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
         self.transport.subscribe_notifications()
+    }
+
+    /// 查询 Transport 能力（编译时固定，不依赖连接状态）。
+    pub fn capabilities(&self) -> TransportCapabilities {
+        self.transport.capabilities()
     }
 
     // ─── 便捷构造 ─────────────────────────────────────────────────

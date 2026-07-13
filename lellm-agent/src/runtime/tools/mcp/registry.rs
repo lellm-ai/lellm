@@ -184,8 +184,8 @@ impl McpServerRegistry {
 
     /// 注册一个已连接并初始化的服务器。
     ///
-    /// 自动启动 Watcher 监听 tools/list_changed 通知。
-    /// 返回 McpCatalog 供 Agent 使用。
+    /// 自动启动 Watcher 监听 tools/list_changed 通知（仅当 Transport 支持时）。
+    /// 用户统一通过 `registry.catalog()` 获取聚合目录。
     ///
     /// # 错误
     /// - `RegistryError::NameConflict` — 工具名冲突且策略为 `Error`
@@ -194,7 +194,7 @@ impl McpServerRegistry {
         &mut self,
         name: impl Into<String>,
         client: McpClient,
-    ) -> Result<McpCatalog, RegistryError> {
+    ) -> Result<(), RegistryError> {
         let name = name.into();
         let client_arc = Arc::new(client);
 
@@ -214,19 +214,22 @@ impl McpServerRegistry {
         // 创建取消令牌
         let cancel = CancellationToken::new();
 
-        // 仅在 Transport 支持 notifications 时 spawn Watcher
-        let watcher = match client_arc.subscribe_notifications() {
-            Some(rx) => {
-                let refresher = CatalogRefresher::new(Arc::clone(&client_arc), Arc::clone(&store));
-                Some(McpCatalogWatcher::new(Arc::new(refresher), rx).spawn(cancel.clone()))
+        // 通过 TransportCapabilities 判断是否 spawn Watcher
+        let watcher = if client_arc.capabilities().notifications {
+            match client_arc.subscribe_notifications() {
+                Some(rx) => {
+                    let refresher =
+                        CatalogRefresher::new(Arc::clone(&client_arc), Arc::clone(&store));
+                    Some(McpCatalogWatcher::new(Arc::new(refresher), rx).spawn(cancel.clone()))
+                }
+                None => None,
             }
-            None => {
-                tracing::debug!(
-                    server = %name,
-                    "transport does not support notifications, skipping watcher"
-                );
-                None
-            }
+        } else {
+            tracing::debug!(
+                server = %name,
+                "transport does not support notifications, skipping watcher"
+            );
+            None
         };
 
         tracing::info!(
@@ -251,8 +254,7 @@ impl McpServerRegistry {
             .unwrap()
             .insert(name, Arc::clone(&store));
 
-        // 重新构建 McpCatalog 返回给用户
-        Ok(McpCatalog::from_parts(client_arc, store))
+        Ok(())
     }
 
     /// 检查工具名冲突。

@@ -24,12 +24,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 添加 SSE 服务器
     let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
     let client = McpClient::connect_sse(&sse_url).await?;
-    let _ = registry.register("qq-map-sse", client).await?;
+    registry.register("qq-map-sse", client).await?;
 
     // 添加 HTTP 服务器
     let http_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
     let client = McpClient::connect_http(&http_url).await?;
-    let _ = registry.register("qq-map-http", client).await?;
+    registry.register("qq-map-http", client).await?;
 
     // 显示工具列表
     println!("已连接服务器:");

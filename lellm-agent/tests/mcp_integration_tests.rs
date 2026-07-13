@@ -12,7 +12,7 @@ use lellm_mcp::protocol::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, McpError, ServerError,
     TransportError,
 };
-use lellm_mcp::transport::{ConnectionState, McpTransport};
+use lellm_mcp::transport::{ConnectionState, McpTransport, TransportCapabilities};
 use std::sync::Arc;
 
 // ============================================================================
@@ -120,6 +120,12 @@ impl McpTransport for MockTransport {
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
         Some(self.notif_tx.subscribe())
+    }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities {
+            notifications: true,
+        }
     }
 
     async fn close(&mut self) -> Result<(), McpError> {

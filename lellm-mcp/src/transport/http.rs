@@ -12,7 +12,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 
-use super::{ConnectionState, McpTransport};
+use super::{ConnectionState, McpTransport, TransportCapabilities};
 use crate::protocol::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, TransportError,
 };
@@ -225,9 +225,16 @@ impl McpTransport for HttpTransport {
     fn subscribe_notifications(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
-        self.inner
-            .as_ref()
-            .map(|inner| inner.notification_tx.subscribe())
+        // HTTP 是无状态的，服务器无法主动推送 notification。
+        // 即使 SSE 响应中解析到了 notification，那也是 request-response 管道内的附带物，
+        // 不是 server → client 的主动推送通道。
+        None
+    }
+
+    fn capabilities(&self) -> TransportCapabilities {
+        TransportCapabilities {
+            notifications: false,
+        }
     }
 
     async fn close(&mut self) -> Result<(), McpError> {
