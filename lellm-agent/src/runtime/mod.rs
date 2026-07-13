@@ -22,7 +22,7 @@ pub mod typed_state;
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
 pub use tools::{
-    BatchExecutionResult, CatalogDiagnostic, ConflictPolicy, CompositeCatalog, ExecutableTool,
+    BatchExecutionResult, CatalogDiagnostic, CompositeCatalog, ConflictPolicy, ExecutableTool,
     ParallelSafety, StaticCatalog, ToolArgs, ToolCatalog, ToolCategory, ToolExecutor, ToolFn,
     ToolSnapshot, execute_batch_with,
 };

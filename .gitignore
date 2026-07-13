@@ -27,6 +27,7 @@ logs/
 
 # Claude Code
 .claude/
+.mimocode/
 
 # Plans (internal temporary files)
 .planning/

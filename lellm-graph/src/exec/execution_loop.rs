@@ -199,12 +199,7 @@ impl<S: WorkflowState + Send + 'static> StepCallback<'_> for EventStepCallback<S
         });
     }
 
-    fn on_barrier_waiting(
-        &mut self,
-        barrier_id: &BarrierId,
-        node_name: &str,
-        span_id: SpanId,
-    ) {
+    fn on_barrier_waiting(&mut self, barrier_id: &BarrierId, node_name: &str, span_id: SpanId) {
         if let Some(ref tx) = self.event_tx {
             let _ = tx.try_send(GraphEvent::BarrierWaiting {
                 barrier_id: barrier_id.clone(),

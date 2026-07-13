@@ -28,8 +28,8 @@
 
 use lellm_agent::{AgentBuilder, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolResult};
-use lellm_tool::tool;
 use lellm_provider::ResolvedModel;
+use lellm_tool::tool;
 use std::sync::Arc;
 
 // ─── 定义工具 ───────────────────────────────────────────────────

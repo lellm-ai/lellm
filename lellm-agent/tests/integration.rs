@@ -1,12 +1,14 @@
-use lellm_tool::{Tool, ToolArgs};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use lellm_agent::{
     AgentBuilder, ContextBudget, ContextCompactor, ExecutableTool, LocalCompactor, StaticCatalog,
     ToolCategory, ToolExecutor, estimate_message, estimate_tokens,
 };
-use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition, ToolSchema};
+use lellm_core::{
+    ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition, ToolSchema,
+};
 use lellm_provider::{MockProvider, ResolvedModel};
+use lellm_tool::{Tool, ToolArgs};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::sync::Arc;
 
 #[tokio::test]

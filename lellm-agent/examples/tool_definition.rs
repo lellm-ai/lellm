@@ -15,12 +15,12 @@
 //! cargo run --example tool_definition
 //! ```
 
-use lellm_tool::schemars::JsonSchema;
-use lellm_tool::serde::Deserialize;
-use lellm_tool::{tool, Tool, ToolArgs};
 use lellm_agent::{AgentBuilder, ExecutableTool, ToolCategory, ToolResult, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition, ToolSchema};
 use lellm_provider::{MockProvider, ResolvedModel};
+use lellm_tool::schemars::JsonSchema;
+use lellm_tool::serde::Deserialize;
+use lellm_tool::{Tool, ToolArgs, tool};
 use std::sync::Arc;
 
 // ─── Level 1: #[tool] 函数宏（推荐，95% 用户）──────────────────

@@ -27,7 +27,7 @@ pub mod prelude {
     };
 
     #[cfg(feature = "tool")]
-    pub use lellm_tool::{compute_and_clean_schema, safe_fn, ToolArgs};
+    pub use lellm_tool::{ToolArgs, compute_and_clean_schema, safe_fn};
 
     #[cfg(feature = "provider")]
     pub use lellm_provider::{
@@ -37,20 +37,20 @@ pub mod prelude {
 
     #[cfg(feature = "graph")]
     pub use lellm_graph::{
-        BarrierDefaultAction, BarrierNode, BarrierSink, ChannelBarrierSink, ConditionNode,
-        Graph, GraphBuilder, LeafContext, LeafNode, NoopBarrierSink, NoopStepCallback,
-        SubgraphSpec, TaskNode, TerminalError,
+        BarrierDefaultAction, BarrierNode, BarrierSink, ChannelBarrierSink, ConditionNode, Graph,
+        GraphBuilder, LeafContext, LeafNode, NoopBarrierSink, NoopStepCallback, SubgraphSpec,
+        TaskNode, TerminalError,
     };
 
     #[cfg(feature = "agent")]
     pub use lellm_agent::{
-        create_agent, create_agent_full, create_agent_with_system, create_agent_with_tools,
         AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, CatalogDiagnostic,
-        ConflictPolicy, CompositeCatalog, ContextBudget, ExecutableTool, FallbackAction,
+        CompositeCatalog, ConflictPolicy, ContextBudget, ExecutableTool, FallbackAction,
         FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult, LocalCompactor,
         ParallelSafety, RetryPolicy, StaticCatalog, StopReason, ToolArgs, ToolCatalog,
         ToolCategory, ToolExecutor, ToolFn, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop,
-        ToolUseResult,
+        ToolUseResult, create_agent, create_agent_full, create_agent_with_system,
+        create_agent_with_tools,
     };
 
     #[cfg(feature = "mcp")]

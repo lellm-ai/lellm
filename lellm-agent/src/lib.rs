@@ -12,7 +12,7 @@ pub use serde;
 pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, BatchExecutionResult,
-    CatalogDiagnostic, CompactionResult, ConflictPolicy, CompositeCatalog, ContextBudget,
+    CatalogDiagnostic, CompactionResult, CompositeCatalog, ConflictPolicy, ContextBudget,
     ContextCompactor, DefaultFallback, ExecutableTool, FallbackAction, FallbackContext,
     FallbackStrategy, IntoToolError, IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel,
     ResolvedRound, RetryPolicy, StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog,

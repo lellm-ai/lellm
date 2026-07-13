@@ -25,8 +25,7 @@ pub use prompt::Prompt;
 pub use request::{ChatRequest, ReasoningConfig, ToolChoice};
 pub use response::{ChatResponse, TokenUsage};
 pub use tool::{
-    __tool_box, ExecutableTool, ParallelSafety, ToolCategory, ToolDefinition, ToolFn,
-    ToolSchema,
+    __tool_box, ExecutableTool, ParallelSafety, ToolCategory, ToolDefinition, ToolFn, ToolSchema,
 };
 
 // Re-export for macro-generated code — ensures consistent serde instances.

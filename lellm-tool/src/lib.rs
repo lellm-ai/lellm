@@ -24,9 +24,7 @@ pub use lellm_derive::tool;
 pub use lellm_derive::Tool;
 
 // Re-export core types used by tool construction.
-pub use lellm_core::{
-    ExecutableTool, ParallelSafety, ToolCategory, ToolDefinition, ToolSchema,
-};
+pub use lellm_core::{ExecutableTool, ParallelSafety, ToolCategory, ToolDefinition, ToolSchema};
 
 // ─── ToolArgs ────────────────────────────────────────────────────────
 
@@ -152,22 +150,18 @@ where
     Fut: std::future::Future<Output = lellm_core::ToolResult> + Send + 'static,
 {
     let f = std::sync::Arc::new(f);
-    ExecutableTool::category_exclusive(
-        def,
-        category,
-        move |value| {
-            let f = std::sync::Arc::clone(&f);
-            let result = T::parse(value.clone());
-            Box::pin(async move {
-                match result {
-                    Ok(parsed) => f(parsed).await,
-                    Err(e) => Err(lellm_core::ToolError::invalid_input(format!(
-                        "invalid tool arguments: {e}"
-                    ))),
-                }
-            })
-        },
-    )
+    ExecutableTool::category_exclusive(def, category, move |value| {
+        let f = std::sync::Arc::clone(&f);
+        let result = T::parse(value.clone());
+        Box::pin(async move {
+            match result {
+                Ok(parsed) => f(parsed).await,
+                Err(e) => Err(lellm_core::ToolError::invalid_input(format!(
+                    "invalid tool arguments: {e}"
+                ))),
+            }
+        })
+    })
 }
 
 /// 强类型便捷构造 — 自动反序列化参数（Exclusive）。

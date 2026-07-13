@@ -40,13 +40,7 @@ pub trait StepCallback<'e>: Send {
     /// Barrier 等待回调 — run_inline 在遇到 Barrier Pause 信号后、等待决策前调用。
     ///
     /// 默认空实现 — 非流式执行路径无需此事件。
-    fn on_barrier_waiting(
-        &mut self,
-        _barrier_id: &BarrierId,
-        _node_name: &str,
-        _span_id: SpanId,
-    ) {
-    }
+    fn on_barrier_waiting(&mut self, _barrier_id: &BarrierId, _node_name: &str, _span_id: SpanId) {}
 }
 
 /// 空回调 — 不执行任何操作。
