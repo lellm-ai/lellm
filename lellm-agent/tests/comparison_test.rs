@@ -7,7 +7,7 @@ use futures_util::stream;
 use lellm_agent::{AgentBuilder, ExecutableTool};
 use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, LlmError, Message, TokenUsage, ToolCall,
-    ToolDefinition,
+    ToolDefinition, ToolSchema,
 };
 use lellm_provider::{LlmProvider, ProviderEvent, ProviderStream, ResolvedModel};
 use std::sync::{Arc, Mutex};
@@ -194,10 +194,10 @@ async fn compare_single_tool_call() {
     let echo_def = ToolDefinition {
         name: "echo".to_string(),
         description: "echo back".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": { "msg": { "type": "string" } }
-        }),
+        })),
         cache_control: None,
     };
     let echo_reg = ExecutableTool::safe(echo_def, |args| {
@@ -313,13 +313,13 @@ async fn compare_multi_round_react() {
     let add_def = ToolDefinition {
         name: "add".to_string(),
         description: "add two numbers".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": {
                 "a": { "type": "number" },
                 "b": { "type": "number" }
             }
-        }),
+        })),
         cache_control: None,
     };
     let add_reg = ExecutableTool::safe(add_def, |args| {
@@ -474,10 +474,10 @@ async fn compare_tool_registered_but_not_called() {
     let echo_def = ToolDefinition {
         name: "echo".to_string(),
         description: "echo".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": { "msg": { "type": "string" } }
-        }),
+        })),
         cache_control: None,
     };
     let echo_reg = ExecutableTool::safe(echo_def, |args| {
@@ -606,10 +606,10 @@ async fn compare_max_iterations_reached() {
     let loop_def = ToolDefinition {
         name: "loop".to_string(),
         description: "loop tool".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": {}
-        }),
+        })),
         cache_control: None,
     };
     let loop_reg =

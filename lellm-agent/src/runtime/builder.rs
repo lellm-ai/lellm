@@ -65,7 +65,7 @@ pub struct AgentBuilder {
     /// 收集通过 `.tool()` 注册的本地静态工具（最高优先级）
     static_tools: Vec<ExecutableTool>,
     /// 收集通过 `.catalog()` 注册的动态目录（按注册顺序，先绑定的优先级高于后绑定的）
-    catalogs: Vec<Arc<dyn ToolCatalog>>,
+    catalogs: Vec<(String, Arc<dyn ToolCatalog>)>,
     config: ToolUseConfig,
     deps: ToolUseDeps,
 }
@@ -191,11 +191,11 @@ impl AgentBuilder {
     /// let client = Arc::new(McpClient::with_transport(transport));
     /// let catalog = McpCatalog::discover(client).await?;
     /// let agent = AgentBuilder::new(model)
-    ///     .catalog(Arc::new(catalog))
+    ///     .catalog("my-mcp-server", Arc::new(catalog))
     ///     .build();
     /// ```
-    pub fn catalog(mut self, catalog: Arc<dyn ToolCatalog>) -> Self {
-        self.catalogs.push(catalog);
+    pub fn catalog(mut self, name: impl Into<String>, catalog: Arc<dyn ToolCatalog>) -> Self {
+        self.catalogs.push((name.into(), catalog));
         self
     }
 
@@ -475,10 +475,13 @@ impl AgentBuilder {
     /// 内部辅助 — 分解为 (Model, Executor, Config, Deps)。
     fn into_parts(self) -> (ResolvedModel, ToolExecutor, ToolUseConfig, ToolUseDeps) {
         // 构造优先级队列：本地静态工具永远拥有最高优先级
-        let mut sources: Vec<Arc<dyn ToolCatalog>> = Vec::new();
+        let mut sources: Vec<(String, Arc<dyn ToolCatalog>)> = Vec::new();
 
         if !self.static_tools.is_empty() {
-            sources.push(Arc::new(StaticCatalog::from_tools(self.static_tools)));
+            sources.push((
+                "builtin".to_string(),
+                Arc::new(StaticCatalog::from_tools(self.static_tools)),
+            ));
         }
 
         sources.extend(self.catalogs);
@@ -486,7 +489,7 @@ impl AgentBuilder {
         // 坍缩成最终的单根 Catalog
         let final_catalog: Arc<dyn ToolCatalog> = match sources.len() {
             0 => Arc::new(StaticCatalog::empty()),
-            1 => sources.remove(0),
+            1 => sources.remove(0).1,
             _ => Arc::new(CompositeCatalog::new(sources)),
         };
 

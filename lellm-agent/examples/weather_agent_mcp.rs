@@ -26,7 +26,7 @@ mod shared;
 use lellm_agent::AgentBuilder;
 use lellm_agent::McpCatalog;
 use lellm_core::{Message, ToolError, ToolErrorKind, ToolResult, text_block};
-use lellm_derive::tool;
+use lellm_tool::tool;
 use lellm_mcp::McpClient;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
@@ -158,7 +158,7 @@ async fn create_agent(
     // 本地工具
     .tool(http_get_tool())
     // MCP 动态工具（resolve_city）
-    .catalog(mcp_catalog)
+    .catalog("weather-mcp", mcp_catalog)
     .max_iterations(10)
     .max_output_tokens(8000)
     .compile())

@@ -5,6 +5,7 @@ members = [
     "lellm-provider",
     "lellm-agent",
     "lellm-derive",
+    "lellm-tool",
     "lellm-mcp",
     "lellm-graph",
 ]
@@ -22,6 +23,7 @@ lellm-provider = { path = "lellm-provider", version = "0.4" }
 lellm-agent = { path = "lellm-agent", version = "0.4" }
 lellm-derive = { path = "lellm-derive", version = "0.4" }
 lellm-mcp = { path = "lellm-mcp", version = "0.4" }
+lellm-tool = { path = "lellm-tool", version = "0.4", default-features = false }
 lellm-graph = { path = "lellm-graph", version = "0.4" }
 
 # Common

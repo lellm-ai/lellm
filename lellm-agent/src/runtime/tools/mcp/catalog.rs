@@ -96,7 +96,7 @@ impl CatalogStoreWrite for CatalogStore {
 /// let catalog = McpCatalog::discover(client.into()).await?;
 ///
 /// let agent = AgentBuilder::new(model)
-///     .catalog(Arc::new(catalog))
+///     .catalog("my-mcp", Arc::new(catalog))
 ///     .build();
 /// ```
 pub struct McpCatalog {
@@ -231,7 +231,7 @@ pub(super) async fn build_snapshot(
             ToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.input_schema.clone(),
+                parameters: lellm_core::ToolSchema::new(tool.input_schema.clone()),
                 cache_control: None,
             },
         );

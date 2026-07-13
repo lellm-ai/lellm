@@ -28,7 +28,7 @@
 
 use lellm_agent::{AgentBuilder, ToolUseLoop};
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolResult};
-use lellm_derive::tool;
+use lellm_tool::tool;
 use lellm_provider::ResolvedModel;
 use std::sync::Arc;
 

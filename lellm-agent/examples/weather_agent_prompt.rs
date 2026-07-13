@@ -12,7 +12,7 @@ mod shared;
 
 use lellm_agent::AgentBuilder;
 use lellm_core::{Message, Prompt, ToolError, ToolErrorKind, ToolResult, text_block};
-use lellm_derive::tool;
+use lellm_tool::tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;

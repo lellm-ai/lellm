@@ -51,16 +51,16 @@
 //! ## Level 3: `ExecutableTool::safe()`（框架开发者）
 //!
 //! ```ignore
-//! use lellm_core::{ExecutableTool, ToolDefinition};
+//! use lellm_core::{ExecutableTool, ToolDefinition, ToolSchema};
 //!
 //! let reg = ExecutableTool::safe(
 //!     ToolDefinition {
 //!         name: "search".to_string(),
 //!         description: "搜索".to_string(),
-//!         parameters: serde_json::json!({
+//!         parameters: ToolSchema::new(serde_json::json!({
 //!             "type": "object",
 //!             "properties": { "query": { "type": "string" } }
-//!         }),
+//!         })),
 //!     },
 //!     |args| async { Ok(args["query"].as_str().unwrap().to_string()) }
 //! );

@@ -14,7 +14,7 @@ use lellm_agent::{
     BackoffStrategy, CompositeCatalog, ExecutableTool, RetryPolicy, StaticCatalog, ToolCatalog,
     ToolExecutor, ToolSnapshot, execute_batch_with,
 };
-use lellm_core::{ToolCall, ToolDefinition, ToolErrorKind};
+use lellm_core::{ToolCall, ToolDefinition, ToolErrorKind, ToolSchema};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -29,10 +29,10 @@ fn make_echo_tool(name: &str) -> ExecutableTool {
         ToolDefinition {
             name: name_str.clone(),
             description: format!("echo {}", name_str),
-            parameters: serde_json::json!({
+            parameters: ToolSchema::new(serde_json::json!({
                 "type": "object",
                 "properties": { "text": { "type": "string" } }
-            }),
+            })),
             cache_control: None,
         },
         move |args| {
@@ -53,10 +53,10 @@ fn make_exclusive_tool(name: &str) -> ExecutableTool {
         ToolDefinition {
             name: name_str.clone(),
             description: format!("exclusive {}", name_str),
-            parameters: serde_json::json!({
+            parameters: ToolSchema::new(serde_json::json!({
                 "type": "object",
                 "properties": { "text": { "type": "string" } }
-            }),
+            })),
             cache_control: None,
         },
         move |args| {
@@ -77,10 +77,10 @@ fn make_category_tool(name: &str, cat: lellm_agent::ToolCategory) -> ExecutableT
         ToolDefinition {
             name: name_str.clone(),
             description: format!("category {}", name_str),
-            parameters: serde_json::json!({
+            parameters: ToolSchema::new(serde_json::json!({
                 "type": "object",
                 "properties": { "text": { "type": "string" } }
-            }),
+            })),
             cache_control: None,
         },
         cat,
@@ -314,7 +314,10 @@ async fn test_composite_catalog_shadowing() {
         make_echo_tool("only_in_low"),
     ]);
 
-    let composite = CompositeCatalog::new(vec![Arc::new(high_priority), Arc::new(low_priority)]);
+    let composite = CompositeCatalog::new(vec![
+        ("high_priority".to_string(), Arc::new(high_priority)),
+        ("low_priority".to_string(), Arc::new(low_priority)),
+    ]);
 
     let snap = composite.snapshot().await;
 

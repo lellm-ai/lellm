@@ -10,12 +10,13 @@ repository = "https://github.com/lellm-ai/lellm"
 [features]
 default = ["provider"]
 core = ["dep:lellm-core"]
+tool = ["dep:lellm-core", "dep:lellm-tool"]
 provider = ["dep:lellm-core", "dep:lellm-provider"]
 graph = ["dep:lellm-core", "dep:lellm-graph"]
-agent = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-provider", "dep:lellm-agent"]
-mcp = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-mcp", "dep:lellm-agent", "lellm-agent/mcp", "lellm-agent/sse", "lellm-agent/http"]
+agent = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-provider", "dep:lellm-agent", "dep:lellm-tool"]
+mcp = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-mcp", "dep:lellm-agent", "dep:lellm-tool", "lellm-agent/mcp", "lellm-agent/sse", "lellm-agent/http"]
 derive = ["dep:lellm-derive"]
-full = ["graph", "provider", "agent", "mcp", "derive"]
+full = ["graph", "provider", "agent", "mcp", "derive", "tool"]
 
 [dependencies]
 lellm-core = { workspace = true, optional = true }
@@ -24,3 +25,4 @@ lellm-graph = { workspace = true, optional = true }
 lellm-agent = { workspace = true, optional = true }
 lellm-mcp = { workspace = true, optional = true }
 lellm-derive = { workspace = true, optional = true }
+lellm-tool = { workspace = true, optional = true }

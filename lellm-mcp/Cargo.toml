@@ -8,8 +8,6 @@ documentation = "https://docs.rs/lellm-mcp"
 repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
-lellm-core.workspace = true
-
 async-trait.workspace = true
 indexmap.workspace = true
 serde.workspace = true

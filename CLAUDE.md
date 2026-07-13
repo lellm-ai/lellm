@@ -12,8 +12,28 @@ LeLLM 传递快乐
 ## 必看
 [蓝图](./docs/BLUEPRINT.md)
 
-## 测试
-- 每个单元测试耗时务必小于10s，对于外部调用的测试(含超时)务必小于30s，否则立刻优化
+## 测试  Test Performance Rules
+* 单个测试耗时必须 **< 10s**。
+* 涉及外部调用（HTTP、MCP、DB、进程、IO 等）的测试耗时必须 **< 30s**。
+* 任意测试耗时 **> 1s**，必须标注原因。
+
+优化慢测试时：
+
+* 优先使用 mock/fake，避免真实网络、服务、LLM 调用。
+* 禁止使用长时间 `sleep` 等待，使用 `Notify`、`channel` 等事件同步方式。
+* 禁止通过增加 timeout 掩盖慢测试。
+
+运行测试时：
+
+* 优先测试受影响 crate：
+
+  ```bash
+  cargo test -p <crate>
+  ```
+* 修改完成后再运行 workspace 全量测试。
+
+测试目标：验证行为，不验证等待时间。
+
 
 ## 发布
 - 务必使用 scripts/publish.sh

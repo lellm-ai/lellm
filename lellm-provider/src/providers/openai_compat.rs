@@ -564,7 +564,7 @@ fn serialize_openai_tools(tools: &[ToolDefinition]) -> Vec<serde_json::Value> {
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters
+                    "parameters": tool.parameters.as_value()
                 }
             })
         })
@@ -674,7 +674,7 @@ mod tests {
         let tools = vec![ToolDefinition {
             name: "search".into(),
             description: "Search".into(),
-            parameters: serde_json::json!({"type": "object"}),
+            parameters: lellm_core::ToolSchema::new(serde_json::json!({"type": "object"})),
             cache_control: Some(CacheControl::Breakpoint),
         }];
         let result = serialize_openai_tools(&tools);

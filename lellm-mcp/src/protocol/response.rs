@@ -131,7 +131,7 @@ impl ContentBlock {
 
     /// 将多个 ContentBlock 拼接为纯文本，忽略非 Text 类型。
     ///
-    /// 对齐 `lellm_core::ContentBlock::flatten_text()` 的语义，
+    /// 语义：提取所有 Text 块，分隔符为 `\n\n`。
     /// 分隔符为 `\n\n`。当存在非文本块时发出 warn 日志。
     pub fn flatten_text(blocks: &[ContentBlock]) -> String {
         let has_non_text = blocks.iter().any(|b| b.as_text().is_none());

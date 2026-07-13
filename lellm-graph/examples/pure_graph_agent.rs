@@ -34,7 +34,7 @@
 
 use async_trait::async_trait;
 use lellm_core::{ChatRequest, ContentBlock, ExecutableTool, Message, ToolCall, ToolDefinition};
-use lellm_derive::tool;
+use lellm_tool::tool;
 use lellm_graph::{
     GraphBuilder, GraphError, NodeContext, NodeKind, State, StateMerge, StateMutation, TaskNode,
 };

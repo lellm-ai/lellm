@@ -1,17 +1,18 @@
 //! 工具系统 — 协议层 + 可执行工具描述。
 //!
-//! 本模块定义了工具的基础类型，不依赖任何运行时（tokio/futures）。
+//! 本模块定义了工具的基础类型，不依赖任何运行时（tokio/futures）和 schemars。
 //!
 //! **分层：**
-//! - 协议层：`ToolArgs`, `ToolDefinition`, `ParallelSafety`, `ToolCategory`
+//! - 协议层：`ToolDefinition`, `ParallelSafety`, `ToolCategory`
 //! - 可执行描述：`ExecutableTool`（定义 + 执行器，但不负责调度/重试/目录）
+//! - 构造框架：`lellm-tool` crate（`ToolArgs`, schema 生成，`#[tool]` 宏）
 //!
-//! `ExecutableTool` 是 `#[tool]` 宏的产物，可在 graph 层直接使用。
+//! `ExecutableTool` 可通过 `ExecutableTool::safe()` 等低级工厂构造，
+//! 或由 `lellm-tool` 的 `#[tool]` 宏自动生成。
 //! 真正的运行时（lookup, dispatch, retry, parallel, snapshot）全部留给 lellm-agent。
 
 use std::borrow::Cow;
 use std::future::Future;
-use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -22,22 +23,30 @@ use crate::ToolResult;
 /// 工具参数 Schema — 清洗后的 JSON Schema（不含 $schema, title 等元数据噪音）。
 ///
 /// Newtype 封装，预留扩展空间（schema hash、version、validation 等）。
-/// 通过 `Deref` 透明访问内部 `serde_json::Value`。
-#[repr(transparent)]
+/// schema 一旦创建即不可变，通过 `as_value()` 只读访问。
+///
+/// **注意：** 目前 `ToolSchema` 是 `serde_json::Value` 的语义包装，
+/// 不做运行时 JSON Schema 验证（如类型检查、required 字段校验等）。
+/// 验证职责留给 Provider 适配层（Codec），因为不同 Provider
+///（OpenAI、Anthropic、MCP）对 JSON Schema 的子集支持不同。
+/// `ToolSchema` 的类型名是一种**语义承诺**，而非**运行时保证**。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolSchema(pub serde_json::Value);
+pub struct ToolSchema(serde_json::Value);
 
 impl ToolSchema {
+    /// 创建新的 ToolSchema。
     pub fn new(value: serde_json::Value) -> Self {
         Self(value)
     }
-}
 
-impl Deref for ToolSchema {
-    type Target = serde_json::Value;
-
-    fn deref(&self) -> &Self::Target {
+    /// 只读访问内部 JSON Value。
+    pub fn as_value(&self) -> &serde_json::Value {
         &self.0
+    }
+
+    /// 消费自身，返回内部 JSON Value。
+    pub fn into_value(self) -> serde_json::Value {
+        self.0
     }
 }
 
@@ -74,61 +83,6 @@ impl<'de> serde::Deserialize<'de> for ToolSchema {
         D: serde::Deserializer<'de>,
     {
         serde_json::Value::deserialize(deserializer).map(ToolSchema)
-    }
-}
-
-// ─── ToolArgs ───────────────────────────────────────────────────
-
-/// 工具参数 trait — 由 `#[tool]` 宏自动生成。
-///
-/// 实现了此 trait 的结构体，即可通过 `tool_definition()` 方法
-/// 自动获得 `ToolDefinition`（含 JSON Schema）。
-///
-/// # 约束
-/// - `DeserializeOwned` — 可从任意 JSON Value 反序列化
-/// - `JsonSchema` — 可生成参数 Schema
-/// - `Send + Sync + 'static` — 可在异步运行时中安全传递
-///
-/// # 示例
-/// ```ignore
-/// use lellm_derive::tool;
-///
-/// #[tool(name = "search", description = "搜索互联网信息")]
-/// async fn search(query: String, limit: u32) -> String {
-///     format!("results for {}", query)
-/// }
-/// // 生成 SearchArgs struct + search_tool() 工厂函数
-/// ```
-pub trait ToolArgs:
-    serde::de::DeserializeOwned + schemars::JsonSchema + Send + Sync + 'static
-{
-    /// 工具名称（蛇形命名）
-    const NAME: &'static str;
-    /// 工具描述
-    const DESCRIPTION: &'static str;
-    /// JSON Schema（LazyLock 缓存）
-    fn schema() -> ToolSchema;
-
-    /// 从原始 JSON Value 反序列化工具参数。
-    ///
-    /// 默认实现调用 `serde_json::from_value()`，通常无需重写。
-    fn parse(value: serde_json::Value) -> Result<Self, serde_json::Error>
-    where
-        Self: Sized,
-    {
-        serde_json::from_value(value)
-    }
-
-    /// 自动生成 ToolDefinition（含 JSON Schema）。
-    ///
-    /// 默认实现无缓存。`#[tool]` 宏会生成带 `LazyLock` 缓存的覆盖版本。
-    fn tool_definition() -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: Self::DESCRIPTION.to_string(),
-            parameters: Self::schema().0,
-            cache_control: None,
-        }
     }
 }
 
@@ -177,8 +131,11 @@ pub struct ToolDefinition {
     pub name: String,
     /// 工具描述
     pub description: String,
-    /// JSON Schema 参数定义
-    pub parameters: serde_json::Value,
+    /// JSON Schema 参数定义（`ToolSchema` 语义包装，目前不做运行时验证）。
+    ///
+    /// 通过 `as_value()` 只读访问，或 `into_value()` 消费。
+    /// Provider 适配层负责根据目标 API 格式进行二次适配。
+    pub parameters: ToolSchema,
     /// 缓存控制标记。Anthropic 支持 Tool Definition 级别的缓存。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<crate::message::CacheControl>,
@@ -191,34 +148,6 @@ impl ToolDefinition {
             cache_control: Some(cache),
             ..self
         }
-    }
-
-    /// 从 `schemars::JsonSchema` 类型计算并清洗 JSON Schema。
-    ///
-    /// 供 `#[tool]` 宏生成的 `LazyLock` 调用，不在泛型函数中使用 `LazyLock`。
-    ///
-    /// **清洗规则：** 去除 `$schema`, `$id`, `title`, `description` 等根部元数据，
-    /// 保留 `type`, `properties`, `required`, `definitions` 等核心 JSON Schema 字段。
-    pub fn compute_and_clean_schema<S: schemars::JsonSchema>() -> ToolSchema {
-        let root = schemars::schema_for!(S);
-        let val = serde_json::to_value(&root)
-            .expect("Failed to serialize JsonSchema; this is a bug in schemars");
-        ToolSchema(Self::clean_schema(val))
-    }
-
-    /// 清洗 schemars 生成的 RootSchema，去除根部元数据噪音。
-    ///
-    /// 保留 `type`, `properties`, `required`, `definitions`, `additionalProperties`
-    /// 等核心 JSON Schema 字段。Codec 层在此基础上进行 Provider 特定的二次适配。
-    fn clean_schema(mut value: serde_json::Value) -> serde_json::Value {
-        if let Some(obj) = value.as_object_mut() {
-            // 去除标准 JSON Schema 根部的噪声元数据
-            obj.remove("$schema");
-            obj.remove("$id");
-            obj.remove("title");
-            obj.remove("description");
-        }
-        value
     }
 }
 
@@ -354,80 +283,5 @@ impl ExecutableTool {
             category: None,
             executor: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
         }
-    }
-
-    // ─── 高层构造 — 强类型输入（自动反序列化） ─────────────────
-
-    /// 强类型便捷构造 — 自动反序列化参数（Safe）。
-    ///
-    /// 闭包接收反序列化后的 `T`，而非原始 `serde_json::Value`。
-    /// 反序列化失败时返回 `ToolErrorKind::InvalidInput`。
-    pub fn safe_fn<T, F, Fut>(def: ToolDefinition, f: F) -> Self
-    where
-        T: ToolArgs + Send + 'static,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ToolResult> + Send + 'static,
-    {
-        let f = Arc::new(f);
-        Self::safe(def, move |value| {
-            let f = Arc::clone(&f);
-            let result = T::parse(value.clone());
-            async move {
-                match result {
-                    Ok(parsed) => f(parsed).await,
-                    Err(e) => Err(crate::ToolError::invalid_input(format!(
-                        "invalid tool arguments: {e}"
-                    ))),
-                }
-            }
-        })
-    }
-
-    /// 强类型便捷构造 — 自动反序列化参数（CategoryExclusive）。
-    pub fn category_exclusive_fn<T, F, Fut>(
-        def: ToolDefinition,
-        category: ToolCategory,
-        f: F,
-    ) -> Self
-    where
-        T: ToolArgs + Send + 'static,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ToolResult> + Send + 'static,
-    {
-        let f = Arc::new(f);
-        Self::category_exclusive(def, category, move |value| {
-            let f = Arc::clone(&f);
-            let result = T::parse(value.clone());
-            async move {
-                match result {
-                    Ok(parsed) => f(parsed).await,
-                    Err(e) => Err(crate::ToolError::invalid_input(format!(
-                        "invalid tool arguments: {e}"
-                    ))),
-                }
-            }
-        })
-    }
-
-    /// 强类型便捷构造 — 自动反序列化参数（Exclusive）。
-    pub fn exclusive_fn<T, F, Fut>(def: ToolDefinition, f: F) -> Self
-    where
-        T: ToolArgs + Send + 'static,
-        F: Fn(T) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = ToolResult> + Send + 'static,
-    {
-        let f = Arc::new(f);
-        Self::exclusive(def, move |value| {
-            let f = Arc::clone(&f);
-            let result = T::parse(value.clone());
-            async move {
-                match result {
-                    Ok(parsed) => f(parsed).await,
-                    Err(e) => Err(crate::ToolError::invalid_input(format!(
-                        "invalid tool arguments: {e}"
-                    ))),
-                }
-            }
-        })
     }
 }

@@ -15,11 +15,11 @@
 //! cargo run --example tool_definition
 //! ```
 
-use lellm_agent::schemars::JsonSchema;
-use lellm_agent::serde::Deserialize;
-use lellm_agent::{AgentBuilder, ExecutableTool, ToolArgs, ToolCategory, ToolResult, ToolUseLoop};
-use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition};
-use lellm_derive::{Tool, tool};
+use lellm_tool::schemars::JsonSchema;
+use lellm_tool::serde::Deserialize;
+use lellm_tool::{tool, Tool, ToolArgs};
+use lellm_agent::{AgentBuilder, ExecutableTool, ToolCategory, ToolResult, ToolUseLoop};
+use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition, ToolSchema};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -65,13 +65,13 @@ fn register_manually() -> Vec<ExecutableTool> {
     let search_def = ToolDefinition {
         name: "manual_search".to_string(),
         description: "手动定义的搜索工具".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": {
                 "query": { "type": "string", "description": "搜索关键词" }
             },
             "required": ["query"]
-        }),
+        })),
         cache_control: None,
     };
 

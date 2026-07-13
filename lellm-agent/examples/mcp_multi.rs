@@ -10,7 +10,7 @@
 //! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features "sse,http" -p lellm-agent
 //! ```
 
-use lellm_agent::{McpServerRegistry, ToolCatalog};
+use lellm_agent::McpServerRegistry;
 use lellm_mcp::McpClient;
 
 #[tokio::main]

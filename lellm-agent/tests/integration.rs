@@ -1,11 +1,11 @@
-use lellm_agent::schemars::JsonSchema;
-use lellm_agent::serde::Deserialize;
+use lellm_tool::{Tool, ToolArgs};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use lellm_agent::{
     AgentBuilder, ContextBudget, ContextCompactor, ExecutableTool, LocalCompactor, StaticCatalog,
-    ToolArgs, ToolCategory, ToolExecutor, estimate_message, estimate_tokens,
+    ToolCategory, ToolExecutor, estimate_message, estimate_tokens,
 };
-use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition};
-use lellm_derive::Tool;
+use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolCall, ToolDefinition, ToolSchema};
 use lellm_provider::{MockProvider, ResolvedModel};
 use std::sync::Arc;
 
@@ -42,12 +42,12 @@ async fn test_tool_executor_snapshot_and_execute() {
     let def = ToolDefinition {
         name: "echo".to_string(),
         description: "echo tool".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string" }
             }
-        }),
+        })),
         cache_control: None,
     };
     let reg = ExecutableTool::safe(def, |args: &serde_json::Value| {
@@ -65,7 +65,7 @@ async fn test_tool_executor_snapshot_and_execute() {
     let call = ToolCall {
         id: "1".to_string(),
         name: "echo".to_string(),
-        arguments: serde_json::json!({"text": "hello"}),
+        arguments: serde_json::json!({"text": "hello"})),
     };
 
     let snapshot = executor.snapshot().await;
@@ -116,7 +116,7 @@ fn test_tool_definition_generation() {
     assert_eq!(def.description, "搜索天气信息");
 
     // 检查 Schema 结构
-    let schema = &def.parameters;
+    let schema = def.parameters.as_value();
     assert_eq!(schema.get("type").unwrap(), "object");
 
     let properties = schema.get("properties").unwrap().as_object().unwrap();
@@ -195,6 +195,7 @@ fn test_option_type_inference() {
     let def = TypedTestArgs::tool_definition();
     let properties = def
         .parameters
+        .as_value()
         .get("properties")
         .unwrap()
         .as_object()
@@ -216,7 +217,7 @@ fn test_option_type_inference() {
     expect_type(&properties["opt_float"]["type"], "number");
 
     // 全部是 Option，required 应为空
-    let required = def.parameters.get("required");
+    let required = def.parameters.as_value().get("required");
     assert!(required.map_or(true, |r| r.as_array().map_or(true, |a| a.is_empty())));
 }
 
@@ -254,7 +255,7 @@ async fn test_tool_safe_execution() {
     let call = ToolCall {
         id: "1".to_string(),
         name: "greet_tool".to_string(),
-        arguments: serde_json::json!({"name": "世界"}),
+        arguments: serde_json::json!({"name": "世界"})),
     };
 
     let snapshot = executor.snapshot().await;
@@ -319,10 +320,10 @@ async fn test_builder_with_tool() {
     let def = ToolDefinition {
         name: "echo".to_string(),
         description: "echo tool".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": { "msg": { "type": "string" } }
-        }),
+        })),
         cache_control: None,
     };
 
@@ -370,7 +371,7 @@ fn test_builder_chain_api() {
     let def = ToolDefinition {
         name: "test_tool".to_string(),
         description: "test".to_string(),
-        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        parameters: ToolSchema::new(serde_json::json!({"type": "object", "properties": {}})),
         cache_control: None,
     };
     let reg = ExecutableTool::safe(def, |_| async { Ok(serde_json::json!("done")) });
@@ -411,10 +412,10 @@ async fn test_create_agent_with_tools() {
     let def = ToolDefinition {
         name: "greet".to_string(),
         description: "greet someone".to_string(),
-        parameters: serde_json::json!({
+        parameters: ToolSchema::new(serde_json::json!({
             "type": "object",
             "properties": { "name": { "type": "string" } }
-        }),
+        })),
         cache_control: None,
     };
     let reg = ExecutableTool::safe(def, |args| {
@@ -481,7 +482,7 @@ fn test_create_agent_full() {
     let def = ToolDefinition {
         name: "t".to_string(),
         description: "test".to_string(),
-        parameters: serde_json::json!({"type": "object", "properties": {}}),
+        parameters: ToolSchema::new(serde_json::json!({"type": "object", "properties": {}})),
         cache_control: None,
     };
     let reg = ExecutableTool::safe(def, |_| async { Ok(serde_json::json!("ok")) });

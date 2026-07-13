@@ -11,7 +11,6 @@ repository = "https://github.com/lellm-ai/lellm"
 anyhow = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-schemars.workspace = true
 thiserror.workspace = true
 
 [features]

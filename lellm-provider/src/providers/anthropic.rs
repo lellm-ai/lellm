@@ -193,7 +193,7 @@ impl ChatCodec for AnthropicCodec {
                     let mut obj = serde_json::Map::new();
                     obj.insert("name".into(), t.name.clone().into());
                     obj.insert("description".into(), t.description.clone().into());
-                    obj.insert("input_schema".into(), t.parameters.clone());
+                    obj.insert("input_schema".into(), t.parameters.as_value().clone());
                     if t.cache_control == Some(CacheControl::Breakpoint) {
                         obj.insert(
                             "cache_control".into(),
@@ -626,7 +626,7 @@ mod tests {
             tools: Some(vec![lellm_core::ToolDefinition {
                 name: "search".into(),
                 description: "Search the web".into(),
-                parameters: serde_json::json!({"type": "object"}),
+                parameters: lellm_core::ToolSchema::new(serde_json::json!({"type": "object"})),
                 cache_control: Some(CacheControl::Breakpoint),
             }]),
             ..Default::default()
@@ -648,7 +648,7 @@ mod tests {
             tools: Some(vec![lellm_core::ToolDefinition {
                 name: "search".into(),
                 description: "Search the web".into(),
-                parameters: serde_json::json!({"type": "object"}),
+                parameters: lellm_core::ToolSchema::new(serde_json::json!({"type": "object"})),
                 cache_control: None,
             }]),
             ..Default::default()

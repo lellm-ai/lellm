@@ -300,7 +300,7 @@ pub(super) fn empty_response() -> lellm_core::ChatResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lellm_core::Prompt;
+    use lellm_core::{Prompt, ToolSchema};
 
     #[test]
     fn test_build_request_messages_with_prompt() {
@@ -408,19 +408,19 @@ mod tests {
             ToolDefinition {
                 name: "search".into(),
                 description: "Search".into(),
-                parameters: serde_json::json!({}),
+                parameters: ToolSchema::new(serde_json::json!({})),
                 cache_control: None,
             },
             ToolDefinition {
                 name: "calculate".into(),
                 description: "Calculate".into(),
-                parameters: serde_json::json!({}),
+                parameters: ToolSchema::new(serde_json::json!({})),
                 cache_control: None,
             },
             ToolDefinition {
                 name: "save".into(),
                 description: "Save".into(),
-                parameters: serde_json::json!({}),
+                parameters: ToolSchema::new(serde_json::json!({})),
                 cache_control: None,
             },
         ];
@@ -463,13 +463,13 @@ mod tests {
             ToolDefinition {
                 name: "search".into(),
                 description: "Search".into(),
-                parameters: serde_json::json!({}),
+                parameters: ToolSchema::new(serde_json::json!({})),
                 cache_control: None,
             },
             ToolDefinition {
                 name: "calculate".into(),
                 description: "Calculate".into(),
-                parameters: serde_json::json!({}),
+                parameters: ToolSchema::new(serde_json::json!({})),
                 // User explicitly set cache_control
                 cache_control: Some(CacheControl::Breakpoint),
             },

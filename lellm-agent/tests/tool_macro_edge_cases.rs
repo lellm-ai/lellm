@@ -7,7 +7,7 @@
 
 use lellm_agent::{StaticCatalog, ToolArgs, ToolCategory, ToolExecutor};
 use lellm_core::{ToolCall, ToolError, ToolErrorKind, ToolResult};
-use lellm_derive::tool;
+use lellm_tool::tool;
 use std::sync::Arc;
 
 // ============================================================================
@@ -227,7 +227,7 @@ fn test_tool_registration_definition() {
     let def = reg.definition();
 
     assert_eq!(def.name, "add_numbers");
-    let schema = &def.parameters;
+    let schema = def.parameters.as_value();
     assert!(schema.get("properties").is_some());
 }
 

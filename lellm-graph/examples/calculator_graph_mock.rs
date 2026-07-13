@@ -16,7 +16,7 @@ use lellm_core::{
     ChatRequest, ChatResponse, ContentBlock, ExecutableTool, LlmError, Message, TokenUsage,
     ToolCall, ToolDefinition,
 };
-use lellm_derive::tool;
+use lellm_tool::tool;
 use lellm_graph::{
     GraphBuilder, GraphError, NodeContext, NodeKind, State, StateMerge, StateMutation, TaskNode,
 };

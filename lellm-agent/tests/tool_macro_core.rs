@@ -7,7 +7,7 @@
 
 use lellm_agent::ToolArgs;
 use lellm_core::ToolResult;
-use lellm_derive::tool;
+use lellm_tool::tool;
 
 // ============================================================================
 // 1. 最基础的 #[tool] 函数 — 无额外配置
@@ -35,6 +35,7 @@ fn test_basic_tool_schema() {
     let def = AddNumbersArgs::tool_definition();
     let properties = def
         .parameters
+        .as_value()
         .get("properties")
         .unwrap()
         .as_object()
@@ -43,7 +44,7 @@ fn test_basic_tool_schema() {
     assert_eq!(properties["a"]["type"], "integer");
     assert_eq!(properties["b"]["type"], "integer");
 
-    let required = def.parameters.get("required").unwrap().as_array().unwrap();
+    let required = def.parameters.as_value().get("required").unwrap().as_array().unwrap();
     assert!(required.iter().any(|v| v.as_str() == Some("a")));
     assert!(required.iter().any(|v| v.as_str() == Some("b")));
 }
@@ -116,6 +117,7 @@ fn test_various_param_types_schema() {
     let def = TypedFunctionArgs::tool_definition();
     let properties = def
         .parameters
+        .as_value()
         .get("properties")
         .unwrap()
         .as_object()
@@ -134,7 +136,7 @@ fn test_various_param_types_schema() {
     );
     assert_eq!(properties["tags"]["type"], "array");
 
-    let required = def.parameters.get("required").unwrap().as_array().unwrap();
+    let required = def.parameters.as_value().get("required").unwrap().as_array().unwrap();
     let required_set: std::collections::HashSet<&str> =
         required.iter().filter_map(|v| v.as_str()).collect();
 
@@ -166,7 +168,7 @@ fn test_no_param_tool() {
     assert_eq!(reg.definition().name, "get_timestamp");
 
     let def = GetTimestampArgs::tool_definition();
-    let properties = def.parameters.get("properties");
+    let properties = def.parameters.as_value().get("properties");
     assert!(
         properties.is_none()
             || properties

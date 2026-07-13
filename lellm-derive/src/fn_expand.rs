@@ -103,8 +103,8 @@ pub(crate) fn expand_tool_for_fn(
         // 2. 自动生成的参数结构体
         /// Auto-generated tool arguments for `#fn_name`
         #[derive(
-            ::lellm_core::serde::Deserialize,
-            ::lellm_core::schemars::JsonSchema
+            ::serde::Deserialize,
+            ::schemars::JsonSchema
         )]
         #visibility struct #struct_name {
             #(#fields),*

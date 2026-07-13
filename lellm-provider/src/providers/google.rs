@@ -425,7 +425,7 @@ fn serialize_google_tools(tools: &[lellm_core::ToolDefinition]) -> Vec<serde_jso
             if !tool.description.is_empty() {
                 obj.insert("description".into(), tool.description.clone().into());
             }
-            obj.insert("parameters".into(), tool.parameters.clone());
+            obj.insert("parameters".into(), tool.parameters.as_value().clone());
             serde_json::Value::Object(obj)
         })
         .collect()
@@ -453,7 +453,7 @@ mod tests {
         let tools = vec![lellm_core::ToolDefinition {
             name: "search".into(),
             description: "Search".into(),
-            parameters: serde_json::json!({"type": "object"}),
+            parameters: lellm_core::ToolSchema::new(serde_json::json!({"type": "object"})),
             cache_control: Some(CacheControl::Breakpoint),
         }];
         let result = serialize_google_tools(&tools);

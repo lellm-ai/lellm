@@ -6,19 +6,19 @@
 pub mod hook;
 pub mod runtime;
 
-// Re-export schemars & serde so derive(Tool) / #[tool] macros can reference them.
-pub use schemars;
+// Re-export serde for compatibility.
 pub use serde;
 
 pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, BatchExecutionResult,
-    CompactionResult, CompositeCatalog, ContextBudget, ContextCompactor, DefaultFallback,
-    ExecutableTool, FallbackAction, FallbackContext, FallbackStrategy, IntoToolError,
-    IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel, ResolvedRound, RetryPolicy,
-    StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog, ToolCategory, ToolError,
-    ToolErrorKind, ToolExecutor, ToolFn, ToolResult, ToolSnapshot, ToolUseConfig, ToolUseDeps,
-    ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens, execute_batch_with,
+    CatalogDiagnostic, CompactionResult, ConflictPolicy, CompositeCatalog, ContextBudget,
+    ContextCompactor, DefaultFallback, ExecutableTool, FallbackAction, FallbackContext,
+    FallbackStrategy, IntoToolError, IntoToolResult, LocalCompactor, ParallelSafety, ResolvedModel,
+    ResolvedRound, RetryPolicy, StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog,
+    ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolFn, ToolResult, ToolSnapshot,
+    ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens,
+    execute_batch_with,
 };
 
 // ─── MCP 集成 re-export (mcp feature) ────────────────────────────

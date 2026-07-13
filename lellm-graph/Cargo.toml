@@ -24,9 +24,10 @@ uuid = { workspace = true, features = ["serde"] }
 lellm-provider = { path = "../lellm-provider", features = ["openai-compat", "mock"] }
 lellm-core = { workspace = true, features = ["anyhow"] }
 lellm-derive = { path = "../lellm-derive" }
+lellm-tool = { path = "../lellm-tool" }
+schemars.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
-schemars = { workspace = true }
 
 [[example]]
 name = "pure_graph_agent"

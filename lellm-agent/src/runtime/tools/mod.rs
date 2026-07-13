@@ -3,8 +3,9 @@
 //! 独立的工具子系统，被 runtime 层使用。
 //!
 //! **分层：**
-//! - 协议层（lellm-core）：`ToolArgs`, `ToolDefinition`, `ParallelSafety`, `ToolCategory`
+//! - 协议层（lellm-core）：`ToolDefinition`, `ParallelSafety`, `ToolCategory`
 //! - 可执行描述（lellm-core）：`ExecutableTool`, `ToolFn`
+//! - 构造框架（lellm-tool）：`ToolArgs`, schema 生成
 //! - 运行时层（本模块）：`ToolExecutor`, `ToolCatalog`, `ToolSnapshot`
 //! - MCP 集成（可选）：`McpCatalog`, `McpServerRegistry` 等
 
@@ -14,7 +15,10 @@ mod executor;
 pub mod mcp;
 
 // Re-export protocol types from lellm-core
-pub use lellm_core::{ExecutableTool, ParallelSafety, ToolArgs, ToolCategory, ToolFn};
+pub use lellm_core::{ExecutableTool, ParallelSafety, ToolCategory, ToolFn};
+
+// Re-export tool construction from lellm-tool
+pub use lellm_tool::ToolArgs;
 
 // Re-export runtime types
 pub use executor::{BatchExecutionResult, ToolExecutor, execute_batch_with};
@@ -25,19 +29,22 @@ pub use executor::{BatchExecutionResult, ToolExecutor, execute_batch_with};
 ///
 /// 一旦创建，快照内容不再变化。通过 `version` 区分不同时刻的快照。
 /// `definitions` 通过 `OnceLock` 懒构建——大部分轮次不需要定义列表。
+/// `diagnostics` 记录本次合并产生的诊断信息（如工具冲突），与快照版本绑定。
 pub struct ToolSnapshot {
     version: u64,
     tools: std::sync::Arc<indexmap::IndexMap<String, ExecutableTool>>,
     definitions: std::sync::OnceLock<Vec<lellm_core::ToolDefinition>>,
+    diagnostics: Vec<CatalogDiagnostic>,
 }
 
 impl ToolSnapshot {
-    /// 从工具映射构建快照。
+    /// 从工具映射构建快照（无诊断信息）。
     pub fn new(tools: indexmap::IndexMap<String, ExecutableTool>, version: u64) -> Self {
         Self {
             version,
             tools: std::sync::Arc::new(tools),
             definitions: std::sync::OnceLock::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -50,6 +57,13 @@ impl ToolSnapshot {
     pub fn definitions(&self) -> &[lellm_core::ToolDefinition] {
         self.definitions
             .get_or_init(|| self.tools.values().map(|t| t.definition.clone()).collect())
+    }
+
+    /// 获取本次快照的诊断信息（如工具冲突）。
+    ///
+    /// 诊断信息与快照版本绑定，不会被后续 `snapshot()` 调用覆盖。
+    pub fn diagnostics(&self) -> &[CatalogDiagnostic] {
+        &self.diagnostics
     }
 
     /// 是否有工具。
@@ -70,6 +84,12 @@ impl ToolSnapshot {
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+
+    /// 设置诊断信息（仅供 `CompositeCatalog` 使用）。
+    pub(crate) fn with_diagnostics(mut self, diagnostics: Vec<CatalogDiagnostic>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 
     /// 迭代所有工具条目。
@@ -135,6 +155,24 @@ impl ToolCatalog for StaticCatalog {
     }
 }
 
+/// 目录诊断信息 — 快照合并时产生的元数据。
+///
+/// 与 `ToolSnapshot` 绑定，不会被后续 `snapshot()` 调用覆盖。
+#[derive(Debug, Clone)]
+pub enum CatalogDiagnostic {
+    /// 工具名称冲突 — 高优先级源遮蔽了低优先级源的同名工具。
+    Conflict {
+        /// 冲突的工具名称
+        tool_name: String,
+        /// 获胜的 catalog 名称（优先级高）
+        winner: String,
+        /// 被覆盖的 catalog 名称（优先级低）
+        loser: String,
+        /// 使用的冲突策略
+        policy: ConflictPolicy,
+    },
+}
+
 /// 冲突解决策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConflictPolicy {
@@ -145,20 +183,11 @@ pub enum ConflictPolicy {
     Error,
 }
 
-/// 工具冲突详情
-#[derive(Debug, Clone)]
-pub struct CatalogConflict {
-    /// 冲突的工具名称
-    pub tool_name: String,
-    /// 获胜的 catalog 名称（优先级高）
-    pub winner: String,
-    /// 被覆盖的 catalog 名称（优先级低）
-    pub loser: String,
-    /// 使用的冲突策略
-    pub policy: ConflictPolicy,
-}
-
 /// 组合目录构建器
+///
+/// 支持两种使用风格：
+/// - **链式构建**（`with()`）：固定来源，一行写尽
+/// - **动态装配**（`add()`）：条件添加来源，运行时组装
 #[derive(Default)]
 pub struct CompositeCatalogBuilder {
     sources: Vec<(String, std::sync::Arc<dyn ToolCatalog>)>,
@@ -171,14 +200,42 @@ impl CompositeCatalogBuilder {
         Self::default()
     }
 
-    /// 设置冲突策略
+    /// 设置冲突策略（consuming，用于链式调用）
     pub fn conflict_policy(mut self, policy: ConflictPolicy) -> Self {
         self.conflict_policy = policy;
         self
     }
 
-    /// 添加工具源（按优先级从高到低）
+    /// 添加工具源（可变引用，用于动态装配）。
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut builder = CompositeCatalog::builder();
+    /// if let Some(mcp) = mcp_catalog {
+    ///     builder.add("mcp", mcp);
+    /// }
+    /// builder.add("builtin", builtin_catalog);
+    /// let catalog = builder.build();
+    /// ```
     pub fn add(
+        &mut self,
+        name: impl Into<String>,
+        catalog: std::sync::Arc<dyn ToolCatalog>,
+    ) -> &mut Self {
+        self.sources.push((name.into(), catalog));
+        self
+    }
+
+    /// 添加工具源（consuming，用于链式调用）。
+    ///
+    /// # Example
+    /// ```ignore
+    /// let catalog = CompositeCatalog::builder()
+    ///     .with("mcp", mcp_catalog)
+    ///     .with("builtin", builtin_catalog)
+    ///     .build();
+    /// ```
+    pub fn with(
         mut self,
         name: impl Into<String>,
         catalog: std::sync::Arc<dyn ToolCatalog>,
@@ -189,12 +246,10 @@ impl CompositeCatalogBuilder {
 
     /// 构建组合目录
     pub fn build(self) -> CompositeCatalog {
-        let sources: Vec<_> = self.sources.into_iter().map(|(_, c)| c).collect();
         CompositeCatalog {
-            sources,
+            sources: self.sources,
             conflict_policy: self.conflict_policy,
             version_counter: std::sync::atomic::AtomicU64::new(0),
-            conflicts: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -202,12 +257,12 @@ impl CompositeCatalogBuilder {
 /// 组合目录 — 按优先级合并多个工具源。
 ///
 /// **遮蔽策略（Shadowing）：** 靠前的源优先级高，同名工具被遮蔽。
-/// 遮蔽发生时通过 `tracing::warn!` 记录结构化日志。
+/// 遮蔽发生时通过 `tracing::warn!` 记录结构化日志，
+/// 并作为 `CatalogDiagnostic::Conflict` 嵌入返回的 `ToolSnapshot`。
 pub struct CompositeCatalog {
-    sources: Vec<std::sync::Arc<dyn ToolCatalog>>,
+    sources: Vec<(String, std::sync::Arc<dyn ToolCatalog>)>,
     conflict_policy: ConflictPolicy,
     version_counter: std::sync::atomic::AtomicU64,
-    conflicts: std::sync::Mutex<Vec<CatalogConflict>>,
 }
 
 impl CompositeCatalog {
@@ -218,19 +273,13 @@ impl CompositeCatalog {
 
     /// 创建组合目录（简单模式，默认 Shadow 策略）。
     ///
-    /// `sources` 按优先级从高到低排列。
-    pub fn new(sources: Vec<std::sync::Arc<dyn ToolCatalog>>) -> Self {
+    /// `sources` 按优先级从高到低排列。源名称自动生成为 `source_0`, `source_1` 等。
+    pub fn new(sources: Vec<(String, std::sync::Arc<dyn ToolCatalog>)>) -> Self {
         Self {
             sources,
             conflict_policy: ConflictPolicy::default(),
             version_counter: std::sync::atomic::AtomicU64::new(0),
-            conflicts: std::sync::Mutex::new(Vec::new()),
         }
-    }
-
-    /// 获取所有冲突详情
-    pub fn conflicts(&self) -> Vec<CatalogConflict> {
-        self.conflicts.lock().unwrap().clone()
     }
 }
 
@@ -240,27 +289,27 @@ impl ToolCatalog for CompositeCatalog {
         // merged 追踪工具来源，以便正确记录冲突信息
         let mut merged: indexmap::IndexMap<String, (ExecutableTool, String)> =
             indexmap::IndexMap::new();
-        let mut conflicts = Vec::new();
+        let mut diagnostics = Vec::new();
 
         // 反向遍历（从低优先级到高优先级），高优先级自然覆盖低优先级
-        for (rev_idx, source) in self.sources.iter().rev().enumerate() {
-            let original_idx = self.sources.len() - 1 - rev_idx;
-            let snap = source.snapshot().await;
-            let source_name = format!("source_{}", original_idx);
+        for source in self.sources.iter().rev() {
+            let source_name = &source.0;
+            let snap = source.1.snapshot().await;
             for (name, tool) in snap.iter() {
                 if let Some((_, existing_source)) = merged.get(name) {
+                    let diagnostic = CatalogDiagnostic::Conflict {
+                        tool_name: name.to_string(),
+                        winner: source_name.clone(),
+                        loser: existing_source.clone(),
+                        policy: self.conflict_policy,
+                    };
                     tracing::warn!(
                         tool_name = %name,
                         winner = %source_name,
                         loser = %existing_source,
                         "Tool conflict detected in CompositeCatalog. Higher priority tool shadows the lower one."
                     );
-                    conflicts.push(CatalogConflict {
-                        tool_name: name.to_string(),
-                        winner: source_name.clone(),
-                        loser: existing_source.clone(),
-                        policy: self.conflict_policy,
-                    });
+                    diagnostics.push(diagnostic);
                 }
                 merged.insert(name.to_string(), (tool.clone(), source_name.clone()));
             }
@@ -272,15 +321,13 @@ impl ToolCatalog for CompositeCatalog {
             .map(|(name, (tool, _source))| (name, tool))
             .collect();
 
-        // 存储冲突信息
-        if !conflicts.is_empty() {
-            *self.conflicts.lock().unwrap() = conflicts;
-        }
-
         let version = self
             .version_counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        std::sync::Arc::new(ToolSnapshot::new(tools, version))
+
+        let snapshot = ToolSnapshot::new(tools, version).with_diagnostics(diagnostics);
+
+        std::sync::Arc::new(snapshot)
     }
 }
