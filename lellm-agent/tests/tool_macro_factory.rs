@@ -79,7 +79,7 @@ fn test_tool_with_factory() {
 async fn test_full_execution_flow_tool_factory() {
     let reg = greet_tool();
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "call_1".to_string(),
@@ -112,7 +112,7 @@ async fn test_full_execution_flow_tool_with_factory() {
     });
 
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "call_2".to_string(),
@@ -137,7 +137,7 @@ async fn test_full_execution_flow_tool_with_factory() {
 #[tokio::test]
 async fn test_multiple_tools_in_catalog() {
     let catalog = StaticCatalog::from_tools(vec![add_numbers_tool(), greet_tool()]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let snapshot = executor.snapshot().await;
     assert_eq!(snapshot.len(), 2);
@@ -177,7 +177,7 @@ async fn test_with_factory_strong_typed_args() {
     });
 
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "c3".to_string(),

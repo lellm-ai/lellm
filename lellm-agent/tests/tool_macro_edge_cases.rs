@@ -102,7 +102,7 @@ fn test_async_tool_args() {
 async fn test_async_tool_execution() {
     let reg = async_search_tool();
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "call_async".to_string(),
@@ -154,7 +154,7 @@ fn risky_op(input: String) -> ToolResult {
 async fn test_tool_error_handling() {
     let reg = risky_op_tool();
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call_ok = ToolCall {
         id: "call_ok".to_string(),
@@ -243,7 +243,7 @@ fn test_tool_registration_definition() {
 async fn test_invalid_argument_parsing() {
     let reg = add_numbers_tool();
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "call_bad".to_string(),

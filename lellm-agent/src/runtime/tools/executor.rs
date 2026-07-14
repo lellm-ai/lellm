@@ -56,17 +56,12 @@ pub struct ToolExecutor {
 }
 
 impl ToolExecutor {
-    /// 绑定工具目录。
+    /// 绑定工具目录，使用默认重试策略。
     pub fn new(catalog: Arc<dyn ToolCatalog>) -> Self {
         Self {
             catalog,
             retry_policy: RetryPolicy::default(),
         }
-    }
-
-    /// 绑定工具目录，使用默认重试策略。
-    pub fn with_catalog(catalog: Arc<dyn ToolCatalog>) -> Self {
-        Self::new(catalog)
     }
 
     /// 构造时绑定全局重试策略。

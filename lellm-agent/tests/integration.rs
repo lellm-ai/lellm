@@ -63,7 +63,7 @@ async fn test_tool_executor_snapshot_and_execute() {
     });
 
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "1".to_string(),
@@ -253,7 +253,7 @@ async fn test_tool_safe_execution() {
         );
 
     let catalog = StaticCatalog::from_tools(vec![reg]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let call = ToolCall {
         id: "1".to_string(),

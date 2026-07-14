@@ -117,7 +117,7 @@ fn extract_tool_text(msg: &lellm_core::Message) -> String {
 #[tokio::test]
 async fn test_static_catalog_snapshot_and_execute() {
     let catalog = StaticCatalog::from_tools(vec![make_echo_tool("echo")]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let snapshot = executor.snapshot().await;
     assert!(snapshot.get("echo").is_some());
@@ -133,7 +133,7 @@ async fn test_static_catalog_snapshot_and_execute() {
 #[tokio::test]
 async fn test_static_batch() {
     let catalog = StaticCatalog::from_tools(vec![make_echo_tool("echo"), make_echo_tool("greet")]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let calls = vec![
         make_tool_call("1", "echo", "hi"),
@@ -189,7 +189,7 @@ impl ToolCatalog for MockDynamicCatalog {
 #[tokio::test]
 async fn test_dynamic_catalog_snapshot_and_execute() {
     let catalog = MockDynamicCatalog::new(vec![make_echo_tool("dynamic_echo")]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let snapshot = executor.snapshot().await;
     assert!(snapshot.get("dynamic_echo").is_some());
@@ -207,7 +207,7 @@ async fn test_dynamic_catalog_snapshot_and_execute() {
 #[tokio::test]
 async fn test_execute_batch_not_found() {
     let catalog = StaticCatalog::empty();
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
     let calls = vec![make_tool_call("1", "ghost_tool", "test")];
 
     let batch = executor.execute_batch(&calls).await;
@@ -221,7 +221,7 @@ async fn test_execute_batch_not_found() {
 #[tokio::test]
 async fn test_executor_not_found() {
     let catalog = StaticCatalog::from_tools(vec![make_echo_tool("echo")]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let snapshot = executor.snapshot().await;
     let call = make_tool_call("1", "non_existent", "test");
@@ -238,7 +238,7 @@ async fn test_executor_not_found() {
 async fn test_hot_refresh_new_tool_visible() {
     let catalog = MockDynamicCatalog::new(vec![make_echo_tool("tool_a")]);
     let catalog_ref = Arc::new(catalog);
-    let executor = ToolExecutor::with_catalog(catalog_ref.clone());
+    let executor = ToolExecutor::new(catalog_ref.clone());
 
     // 第一次 snapshot — 只有 tool_a
     let snap_v1 = executor.snapshot().await;
@@ -266,7 +266,7 @@ async fn test_hot_refresh_new_tool_visible() {
 async fn test_snapshot_freezing_no_drift() {
     let catalog = MockDynamicCatalog::new(vec![make_echo_tool("tool_a")]);
     let catalog_ref = Arc::new(catalog);
-    let executor = ToolExecutor::with_catalog(catalog_ref.clone());
+    let executor = ToolExecutor::new(catalog_ref.clone());
 
     // 获取快照
     let snap = executor.snapshot().await;
@@ -350,7 +350,7 @@ impl ToolCatalog for CountingCatalog {
 async fn test_snapshot_called_once_per_resolve() {
     let counter = Arc::new(AtomicUsize::new(0));
     let catalog = CountingCatalog::new(counter.clone(), vec![make_echo_tool("echo")]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 
@@ -402,7 +402,7 @@ async fn test_empty_snapshot() {
 async fn test_parallel_safety_safe() {
     let catalog =
         StaticCatalog::from_tools(vec![make_echo_tool("safe_a"), make_echo_tool("safe_b")]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let calls = vec![
         make_tool_call("1", "safe_a", "A"),
@@ -421,7 +421,7 @@ async fn test_parallel_safety_exclusive() {
         make_exclusive_tool("excl_a"),
         make_exclusive_tool("excl_b"),
     ]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let calls = vec![
         make_tool_call("1", "excl_a", "A"),
@@ -441,7 +441,7 @@ async fn test_parallel_safety_category_exclusive() {
         make_category_tool("cat_a_2", lellm_agent::ToolCategory::FILE_IO),
         make_category_tool("cat_b_1", lellm_agent::ToolCategory::NETWORK),
     ]);
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let calls = vec![
         make_tool_call("1", "cat_a_1", "1"),
@@ -460,7 +460,7 @@ async fn test_parallel_safety_category_exclusive() {
 #[tokio::test]
 async fn test_empty_static_catalog() {
     let catalog = StaticCatalog::empty();
-    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
+    let executor = ToolExecutor::new(Arc::new(catalog));
 
     let snap = executor.snapshot().await;
     assert!(snap.is_empty());
