@@ -18,21 +18,22 @@ struct ToolTiming {
 
 /// 自动推断时间单位并格式化，简洁易读。
 ///
-/// `<1ms` → `123µs`，`<100ms` → `99ms`，`<1s` → `0.15s`，`<60s` → `1.23s`，`<60min` → `2.50min`，`≥60min` → `1.05h`
+/// `<1ms` → `123µs`，`<100ms` → `99ms`，`<1s` → `0.15s`，`≥1s` → `1.23s`
 fn format_duration(secs: f64) -> String {
     let ms = secs * 1000.0;
     if ms < 1.0 {
-        format!("{:.0}µs", secs * 1_000_000.0)
+        let us = secs * 1_000_000.0;
+        if us < 10.0 {
+            format!("{:.1}µs", us)
+        } else {
+            format!("{:.0}µs", us)
+        }
     } else if ms < 100.0 {
         format!("{:.0}ms", ms)
     } else if secs < 1.0 {
         format!("{:.2}s", secs)
-    } else if secs < 60.0 {
-        format!("{:.2}s", secs)
-    } else if secs < 3600.0 {
-        format!("{:.2}min", secs / 60.0)
     } else {
-        format!("{:.2}h", secs / 3600.0)
+        format!("{:.2}s", secs)
     }
 }
 
