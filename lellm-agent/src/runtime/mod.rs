@@ -21,11 +21,10 @@ pub mod typed_state;
 
 // ─── 工具系统 re-export ──────────────────────────────────────────
 
-#[allow(deprecated)]
 pub use tools::{
     BatchExecutionResult, CatalogDiagnostic, CompositeCatalog, ConflictPolicy, ExecutableTool,
     ParallelSafety, StaticCatalog, ToolArgs, ToolCatalog, ToolCategory, ToolExecutor, ToolFn,
-    ToolSnapshot, execute_batch_with,
+    ToolSnapshot,
 };
 
 // ─── 运行时 re-export ────────────────────────────────────────────

@@ -1,9 +1,9 @@
 //! ToolCatalog → ToolExecutor 链路集成测试。
 //!
 //! 验证：
-//! - Case 1: StaticCatalog → snapshot → execute_batch_with
-//! - Case 2: Mock 动态目录 → snapshot → execute_batch_with
-//! - Case 3: execute_batch_with 工具不存在 → NotFound
+//! - Case 1: StaticCatalog → snapshot → execute_batch
+//! - Case 2: Mock 动态目录 → snapshot → execute_batch
+//! - Case 3: 工具不存在 → NotFound
 //! - Case 4: 热刷新（discover → call → refresh → new tool visible）
 //! - Case 5: ExecutableTool Clone 编译验证
 //! - Case 6: CompositeCatalog 遮蔽策略
@@ -11,8 +11,7 @@
 //! - Case 8: ToolSnapshot 基本行为
 
 use lellm_agent::{
-    BackoffStrategy, CompositeCatalog, ExecutableTool, RetryPolicy, StaticCatalog, ToolCatalog,
-    ToolExecutor, ToolSnapshot, execute_batch_with,
+    CompositeCatalog, ExecutableTool, StaticCatalog, ToolCatalog, ToolExecutor, ToolSnapshot,
 };
 use lellm_core::{ToolCall, ToolDefinition, ToolErrorKind, ToolSchema};
 use std::sync::{
@@ -104,13 +103,6 @@ fn make_tool_call(id: &str, name: &str, arg: &str) -> ToolCall {
     }
 }
 
-fn default_retry() -> RetryPolicy {
-    RetryPolicy::new(
-        1,
-        BackoffStrategy::Fixed(std::time::Duration::from_millis(0)),
-    )
-}
-
 /// 从 Message 中提取 JSON 内容（第一个 ContentBlock）
 fn extract_tool_text(msg: &lellm_core::Message) -> String {
     msg.content()
@@ -120,7 +112,7 @@ fn extract_tool_text(msg: &lellm_core::Message) -> String {
         .join("")
 }
 
-// ─── Case 1: StaticCatalog → snapshot → execute_batch_with ──────
+// ─── Case 1: StaticCatalog → snapshot → execute_batch ────────────
 
 #[tokio::test]
 async fn test_static_catalog_snapshot_and_execute() {
@@ -131,7 +123,7 @@ async fn test_static_catalog_snapshot_and_execute() {
     assert!(snapshot.get("echo").is_some());
 
     let calls = vec![make_tool_call("1", "echo", "static-catalog")];
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 1);
     let text = extract_tool_text(&batch.results[0]);
@@ -143,13 +135,12 @@ async fn test_static_batch() {
     let catalog = StaticCatalog::from_tools(vec![make_echo_tool("echo"), make_echo_tool("greet")]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
-    let snapshot = executor.snapshot().await;
     let calls = vec![
         make_tool_call("1", "echo", "hi"),
         make_tool_call("2", "greet", "world"),
     ];
 
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 2);
     assert!(!batch.panicked);
@@ -204,21 +195,22 @@ async fn test_dynamic_catalog_snapshot_and_execute() {
     assert!(snapshot.get("dynamic_echo").is_some());
 
     let calls = vec![make_tool_call("1", "dynamic_echo", "dynamic-hello")];
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 1);
     let text = extract_tool_text(&batch.results[0]);
     assert!(text.contains("[dynamic_echo] dynamic-hello"));
 }
 
-// ─── Case 3: execute_batch_with 工具不存在 → NotFound ───────────
+// ─── Case 3: 工具不存在 → NotFound ──────────────────────────────
 
 #[tokio::test]
-async fn test_execute_batch_with_not_found() {
-    let snapshot = ToolSnapshot::new(indexmap::IndexMap::new());
+async fn test_execute_batch_not_found() {
+    let catalog = StaticCatalog::empty();
+    let executor = ToolExecutor::with_catalog(Arc::new(catalog));
     let calls = vec![make_tool_call("1", "ghost_tool", "test")];
 
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 1);
     assert!(batch.results[0].is_tool_error());
@@ -263,7 +255,7 @@ async fn test_hot_refresh_new_tool_visible() {
 
     // 用 v2 快照执行 tool_b
     let calls = vec![make_tool_call("1", "tool_b", "new-tool")];
-    let batch = execute_batch_with(&calls, &snap_v2, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 1);
     let text = extract_tool_text(&batch.results[0]);
@@ -412,13 +404,12 @@ async fn test_parallel_safety_safe() {
         StaticCatalog::from_tools(vec![make_echo_tool("safe_a"), make_echo_tool("safe_b")]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
-    let snapshot = executor.snapshot().await;
     let calls = vec![
         make_tool_call("1", "safe_a", "A"),
         make_tool_call("2", "safe_b", "B"),
     ];
 
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 2);
     assert!(!batch.panicked);
@@ -432,13 +423,12 @@ async fn test_parallel_safety_exclusive() {
     ]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
-    let snapshot = executor.snapshot().await;
     let calls = vec![
         make_tool_call("1", "excl_a", "A"),
         make_tool_call("2", "excl_b", "B"),
     ];
 
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 2);
     assert!(!batch.panicked);
@@ -453,14 +443,13 @@ async fn test_parallel_safety_category_exclusive() {
     ]);
     let executor = ToolExecutor::with_catalog(Arc::new(catalog));
 
-    let snapshot = executor.snapshot().await;
     let calls = vec![
         make_tool_call("1", "cat_a_1", "1"),
         make_tool_call("2", "cat_a_2", "2"),
         make_tool_call("3", "cat_b_1", "3"),
     ];
 
-    let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
+    let batch = executor.execute_batch(&calls).await;
 
     assert_eq!(batch.results.len(), 3);
     assert!(!batch.panicked);

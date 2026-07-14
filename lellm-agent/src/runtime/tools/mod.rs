@@ -21,8 +21,6 @@ pub use lellm_core::{ExecutableTool, ParallelSafety, ToolCategory, ToolFn};
 pub use lellm_core::ToolArgs;
 
 // Re-export runtime types
-#[allow(deprecated)]
-pub use executor::execute_batch_with;
 pub use executor::{BatchExecutionResult, ToolExecutor};
 
 // ─── 工具快照 ────────────────────────────────────────────────────

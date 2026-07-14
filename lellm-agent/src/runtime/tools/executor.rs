@@ -339,18 +339,3 @@ async fn run_batch_internal(
         panicked,
     }
 }
-
-// ─── 向后兼容：自由函数别名 ──────────────────────────────────────
-
-/// 向后兼容 — 等价于 `executor.execute_batch()`。
-///
-/// **已弃用。** 请直接调用 `ToolExecutor::execute_batch()`。
-#[deprecated(since = "0.4.10", note = "Use ToolExecutor::execute_batch() instead")]
-#[allow(deprecated)]
-pub async fn execute_batch_with(
-    calls: &[ToolCall],
-    snapshot: &ToolSnapshot,
-    retry_policy: &RetryPolicy,
-) -> BatchExecutionResult {
-    run_batch_internal(calls, Arc::new(snapshot.clone()), retry_policy).await
-}

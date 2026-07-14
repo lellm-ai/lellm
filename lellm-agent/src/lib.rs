@@ -10,7 +10,6 @@ pub mod runtime;
 pub use serde;
 
 pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
-#[allow(deprecated)]
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, BatchExecutionResult,
     CatalogDiagnostic, CompactionResult, CompositeCatalog, ConflictPolicy, ContextBudget,
@@ -19,7 +18,6 @@ pub use runtime::{
     ResolvedRound, RetryPolicy, StaticCatalog, StopReason, ToolArgs, ToolCachePolicy, ToolCatalog,
     ToolCategory, ToolError, ToolErrorKind, ToolExecutor, ToolFn, ToolResult, ToolSnapshot,
     ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult, estimate_message, estimate_tokens,
-    execute_batch_with,
 };
 
 // ─── MCP 集成 re-export (mcp feature) ────────────────────────────
