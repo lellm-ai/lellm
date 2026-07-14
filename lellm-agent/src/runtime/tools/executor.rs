@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use lellm_core::{
     Message, ParallelSafety, ToolCall, ToolCategory, ToolError, ToolErrorKind, ToolResult,
 };
@@ -223,8 +224,7 @@ async fn run_batch_internal(
     }
 
     let mut safe_calls: Vec<(usize, ToolCall)> = Vec::new();
-    let mut category_calls: std::collections::HashMap<ToolCategory, Vec<(usize, ToolCall)>> =
-        std::collections::HashMap::new();
+    let mut category_calls: IndexMap<ToolCategory, Vec<(usize, ToolCall)>> = IndexMap::new();
     let mut exclusive_calls: Vec<(usize, ToolCall)> = Vec::new();
 
     for (idx, call) in calls.iter().enumerate() {
