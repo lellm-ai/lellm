@@ -134,6 +134,36 @@ impl McpError {
     }
 }
 
+/// MCP 工具执行错误。
+///
+/// 与 [McpError] 的区别：
+/// - `McpError`：协议/传输层错误（连接断开、JSON-RPC 格式错误等）
+/// - `McpToolError`：工具业务层错误（参数校验失败、工具执行失败）
+///
+/// 用于 [super::server::ToolFn] 的返回类型，替代裸 `String`。
+#[derive(Debug, Error)]
+pub enum McpToolError {
+    /// 参数校验失败（对应 Agent 侧的 `ToolErrorKind::InvalidInput`）
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
+    /// 工具执行失败（对应 Agent 侧的 `ToolErrorKind::Internal`）
+    #[error("tool execution failed: {0}")]
+    Execution(String),
+}
+
+impl McpToolError {
+    /// 构造参数校验错误。
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        Self::InvalidInput(msg.into())
+    }
+
+    /// 构造执行错误。
+    pub fn execution(msg: impl Into<String>) -> Self {
+        Self::Execution(msg.into())
+    }
+}
+
 // 向后兼容的别名——供现有代码使用，后续逐步迁移。
 impl McpError {
     pub fn disconnected() -> Self {

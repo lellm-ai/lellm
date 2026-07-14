@@ -2,6 +2,7 @@
 //!
 //! ```rust,ignore
 //! use lellm_mcp::server::SimpleMcp;
+//! use lellm_mcp::protocol::McpToolError;
 //!
 //! let mut mcp = SimpleMcp::new("My Server");
 //!
@@ -19,13 +20,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::protocol::{CallToolResult, ContentBlock, ToolInfo};
+use crate::protocol::{CallToolResult, ContentBlock, McpToolError, ToolInfo};
 
 /// 工具执行函数类型。
 pub type ToolFn = Arc<
     dyn Fn(
             serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, McpToolError>> + Send>>
         + Send
         + Sync,
 >;
@@ -72,7 +73,7 @@ impl SimpleMcp {
         handler: F,
     ) where
         F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+        Fut: Future<Output = Result<serde_json::Value, McpToolError>> + Send + 'static,
     {
         let default_schema = serde_json::json!({
             "type": "object",
@@ -95,7 +96,7 @@ impl SimpleMcp {
         handler: F,
     ) where
         F: Fn(serde_json::Value) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<serde_json::Value, String>> + Send + 'static,
+        Fut: Future<Output = Result<serde_json::Value, McpToolError>> + Send + 'static,
     {
         let name = name.into();
         let description = description.into();
@@ -147,7 +148,9 @@ impl SimpleMcp {
                 is_error: false,
             }),
             Err(e) => Ok(CallToolResult {
-                content: vec![ContentBlock::Text { text: e }],
+                content: vec![ContentBlock::Text {
+                    text: e.to_string(),
+                }],
                 is_error: true,
             }),
         }

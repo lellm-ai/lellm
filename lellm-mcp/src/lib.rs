@@ -17,7 +17,7 @@ pub mod server;
 
 pub use client::McpClient;
 pub use protocol::{
-    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
+    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, McpToolError,
     RetryDisposition, TransportError,
 };
 pub use transport::{ConnectionState, McpTransport, TransportCapabilities};
