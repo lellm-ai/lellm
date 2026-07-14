@@ -24,7 +24,7 @@ use lellm_core::{
 };
 
 use super::super::retry::RetryPolicy;
-use super::{ToolCatalog, ToolFn, ToolSnapshot};
+use super::{ToolCatalog, ToolSnapshot};
 
 /// 批量执行结果 — 长度、顺序、完整性三重保证。
 ///
@@ -137,19 +137,15 @@ impl ToolExecutor {
 /// 静态函数，不依赖 `&self`，因此可以被 `dispatch_one`（单调用）、
 /// `run_parallel_indexed` / `run_serial_indexed`（batch spawn task）复用。
 /// 这是工具执行的唯一核心路径。
+///
+/// 闭包捕获 `&ExecutableTool` 引用，无需 clone，也无需创建临时 `ToolFn`。
 async fn dispatch_call(
     call: &ToolCall,
     snapshot: &ToolSnapshot,
     retry_policy: &RetryPolicy,
 ) -> ToolResult {
     match snapshot.get(&call.name) {
-        Some(entry) => {
-            let entry = entry.clone();
-            let tool_fn: ToolFn = Arc::new(move |args: &serde_json::Value| entry.execute(args));
-            retry_policy
-                .execute_with_retry(&tool_fn, &call.arguments)
-                .await
-        }
+        Some(tool) => retry_policy.execute(|| tool.execute(&call.arguments)).await,
         None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
     }
 }

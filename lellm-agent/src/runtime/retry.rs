@@ -3,11 +3,10 @@
 //! 位于 ToolExecutor 内部，负责 transient failure recovery。
 //! 重试耗尽后，错误向上传播至 FallbackStrategy（"换条路走"）。
 
+use std::future::Future;
 use std::time::Duration;
 
 use lellm_core::ToolResult;
-
-use super::tools::ToolFn;
 
 /// 退避策略
 #[derive(Debug, Clone)]
@@ -74,16 +73,19 @@ impl RetryPolicy {
         &self.backoff
     }
 
-    /// 执行工具函数并自动重试可重试的错误。
+    /// 执行可重试的操作并自动重试可重试的错误。
     ///
     /// `max_attempts` = 总尝试次数（初始执行 + 重试），与 AWS SDK / reqwest 等语义一致。
-    /// 执行链：`ToolUseLoop → ToolExecutor → RetryPolicy → tool_fn()`
-    pub async fn execute_with_retry(
-        &self,
-        tool_fn: &ToolFn,
-        args: &serde_json::Value,
-    ) -> ToolResult {
-        let mut last_result = tool_fn(args).await;
+    /// 执行链：`ToolUseLoop → ToolExecutor → RetryPolicy → closure()`
+    ///
+    /// 接受任意 `FnMut` 闭包，闭包每次被调用应返回一个新的 Future。
+    /// 不依赖 `ToolFn` 中间层，消除 `Arc<dyn Fn>` heap allocation。
+    pub async fn execute<F, Fut>(&self, mut f: F) -> ToolResult
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = ToolResult>,
+    {
+        let mut last_result = f().await;
         if last_result.is_ok() {
             return last_result;
         }
@@ -103,7 +105,7 @@ impl RetryPolicy {
             );
             tokio::time::sleep(delay).await;
 
-            last_result = tool_fn(args).await;
+            last_result = f().await;
             if last_result.is_ok() {
                 return last_result;
             }
