@@ -392,9 +392,7 @@ async fn main() {
         lellm_graph::ExecutionEngine::new(&mut state, None, CancellationToken::new(), None, None);
 
     struct NoopStepCallback;
-    impl<'e> lellm_graph::StepCallback<'e> for NoopStepCallback {
-        fn on_step(&mut self, _: &str, _: usize, _: std::time::Duration) {}
-    }
+    impl<'e> lellm_graph::StepCallback<'e> for NoopStepCallback {}
 
     match graph
         .run_inline(&mut exec_ctx, 50, &mut NoopStepCallback)

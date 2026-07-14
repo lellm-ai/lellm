@@ -30,12 +30,29 @@ use crate::state::{State, StateMerge};
 /// 用于 wrapper（如 run_execution_loop）追踪 execution_log 或发射 per-node 事件。
 /// 回调在 commit + checkpoint 之后、take_control 之前调用。
 pub trait StepCallback<'e>: Send {
+    /// 节点开始执行前的回调。
+    ///
+    /// - `node_name` — 即将执行的节点名
+    /// - `span_id` — 本次节点执行的唯一 span ID
+    /// - `step` — 当前步数（从 1 开始）
+    fn on_node_start(&mut self, _node_name: &str, _span_id: SpanId, _step: usize) {}
+
     /// 节点执行完成后的回调。
     ///
     /// - `node_name` — 刚执行完的节点名
+    /// - `span_id` — 本次节点执行的唯一 span ID
     /// - `step` — 当前步数（从 1 开始）
     /// - `duration` — 节点执行耗时
-    fn on_step(&mut self, node_name: &str, step: usize, duration: std::time::Duration);
+    /// - `success` — 是否执行成功
+    fn on_node_end(
+        &mut self,
+        _node_name: &str,
+        _span_id: SpanId,
+        _step: usize,
+        _duration: std::time::Duration,
+        _success: bool,
+    ) {
+    }
 
     /// Barrier 等待回调 — run_inline 在遇到 Barrier Pause 信号后、等待决策前调用。
     ///
@@ -46,9 +63,7 @@ pub trait StepCallback<'e>: Send {
 /// 空回调 — 不执行任何操作。
 pub struct NoopStepCallback;
 
-impl<'e> StepCallback<'e> for NoopStepCallback {
-    fn on_step(&mut self, _node_name: &str, _step: usize, _duration: std::time::Duration) {}
-}
+impl<'e> StepCallback<'e> for NoopStepCallback {}
 
 // ─── Edge ──────────────────────────────────────────────────────
 
@@ -343,50 +358,60 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             })?;
 
             let node_start = std::time::Instant::now();
+            let span_id = SpanId::new();
+
+            // 通知 wrapper 节点即将开始执行
+            step_cb.on_node_start(&current, span_id, step);
 
             // 根据 NodeKind 分发执行
-            match node {
+            let exec_result = match node {
                 NodeKind::Task(n) => {
                     let mut ctx = exec_ctx.build_node_context();
-                    n.execute(&mut ctx).await?;
+                    n.execute(&mut ctx).await
                 }
                 NodeKind::Condition(n) => {
                     let mut ctx = exec_ctx.build_leaf_context();
-                    <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx).await?;
+                    <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
                 }
                 NodeKind::Barrier(n) => {
                     let mut ctx = exec_ctx.build_leaf_context();
-                    <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx).await?;
+                    <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
                 }
                 NodeKind::External(n) => {
                     let mut ctx = exec_ctx.build_node_context();
-                    n.execute(&mut ctx).await?;
+                    n.execute(&mut ctx).await
                 }
                 NodeKind::ExternalLeaf(n) => {
                     let mut ctx = exec_ctx.build_leaf_context();
-                    n.execute(&mut ctx).await?;
+                    n.execute(&mut ctx).await
                 }
                 NodeKind::Parallel(p) => {
                     // ExecutorOperation 直接接收 &mut ExecutionEngine
-                    p.execute(exec_ctx).await?;
+                    p.execute(exec_ctx).await
                 }
                 NodeKind::Subgraph(spec) => {
                     // Subgraph 执行 — 通过 CompiledSubgraph 的 StateProjector 递归执行内层 Graph
                     let stream = exec_ctx.stream_sink();
                     let cancel = exec_ctx.cancel_token().clone();
-                    spec.execute(exec_ctx.state_mut(), stream, cancel).await?;
+                    spec.execute(exec_ctx.state_mut(), stream, cancel).await
                 }
-            }
+            };
+
+            let node_duration = node_start.elapsed();
+            let success = exec_result.is_ok();
+
+            // 通知 wrapper 节点执行完成
+            step_cb.on_node_end(&current, span_id, step, node_duration, success);
+
+            // 如果节点执行失败，传播错误
+            exec_result?;
 
             // commit mutations (Unit of Work) — 对 Parallel 是空操作
             exec_ctx.commit();
 
             // checkpoint — 通知 Sink 到达了合法的恢复边界。
-            // 顺序：execute → commit → checkpoint → step_cb → route
+            // 顺序：execute → commit → checkpoint → route
             exec_ctx.emit_checkpoint(&current, step);
-
-            // 每步回调 — 供 wrapper 追踪 execution_log / 发射 per-node 事件
-            step_cb.on_step(&current, step, node_start.elapsed());
 
             // 提取控制信号
             let (next_action, signal) = exec_ctx.take_control();

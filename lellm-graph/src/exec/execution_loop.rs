@@ -162,19 +162,25 @@ impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
 
 // ─── EventStepCallback ──────────────────────────────────────────
 
-/// StepCallback 实现 — 用于 run_execution_loop 追踪执行日志 + 发射 BarrierWaiting 事件。
+/// StepCallback 实现 — 用于 run_execution_loop 追踪执行日志 + 发射 per-node 事件。
 struct EventStepCallback<S: WorkflowState> {
     start_time: Instant,
     execution_log: Vec<ExecutionEntry>,
     event_tx: Option<tokio::sync::mpsc::Sender<GraphEvent<S>>>,
+    trace_id: TraceId,
 }
 
 impl<S: WorkflowState> EventStepCallback<S> {
-    fn new(start_time: Instant, event_tx: tokio::sync::mpsc::Sender<GraphEvent<S>>) -> Self {
+    fn new(
+        start_time: Instant,
+        event_tx: tokio::sync::mpsc::Sender<GraphEvent<S>>,
+        trace_id: TraceId,
+    ) -> Self {
         Self {
             start_time,
             execution_log: Vec::new(),
             event_tx: Some(event_tx),
+            trace_id,
         }
     }
 
@@ -184,7 +190,26 @@ impl<S: WorkflowState> EventStepCallback<S> {
 }
 
 impl<S: WorkflowState + Send + 'static> StepCallback<'_> for EventStepCallback<S> {
-    fn on_step(&mut self, node_name: &str, step: usize, duration: Duration) {
+    fn on_node_start(&mut self, node_name: &str, span_id: SpanId, step: usize) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.try_send(GraphEvent::NodeStart {
+                node_name: node_name.to_string(),
+                trace_id: self.trace_id,
+                span_id,
+                step,
+            });
+        }
+    }
+
+    fn on_node_end(
+        &mut self,
+        node_name: &str,
+        span_id: SpanId,
+        step: usize,
+        duration: Duration,
+        success: bool,
+    ) {
+        // 记录执行日志
         let node_end = self
             .start_time
             .checked_add(duration)
@@ -194,9 +219,20 @@ impl<S: WorkflowState + Send + 'static> StepCallback<'_> for EventStepCallback<S
             node_name: node_name.to_string(),
             start_time: self.start_time,
             end_time: node_end,
-            success: true,
+            success,
             error: None,
         });
+
+        // 发射 NodeEnd 事件
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.try_send(GraphEvent::NodeEnd {
+                node_name: node_name.to_string(),
+                trace_id: self.trace_id,
+                span_id,
+                success,
+                duration,
+            });
+        }
     }
 
     fn on_barrier_waiting(&mut self, barrier_id: &BarrierId, node_name: &str, span_id: SpanId) {
@@ -259,7 +295,7 @@ pub(crate) async fn run_execution_loop<S, M>(
     let _ = event_tx.send(GraphEvent::GraphStart { trace_id }).await;
 
     // step_cb 在 Engine 外部创建，以便在 Engine drop 后获取 execution_log
-    let mut step_cb = EventStepCallback::new(start_time, event_tx.clone());
+    let mut step_cb = EventStepCallback::new(start_time, event_tx.clone(), trace_id);
 
     // 在块作用域中创建 Engine，限制借用生命周期
     let result = {

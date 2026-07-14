@@ -306,7 +306,14 @@ fn build_graph(
 struct LoggingStepCallback;
 
 impl<'e> lellm_graph::StepCallback<'e> for LoggingStepCallback {
-    fn on_step(&mut self, node_name: &str, step: usize, duration: std::time::Duration) {
+    fn on_node_end(
+        &mut self,
+        node_name: &str,
+        _span_id: lellm_graph::SpanId,
+        step: usize,
+        duration: std::time::Duration,
+        _success: bool,
+    ) {
         tracing::info!(
             step = step,
             node = node_name,
