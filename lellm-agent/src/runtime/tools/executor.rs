@@ -238,9 +238,16 @@ async fn run_batch_internal(
 
     for (idx, call) in calls.iter().enumerate() {
         let entry = snapshot.get(&call.name);
-        let safety = entry
-            .map(|t| t.safety.clone())
-            .unwrap_or(ParallelSafety::Exclusive);
+        let safety = match entry {
+            Some(t) => t.safety.clone(),
+            None => {
+                tracing::warn!(
+                    tool = %call.name,
+                    "unknown tool in batch — downgrading to Exclusive"
+                );
+                ParallelSafety::Exclusive
+            }
+        };
 
         match safety {
             ParallelSafety::Safe => safe_calls.push((idx, call.clone())),
