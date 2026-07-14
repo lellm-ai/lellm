@@ -16,15 +16,17 @@ struct ToolTiming {
     name: String,
 }
 
-/// 自动推断时间单位并格式化，保留 2 位小数。
+/// 自动推断时间单位并格式化，简洁易读。
 ///
-/// `<1ms` → `123µs`，`<60s` → `1.23s`，`<60min` → `2.50min`，`≥60min` → `1.05h`
+/// `<1ms` → `123µs`，`<100ms` → `99ms`，`<1s` → `0.15s`，`<60s` → `1.23s`，`<60min` → `2.50min`，`≥60min` → `1.05h`
 fn format_duration(secs: f64) -> String {
     let ms = secs * 1000.0;
     if ms < 1.0 {
         format!("{:.0}µs", secs * 1_000_000.0)
-    } else if ms < 1000.0 {
-        format!("{:.2}ms", ms)
+    } else if ms < 100.0 {
+        format!("{:.0}ms", ms)
+    } else if secs < 1.0 {
+        format!("{:.2}s", secs)
     } else if secs < 60.0 {
         format!("{:.2}s", secs)
     } else if secs < 3600.0 {
