@@ -32,6 +32,8 @@ pub use executor::{BatchExecutionResult, ToolExecutor};
 /// 一旦创建，快照内容不再变化。
 /// `definitions` 通过 `OnceLock` 懒构建——大部分轮次不需要定义列表。
 /// `diagnostics` 记录本次合并产生的诊断信息（如工具冲突），与快照绑定。
+///
+/// Clone 很便宜——内部 `tools` 是 Arc 浅拷贝，`definitions` OnceLock 重建即可。
 pub struct ToolSnapshot {
     tools: std::sync::Arc<indexmap::IndexMap<String, ExecutableTool>>,
     definitions: std::sync::OnceLock<Vec<lellm_core::ToolDefinition>>,
@@ -93,6 +95,17 @@ impl ToolSnapshot {
     /// 无需 `definitions() → get(name)` 的绕圈。
     pub fn iter(&self) -> impl Iterator<Item = (&str, &ExecutableTool)> {
         self.tools.iter().map(|(k, v)| (k.as_str(), v))
+    }
+}
+
+/// Clone 很便宜——`tools` 是 Arc 浅拷贝，`definitions` OnceLock 重建后懒计算。
+impl Clone for ToolSnapshot {
+    fn clone(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            definitions: std::sync::OnceLock::new(),
+            diagnostics: self.diagnostics.clone(),
+        }
     }
 }
 

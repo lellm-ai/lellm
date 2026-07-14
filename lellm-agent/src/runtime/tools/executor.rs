@@ -5,17 +5,16 @@
 //! **分层：**
 //! - 协议层（lellm-core）：`ToolDefinition`, `ParallelSafety`, `ToolCategory`
 //! - 可执行描述（lellm-core）：`ExecutableTool`, `ToolFn`
-//! - 构造框架（lellm-tool）：`ToolArgs`, schema 生成
+//! - 构造框架（lellm-core/tool feature）：`ToolArgs`, schema 生成
 //! - 运行时层（本模块）：`ToolExecutor`, `ToolCatalog`, `ToolSnapshot`
 //!
 //! **执行链路：**
 //! ```text
 //! execute_batch()
-//!   └── snapshot()
-//!       └── ParallelSafety scheduler
-//!           └── dispatch_one()
-//!               └── lookup → retry → invoke
-//!                   └── ExecutableTool::execute()
+//!   └── snapshot()                  → Arc<ToolSnapshot>
+//!       └── run_batch_internal()    → ParallelSafety 分组
+//!           └── dispatch_call()     → lookup + retry + invoke (唯一核心路径)
+//!               └── ExecutableTool::execute()
 //! ```
 
 use std::sync::Arc;
@@ -25,7 +24,7 @@ use lellm_core::{
 };
 
 use super::super::retry::RetryPolicy;
-use super::{ExecutableTool, ToolCatalog, ToolFn, ToolSnapshot};
+use super::{ToolCatalog, ToolFn, ToolSnapshot};
 
 /// 批量执行结果 — 长度、顺序、完整性三重保证。
 ///
@@ -117,73 +116,67 @@ impl ToolExecutor {
     /// 自动获取 snapshot，按 ParallelSafety 分组调度。
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> BatchExecutionResult {
         let snapshot = self.snapshot().await;
-        self.execute_batch_with(calls, &snapshot).await
+        run_batch_internal(calls, snapshot, &self.retry_policy).await
     }
 
     // ─── 内部核心：dispatch ────────────────────────────────────
 
     /// 核心 dispatch — lookup + retry + invoke。
     ///
-    /// 所有执行路径最终都汇聚到这里。
+    /// 委托给静态 `dispatch_call`，确保 `execute_one`、`execute_batch`
+    /// 以及 batch 内部的 spawn task 都走同一条执行路径。
     async fn dispatch_one(&self, call: &ToolCall, snapshot: &ToolSnapshot) -> ToolResult {
-        match snapshot.get(&call.name) {
-            Some(entry) => {
-                let tool_fn = tool_fn_from_reg(entry);
-                self.retry_policy
-                    .execute_with_retry(&tool_fn, &call.arguments)
-                    .await
-            }
-            None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
-        }
-    }
-
-    // ─── 内部调度：batch ───────────────────────────────────────
-
-    /// 使用预解析的快照批量执行 tool_calls。
-    async fn execute_batch_with(
-        &self,
-        calls: &[ToolCall],
-        snapshot: &ToolSnapshot,
-    ) -> BatchExecutionResult {
-        run_batch_internal(calls, snapshot, &self.retry_policy).await
+        dispatch_call(call, snapshot, &self.retry_policy).await
     }
 }
 
-// ─── 内部辅助：快照克隆 ──────────────────────────────────────────
+// ─── 统一 dispatch：所有执行路径共享 ─────────────────────────────
 
-impl ToolSnapshot {
-    /// 克隆内部工具映射，供 spawn 使用。
-    pub fn clone_for_spawn(&self) -> Arc<indexmap::IndexMap<String, ExecutableTool>> {
-        self.tools.clone()
+/// 核心 dispatch — lookup + retry + invoke。
+///
+/// 静态函数，不依赖 `&self`，因此可以被 `dispatch_one`（单调用）、
+/// `run_parallel_indexed` / `run_serial_indexed`（batch spawn task）复用。
+/// 这是工具执行的唯一核心路径。
+async fn dispatch_call(
+    call: &ToolCall,
+    snapshot: &ToolSnapshot,
+    retry_policy: &RetryPolicy,
+) -> ToolResult {
+    match snapshot.get(&call.name) {
+        Some(entry) => {
+            let entry = entry.clone();
+            let tool_fn: ToolFn = Arc::new(move |args: &serde_json::Value| entry.execute(args));
+            retry_policy
+                .execute_with_retry(&tool_fn, &call.arguments)
+                .await
+        }
+        None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
     }
 }
 
 // ─── Safe group: 全并发 ──────────────────────────────────────────
 
 async fn run_parallel_indexed(
-    tools: &Arc<indexmap::IndexMap<String, ExecutableTool>>,
-    retry_policy: &RetryPolicy,
+    snapshot: Arc<ToolSnapshot>,
+    retry_policy: RetryPolicy,
     calls: Vec<(usize, ToolCall)>,
 ) -> Vec<(usize, Message)> {
     let handles: Vec<_> = calls
         .iter()
         .map(|(idx, call)| {
-            let tools = Arc::clone(tools);
+            let snap = Arc::clone(&snapshot);
             let rp = retry_policy.clone();
             let call = call.clone();
             let idx = *idx;
             tokio::spawn(async move {
-                let result = match tools.get(&call.name) {
-                    Some(entry) => {
-                        let tool_fn = tool_fn_from_reg(entry);
-                        rp.execute_with_retry(&tool_fn, &call.arguments).await
-                    }
-                    None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
-                };
+                let result = dispatch_call(&call, &snap, &rp).await;
                 (idx, Message::tool_result(&call, &result))
             })
         })
         .collect();
+
+    // snap: Arc<ToolSnapshot>, &snap → &Arc<ToolSnapshot>
+    // dispatch_call 接收 &ToolSnapshot，Rust auto-deref 会处理
 
     let raw = futures_util::future::join_all(handles).await;
     raw.into_iter()
@@ -207,38 +200,23 @@ async fn run_parallel_indexed(
 // ─── 组内串行 ────────────────────────────────────────────────────
 
 async fn run_serial_indexed(
-    tools: &Arc<indexmap::IndexMap<String, ExecutableTool>>,
-    retry_policy: &RetryPolicy,
+    snapshot: Arc<ToolSnapshot>,
+    retry_policy: RetryPolicy,
     calls: Vec<(usize, ToolCall)>,
 ) -> Vec<(usize, Message)> {
     let mut results = Vec::with_capacity(calls.len());
     for (idx, call) in calls {
-        let exec_result = match tools.get(&call.name) {
-            Some(entry) => {
-                let tool_fn = tool_fn_from_reg(entry);
-                retry_policy
-                    .execute_with_retry(&tool_fn, &call.arguments)
-                    .await
-            }
-            None => Err(ToolError::not_found(format!("unknown tool: {}", call.name))),
-        };
+        let exec_result = dispatch_call(&call, &snapshot, &retry_policy).await;
         results.push((idx, Message::tool_result(&call, &exec_result)));
     }
     results
 }
 
-// ─── Helper: 从 ExecutableTool 获取 ToolFn ──────────────────────
-
-fn tool_fn_from_reg(entry: &ExecutableTool) -> ToolFn {
-    let entry = entry.clone();
-    Arc::new(move |args: &serde_json::Value| entry.execute(args))
-}
-
-// ─── 内部：批量调度核心（被 execute_batch_with 和自由函数共享）──
+// ─── 内部：批量调度核心 ──────────────────────────────────────────
 
 async fn run_batch_internal(
     calls: &[ToolCall],
-    snapshot: &ToolSnapshot,
+    snapshot: Arc<ToolSnapshot>,
     retry_policy: &RetryPolicy,
 ) -> BatchExecutionResult {
     if calls.is_empty() {
@@ -278,35 +256,36 @@ async fn run_batch_internal(
     let mut group_handles: Vec<tokio::task::JoinHandle<Vec<(usize, Message)>>> = Vec::new();
     let mut group_indices: Vec<Vec<usize>> = Vec::new();
 
-    let snapshot_tools = snapshot.clone_for_spawn();
-
     if !safe_calls.is_empty() {
-        let s = Arc::clone(&snapshot_tools);
         let rp = retry_policy.clone();
         let indices: Vec<usize> = safe_calls.iter().map(|(i, _)| *i).collect();
-        group_handles.push(tokio::spawn(async move {
-            run_parallel_indexed(&s, &rp, safe_calls).await
-        }));
+        group_handles.push(tokio::spawn(run_parallel_indexed(
+            Arc::clone(&snapshot),
+            rp,
+            safe_calls,
+        )));
         group_indices.push(indices);
     }
 
     for group_calls in category_calls.into_values() {
-        let s = Arc::clone(&snapshot_tools);
         let rp = retry_policy.clone();
         let indices: Vec<usize> = group_calls.iter().map(|(i, _)| *i).collect();
-        group_handles.push(tokio::spawn(async move {
-            run_serial_indexed(&s, &rp, group_calls).await
-        }));
+        group_handles.push(tokio::spawn(run_serial_indexed(
+            Arc::clone(&snapshot),
+            rp,
+            group_calls,
+        )));
         group_indices.push(indices);
     }
 
     if !exclusive_calls.is_empty() {
-        let s = Arc::clone(&snapshot_tools);
         let rp = retry_policy.clone();
         let indices: Vec<usize> = exclusive_calls.iter().map(|(i, _)| *i).collect();
-        group_handles.push(tokio::spawn(async move {
-            run_serial_indexed(&s, &rp, exclusive_calls).await
-        }));
+        group_handles.push(tokio::spawn(run_serial_indexed(
+            Arc::clone(&snapshot),
+            rp,
+            exclusive_calls,
+        )));
         group_indices.push(indices);
     }
 
@@ -349,10 +328,11 @@ async fn run_batch_internal(
 ///
 /// **已弃用。** 请直接调用 `ToolExecutor::execute_batch()`。
 #[deprecated(since = "0.4.10", note = "Use ToolExecutor::execute_batch() instead")]
+#[allow(deprecated)]
 pub async fn execute_batch_with(
     calls: &[ToolCall],
     snapshot: &ToolSnapshot,
     retry_policy: &RetryPolicy,
 ) -> BatchExecutionResult {
-    run_batch_internal(calls, snapshot, retry_policy).await
+    run_batch_internal(calls, Arc::new(snapshot.clone()), retry_policy).await
 }
