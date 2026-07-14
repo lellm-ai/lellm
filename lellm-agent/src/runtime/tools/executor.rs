@@ -242,6 +242,10 @@ async fn run_batch_internal(
                         .or_default()
                         .push((idx, call.clone()));
                 } else {
+                    tracing::warn!(
+                        tool = %call.name,
+                        "CategoryExclusive tool has no category set, downgrading to Exclusive"
+                    );
                     exclusive_calls.push((idx, call.clone()));
                 }
             }
