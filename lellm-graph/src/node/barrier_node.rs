@@ -35,6 +35,9 @@ pub struct BarrierNode<S: WorkflowState = State> {
     pub default_action: BarrierDefaultAction,
     pub reject_key: String,
     pub approve_key: String,
+    /// 每次 execute() 递增，生成唯一的 BarrierId::occurrence。
+    /// Arc 包裹确保 clone 后共享同一计数器。
+    occurrence_counter: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Phantom 用于标记泛型类型
     _phantom: std::marker::PhantomData<S>,
 }
@@ -48,6 +51,7 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
             default_action: BarrierDefaultAction::default(),
             reject_key: format!("{name}.reject_reason"),
             approve_key: format!("{name}.approved"),
+            occurrence_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -106,7 +110,8 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
 #[async_trait]
 impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
     async fn execute(&self, ctx: &mut LeafContext<'_, S>) -> Result<(), GraphError> {
-        let barrier_id = BarrierId::new(&self.name, 0);
+        let occurrence = self.occurrence_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let barrier_id = BarrierId::new(&self.name, occurrence);
         ctx.pause(barrier_id, self.timeout);
         ctx.set_has_side_effects();
         Ok(())
@@ -116,7 +121,8 @@ impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for BarrierNode<S> {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
-        let barrier_id = BarrierId::new(&self.name, 0);
+        let occurrence = self.occurrence_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let barrier_id = BarrierId::new(&self.name, occurrence);
         ctx.pause(barrier_id, self.timeout);
         ctx.set_has_side_effects();
         Ok(())
