@@ -27,7 +27,7 @@ pub mod prelude {
     };
 
     #[cfg(feature = "tool")]
-    pub use lellm_tool::{ToolArgs, compute_and_clean_schema, safe_fn};
+    pub use lellm_core::{ToolArgs, compute_and_clean_schema, safe_fn};
 
     #[cfg(feature = "provider")]
     pub use lellm_provider::{
@@ -47,10 +47,9 @@ pub mod prelude {
         AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, CatalogDiagnostic,
         CompositeCatalog, ConflictPolicy, ContextBudget, ExecutableTool, FallbackAction,
         FallbackContext, FallbackStrategy, IntoToolError, IntoToolResult, LocalCompactor,
-        ParallelSafety, RetryPolicy, StaticCatalog, StopReason, ToolArgs, ToolCatalog,
-        ToolCategory, ToolExecutor, ToolFn, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop,
-        ToolUseResult, create_agent, create_agent_full, create_agent_with_system,
-        create_agent_with_tools,
+        ParallelSafety, RetryPolicy, StaticCatalog, StopReason, ToolCatalog, ToolCategory,
+        ToolExecutor, ToolFn, ToolSnapshot, ToolUseConfig, ToolUseDeps, ToolUseLoop, ToolUseResult,
+        create_agent, create_agent_full, create_agent_with_system, create_agent_with_tools,
     };
 
     #[cfg(feature = "mcp")]
@@ -63,7 +62,7 @@ pub mod prelude {
     pub use lellm_derive::ToolDefinition;
 
     #[cfg(feature = "tool")]
-    pub use lellm_tool::tool;
+    pub use lellm_derive::tool;
 }
 
 // ─── Crate 级 re-export（向后兼容）─────────────────────────────────
@@ -71,8 +70,9 @@ pub mod prelude {
 #[cfg(feature = "core")]
 pub use lellm_core as core;
 
-#[cfg(feature = "tool")]
-pub use lellm_tool as tool;
+// Note: `lellm::tool` re-export removed — use `lellm::prelude` instead.
+// ToolArgs, compute_and_clean_schema, safe_fn, and #[tool] macro
+// are all available via `lellm::prelude::*`.
 
 #[cfg(feature = "provider")]
 pub use lellm_provider as provider;

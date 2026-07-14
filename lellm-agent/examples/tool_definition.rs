@@ -16,11 +16,12 @@
 //! ```
 
 use lellm_agent::{AgentBuilder, ExecutableTool, ToolCategory, ToolResult, ToolUseLoop};
+use lellm_core::ToolArgs;
 use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage, ToolDefinition, ToolSchema};
+use lellm_derive::{Tool, tool};
 use lellm_provider::{MockProvider, ResolvedModel};
-use lellm_tool::schemars::JsonSchema;
-use lellm_tool::serde::Deserialize;
-use lellm_tool::{Tool, ToolArgs, tool};
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::sync::Arc;
 
 // ─── Level 1: #[tool] 函数宏（推荐，95% 用户）──────────────────

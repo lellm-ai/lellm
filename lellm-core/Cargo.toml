@@ -9,10 +9,12 @@ repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 anyhow = { workspace = true, optional = true }
-serde.workspace = true
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 
 [features]
 default = []
 anyhow = ["dep:anyhow"]
+tool = ["dep:schemars"]

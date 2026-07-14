@@ -7,7 +7,7 @@
 
 use lellm_agent::{ParallelSafety, StaticCatalog, ToolExecutor};
 use lellm_core::{ToolCall, ToolResult};
-use lellm_tool::tool;
+use lellm_derive::tool;
 use std::sync::Arc;
 
 // ============================================================================

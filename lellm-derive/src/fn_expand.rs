@@ -8,6 +8,8 @@
 //! - Safe registration methods
 //! - `_tool()` factory function (no dependency injection)
 //! - `_tool_with()` factory function (dependency injection)
+//!
+//! **原则：宏只拼 AST，所有运行逻辑都在 lellm-core。**
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};

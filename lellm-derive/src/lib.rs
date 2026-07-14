@@ -5,7 +5,7 @@
 //! ## Level 1: `#[tool]` 函数宏（推荐，95% 用户）
 //!
 //! ```ignore
-//! use lellm_agent::ToolResult;
+//! use lellm_core::ToolResult;
 //! use lellm_derive::tool;
 //!
 //! #[tool(name = "search", description = "搜索互联网信息")]
@@ -30,7 +30,7 @@
 //! ## Level 2: `#[derive(Tool)]` struct 宏（高级用户）
 //!
 //! ```ignore
-//! use lellm_agent::ToolResult;
+//! use lellm_core::ToolResult;
 //! use lellm_derive::Tool;
 //!
 //! #[derive(Tool, JsonSchema)]

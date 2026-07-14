@@ -4,6 +4,8 @@
 //! - `derive(Tool)`: derive macro path for struct types
 //!
 //! Both generate the same ToolArgs impl + helper methods.
+//!
+//! **原则：宏只拼 AST，所有运行逻辑都在 lellm-core。**
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

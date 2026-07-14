@@ -1,20 +1,20 @@
 //! Code generation functions for tool macros.
 //!
 //! Generates the TokenStream code for:
-//! - Schema caching (delegates to lellm-tool's compute_and_clean_schema)
+//! - Schema caching (delegates to lellm-core's compute_and_clean_schema)
 //! - ToolArgs trait impl
 //! - Backward-compatible methods
 //! - Safe registration methods
 //!
-//! **原则：宏只拼 AST，所有运行逻辑都在 lellm-tool。**
-//! 宏不直接引用 serde_json / schemars，只通过 lellm-tool 的 API 调用。
+//! **原则：宏只拼 AST，所有运行逻辑都在 lellm-core。**
+//! 宏不直接引用 serde_json / schemars，只通过 lellm-core 的 API 调用。
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
 /// Generate the ToolArgs trait impl.
 ///
-/// 委托给 lellm-tool 的 `compute_and_clean_schema::<T>()`，
+/// 委托给 lellm-core 的 `compute_and_clean_schema::<T>()`，
 /// 宏不需要知道 serde_json / schemars 的存在。
 pub(crate) fn generate_tool_args_impl(
     struct_name: &syn::Ident,
@@ -22,14 +22,14 @@ pub(crate) fn generate_tool_args_impl(
     description: &str,
 ) -> TokenStream2 {
     quote! {
-        impl ::lellm_tool::ToolArgs for #struct_name {
+        impl ::lellm_core::ToolArgs for #struct_name {
             const NAME: &'static str = #name;
             const DESCRIPTION: &'static str = #description;
 
             fn schema() -> ::lellm_core::ToolSchema {
                 static SCHEMA: ::std::sync::LazyLock<::lellm_core::ToolSchema> =
                     ::std::sync::LazyLock::new(|| {
-                        ::lellm_tool::compute_and_clean_schema::<#struct_name>()
+                        ::lellm_core::compute_and_clean_schema::<#struct_name>()
                     });
                 SCHEMA.clone()
             }
@@ -45,24 +45,24 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
         impl #struct_name {
             /// JSON Schema（LazyLock 缓存）。
             pub fn schema() -> ::lellm_core::ToolSchema {
-                <#struct_name as ::lellm_tool::ToolArgs>::schema()
+                <#struct_name as ::lellm_core::ToolArgs>::schema()
             }
 
             /// 工具名称 — 向后兼容
             pub fn __name() -> &'static str {
-                <#struct_name as ::lellm_tool::ToolArgs>::NAME
+                <#struct_name as ::lellm_core::ToolArgs>::NAME
             }
 
             /// 工具描述 — 向后兼容
             pub fn __description() -> &'static str {
-                <#struct_name as ::lellm_tool::ToolArgs>::DESCRIPTION
+                <#struct_name as ::lellm_core::ToolArgs>::DESCRIPTION
             }
 
             /// ToolDefinition（LazyLock 缓存，避免重复 clone）。
             pub fn tool_definition() -> ::lellm_core::ToolDefinition {
                 static DEF: ::std::sync::LazyLock<::lellm_core::ToolDefinition> =
                     ::std::sync::LazyLock::new(|| {
-                        <#struct_name as ::lellm_tool::ToolArgs>::tool_definition()
+                        <#struct_name as ::lellm_core::ToolArgs>::tool_definition()
                     });
                 DEF.clone()
             }
@@ -72,7 +72,7 @@ pub(crate) fn generate_compat_methods(struct_name: &syn::Ident) -> TokenStream2 
 
 /// Generate safe registration methods: safe(), category_exclusive(), exclusive().
 ///
-/// 直接委托给 lellm-tool 的 `safe_fn()` 等强类型工厂函数，
+/// 直接委托给 lellm-core 的 `safe_fn()` 等强类型工厂函数，
 /// 不再在宏中手动处理 parse / error / boxing。
 pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
     quote! {
@@ -83,8 +83,8 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
-                ::lellm_tool::safe_fn(
-                    <#struct_name as ::lellm_tool::ToolArgs>::tool_definition(),
+                ::lellm_core::safe_fn(
+                    <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     f,
                 )
             }
@@ -98,8 +98,8 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
-                ::lellm_tool::category_exclusive_fn(
-                    <#struct_name as ::lellm_tool::ToolArgs>::tool_definition(),
+                ::lellm_core::category_exclusive_fn(
+                    <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     category,
                     f,
                 )
@@ -111,8 +111,8 @@ pub(crate) fn generate_safe_methods(struct_name: &syn::Ident) -> TokenStream2 {
                 F: Fn(#struct_name) -> Fut + Send + Sync + 'static,
                 Fut: ::core::future::Future<Output = ::lellm_core::ToolResult> + Send + 'static,
             {
-                ::lellm_tool::exclusive_fn(
-                    <#struct_name as ::lellm_tool::ToolArgs>::tool_definition(),
+                ::lellm_core::exclusive_fn(
+                    <#struct_name as ::lellm_core::ToolArgs>::tool_definition(),
                     f,
                 )
             }

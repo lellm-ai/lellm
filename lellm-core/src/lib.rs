@@ -28,5 +28,8 @@ pub use tool::{
     __tool_box, ExecutableTool, ParallelSafety, ToolCategory, ToolDefinition, ToolFn, ToolSchema,
 };
 
+#[cfg(feature = "tool")]
+pub use tool::{ToolArgs, category_exclusive_fn, compute_and_clean_schema, exclusive_fn, safe_fn};
+
 // Re-export for macro-generated code — ensures consistent serde instances.
 pub use serde;

@@ -26,11 +26,11 @@ mod shared;
 use lellm_agent::AgentBuilder;
 use lellm_agent::McpCatalog;
 use lellm_core::{Message, ToolError, ToolErrorKind, ToolResult, text_block};
+use lellm_derive::tool;
 use lellm_mcp::McpClient;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
-use lellm_tool::tool;
 use std::sync::Arc;
 
 // ─── Tool: http_get ─────────────────────────────────────────────

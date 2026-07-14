@@ -7,7 +7,7 @@
 
 use lellm_agent::ToolArgs;
 use lellm_core::ToolResult;
-use lellm_tool::tool;
+use lellm_derive::tool;
 
 // ============================================================================
 // 1. 最基础的 #[tool] 函数 — 无额外配置
