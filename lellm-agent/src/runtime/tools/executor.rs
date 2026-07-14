@@ -242,15 +242,15 @@ async fn run_batch_internal(
     let mut exclusive_calls: Vec<(usize, ToolCall)> = Vec::new();
 
     for (idx, call) in calls.iter().enumerate() {
-        let safety = snapshot
-            .get(&call.name)
+        let entry = snapshot.get(&call.name);
+        let safety = entry
             .map(|t| t.safety.clone())
             .unwrap_or(ParallelSafety::Exclusive);
 
         match safety {
             ParallelSafety::Safe => safe_calls.push((idx, call.clone())),
             ParallelSafety::CategoryExclusive => {
-                if let Some(cat) = snapshot.get(&call.name).and_then(|t| t.category.clone()) {
+                if let Some(cat) = entry.and_then(|t| t.category.clone()) {
                     category_calls
                         .entry(cat)
                         .or_default()
