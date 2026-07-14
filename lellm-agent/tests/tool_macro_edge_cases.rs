@@ -111,7 +111,7 @@ async fn test_async_tool_execution() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
 
     assert!(result.is_ok());
     let val = result.unwrap();
@@ -162,7 +162,9 @@ async fn test_tool_error_handling() {
         arguments: serde_json::json!({"input": "hello"}),
     };
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call_ok, &snapshot).await;
+    let result = executor
+        .execute_one_with_snapshot(&call_ok, &snapshot)
+        .await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), serde_json::json!("success: hello"));
 
@@ -171,7 +173,9 @@ async fn test_tool_error_handling() {
         name: "risky_op".to_string(),
         arguments: serde_json::json!({"input": ""}),
     };
-    let result = executor.execute_with_snapshot(&call_err, &snapshot).await;
+    let result = executor
+        .execute_one_with_snapshot(&call_err, &snapshot)
+        .await;
     assert!(result.is_err());
 }
 
@@ -248,7 +252,7 @@ async fn test_invalid_argument_parsing() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();

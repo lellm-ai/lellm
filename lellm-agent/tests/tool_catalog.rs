@@ -191,7 +191,7 @@ impl MockDynamicCatalog {
 impl ToolCatalog for MockDynamicCatalog {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
         let guard = self.tools.lock().await;
-        Arc::new(ToolSnapshot::new(guard.clone(), 0))
+        Arc::new(ToolSnapshot::new(guard.clone()))
     }
 }
 
@@ -215,7 +215,7 @@ async fn test_dynamic_catalog_snapshot_and_execute() {
 
 #[tokio::test]
 async fn test_execute_batch_with_not_found() {
-    let snapshot = ToolSnapshot::new(indexmap::IndexMap::new(), 0);
+    let snapshot = ToolSnapshot::new(indexmap::IndexMap::new());
     let calls = vec![make_tool_call("1", "ghost_tool", "test")];
 
     let batch = execute_batch_with(&calls, &snapshot, &default_retry()).await;
@@ -233,7 +233,7 @@ async fn test_executor_not_found() {
 
     let snapshot = executor.snapshot().await;
     let call = make_tool_call("1", "non_existent", "test");
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -350,7 +350,7 @@ impl ToolCatalog for CountingCatalog {
         for t in &self.tools {
             map.insert(t.definition().name.clone(), t.clone());
         }
-        Arc::new(ToolSnapshot::new(map, 0))
+        Arc::new(ToolSnapshot::new(map))
     }
 }
 
@@ -380,11 +380,12 @@ async fn test_tool_snapshot_basic() {
     for t in tools {
         map.insert(t.definition().name.clone(), t);
     }
-    let snap = ToolSnapshot::new(map, 42);
+    let snap = ToolSnapshot::new(map);
 
     assert!(snap.has_tools());
     assert_eq!(snap.len(), 2);
-    assert_eq!(snap.version(), 42);
+    assert!(snap.get("echo").is_some());
+    assert!(snap.get("missing").is_none());
     assert!(snap.get("echo").is_some());
     assert!(snap.get("missing").is_none());
 
@@ -395,7 +396,7 @@ async fn test_tool_snapshot_basic() {
 
 #[tokio::test]
 async fn test_empty_snapshot() {
-    let snap = ToolSnapshot::new(indexmap::IndexMap::new(), 0);
+    let snap = ToolSnapshot::new(indexmap::IndexMap::new());
 
     assert!(!snap.has_tools());
     assert!(snap.is_empty());

@@ -88,7 +88,7 @@ async fn test_full_execution_flow_tool_factory() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
 
     assert!(result.is_ok());
     let val = result.unwrap();
@@ -121,7 +121,7 @@ async fn test_full_execution_flow_tool_with_factory() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
 
     assert!(result.is_ok());
     let val = result.unwrap();
@@ -149,7 +149,9 @@ async fn test_multiple_tools_in_catalog() {
         name: "add_numbers".to_string(),
         arguments: serde_json::json!({"a": 100, "b": 200}),
     };
-    let result = executor.execute_with_snapshot(&call_add, &snapshot).await;
+    let result = executor
+        .execute_one_with_snapshot(&call_add, &snapshot)
+        .await;
     assert_eq!(result.unwrap(), serde_json::json!(300));
 
     let call_greet = ToolCall {
@@ -157,7 +159,9 @@ async fn test_multiple_tools_in_catalog() {
         name: "greet".to_string(),
         arguments: serde_json::json!({"name": "Team", "formal": false}),
     };
-    let result = executor.execute_with_snapshot(&call_greet, &snapshot).await;
+    let result = executor
+        .execute_one_with_snapshot(&call_greet, &snapshot)
+        .await;
     assert_eq!(result.unwrap(), serde_json::json!("嘿, Team！"));
 }
 
@@ -182,6 +186,6 @@ async fn test_with_factory_strong_typed_args() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
     assert_eq!(result.unwrap(), serde_json::json!("computed: 15"));
 }

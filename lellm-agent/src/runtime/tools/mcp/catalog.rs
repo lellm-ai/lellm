@@ -17,7 +17,6 @@
 //! - `McpCatalog` — 单 Server 目录，持有 Client 引用 + 工具快照
 //! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use indexmap::IndexMap;
@@ -31,20 +30,16 @@ use super::{ToolCatalog, ToolSnapshot};
 
 /// 工具快照存储 — 零后台任务，纯数据容器。
 ///
-/// 维护单调递增的版本计数器（对齐 `CompositeCatalog` 模式），
 /// 读方法直接在 impl 上，写方法收敛到 `CatalogStoreWrite` trait。
 pub(crate) struct CatalogStore {
     snapshot: RwLock<Arc<ToolSnapshot>>,
-    version: AtomicU64,
 }
 
 impl CatalogStore {
-    /// 创建存储，记录初始快照的版本号。
+    /// 创建存储。
     pub(crate) fn new(initial: Arc<ToolSnapshot>) -> Self {
-        let initial_version = initial.version();
         Self {
             snapshot: RwLock::new(initial),
-            version: AtomicU64::new(initial_version),
         }
     }
 
@@ -66,17 +61,11 @@ impl CatalogStore {
 
 /// CatalogStore 写操作 trait —— crate 内部可见，`McpCatalog` 无法暴露写入能力。
 pub(crate) trait CatalogStoreWrite {
-    /// 自增版本号并返回新值。
-    fn next_version(&self) -> u64;
-    /// 直接存储快照（不修改版本号）。
+    /// 直接存储快照。
     fn store_raw(&self, snapshot: Arc<ToolSnapshot>);
 }
 
 impl CatalogStoreWrite for CatalogStore {
-    fn next_version(&self) -> u64 {
-        self.version.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
     fn store_raw(&self, snapshot: Arc<ToolSnapshot>) {
         *self.snapshot.write().unwrap() = snapshot;
     }
@@ -110,7 +99,7 @@ impl McpCatalog {
     /// 执行一次 `tools/list` 远程调用，构建工具快照。
     /// 返回的 `McpCatalog` 持有 `client` 引用，保持 Transport 存活。
     pub async fn discover(client: Arc<McpClient>) -> Result<Self, lellm_mcp::McpError> {
-        let snapshot = build_snapshot(client.clone(), 0).await?;
+        let snapshot = build_snapshot(client.clone()).await?;
         Ok(Self {
             client,
             store: Arc::new(CatalogStore::new(snapshot)),
@@ -198,8 +187,7 @@ impl CatalogRefresher {
             .client
             .upgrade()
             .ok_or_else(lellm_mcp::McpError::disconnected)?;
-        let version = self.store.next_version();
-        let new_snapshot = build_snapshot(client, version).await?;
+        let new_snapshot = build_snapshot(client).await?;
         self.store.store_raw(new_snapshot);
         Ok(())
     }
@@ -219,7 +207,6 @@ impl CatalogRefresh for CatalogRefresher {
 /// 构建工具快照。
 pub(super) async fn build_snapshot(
     client: Arc<McpClient>,
-    version: u64,
 ) -> Result<Arc<ToolSnapshot>, lellm_mcp::McpError> {
     let list_result: lellm_mcp::protocol::ListToolsResult = client.tools_list().await?;
 
@@ -238,7 +225,7 @@ pub(super) async fn build_snapshot(
         reg_map.insert(tool.name.clone(), entry);
     }
 
-    Ok(Arc::new(ToolSnapshot::new(reg_map, version)))
+    Ok(Arc::new(ToolSnapshot::new(reg_map)))
 }
 
 /// 将 MCP 工具转换为 ExecutableTool。

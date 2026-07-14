@@ -429,11 +429,9 @@ impl ToolCatalog for RegistryCatalog {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
         let stores = self.stores.read().unwrap();
         let mut reg_map = IndexMap::new();
-        let mut max_version = 0u64;
 
         for (server_name, store) in stores.iter() {
             let snapshot = store.load();
-            max_version = max_version.max(snapshot.version());
 
             for (tool_name, tool) in snapshot.iter() {
                 match &self.conflict_policy {
@@ -455,6 +453,6 @@ impl ToolCatalog for RegistryCatalog {
             }
         }
 
-        Arc::new(ToolSnapshot::new(reg_map, max_version))
+        Arc::new(ToolSnapshot::new(reg_map))
     }
 }

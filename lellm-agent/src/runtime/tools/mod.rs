@@ -21,17 +21,18 @@ pub use lellm_core::{ExecutableTool, ParallelSafety, ToolCategory, ToolFn};
 pub use lellm_tool::ToolArgs;
 
 // Re-export runtime types
-pub use executor::{BatchExecutionResult, ToolExecutor, execute_batch_with};
+#[allow(deprecated)]
+pub use executor::execute_batch_with;
+pub use executor::{BatchExecutionResult, ToolExecutor};
 
 // ─── 工具快照 ────────────────────────────────────────────────────
 
 /// 工具快照 — 冻结视图（Frozen View）。
 ///
-/// 一旦创建，快照内容不再变化。通过 `version` 区分不同时刻的快照。
+/// 一旦创建，快照内容不再变化。
 /// `definitions` 通过 `OnceLock` 懒构建——大部分轮次不需要定义列表。
-/// `diagnostics` 记录本次合并产生的诊断信息（如工具冲突），与快照版本绑定。
+/// `diagnostics` 记录本次合并产生的诊断信息（如工具冲突），与快照绑定。
 pub struct ToolSnapshot {
-    version: u64,
     tools: std::sync::Arc<indexmap::IndexMap<String, ExecutableTool>>,
     definitions: std::sync::OnceLock<Vec<lellm_core::ToolDefinition>>,
     diagnostics: Vec<CatalogDiagnostic>,
@@ -39,9 +40,8 @@ pub struct ToolSnapshot {
 
 impl ToolSnapshot {
     /// 从工具映射构建快照（无诊断信息）。
-    pub fn new(tools: indexmap::IndexMap<String, ExecutableTool>, version: u64) -> Self {
+    pub fn new(tools: indexmap::IndexMap<String, ExecutableTool>) -> Self {
         Self {
-            version,
             tools: std::sync::Arc::new(tools),
             definitions: std::sync::OnceLock::new(),
             diagnostics: Vec::new(),
@@ -61,7 +61,7 @@ impl ToolSnapshot {
 
     /// 获取本次快照的诊断信息（如工具冲突）。
     ///
-    /// 诊断信息与快照版本绑定，不会被后续 `snapshot()` 调用覆盖。
+    /// 诊断信息与快照绑定，不会被后续 `snapshot()` 调用覆盖。
     pub fn diagnostics(&self) -> &[CatalogDiagnostic] {
         &self.diagnostics
     }
@@ -69,11 +69,6 @@ impl ToolSnapshot {
     /// 是否有工具。
     pub fn has_tools(&self) -> bool {
         !self.tools.is_empty()
-    }
-
-    /// 快照版本号。
-    pub fn version(&self) -> u64 {
-        self.version
     }
 
     /// 工具数量。
@@ -136,14 +131,14 @@ impl StaticCatalog {
             map.insert(reg.definition.name.clone(), reg);
         }
         Self {
-            snapshot: std::sync::Arc::new(ToolSnapshot::new(map, 0)),
+            snapshot: std::sync::Arc::new(ToolSnapshot::new(map)),
         }
     }
 
     /// 空目录。
     pub fn empty() -> Self {
         Self {
-            snapshot: std::sync::Arc::new(ToolSnapshot::new(indexmap::IndexMap::new(), 0)),
+            snapshot: std::sync::Arc::new(ToolSnapshot::new(indexmap::IndexMap::new())),
         }
     }
 }
@@ -249,7 +244,6 @@ impl CompositeCatalogBuilder {
         CompositeCatalog {
             sources: self.sources,
             conflict_policy: self.conflict_policy,
-            version_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -262,7 +256,6 @@ impl CompositeCatalogBuilder {
 pub struct CompositeCatalog {
     sources: Vec<(String, std::sync::Arc<dyn ToolCatalog>)>,
     conflict_policy: ConflictPolicy,
-    version_counter: std::sync::atomic::AtomicU64,
 }
 
 impl CompositeCatalog {
@@ -278,7 +271,6 @@ impl CompositeCatalog {
         Self {
             sources,
             conflict_policy: ConflictPolicy::default(),
-            version_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
@@ -321,12 +313,7 @@ impl ToolCatalog for CompositeCatalog {
             .map(|(name, (tool, _source))| (name, tool))
             .collect();
 
-        let version = self
-            .version_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-
-        let snapshot = ToolSnapshot::new(tools, version).with_diagnostics(diagnostics);
+        let snapshot = ToolSnapshot::new(tools).with_diagnostics(diagnostics);
 
         std::sync::Arc::new(snapshot)
     }

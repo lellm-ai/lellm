@@ -3,6 +3,15 @@
 //! # Typed State
 //!
 //! 从 ctx 获取 `AgentState`，执行工具，追加结果到消息历史。
+//!
+//! **执行路径：**
+//! ```text
+//! ToolNode::execute()
+//!   └── executor.execute_batch()   ← ParallelSafety 调度
+//!       └── dispatch_one()         ← lookup + retry + invoke
+//!           └── ExecutableTool::execute()
+//!   └── 后处理（budget truncate, cache marker, event emit）
+//! ```
 
 use async_trait::async_trait;
 
@@ -11,8 +20,7 @@ use lellm_graph::{GraphError, LeafContext, LeafNode};
 
 use super::super::config::{ToolUseConfig, empty_response};
 use super::super::context::ContextBudget;
-use super::super::runtime::ResolvedRound;
-use super::super::tools::{ToolExecutor, ToolFn};
+use super::super::tools::ToolExecutor;
 use super::super::typed_state::{AgentMutation, AgentState};
 
 /// 工具执行节点。
@@ -39,7 +47,6 @@ impl LeafNode<AgentState> for ToolNode {
         use lellm_graph::{StreamChunk, ToolPhase};
 
         // 1. 获取工具调用
-        let round = ResolvedRound::new(self.executor.snapshot().await);
         let state = ctx.state().clone();
         let last_response = state.last_response.unwrap_or_else(empty_response);
         let tool_calls: Vec<ToolCall> = last_response.tool_calls().cloned().collect();
@@ -48,7 +55,7 @@ impl LeafNode<AgentState> for ToolNode {
             return Ok(());
         }
 
-        // 2. Emit Queued + Started for all tools (严格按 ToolCall 顺序)
+        // 2. Emit Queued + Started for all tools（严格按 ToolCall 顺序）
         for call in &tool_calls {
             ctx.emit(StreamChunk::ToolLifecycle {
                 phase: ToolPhase::Queued,
@@ -62,100 +69,49 @@ impl LeafNode<AgentState> for ToolNode {
             });
         }
 
-        // 3. 并发执行每个工具，完成后立即 emit Finished + ToolOutput
-        let retry_policy = self.executor.retry_policy().clone();
-        let snapshot = round.snapshot.clone();
-        let budget = self.config.context_budget.clone();
+        // 3. 统一执行入口 — ParallelSafety 分组调度
+        let batch = self.executor.execute_batch(&tool_calls).await;
 
-        let mut handles = Vec::with_capacity(tool_calls.len());
-        for call in &tool_calls {
-            let entry = snapshot.get(&call.name).cloned();
-            let rp = retry_policy.clone();
-            let call_clone = call.clone();
-            let budget_clone = budget.clone();
-
-            handles.push(tokio::spawn(async move {
-                let start = std::time::Instant::now();
-                let result: lellm_core::ToolResult = match entry {
-                    Some(reg) => {
-                        let tool_fn: ToolFn =
-                            std::sync::Arc::new(move |args: &serde_json::Value| reg.execute(args));
-                        rp.execute_with_retry(&tool_fn, &call_clone.arguments).await
-                    }
-                    None => Err(lellm_core::ToolError::not_found(format!(
-                        "unknown tool: {}",
-                        call_clone.name
-                    ))),
-                };
-                let duration = start.elapsed();
-
-                // 应用预算截断 + 前缀缓存 Breakpoint
-                let msg = lellm_core::Message::tool_result(&call_clone, &result);
-                let msg = apply_budget_truncate(msg, &budget_clone);
-                let msg = set_tool_result_cache(msg);
-
-                (msg, duration)
-            }));
-        }
-
-        // 4. 收集结果，join_all 保持顺序，i-th result 对应 i-th tool_call
-        let mut results: Vec<Option<lellm_core::Message>> = vec![None; tool_calls.len()];
-        let mut panicked = false;
-
-        let collect = futures_util::future::join_all(handles).await;
-        for (i, (call, join_result)) in tool_calls.iter().zip(collect).enumerate() {
-            match join_result {
-                Ok((msg, duration)) => {
-                    // Emit Finished
-                    ctx.emit(StreamChunk::ToolLifecycle {
-                        phase: ToolPhase::Finished,
-                        call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                    });
-                    // Emit ToolOutput
-                    if let Some(chunk) = tool_output_chunk(&msg, &call.id, &call.name, duration) {
-                        ctx.emit(chunk);
-                    }
-                    results[i] = Some(msg);
-                }
-                Err(join_err) => {
-                    panicked = true;
-                    let err_msg = lellm_core::Message::tool_result(
-                        call,
-                        &Err(lellm_core::ToolError {
-                            kind: lellm_core::ToolErrorKind::Internal,
-                            message: format!("tool task panicked: {join_err}"),
-                        }),
-                    );
-                    let err_msg = set_tool_result_cache(err_msg);
-                    ctx.emit(StreamChunk::ToolLifecycle {
-                        phase: ToolPhase::Finished,
-                        call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                    });
-                    if let Some(chunk) =
-                        tool_output_chunk(&err_msg, &call.id, &call.name, std::time::Duration::ZERO)
-                    {
-                        ctx.emit(chunk);
-                    }
-                    results[i] = Some(err_msg);
-                }
-            }
-        }
-
-        if panicked {
+        if batch.panicked {
             tracing::warn!("tool batch task panicked — error results filled");
         }
 
+        // 4. 后处理 + event emit + 收集结果（单次遍历）
+        let budget = self.config.context_budget.clone();
+        let mut processed_messages = Vec::with_capacity(tool_calls.len());
+
+        for (call, msg) in tool_calls.iter().zip(batch.results.into_iter()) {
+            let processed = apply_post_process(msg, &budget);
+            processed_messages.push(processed.clone());
+
+            // Emit Finished
+            ctx.emit(StreamChunk::ToolLifecycle {
+                phase: ToolPhase::Finished,
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+            });
+
+            // Emit ToolOutput
+            if let Some(chunk) =
+                tool_output_chunk(&processed, &call.id, &call.name, std::time::Duration::ZERO)
+            {
+                ctx.emit(chunk);
+            }
+        }
+
         // 5. Emit 消息追加 Mutation
-        ctx.record(AgentMutation::AppendMessages(
-            results.into_iter().flatten().collect(),
-        ));
+        ctx.record(AgentMutation::AppendMessages(processed_messages));
 
         tracing::debug!(tool_calls = tool_calls.len(), "tool execution completed");
 
         Ok(())
     }
+}
+
+/// 后处理：budget truncate + cache marker
+fn apply_post_process(msg: lellm_core::Message, budget: &ContextBudget) -> lellm_core::Message {
+    let msg = apply_budget_truncate(msg, budget);
+    set_tool_result_cache(msg)
 }
 
 /// 对单个 ToolResult 应用预算截断。

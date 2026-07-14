@@ -470,9 +470,7 @@ async fn test_catalog_snapshot_versions_stable() {
 
     let snap1 = catalog.snapshot().await;
     let snap2 = catalog.snapshot().await;
-    // 未更新的 catalog 返回相同 version
-    assert_eq!(snap1.version(), snap2.version());
-    // 是同一个 Arc
+    // 未更新的 catalog 返回同一个 Arc 快照
     assert!(std::sync::Arc::ptr_eq(&snap1, &snap2));
 }
 

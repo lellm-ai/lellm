@@ -10,6 +10,7 @@ pub mod runtime;
 pub use serde;
 
 pub use hook::{AgentHook, AgentHookContext, AgentHookSnapshot, NoOpAgentHook, TracingAgentHook};
+#[allow(deprecated)]
 pub use runtime::{
     AgentBuilder, AgentEvent, AgentState, AgentStream, BackoffStrategy, BatchExecutionResult,
     CatalogDiagnostic, CompactionResult, CompositeCatalog, ConflictPolicy, ContextBudget,

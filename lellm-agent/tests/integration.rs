@@ -71,7 +71,7 @@ async fn test_tool_executor_snapshot_and_execute() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
     assert!(result.is_ok());
     let val = result.unwrap();
     assert_eq!(val, serde_json::json!("echo: hello"));
@@ -261,7 +261,7 @@ async fn test_tool_safe_execution() {
     };
 
     let snapshot = executor.snapshot().await;
-    let result = executor.execute_with_snapshot(&call, &snapshot).await;
+    let result = executor.execute_one_with_snapshot(&call, &snapshot).await;
     assert!(result.is_ok());
     let val = result.unwrap();
     assert_eq!(val, serde_json::json!("你好, 世界!"));
