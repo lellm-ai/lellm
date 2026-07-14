@@ -14,6 +14,7 @@ use crate::event::{GraphExecution, GraphHandle};
 use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::TraceId;
+#[allow(deprecated)]
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::{ExecutionEntry, GraphResult, State};
 
@@ -77,6 +78,7 @@ impl SimpleExecutor {
             let node_start = Instant::now();
 
             // 根据 NodeKind 分发执行
+            #[allow(deprecated)]
             match node {
                 NodeKind::Task(n) => {
                     let mut ctx = engine.build_node_context();

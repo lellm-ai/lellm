@@ -11,7 +11,10 @@ mod notification;
 mod request;
 mod response;
 
-pub use error::{McpError, McpToolError, RetryDisposition, ServerError, TransportError};
+pub use error::{McpError, RetryDisposition, ServerError, TransportError};
+
+#[cfg(feature = "server")]
+pub use error::McpToolError;
 pub use notification::{JsonRpcNotification, NotificationKind, methods as notification_methods};
 pub use request::{CallToolParams, ImplementationInfo, InitializeParams, JsonRpcRequest, methods};
 pub use response::{

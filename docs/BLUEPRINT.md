@@ -146,16 +146,28 @@ pub trait WorkflowState: Clone + Send + Sync {
     /// 可序列化的 Checkpoint 快照（projection，不是 raw state）
     type Checkpoint: Serialize + DeserializeOwned + Clone + Send;
     /// 状态变更命令
+    ///
+    /// **关键设计：** Mutation 是 Runtime 的内部 IR，不是业务层 API。
+    /// 业务代码通过 `StateContext` 便捷方法操作（`ctx.append_message()`），
+    /// ctx 内部生成 Mutation → state.apply()。
     type Mutation: StateMutation<Self>;
 
     /// 创建 checkpoint 快照
     fn snapshot(&self) -> Self::Checkpoint;
     /// 从 checkpoint 恢复
     fn restore(checkpoint: Self::Checkpoint) -> Self;
-    /// 批量应用 Mutation
-    fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>);
+    /// 应用单个 Mutation（batch 是 Runtime 的事）
+    fn apply(&mut self, mutation: Self::Mutation);
 }
 ```
+
+**Mutation as Runtime IR 层次：**
+```
+业务代码 → ctx.append_message() → Mutation::AppendMessage → state.apply() → Checkpoint / Trace
+```
+- Graph Runtime 只认识 Mutation（Checkpoint、Parallel Merge、Barrier、Trace 的基础）
+- 业务代码永远写 State 操作（通过 `StateContext` 便捷 API）
+- Mutation 自动生成（可选 derive 宏），不手写 enum
 
 ### 5.3 AgentBuilder (DSL)
 

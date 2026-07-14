@@ -43,6 +43,46 @@ ToolUseLoop::simple(model, executor)
 - `ToolUseLoop` = Runtime，不提供 `with_` 方法
 - **不存在** `AgentBuilder::from_loop()` — 不鼓励 Runtime → Builder 的反向转换
 
+## ReAct 图结构 — 固定 vs 可配置
+
+> **v2026-07-14 决策：** ReAct 图结构固定，通过钩子扩展。
+
+### 固定结构
+
+`AgentBuilder.build()` 内部固定构建以下节点：
+
+```
+budget_check → llm → post_llm_check → tool → (回到 llm)
+                    ↘
+               compactor (上下文压缩)
+```
+
+用户**不能**替换 `LLMNode`、`ToolNode` 或修改循环结构。
+
+### 扩展点（钩子）
+
+已有的钩子覆盖了 80% 的自定义需求：
+
+| 钩子 | 作用域 | 自定义能力 |
+|------|--------|-----------|
+| `FallbackStrategy` | LLM 调用失败 | 降级 / 切换 Provider / 中止 |
+| `RetryPolicy` | 工具执行 | 重试次数、退避策略 |
+| `ContextBudget` | 上下文管理 | Token 上限、压缩策略 |
+| `ToolCatalog` | 工具来源 | 静态 / MCP 动态 / 组合目录 |
+| `StepCallback` | 执行通知 | 每步执行事件 |
+| `RequestOptions` | 请求参数 | temperature、seed、tool_choice 等 |
+
+### 完全自定义
+
+需要修改图结构的用户，直接使用 `GraphBuilder`（世界二）手写 ReAct 流程。
+
+### 为什么不开放节点替换
+
+1. **80/20 原则** — 80% 用户只需要标准 ReAct，固定结构最简单可靠
+2. **避免过度配置** — 节点替换会让 AgentBuilder 膨胀为"杀牛刀"
+3. **已有钩子足够** — 上面的钩子覆盖了常见自定义场景
+4. **Graph Primitive 兜底** — 世界二提供完全自由
+
 ### 输出预算分层
 
 `ToolUseConfig` 提供两层输出预算控制：
@@ -72,7 +112,118 @@ max_iterations → 轮次上限（已有）
 ContextBudget.max_tokens → 输入上下文上限（已有）
 ```
 
-## 核心组件
+## 状态变更模型 — Mutation as Runtime IR
+
+> **v2026-07-14 决策：** Mutation 是 Runtime 内部 IR，不是业务层 API。
+
+### 核心原则
+
+**Mutation 是 Graph Runtime 的唯一状态变更模型，但业务层不直接编写 Mutation。**
+
+```
+业务代码永远写 State 操作
+Runtime 内部永远走 Mutation
+```
+
+### 层次划分
+
+```
+Graph Runtime
+────────────────────
+ExecutionLoop / Checkpoint / Reducer / Barrier / Trace
+只认识 Mutation
+        │
+        ▼
+State Context
+────────────────────
+append_message() / set_response() / increase_token() / record(...)
+业务 API — 内部生成 Mutation
+        │
+        ▼
+WorkflowState
+────────────────────
+apply(mutation) / snapshot() / restore()
+完全不知道 Graph
+        │
+        ▼
+AgentState
+────────────────────
+messages / tokens / iterations / stop_reason
+纯数据，无逻辑
+```
+
+### 业务代码写法
+
+```rust
+// 现在（临时）
+state.messages.push(msg)
+
+// 目标（C2）
+ctx.append_message(msg)
+ctx.set_last_response(response)
+ctx.add_tokens(n)
+```
+
+`ctx` 内部：
+
+```
+mutation_log.push(AppendMessage(msg))
+state.apply(AppendMessage(msg))
+```
+
+### Mutation 设计
+
+**每个 Mutation 一个类型**，实现 `StateMutation<S>` trait：
+
+```rust
+trait StateMutation<S> {
+    fn apply(self, state: &mut S);
+}
+
+struct AppendMessage(Message);
+impl StateMutation<AgentState> for AppendMessage { ... }
+
+struct IncreaseIteration(u32);
+impl StateMutation<AgentState> for IncreaseIteration { ... }
+```
+
+**不使用 enum** — 扩展时无需修改枚举体，符合开闭原则。
+
+### WorkflowState trait 调整
+
+```rust
+// 现在
+fn apply_batch(&mut self, mutations: impl IntoIterator<Item = Self::Mutation>);
+
+// 目标
+fn apply(&mut self, mutation: Self::Mutation);
+// batch 是 Runtime 的事，State 只负责单个 apply
+```
+
+### 为什么保留 Mutation（不选 B）
+
+| 能力 | 无 Mutation | 有 Mutation |
+|------|-----------|------------|
+| Checkpoint | 存整个 State | 记录 Mutation 序列 |
+| Replay | 无法增量回放 | Mutation 序列回放 |
+| Rollback | 需要完整快照 | 撤销最后 N 个 Mutation |
+| Branch | 深拷贝 State | fork mutation log |
+| Parallel Merge | merge(StateA, StateB) — 难 | merge(mutations_a, mutations_b) — Reducer 解决 |
+| Barrier | collect State | collect mutations → apply → continue |
+| Trace | Snapshot diff — 成本高 | Mutation log — 天然审计 |
+
+### 为什么不让业务写 Mutation（不选 C）
+
+- `AgentMutation::AddMessage(...)` 到处都是 → 业务代码噪音大
+- Mutation 是 Runtime 的内部语言（IR），不应泄露到业务层
+- 通过 `ctx.record()` 封装，业务代码保持简洁
+
+### 实施路径
+
+1. **v0.5（现在）** — Mutation trait 存在，AgentState 直接修改字段（临时兼容）
+2. **v0.6** — 引入 `StateContext`，业务改为 `ctx.append_message()` 等 API
+3. **v0.6** — Mutation 自动生成（可选 derive 宏）
+4. **v0.7+** — 基于 Mutation 的 Checkpoint、Replay、Trace 完整落地
 
 ### 1. ToolRegistration — 工具完整条目
 

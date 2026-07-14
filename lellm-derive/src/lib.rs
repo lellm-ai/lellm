@@ -69,6 +69,7 @@
 mod codegen;
 mod fn_expand;
 mod helpers;
+mod mutation_expand;
 mod struct_expand;
 
 use proc_macro::TokenStream;
@@ -131,4 +132,31 @@ pub fn derive_tool(input: TokenStream) -> TokenStream {
 #[deprecated(since = "0.2.0", note = "Use `Tool` instead of `ToolDefinition`")]
 pub fn derive_tool_definition(input: TokenStream) -> TokenStream {
     derive_tool(input)
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Entry: #[derive(StateMutation)] derive macro
+// ─────────────────────────────────────────────────────────────────
+
+/// Derive macro for `StateMutation<S>`.
+///
+/// Generates `impl StateMutation<S> for E` with `apply()` method.
+///
+/// # Usage
+///
+/// ```ignore
+/// #[derive(StateMutation)]
+/// #[state(AgentState)]
+/// pub enum AgentMutation {
+///     #[mutation(state.messages.push(value))]
+///     AppendMessage(Message),
+///
+///     #[mutation(state.iterations += 1)]
+///     IncrementIteration,
+/// }
+/// ```
+#[proc_macro_derive(StateMutation, attributes(state, mutation))]
+pub fn derive_state_mutation(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    mutation_expand::generate_state_mutation(&input).into()
 }

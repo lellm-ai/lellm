@@ -1,0 +1,1 @@
+- [MCP Server Feature Gate](mcp-server-feature-gate.md) — Server 代码通过 feature 隔离

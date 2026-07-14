@@ -21,7 +21,8 @@ use lellm_graph::{GraphError, LeafContext, LeafNode};
 use super::super::config::ToolUseConfig;
 use super::super::context::ContextBudget;
 use super::super::tools::ToolExecutor;
-use super::super::typed_state::{AgentMutation, AgentState};
+use super::super::context_ext::AgentContextExt;
+use super::super::typed_state::AgentState;
 
 /// 工具执行节点。
 #[derive(Clone)]
@@ -106,8 +107,8 @@ impl LeafNode<AgentState> for ToolNode {
             processed_messages.push(processed);
         }
 
-        // 5. Emit 消息追加 Mutation
-        ctx.record(AgentMutation::AppendMessages(processed_messages));
+        // 5. 追加 Tool 结果消息
+        ctx.append_messages(processed_messages);
 
         tracing::debug!(tool_calls = tool_calls.len(), "tool execution completed");
 

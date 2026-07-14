@@ -140,7 +140,8 @@ impl McpError {
 /// - `McpError`：协议/传输层错误（连接断开、JSON-RPC 格式错误等）
 /// - `McpToolError`：工具业务层错误（参数校验失败、工具执行失败）
 ///
-/// 用于 [super::server::ToolFn] 的返回类型，替代裸 `String`。
+/// 用于 [crate::server::SimpleMcp] 的工具函数返回类型，替代裸 `String`。
+#[cfg(feature = "server")]
 #[derive(Debug, Error)]
 pub enum McpToolError {
     /// 参数校验失败（对应 Agent 侧的 `ToolErrorKind::InvalidInput`）
@@ -152,6 +153,7 @@ pub enum McpToolError {
     Execution(String),
 }
 
+#[cfg(feature = "server")]
 impl McpToolError {
     /// 构造参数校验错误。
     pub fn invalid_input(msg: impl Into<String>) -> Self {

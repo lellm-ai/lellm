@@ -112,11 +112,13 @@ pub trait MutationLogStore: Send + Sync {
 /// 基于内存的 MutationLog 实现。
 ///
 /// 适用于测试和开发环境。
+///
+/// 内部使用单个 RwLock 保护索引，确保原子性。
+/// 索引直接存储条目（而非索引号），避免 truncate 后的索引失效问题。
 #[derive(Default)]
 pub struct InMemoryMutationLog {
-    entries: RwLock<Vec<MutationLogEntry>>,
-    /// trace_id → [entry indices] 索引
-    index: RwLock<HashMap<TraceId, Vec<usize>>>,
+    /// trace_id → [MutationLogEntry] 索引（按时间正序）
+    index: RwLock<HashMap<TraceId, Vec<MutationLogEntry>>>,
 }
 
 impl InMemoryMutationLog {
@@ -124,8 +126,10 @@ impl InMemoryMutationLog {
         Self::default()
     }
 
+    /// 所有 trace 的条目总数。
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        let index = self.index.read().unwrap();
+        index.values().map(|v| v.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -136,23 +140,11 @@ impl InMemoryMutationLog {
 #[async_trait]
 impl MutationLogStore for InMemoryMutationLog {
     async fn append(&self, entry: MutationLogEntry) -> Result<(), CheckpointStoreError> {
-        let trace_id = entry.trace_id;
-        let idx = {
-            let mut entries = self
-                .entries
-                .write()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            let idx = entries.len();
-            entries.push(entry);
-            idx
-        };
-        {
-            let mut index_map = self
-                .index
-                .write()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            index_map.entry(trace_id).or_default().push(idx);
-        }
+        let mut index = self
+            .index
+            .write()
+            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        index.entry(entry.trace_id).or_default().push(entry);
         Ok(())
     }
 
@@ -161,29 +153,12 @@ impl MutationLogStore for InMemoryMutationLog {
         trace_id: &TraceId,
         from_step: usize,
     ) -> Result<Vec<MutationLogEntry>, CheckpointStoreError> {
-        let entry_indices = {
-            let index_map = self
-                .index
-                .read()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            index_map.get(trace_id).cloned().unwrap_or_default()
-        };
-
-        let entries = self
-            .entries
+        let index = self
+            .index
             .read()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-
-        let mut result = Vec::new();
-        for &idx in &entry_indices {
-            if idx < entries.len() {
-                let entry = &entries[idx];
-                if entry.step >= from_step {
-                    result.push(entry.clone());
-                }
-            }
-        }
-        Ok(result)
+        let entries = index.get(trace_id).cloned().unwrap_or_default();
+        Ok(entries.into_iter().filter(|e| e.step >= from_step).collect())
     }
 
     async fn truncate(
@@ -191,29 +166,14 @@ impl MutationLogStore for InMemoryMutationLog {
         trace_id: &TraceId,
         keep_from_step: usize,
     ) -> Result<usize, CheckpointStoreError> {
-        let entry_indices: Vec<usize> = {
-            let index_map = self
-                .index
-                .read()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            index_map.get(trace_id).cloned().unwrap_or_default()
-        };
-
-        let entries = self
-            .entries
-            .read()
+        let mut index = self
+            .index
+            .write()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-
-        let mut removed = 0;
-        for &idx in &entry_indices {
-            if idx < entries.len() && entries[idx].step < keep_from_step {
-                removed += 1;
-            }
-        }
-
-        // Note: In-memory truncate is soft (count only).
-        // A hard truncate would require rewriting the entries vector.
-        Ok(removed)
+        let entries = index.entry(*trace_id).or_default();
+        let original_len = entries.len();
+        entries.retain(|e| e.step >= keep_from_step);
+        Ok(original_len - entries.len())
     }
 }
 

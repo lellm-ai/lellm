@@ -78,12 +78,25 @@ pub trait ExecutorOperation<S: WorkflowState = State>: Send + Sync {
     async fn execute(&self, engine: &mut ExecutionEngine<'_, S>) -> Result<(), GraphError>;
 }
 
-// ─── Backward Compat: FlowNode ────────────────────────────────
+// ─── Backward Compat: FlowNode (deprecated) ───────────────────
 
 /// 向后兼容 — `FlowNode` trait。
 ///
-/// 保留此名称以兼容现有代码。
-/// 接收 `NodeContext`（持有 `&mut S`），以便旧代码继续工作。
+/// **已弃用**。请使用 [`LeafNode`]（只读 State + emit Mutation）或
+/// [`ExecutorOperation`]（组合节点，完整控制）。
+///
+/// `FlowNode` 接收 `NodeContext`（持有 `&mut S`），绕过了 Mutation 模式，
+/// 不利于 Checkpoint 和审计追踪。
+///
+/// # 迁移指南
+///
+/// - 如果节点只需读 State + 路由 → 迁移到 [`LeafNode`]
+/// - 如果节点需要直接写 State → 迁移到 [`LeafNode`] + `ctx.record(mutation)`
+/// - 如果节点是组合逻辑（Parallel、Subgraph）→ 迁移到 [`ExecutorOperation`]
+#[deprecated(
+    since = "0.6.0",
+    note = "Use LeafNode (read-only state + mutations) or ExecutorOperation (composite control) instead."
+)]
 #[async_trait]
 pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
     /// 执行节点逻辑。
@@ -101,6 +114,7 @@ pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
 ///
 /// - `S` — 类型化状态（默认 `State` = HashMap，向后兼容）
 /// - `M` — 并行合并策略（仅 `Parallel` 变体使用，默认 [`StateMerge`]）
+#[allow(deprecated)]
 pub enum NodeKind<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     /// 自定义逻辑
     Task(TaskNode<S>),
@@ -111,6 +125,8 @@ pub enum NodeKind<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     /// 并行执行多个分支
     Parallel(ParallelNode<S, M>),
     /// 外部节点（由 lellm-agent 等 crate 提供）— 向后兼容，使用 NodeContext
+    ///
+    /// **已弃用**。新代码请使用 `ExternalLeaf`。
     External(Arc<dyn FlowNode<S>>),
     /// 外部 Leaf 节点 — 只能读 State + emit Mutation
     ExternalLeaf(Arc<dyn LeafNode<S>>),
@@ -121,6 +137,7 @@ pub enum NodeKind<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     Subgraph(super::compiled_subgraph::CompiledSubgraph<S>),
 }
 
+#[allow(deprecated)]
 impl<S: WorkflowState, M: MergeStrategy<S>> Clone for NodeKind<S, M> {
     fn clone(&self) -> Self {
         match self {
@@ -162,6 +179,7 @@ impl<S: WorkflowState> TaskNode<S> {
 /// TaskNode 实现 FlowNode（向后兼容 — 使用 NodeContext）。
 ///
 /// 未来将迁移到 LeafNode + LeafContext。
+#[allow(deprecated)]
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for TaskNode<S> {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
@@ -230,6 +248,7 @@ impl<S: WorkflowState> LeafNode<S> for ConditionNode<S> {
 }
 
 /// ConditionNode 实现 FlowNode（向后兼容 — 使用 NodeContext）。
+#[allow(deprecated)]
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for ConditionNode<S> {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
@@ -247,4 +266,5 @@ impl<S: WorkflowState> FlowNode<S> for ConditionNode<S> {
 // ─── Backward Compatibility Alias ─────────────────────────────
 
 /// 向后兼容别名 — `GraphNode` → `FlowNode`。
+#[allow(deprecated)]
 pub type GraphNode<S> = dyn FlowNode<S>;

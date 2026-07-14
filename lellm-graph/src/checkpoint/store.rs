@@ -49,11 +49,18 @@ pub trait BlobCheckpointStore: Send + Sync {
 /// 基于内存的 Checkpoint 存储后端。
 ///
 /// 通过 `save_with_trace()` 关联 trace_id，或在存储层组织关联。
+///
+/// 内部使用单个 RwLock 保护 store + index，确保原子性。
 #[derive(Default)]
 pub struct InMemoryBlobStore {
-    store: RwLock<HashMap<CheckpointId, CheckpointBlob>>,
+    inner: RwLock<InMemoryBlobStoreInner>,
+}
+
+#[derive(Default)]
+struct InMemoryBlobStoreInner {
+    store: HashMap<CheckpointId, CheckpointBlob>,
     /// trace_id → [CheckpointId] 索引（按时间正序）
-    index: RwLock<HashMap<TraceId, Vec<CheckpointId>>>,
+    index: HashMap<TraceId, Vec<CheckpointId>>,
 }
 
 impl InMemoryBlobStore {
@@ -62,7 +69,7 @@ impl InMemoryBlobStore {
     }
 
     pub fn len(&self) -> usize {
-        self.store.read().unwrap().len()
+        self.inner.read().unwrap().store.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -78,23 +85,12 @@ impl BlobCheckpointStore for InMemoryBlobStore {
         blob: &CheckpointBlob,
     ) -> Result<(), CheckpointStoreError> {
         let id = blob.id.clone();
-
-        {
-            let mut store = self
-                .store
-                .write()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            store.insert(id.clone(), blob.clone());
-        }
-
-        {
-            let mut index = self
-                .index
-                .write()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            index.entry(*trace_id).or_default().push(id);
-        }
-
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        inner.store.insert(id.clone(), blob.clone());
+        inner.index.entry(*trace_id).or_default().push(id);
         Ok(())
     }
 
@@ -102,74 +98,64 @@ impl BlobCheckpointStore for InMemoryBlobStore {
         &self,
         id: &CheckpointId,
     ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
-        let store = self
-            .store
+        let inner = self
+            .inner
             .read()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-        Ok(store.get(id).cloned())
+        Ok(inner.store.get(id).cloned())
     }
 
     async fn load_latest(
         &self,
         trace_id: &TraceId,
     ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
-        let last_id = {
-            let index = self
-                .index
-                .read()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            index.get(trace_id).and_then(|ids| ids.last()).cloned()
-        };
-
+        let inner = self
+            .inner
+            .read()
+            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let last_id = inner.index.get(trace_id).and_then(|ids| ids.last()).cloned();
         match last_id {
-            Some(id) => self.load(&id).await,
+            Some(id) => Ok(inner.store.get(&id).cloned()),
             None => Ok(None),
         }
     }
 
     async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError> {
-        let index = self
-            .index
+        let inner = self
+            .inner
             .read()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-        let ids = index.get(trace_id).cloned().unwrap_or_default();
+        let ids = inner.index.get(trace_id).cloned().unwrap_or_default();
         Ok(ids.into_iter().rev().collect())
     }
 
     async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError> {
-        let mut store = self
-            .store
+        let mut inner = self
+            .inner
             .write()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-        store
+        inner
+            .store
             .remove(id)
             .map(|_| true)
             .ok_or_else(|| CheckpointStoreError::Storage("failed to acquire write lock".into()))
     }
 
     async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError> {
-        let to_delete: Vec<CheckpointId> = {
-            let mut index = self
-                .index
-                .write()
-                .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-            match index.get_mut(trace_id) {
-                Some(ids) if ids.len() > keep => {
-                    let remove_count = ids.len() - keep;
-                    ids.drain(..remove_count).collect()
-                }
-                _ => return Ok(0),
-            }
-        };
-
-        let mut store = self
-            .store
+        let mut inner = self
+            .inner
             .write()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let to_delete: Vec<CheckpointId> = match inner.index.get_mut(trace_id) {
+            Some(ids) if ids.len() > keep => {
+                let remove_count = ids.len() - keep;
+                ids.drain(..remove_count).collect()
+            }
+            _ => return Ok(0),
+        };
         for id in &to_delete {
-            store.remove(id);
+            inner.store.remove(id);
         }
-
         Ok(to_delete.len())
     }
 }

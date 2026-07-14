@@ -6,6 +6,7 @@
 pub mod builder;
 pub mod config;
 pub mod context;
+pub mod context_ext;
 pub mod event;
 pub mod event_bridge;
 pub mod fallback;
@@ -43,6 +44,7 @@ pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{ResolvedRound, ToolUseLoop, ToolUseResult};
 pub use typed_state::{AgentMutation, AgentState};
+pub use context_ext::AgentContextExt;
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};

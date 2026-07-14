@@ -71,6 +71,7 @@ pub use graph::GraphBuilder;
 pub use graph::{Edge, Graph, NoopStepCallback, StepCallback};
 
 // ─── Nodes ───────────────────────────────────────────────────
+#[allow(deprecated)]
 pub use node::{
     BarrierDefaultAction, BarrierNode, BranchCondition, ConditionNode, ConditionNodeBuilder,
     ExecutorOperation, FlowNode, LeafNode, NodeKind, ParallelErrorStrategy, ParallelNode,

@@ -21,6 +21,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+#[allow(deprecated)]
 use super::FlowNode;
 use crate::error::GraphError;
 use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, OwnedExecutionEngine};
@@ -47,6 +48,7 @@ use crate::state::{State, StateMerge};
 ///
 /// graph.node("research", NodeKind::Parallel(parallel));
 /// ```
+#[allow(deprecated)]
 pub struct ParallelNode<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     label: Option<String>,
     branches: Vec<(String, Arc<dyn FlowNode<S>>)>,
@@ -100,6 +102,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
             .collect()
     }
 
+    #[allow(deprecated)]
     pub fn branches_iter(&self) -> impl Iterator<Item = (&str, &Arc<dyn FlowNode<S>>)> {
         self.branches
             .iter()
@@ -120,6 +123,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
 }
 
 /// ParallelNode 构建器。
+#[allow(deprecated)]
 pub struct ParallelNodeBuilder<S: WorkflowState = State, M: MergeStrategy<S> = StateMerge> {
     label: Option<String>,
     branches: Vec<(String, Arc<dyn FlowNode<S>>)>,
@@ -142,6 +146,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
         self
     }
 
+    #[allow(deprecated)]
     pub fn branch(mut self, name: impl Into<String>, node: Arc<dyn FlowNode<S>>) -> Self {
         self.branches.push((name.into(), node));
         self
@@ -197,6 +202,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> std::fmt::Debug for ParallelNode<S, 
 
 impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S, M> {
     /// 执行并行分支 — 创建独立的 OwnedExecutionEngine 给每个分支。
+    #[allow(deprecated)]
     pub async fn execute(&self, engine: &mut ExecutionEngine<'_, S>) -> Result<(), GraphError> {
         let start_time = Instant::now();
         let branch_count = self.branches.len();

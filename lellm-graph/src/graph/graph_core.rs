@@ -19,6 +19,7 @@ use crate::error::{GraphDiagnostics, GraphError, TerminalError};
 use crate::event::BarrierId;
 use crate::exec::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
 use crate::ids::SpanId;
+#[allow(deprecated)]
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
 use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
@@ -364,6 +365,7 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             step_cb.on_node_start(&current, span_id, step);
 
             // 根据 NodeKind 分发执行
+            #[allow(deprecated)]
             let exec_result = match node {
                 NodeKind::Task(n) => {
                     let mut ctx = exec_ctx.build_node_context();

@@ -9,6 +9,7 @@ repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 lellm-core = { workspace = true, features = ["anyhow", "tool"] }
+lellm-derive = { path = "../lellm-derive" }
 lellm-graph.workspace = true
 lellm-provider.workspace = true
 lellm-mcp = { workspace = true, optional = true }
@@ -34,7 +35,6 @@ http = ["mcp", "lellm-mcp/http"]
 lellm-agent = { path = ".", features = ["sse", "http"] }
 lellm-core = { path = "../lellm-core", features = ["tool"] }
 lellm-provider = { path = "../lellm-provider", features = ["mock", "openai-compat"] }
-lellm-derive = { path = "../lellm-derive" }
 lellm-mcp = { path = "../lellm-mcp", features = ["stdio", "http", "sse"] }
 reqwest.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

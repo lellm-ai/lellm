@@ -17,10 +17,13 @@ pub mod server;
 
 pub use client::McpClient;
 pub use protocol::{
-    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, McpToolError,
+    JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
     RetryDisposition, TransportError,
 };
 pub use transport::{ConnectionState, McpTransport, TransportCapabilities};
+
+#[cfg(feature = "server")]
+pub use protocol::McpToolError;
 
 #[cfg(feature = "server")]
 pub use server::SimpleMcp;

@@ -12,6 +12,7 @@
 use async_trait::async_trait;
 
 use super::node_context::{LeafContext, NodeContext};
+#[allow(deprecated)]
 use super::{FlowNode, LeafNode};
 use crate::error::GraphError;
 use crate::event::{BarrierDecision, BarrierId};
@@ -118,6 +119,7 @@ impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for BarrierNode<S> {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {

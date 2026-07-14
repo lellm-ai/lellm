@@ -27,7 +27,8 @@ use super::super::invoker::LlmInvoker;
 use super::super::runtime::ResolvedRound;
 use super::super::stream_translation::{TranslationResult, translate_provider_event};
 use super::super::tools::ToolExecutor;
-use super::super::typed_state::{AgentMutation, AgentState};
+use super::super::context_ext::AgentContextExt;
+use super::super::typed_state::AgentState;
 
 /// 分离 output / reasoning token
 fn split_output_tokens(content: &[lellm_core::ContentBlock]) -> (usize, usize) {
@@ -83,8 +84,8 @@ impl LeafNode<AgentState> for LLMNode {
         // 1. 提取迭代计数（Copy，零 clone）
         let iterations = ctx.state().iterations;
 
-        // 2. Emit 迭代递增 Mutation
-        ctx.record(AgentMutation::IncrementIteration);
+        // 2. 迭代递增
+        ctx.increment_iteration();
 
         // 3. 获取工具定义 & 构建 LLM 请求
         let round = ResolvedRound::new(self.executor.snapshot().await);
@@ -187,22 +188,22 @@ impl LeafNode<AgentState> for LLMNode {
 
         // 5. 分离 output / reasoning token，Emit Token Effects
         let (output_tokens, reasoning_tokens) = split_output_tokens(&response.content);
-        ctx.record(AgentMutation::AddOutputTokens(output_tokens));
-        ctx.record(AgentMutation::AddReasoningTokens(reasoning_tokens));
+        ctx.add_output_tokens(output_tokens);
+        ctx.add_reasoning_tokens(reasoning_tokens);
 
-        // 6. Emit 消息追加 Mutation
+        // 6. 追加 Assistant 消息
         let content = response.content.clone();
         let msg = Message::Assistant { content };
-        ctx.record(AgentMutation::AppendMessage(msg));
+        ctx.append_message(msg);
 
         // 7. 记录 tool_calls
         let has_tools = response.has_tool_calls();
         if has_tools {
-            ctx.record(AgentMutation::AddToolCalls(tool_calls_count));
+            ctx.add_tool_calls(tool_calls_count);
         }
 
-        // 8. Emit LastResponse（供 PostLLMGuard 检查）
-        ctx.record(AgentMutation::SetLastResponse(response));
+        // 8. 设置 LastResponse（供 PostLLMGuard 检查）
+        ctx.set_last_response(response);
 
         // 路由决策全部交给 PostLLMGuard，此处不调用 ctx.goto()/ctx.end()
         tracing::debug!(

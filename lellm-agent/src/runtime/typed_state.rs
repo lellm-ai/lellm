@@ -11,6 +11,7 @@
 //! - 零 JSON 序列化开销（节点直接操作 typed state）
 
 use lellm_core::{ChatResponse, Message};
+use lellm_derive::StateMutation;
 use lellm_graph::WorkflowState;
 use serde::{Deserialize, Serialize};
 
@@ -120,65 +121,42 @@ impl AgentState {
 ///
 /// 节点通过发射 Mutation 来变更状态，而非直接修改 `AgentState` 字段。
 /// Mutation 是可序列化的、自包含的、不可变的。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// `StateMutation` derive 自动生成 `apply()` 方法。
+/// 每个 variant 的 `#[mutation(...)]` 指定了对 `state` 的操作表达式。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, StateMutation)]
+#[state(AgentState)]
 pub enum AgentMutation {
     /// 追加一条消息到历史
+    #[mutation(state.messages.push(value))]
     AppendMessage(Message),
     /// 追加多条消息到历史
+    #[mutation(state.messages.extend(value))]
     AppendMessages(Vec<Message>),
     /// 进入下一轮迭代
+    #[mutation(state.iterations += 1)]
     IncrementIteration,
     /// 记录工具调用数量
+    #[mutation(state.total_tool_calls += value)]
     AddToolCalls(usize),
     /// 记录输出 Token
+    #[mutation(state.output_tokens += value)]
     AddOutputTokens(usize),
     /// 记录推理 Token
+    #[mutation(state.reasoning_tokens += value)]
     AddReasoningTokens(usize),
     /// 记录一次压缩
+    #[mutation(state.compact_count += 1)]
     IncrementCompactCount,
     /// 替换消息历史（压缩场景）
+    #[mutation(state.messages = value)]
     ReplaceMessages(Vec<Message>),
     /// 设置停止原因
+    #[mutation(state.stop_reason = Some(value))]
     SetStopReason(StopReason),
     /// 更新最后一次 LLM 响应
+    #[mutation(state.last_response = Some(value))]
     SetLastResponse(ChatResponse),
-}
-
-impl lellm_graph::state::workflow_state::StateMutation<AgentState> for AgentMutation {
-    fn apply(self, state: &mut AgentState) {
-        match self {
-            AgentMutation::AppendMessage(msg) => {
-                state.messages.push(msg);
-            }
-            AgentMutation::AppendMessages(msgs) => {
-                state.messages.extend(msgs);
-            }
-            AgentMutation::IncrementIteration => {
-                state.iterations += 1;
-            }
-            AgentMutation::AddToolCalls(n) => {
-                state.total_tool_calls += n;
-            }
-            AgentMutation::AddOutputTokens(n) => {
-                state.output_tokens += n;
-            }
-            AgentMutation::AddReasoningTokens(n) => {
-                state.reasoning_tokens += n;
-            }
-            AgentMutation::IncrementCompactCount => {
-                state.compact_count += 1;
-            }
-            AgentMutation::ReplaceMessages(msgs) => {
-                state.messages = msgs;
-            }
-            AgentMutation::SetStopReason(reason) => {
-                state.stop_reason = Some(reason);
-            }
-            AgentMutation::SetLastResponse(response) => {
-                state.last_response = Some(response);
-            }
-        }
-    }
 }
 
 // ─── AgentCheckpoint ─────────────────────────────────────────────
