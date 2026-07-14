@@ -80,7 +80,12 @@ impl LeafNode<AgentState> for ToolNode {
         let budget = self.config.context_budget.clone();
         let mut processed_messages = Vec::with_capacity(tool_calls.len());
 
-        for (call, msg) in tool_calls.iter().zip(batch.results.into_iter()) {
+        for (call, msg, duration) in tool_calls
+            .iter()
+            .zip(batch.results.into_iter())
+            .zip(batch.durations.into_iter())
+            .map(|((call, msg), duration)| (call, msg, duration))
+        {
             let processed = apply_post_process(msg, &budget);
             processed_messages.push(processed.clone());
 
@@ -92,9 +97,7 @@ impl LeafNode<AgentState> for ToolNode {
             });
 
             // Emit ToolOutput
-            if let Some(chunk) =
-                tool_output_chunk(&processed, &call.id, &call.name, std::time::Duration::ZERO)
-            {
+            if let Some(chunk) = tool_output_chunk(&processed, &call.id, &call.name, duration) {
                 ctx.emit(chunk);
             }
         }
