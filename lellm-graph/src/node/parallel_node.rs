@@ -237,12 +237,12 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
                         OwnedExecutionEngine::new(state, child_stream, child_cancel);
 
                     let mut branch_ctx = child_engine.build_node_context();
-                    let ok = node.execute(&mut branch_ctx).await.is_ok();
+                    let exec_result = node.execute(&mut branch_ctx).await;
                     // branch_ctx goes out of scope here; explicit drop removed
                     // (NodeContext only holds references, drop() is a no-op)
 
-                    if !ok {
-                        return (branch_name, Err("branch execution failed".into()));
+                    if let Err(ref e) = exec_result {
+                        return (branch_name, Err(format!("branch execution failed: {e}")));
                     }
 
                     // Commit mutations to child engine
