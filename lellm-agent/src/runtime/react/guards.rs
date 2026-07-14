@@ -83,16 +83,24 @@ impl PostLLMGuard {
 #[async_trait]
 impl LeafNode<AgentState> for PostLLMGuard {
     async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
-        let state = ctx.state().clone();
+        // 只 clone last_response（借用跨度长，与 ctx.record 冲突）
+        // 其余字段用 Copy 值或引用
+        let state = ctx.state();
+        let is_terminal = state.stop_reason.is_some();
+        let iterations = state.iterations;
+        let output_tokens = state.output_tokens;
+        let reasoning_tokens = state.reasoning_tokens;
+        // last_response 必须 clone：借用跨度覆盖多个 ctx.record/goto/end 调用
+        let last_response = state.last_response.clone().unwrap_or_else(empty_response);
 
         // 1. 已终止（前置节点已设置 stop_reason）→ End
-        if state.stop_reason.is_some() {
+        if is_terminal {
             ctx.end();
             return Ok(());
         }
 
         // 2. 超过最大迭代 → End
-        if state.reached_max(self.stop_config.max_iterations) {
+        if iterations >= self.stop_config.max_iterations {
             ctx.record(AgentMutation::SetStopReason(
                 StopReason::MaxIterationsReached,
             ));
@@ -101,7 +109,6 @@ impl LeafNode<AgentState> for PostLLMGuard {
         }
 
         // 3-5. Budget 检查（优先级：单轮推理 > 总输出 > 总推理）
-        let last_response = state.last_response.clone().unwrap_or_else(empty_response);
         let mut stopped = false;
 
         // 3. 单轮推理 Token 超限
@@ -121,18 +128,26 @@ impl LeafNode<AgentState> for PostLLMGuard {
         }
 
         // 4. 总输出 Token 超限
-        if !stopped && state.exceeded_output(self.stop_config.max_total_output_tokens) {
-            ctx.record(AgentMutation::SetStopReason(
-                StopReason::OutputBudgetExceeded,
-            ));
-            stopped = true;
+        if !stopped {
+            if let Some(max) = self.stop_config.max_total_output_tokens {
+                if output_tokens >= max as usize {
+                    ctx.record(AgentMutation::SetStopReason(
+                        StopReason::OutputBudgetExceeded,
+                    ));
+                    stopped = true;
+                }
+            }
         }
 
         // 5. 总推理 Token 超限
-        if !stopped && state.exceeded_reasoning(self.stop_config.max_total_reasoning_tokens) {
-            ctx.record(AgentMutation::SetStopReason(
-                StopReason::ReasoningBudgetExceeded,
-            ));
+        if !stopped {
+            if let Some(max) = self.stop_config.max_total_reasoning_tokens {
+                if reasoning_tokens >= max as usize {
+                    ctx.record(AgentMutation::SetStopReason(
+                        StopReason::ReasoningBudgetExceeded,
+                    ));
+                }
+            }
         }
 
         if stopped {

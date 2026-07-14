@@ -80,8 +80,8 @@ impl LLMNode {
 #[async_trait]
 impl LeafNode<AgentState> for LLMNode {
     async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
-        // 1. 获取 AgentState
-        let state = ctx.state().clone();
+        // 1. 提取迭代计数（Copy，零 clone）
+        let iterations = ctx.state().iterations;
 
         // 2. Emit 迭代递增 Mutation
         ctx.record(AgentMutation::IncrementIteration);
@@ -89,12 +89,15 @@ impl LeafNode<AgentState> for LLMNode {
         // 3. 获取工具定义 & 构建 LLM 请求
         let round = ResolvedRound::new(self.executor.snapshot().await);
 
+        // 此时 ctx 可变借用已结束，安全借用 messages
+        let messages = &ctx.state().messages;
+
         let req = build_request_inner_with_round(
             self.invoker.model(),
-            &state.messages,
+            messages,
             self.config.max_output_tokens,
             &self.config.request_options,
-            state.iterations + 1,
+            iterations + 1,
             &round.definitions,
             self.config.tool_cache_policy,
         );
@@ -102,7 +105,7 @@ impl LeafNode<AgentState> for LLMNode {
         // 4. 通过 LlmInvoker 执行流式调用（自动处理 retry/fallback）
         let mut stream = self
             .invoker
-            .invoke_stream(&req, &state.messages, state.iterations)
+            .invoke_stream(&req, messages, iterations)
             .await
             .map_err(|e| {
                 GraphError::Terminal(TerminalError::NodeExecutionFailed {
@@ -203,7 +206,7 @@ impl LeafNode<AgentState> for LLMNode {
 
         // 路由决策全部交给 PostLLMGuard，此处不调用 ctx.goto()/ctx.end()
         tracing::debug!(
-            iteration = state.iterations + 1,
+            iteration = iterations + 1,
             has_tool_calls = has_tools,
             "LLM call completed"
         );
