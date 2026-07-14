@@ -34,10 +34,13 @@ use super::{ToolCatalog, ToolSnapshot};
 /// 2. `results[i]` 对应 `calls[i]` 的执行结果（原始顺序）
 /// 3. panic 永远被转换成 `ToolResult(is_error: true)`，不会丢失
 /// 4. `panicked` 仅作为观测信号，不改变结果完整性
+/// 5. `durations.len() == calls.len()` 永远成立，包含每个工具的执行时间
 #[derive(Debug)]
 pub struct BatchExecutionResult {
     /// 按原始调用顺序排列的工具结果，长度等于输入 calls 长度。
     pub results: Vec<Message>,
+    /// 按原始调用顺序排列的工具执行时间，长度等于输入 calls 长度。
+    pub durations: Vec<std::time::Duration>,
     /// 是否有任意 spawned task panic（仅作为观测信号）
     pub panicked: bool,
 }
@@ -157,7 +160,7 @@ async fn run_parallel_indexed(
     snapshot: Arc<ToolSnapshot>,
     retry_policy: RetryPolicy,
     calls: Vec<(usize, ToolCall)>,
-) -> Vec<(usize, Message)> {
+) -> Vec<(usize, Message, std::time::Duration)> {
     let handles: Vec<_> = calls
         .iter()
         .map(|(idx, call)| {
@@ -166,20 +169,19 @@ async fn run_parallel_indexed(
             let call = call.clone();
             let idx = *idx;
             tokio::spawn(async move {
+                let start = std::time::Instant::now();
                 let result = dispatch_call(&call, &snap, &rp).await;
-                (idx, Message::tool_result(&call, &result))
+                let duration = start.elapsed();
+                (idx, Message::tool_result(&call, &result), duration)
             })
         })
         .collect();
-
-    // snap: Arc<ToolSnapshot>, &snap → &Arc<ToolSnapshot>
-    // dispatch_call 接收 &ToolSnapshot，Rust auto-deref 会处理
 
     let raw = futures_util::future::join_all(handles).await;
     raw.into_iter()
         .zip(calls.into_iter())
         .map(|(h, (idx, call))| match h {
-            Ok((_, msg)) => (idx, msg),
+            Ok((_, msg, dur)) => (idx, msg, dur),
             Err(join_err) => (
                 idx,
                 Message::tool_result(
@@ -189,6 +191,7 @@ async fn run_parallel_indexed(
                         message: format!("tool '{}' task panicked: {join_err}", call.name),
                     }),
                 ),
+                std::time::Duration::ZERO,
             ),
         })
         .collect()
@@ -200,16 +203,26 @@ async fn run_serial_indexed(
     snapshot: Arc<ToolSnapshot>,
     retry_policy: RetryPolicy,
     calls: Vec<(usize, ToolCall)>,
-) -> Vec<(usize, Message)> {
+) -> Vec<(usize, Message, std::time::Duration)> {
     let mut results = Vec::with_capacity(calls.len());
     for (idx, call) in calls {
+        let start = std::time::Instant::now();
         let exec_result = dispatch_call(&call, &snapshot, &retry_policy).await;
-        results.push((idx, Message::tool_result(&call, &exec_result)));
+        let duration = start.elapsed();
+        results.push((idx, Message::tool_result(&call, &exec_result), duration));
     }
     results
 }
 
 // ─── 内部：批量调度核心 ──────────────────────────────────────────
+
+/// 一个调度组（spawn handle + 原始索引列表）。
+///
+/// 将 handle 与 indices 绑定在一起，避免两个独立 Vec 的 push 错位。
+struct GroupTask {
+    handle: tokio::task::JoinHandle<Vec<(usize, Message, std::time::Duration)>>,
+    indices: Vec<usize>,
+}
 
 async fn run_batch_internal(
     calls: &[ToolCall],
@@ -219,6 +232,7 @@ async fn run_batch_internal(
     if calls.is_empty() {
         return BatchExecutionResult {
             results: Vec::new(),
+            durations: Vec::new(),
             panicked: false,
         };
     }
@@ -253,51 +267,54 @@ async fn run_batch_internal(
         }
     }
 
-    let mut group_handles: Vec<tokio::task::JoinHandle<Vec<(usize, Message)>>> = Vec::new();
-    let mut group_indices: Vec<Vec<usize>> = Vec::new();
+    let mut groups: Vec<GroupTask> = Vec::new();
 
     if !safe_calls.is_empty() {
         let rp = retry_policy.clone();
         let indices: Vec<usize> = safe_calls.iter().map(|(i, _)| *i).collect();
-        group_handles.push(tokio::spawn(run_parallel_indexed(
-            Arc::clone(&snapshot),
-            rp,
-            safe_calls,
-        )));
-        group_indices.push(indices);
+        groups.push(GroupTask {
+            handle: tokio::spawn(run_parallel_indexed(Arc::clone(&snapshot), rp, safe_calls)),
+            indices,
+        });
     }
 
     for group_calls in category_calls.into_values() {
         let rp = retry_policy.clone();
         let indices: Vec<usize> = group_calls.iter().map(|(i, _)| *i).collect();
-        group_handles.push(tokio::spawn(run_serial_indexed(
-            Arc::clone(&snapshot),
-            rp,
-            group_calls,
-        )));
-        group_indices.push(indices);
+        groups.push(GroupTask {
+            handle: tokio::spawn(run_serial_indexed(Arc::clone(&snapshot), rp, group_calls)),
+            indices,
+        });
     }
 
     if !exclusive_calls.is_empty() {
         let rp = retry_policy.clone();
         let indices: Vec<usize> = exclusive_calls.iter().map(|(i, _)| *i).collect();
-        group_handles.push(tokio::spawn(run_serial_indexed(
-            Arc::clone(&snapshot),
-            rp,
-            exclusive_calls,
-        )));
-        group_indices.push(indices);
+        groups.push(GroupTask {
+            handle: tokio::spawn(run_serial_indexed(
+                Arc::clone(&snapshot),
+                rp,
+                exclusive_calls,
+            )),
+            indices,
+        });
     }
 
     let mut results: Vec<Option<Message>> = vec![None; calls.len()];
+    let mut durations: Vec<std::time::Duration> = vec![std::time::Duration::ZERO; calls.len()];
     let mut panicked = false;
-    let all_handles = futures_util::future::join_all(group_handles).await;
 
-    for (handle_result, indices) in all_handles.into_iter().zip(group_indices.into_iter()) {
+    // 提取 handles 等待全部完成，indices 与 handles 保持一一对应
+    let handles: Vec<_> = groups.iter_mut().map(|g| &mut g.handle).collect();
+    let all_handle_results = futures_util::future::join_all(handles).await;
+
+    for (group, handle_result) in groups.into_iter().zip(all_handle_results.into_iter()) {
+        let indices = group.indices;
         match handle_result {
             Ok(indexed_messages) => {
-                for (idx, msg) in indexed_messages {
+                for (idx, msg, dur) in indexed_messages {
                     results[idx] = Some(msg);
+                    durations[idx] = dur;
                 }
             }
             Err(join_err) => {
@@ -318,6 +335,7 @@ async fn run_batch_internal(
 
     BatchExecutionResult {
         results: results.into_iter().flatten().collect(),
+        durations,
         panicked,
     }
 }
