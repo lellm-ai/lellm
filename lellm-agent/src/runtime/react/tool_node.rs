@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use lellm_core::{CacheControl, TextBlock, ToolCall};
 use lellm_graph::{GraphError, LeafContext, LeafNode};
 
-use super::super::config::{ToolUseConfig, empty_response};
+use super::super::config::ToolUseConfig;
 use super::super::context::ContextBudget;
 use super::super::tools::ToolExecutor;
 use super::super::typed_state::{AgentMutation, AgentState};
@@ -46,10 +46,13 @@ impl LeafNode<AgentState> for ToolNode {
     async fn execute(&self, ctx: &mut LeafContext<'_, AgentState>) -> Result<(), GraphError> {
         use lellm_graph::{StreamChunk, ToolPhase};
 
-        // 1. 获取工具调用
-        let state = ctx.state().clone();
-        let last_response = state.last_response.unwrap_or_else(empty_response);
-        let tool_calls: Vec<ToolCall> = last_response.tool_calls().cloned().collect();
+        // 1. 获取工具调用（纯引用，零 clone）
+        let tool_calls: Vec<ToolCall> = ctx
+            .state()
+            .last_response
+            .as_ref()
+            .map(|resp| resp.tool_calls().cloned().collect())
+            .unwrap_or_default();
 
         if tool_calls.is_empty() {
             return Ok(());
@@ -87,7 +90,6 @@ impl LeafNode<AgentState> for ToolNode {
             .map(|((call, msg), duration)| (call, msg, duration))
         {
             let processed = apply_post_process(msg, &budget);
-            processed_messages.push(processed.clone());
 
             // Emit Finished
             ctx.emit(StreamChunk::ToolLifecycle {
@@ -100,6 +102,8 @@ impl LeafNode<AgentState> for ToolNode {
             if let Some(chunk) = tool_output_chunk(&processed, &call.id, &call.name, duration) {
                 ctx.emit(chunk);
             }
+
+            processed_messages.push(processed);
         }
 
         // 5. Emit 消息追加 Mutation
