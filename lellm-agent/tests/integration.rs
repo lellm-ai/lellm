@@ -21,11 +21,7 @@ async fn test_tool_use_loop_no_tool_calls() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     let messages = vec![Message::user_text("test")];
 
@@ -278,11 +274,7 @@ async fn test_builder_basic_build() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     let agent = AgentBuilder::new(model).compile();
 
@@ -301,11 +293,7 @@ async fn test_builder_with_config() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     let agent = AgentBuilder::new(model)
         .system("你是助手".to_string())
@@ -345,11 +333,7 @@ async fn test_builder_with_tool() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test");
 
     let _agent = AgentBuilder::new(model).tool(reg).compile();
 
@@ -365,11 +349,7 @@ fn test_builder_chain_api() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test");
 
     let def = ToolDefinition {
         name: "test_tool".to_string(),
@@ -397,11 +377,7 @@ async fn test_create_agent() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test");
 
     let agent = lellm_agent::create_agent(model);
     let messages = vec![Message::user_text("hello")];
@@ -436,11 +412,7 @@ async fn test_create_agent_with_tools() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test");
 
     let _agent = lellm_agent::create_agent_with_tools(model, vec![reg]);
     // 如果构建成功，API 即工作正常
@@ -454,11 +426,7 @@ async fn test_create_agent_with_system() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test");
 
     let agent = lellm_agent::create_agent_with_system(model, "你是助手".to_string());
 
@@ -476,11 +444,7 @@ fn test_create_agent_full() {
         serde_json::json!(null),
     );
     let provider = Arc::new(MockProvider::reply_with(response));
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test");
 
     let def = ToolDefinition {
         name: "t".to_string(),

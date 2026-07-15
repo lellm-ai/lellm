@@ -117,11 +117,7 @@ fn create_agent(tools: Vec<ExecutableTool>) -> ToolUseLoop {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     AgentBuilder::new(model).tools(tools).compile()
 }

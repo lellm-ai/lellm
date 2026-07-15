@@ -35,6 +35,23 @@ pub struct ResolvedModel {
     pub context_window: Option<usize>,
 }
 
+impl ResolvedModel {
+    /// 创建 ResolvedModel。自动包装为 `Arc`，无需调用方手动包裹。
+    pub fn new<P: LlmProvider + 'static>(provider: P, model: impl Into<String>) -> Self {
+        Self {
+            provider: Arc::new(provider),
+            model: model.into(),
+            context_window: None,
+        }
+    }
+
+    /// 设置上下文窗口大小（Token）。
+    pub fn with_context_window(mut self, window: usize) -> Self {
+        self.context_window = Some(window);
+        self
+    }
+}
+
 /// 模型路由器 — 根据任务级别选择路由。
 pub struct ModelRouter {
     routes: HashMap<TaskLevel, RouteEntry>,

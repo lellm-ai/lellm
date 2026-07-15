@@ -4,9 +4,9 @@ English | [中文](./README_zh.md)
 
 > LeLLM spreads joy. The most important thing in life is to be happy.
 
-**Build stateful AI agents as typed directed graphs in Rust.**
+**Build AI agents with an inspectable mind.**
 
-Compile-time type safety. Durable checkpointing. Human-in-the-loop. No external services required.
+Every agent is a compiled directed graph — not a black-box `while` loop. Compile-time type safety. Durable checkpointing. Human-in-the-loop. No external services required.
 
 [![crates.io](https://img.shields.io/crates/v/lellm.svg)](https://crates.io/crates/lellm)
 [![License](https://img.shields.io/crates/l/lellm)](LICENSE)
@@ -14,20 +14,14 @@ Compile-time type safety. Durable checkpointing. Human-in-the-loop. No external 
 
 ```rust
 use lellm::prelude::*;
-use std::sync::Arc;
 
 let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
+let model = ResolvedModel::new(provider, "gpt-5.6-sol");
 
 #[tool(name = "get_weather", description = "Get current weather for a city")]
 async fn get_weather(city: String) -> ToolResult {
     Ok(serde_json::json!({"city": city, "temp": 25}))
 }
-
-let model = ResolvedModel {
-    provider: Arc::new(provider),
-    model: "gpt-4o".into(),
-    context_window: None,
-};
 
 let agent = AgentBuilder::new(model)
     .system("You are a helpful assistant.")
@@ -52,25 +46,22 @@ A complete **ReAct agent loop** — tool use, budget enforcement, retry policy, 
 
 ## Why LeLLM
 
-Most AI frameworks optimize for speed of prototyping. **LeLLM optimizes for production reliability.**
+Most agent frameworks hide the loop. LeLLM compiles it into a graph you can see, pause, and resume.
 
-| Challenge | LeLLM's Answer |
+| What You Fight With Black-Box Loops | How LeLLM Solves It |
 |---|---|
-| Provider differences | Unified `ChatCodec` — one API, six providers |
-| Runaway agent loops | Hard `max_iterations` + token budget |
-| Context overflow | Pluggable compaction, observable token counts |
-| Tool failures | Typed retry policy + `ParallelSafety` categories |
-| State consistency | Checkpoint + Mutation Log + Execution Trace |
-| Human approval gates | `BarrierNode` — pause, decide, resume |
-| Parallel workflows | `ParallelNode` — fan-out / fan-in with typed merge |
+| Unbounded agent loops spinning forever | Hard `max_iterations` + token budget, enforced at graph boundaries |
+| Context window overflow mid-conversation | Pluggable compaction node, observable token counts |
+| Tool failures crash the entire run | Typed retry policy + `ParallelSafety` categories |
+| Crash = lose all conversation state | Checkpoint + Mutation Log + Execution Trace |
+| "Trust me it works" runtime types | Rust structs — invalid states fail at compile time |
+| Observability requires a paid cloud | Built-in Trace + Mutation Log — zero SaaS dependency |
 
 ---
 
 ## Core Concepts
 
-### Graph is Runtime, Agent is DSL
-
-Every agent is a compiled directed graph. The ReAct loop is not a `while` — it's a real graph:
+### Every Agent is a Compiled Graph
 
 ```
 START → budget_check ──(ok)──→ [llm] → [post_llm_check]
@@ -79,11 +70,11 @@ START → budget_check ──(ok)──→ [llm] → [post_llm_check]
                                    │       no_tools  → [end]
 ```
 
-Every graph feature — checkpointing, barriers, parallel execution, tracing — works for agents automatically.
+The ReAct loop is not a `while` — it's a real directed graph with typed nodes and edges. Every graph feature — checkpointing, barriers, parallel execution, tracing — works for agents automatically.
 
 ### Durable Execution
 
-Persist state at node boundaries, resume from exact failure point with graph hash validation:
+Persist state at node boundaries, resume from the exact failure point:
 
 ```rust
 let checkpoint = session.checkpoint();
@@ -106,24 +97,8 @@ let graph = GraphBuilder::<State>::new("workflow")
     .end("act")
     .build()?;
 
-// Barrier pauses — your control plane decides:
 handle.decide(barrier_id, BarrierDecision::Approve).await?;
 ```
-
-### Type-Safe Everything
-
-State is a struct, not a `dict`. Tool args are Rust types with auto-generated JSON Schema. Invalid states fail at compile time.
-
-### Multi-Provider, One API
-
-| Provider | Codec | Streaming | Tool Use |
-|---|---|---|---|
-| OpenAI | `OpenAICompatCodec::openai()` | ✅ | ✅ |
-| Anthropic | `AnthropicCodec` | ✅ | ✅ |
-| Google | `GoogleCodec` | ✅ | ✅ |
-| DeepSeek | `OpenAICompatCodec::deepseek()` | ✅ | ✅ |
-| NVIDIA | `OpenAICompatCodec::nvidia()` | ✅ | ✅ |
-| vLLM / LLaMA | `OpenAICompatCodec::vllm()` | ✅ | ✅ |
 
 ---
 
@@ -135,24 +110,18 @@ cargo add lellm
 
 ```toml
 [dependencies]
-# Default: core + provider adapters
-lellm = "0.4"
-
-# Agent runtime (core + graph + provider + agent)
-lellm = { version = "0.4", features = ["agent"] }
-
-# Everything
-lellm = { version = "0.4", features = ["full"] }
+lellm = "0.4"                                    # core + provider adapters
+lellm = { version = "0.4", features = ["agent"] } # full agent runtime
+lellm = { version = "0.4", features = ["full"] }  # everything
 ```
 
 | Feature | Includes |
 |---|---|
 | `provider` (default) | core + LLM adapters |
-| `graph` | standalone workflow engine — zero LLM dependency |
+| `graph` | standalone workflow engine — **zero LLM dependency** |
 | `agent` | full agent runtime — ReAct + tools + checkpoint |
 | `mcp` | MCP client/server |
 | `derive` | `#[tool]` and `#[derive(Tool)]` macros |
-| `full` | everything |
 
 **Requirements:** Rust 2024 edition, stable toolchain.
 
@@ -187,17 +156,15 @@ Each crate is independently usable.
 | | **LeLLM** | **LangGraph** |
 |---|---|---|
 | Language | Rust | Python |
-| Type Safety | Compile-time | Runtime (TypedDict) |
+| Type Safety | Compile-time (Rust structs) | Runtime (TypedDict) |
 | Agent = Graph | Yes — compiled internal graph | Yes — StateGraph |
-| Graph Engine | Built-in, zero LLM dependency | Built-in |
+| Graph Engine | Built-in, **zero LLM dependency** | Built-in |
 | Checkpointing | Built-in, typed, mutation log | Built-in |
 | Human-in-the-Loop | `BarrierNode` with routing | `interrupt()` |
 | Streaming | Decoupled pipeline | Multiple modes |
-| Runtime | No GIL, true parallelism | asyncio |
+| Runtime | No GIL, true parallelism | asyncio (GIL-bounded) |
+| Observability | **Built-in** Trace + Mutation Log | LangSmith (cloud service) |
 | Deploy | Anywhere Rust runs | Python runtime |
-| Observability | Built-in Trace + Mutation Log | LangSmith (cloud) |
-
-LeLLM's graph engine has **zero LLM dependency** and **built-in observability** — no paid cloud service needed.
 
 ---
 

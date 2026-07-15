@@ -113,16 +113,8 @@ async fn collect_stream_result(
 fn make_models(responses: Vec<ChatResponse>, model_name: &str) -> (ResolvedModel, ResolvedModel) {
     let p1 = Arc::new(MultiResponseMock::new(responses.clone()));
     let p2 = Arc::new(MultiResponseMock::new(responses));
-    let m1 = ResolvedModel {
-        context_window: None,
-        provider: p1,
-        model: model_name.to_string(),
-    };
-    let m2 = ResolvedModel {
-        context_window: None,
-        provider: p2,
-        model: model_name.to_string(),
-    };
+    let m1 = ResolvedModel::new(Arc::clone(&p1), model_name);
+    let m2 = ResolvedModel::new(Arc::clone(&p2), model_name);
     (m1, m2)
 }
 
@@ -543,16 +535,8 @@ async fn compare_provider_requests_equivalent() {
     let provider_new = Arc::new(MultiResponseMock::new(vec![response.clone()]));
     let provider_old = Arc::new(MultiResponseMock::new(vec![response]));
 
-    let model_new = ResolvedModel {
-        context_window: None,
-        provider: Arc::clone(&provider_new) as Arc<dyn LlmProvider>,
-        model: "test-model".to_string(),
-    };
-    let model_old = ResolvedModel {
-        context_window: None,
-        provider: Arc::clone(&provider_old) as Arc<dyn LlmProvider>,
-        model: "test-model".to_string(),
-    };
+    let model_new = ResolvedModel::new(Arc::clone(&provider_new), "test-model");
+    let model_old = ResolvedModel::new(Arc::clone(&provider_old), "test-model");
 
     let messages = vec![Message::user_text("test request")];
 

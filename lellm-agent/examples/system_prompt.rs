@@ -35,11 +35,7 @@ fn create_agent_with_builder() -> ToolUseLoop {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     AgentBuilder::new(model)
         .system("你是一个简洁准确的助手。回答不超过两句话。使用技术术语。".to_string())
@@ -57,11 +53,7 @@ fn create_agent_simple() -> ToolUseLoop {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     create_agent_with_system(model, "你是一个专业的技术助手。请用中文回答。".to_string())
 }
@@ -139,11 +131,7 @@ async fn main() {
         serde_json::json!(null),
     );
     let provider3 = Arc::new(MockProvider::reply_with(response3));
-    let model3 = ResolvedModel {
-        context_window: None,
-        provider: provider3,
-        model: "test-model".to_string(),
-    };
+    let model3 = ResolvedModel::new(provider3, "test-model");
 
     // 不设置 system_prompt，Agent 直接从用户消息推断任务
     let agent3 = AgentBuilder::new(model3).compile();

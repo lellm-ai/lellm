@@ -16,8 +16,6 @@ use lellm_derive::tool;
 use lellm_provider::ResolvedModel;
 use lellm_provider::providers::base::CodecProvider;
 use lellm_provider::providers::openai_compat::OpenAICompatCodec;
-use std::sync::Arc;
-
 // ─── 通用 HTTP GET 工具 ─────────────────────────────────────────
 
 /// 发送 HTTP GET 请求并返回响应文本。URL 由你根据 API 文档构造。
@@ -137,19 +135,15 @@ https://wttr.in/{city}?format=%c+%t+%h+%w
 // ─── Agent 工厂 ─────────────────────────────────────────────────
 
 fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> lellm_agent::ToolUseLoop {
-    AgentBuilder::new(ResolvedModel {
-        provider: Arc::new(provider),
-        model: "Qwen3.6".to_string(),
-        context_window: None,
-    })
-    .system(build_system_prompt())
-    .tool(http_get_tool())
-    // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
-    .max_iterations(5)
-    .max_output_tokens(8000)
-    .reasoning_budget(8000)
-    //.reasoning(lellm_core::ReasoningConfig::Disabled)
-    .compile()
+    AgentBuilder::new(ResolvedModel::new(provider, "Qwen3.6"))
+        .system(build_system_prompt())
+        .tool(http_get_tool())
+        // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
+        .max_iterations(5)
+        .max_output_tokens(8000)
+        .reasoning_budget(8000)
+        //.reasoning(lellm_core::ReasoningConfig::Disabled)
+        .compile()
 }
 
 // ─── 主函数 ─────────────────────────────────────────────────────

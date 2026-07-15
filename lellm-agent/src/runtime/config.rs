@@ -426,11 +426,11 @@ mod tests {
         ];
 
         let req = build_request_inner(
-            &ResolvedModel {
-                provider: Arc::new(lellm_provider::providers::mock::MockProvider::new(vec![])),
-                model: "test".into(),
-                context_window: Some(100_000),
-            },
+            &ResolvedModel::new(
+                lellm_provider::providers::mock::MockProvider::new(vec![]),
+                "test",
+            )
+            .with_context_window(100_000),
             &[],
             4096,
             &RequestOptions::default(),
@@ -476,11 +476,11 @@ mod tests {
         ];
 
         let req = build_request_inner(
-            &ResolvedModel {
-                provider: Arc::new(lellm_provider::providers::mock::MockProvider::new(vec![])),
-                model: "test".into(),
-                context_window: Some(100_000),
-            },
+            &ResolvedModel::new(
+                lellm_provider::providers::mock::MockProvider::new(vec![]),
+                "test",
+            )
+            .with_context_window(100_000),
             &[],
             4096,
             &RequestOptions::default(),

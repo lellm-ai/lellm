@@ -149,19 +149,15 @@ async fn create_agent(
     // 连接 MCP Server
     let mcp_catalog = connect_tencent_map_server(mcp_server_url, transport_type).await?;
 
-    Ok(AgentBuilder::new(ResolvedModel {
-        provider: Arc::new(provider),
-        model: "Qwen3.6".to_string(),
-        context_window: None,
-    })
-    .system(build_system_prompt())
-    // 本地工具
-    .tool(http_get_tool())
-    // MCP 动态工具（resolve_city）
-    .catalog("weather-mcp", mcp_catalog)
-    .max_iterations(10)
-    .max_output_tokens(8000)
-    .compile())
+    Ok(AgentBuilder::new(ResolvedModel::new(provider, "Qwen3.6"))
+        .system(build_system_prompt())
+        // 本地工具
+        .tool(http_get_tool())
+        // MCP 动态工具（resolve_city）
+        .catalog("weather-mcp", mcp_catalog)
+        .max_iterations(10)
+        .max_output_tokens(8000)
+        .compile())
 }
 
 // ─── 主函数 ─────────────────────────────────────────────────────

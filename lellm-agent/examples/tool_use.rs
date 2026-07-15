@@ -161,11 +161,7 @@ fn create_react_agent() -> ToolUseLoop {
         final_response,
     ]));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "react-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "react-model");
 
     AgentBuilder::new(model)
         .tools(vec![

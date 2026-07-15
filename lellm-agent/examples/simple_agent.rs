@@ -29,11 +29,7 @@ fn create_simple_agent() -> ToolUseLoop {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "test-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "test-model");
 
     // 无工具的 Agent — 仅包含一个 LLM 节点，不具备工具调用能力
     // compile() 返回 ToolUseLoop，提供 invoke() 便捷 API

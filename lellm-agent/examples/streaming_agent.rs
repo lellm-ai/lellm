@@ -30,11 +30,7 @@ async fn main() {
     );
     let provider = Arc::new(MockProvider::reply_with(response));
 
-    let model = ResolvedModel {
-        context_window: None,
-        provider,
-        model: "streaming-model".to_string(),
-    };
+    let model = ResolvedModel::new(provider, "streaming-model");
 
     let agent = AgentBuilder::new(model).compile();
 

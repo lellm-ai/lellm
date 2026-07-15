@@ -401,11 +401,7 @@ async fn main() {
         CodecProvider::load(lellm_provider::providers::openai_compat::OpenAICompatCodec::openai())
             .expect("请设置 OPENAI_API_KEY 环境变量");
 
-    let model = ResolvedModel {
-        provider: Arc::new(provider),
-        model: "llama3.2".into(),
-        context_window: Some(8192),
-    };
+    let model = ResolvedModel::new(provider, "llama3.2").with_context_window(8192);
 
     let graph = build_agent_graph(model, 10).expect("Graph 构建失败");
     println!("Graph 构建完成: {}", graph.name());

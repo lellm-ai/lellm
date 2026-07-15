@@ -159,21 +159,17 @@ fn create_agent(provider: CodecProvider<OpenAICompatCodec>) -> lellm_agent::Tool
     // 共享 provider：主 Agent Loop + resolve_city 第四级降级各持一份 Arc
     let shared_provider: Arc<dyn LlmProvider> = Arc::new(provider);
 
-    AgentBuilder::new(ResolvedModel {
-        provider: shared_provider.clone(),
-        model: "Qwen3.6".to_string(),
-        context_window: None,
-    })
-    .system(build_system_prompt())
-    .tools(vec![
-        register_resolve_city(shared_provider),
-        http_get_tool(),
-    ])
-    // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
-    .max_iterations(10)
-    .max_output_tokens(8000)
-    //.reasoning(lellm_core::ReasoningConfig::Disabled)
-    .compile()
+    AgentBuilder::new(ResolvedModel::new(shared_provider.clone(), "Qwen3.6"))
+        .system(build_system_prompt())
+        .tools(vec![
+            register_resolve_city(shared_provider),
+            http_get_tool(),
+        ])
+        // ToolCachePolicy::Auto（默认）— 工具定义自动获得 cache_control 断点
+        .max_iterations(10)
+        .max_output_tokens(8000)
+        //.reasoning(lellm_core::ReasoningConfig::Disabled)
+        .compile()
 }
 
 // ─── 主函数 ─────────────────────────────────────────────────────

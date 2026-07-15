@@ -4,6 +4,7 @@
 //! 具体实现。通过 feature gate 可选编译。
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -60,5 +61,25 @@ pub trait LlmProvider: Send + Sync {
     /// Provider 应 override 以提供精确的能力声明。
     fn capabilities_for(&self, _model: &str) -> Capabilities {
         Capabilities::default()
+    }
+}
+
+// Arc<T> 自动实现 LlmProvider — 方便在 Arc 和具体类型之间无缝传递。
+#[async_trait]
+impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
+    async fn call(&self, request: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        (**self).call(request).await
+    }
+
+    async fn stream(&self, request: &ChatRequest) -> Result<ProviderStream, LlmError> {
+        (**self).stream(request).await
+    }
+
+    fn provider_id(&self) -> &str {
+        (**self).provider_id()
+    }
+
+    fn capabilities_for(&self, model: &str) -> Capabilities {
+        (**self).capabilities_for(model)
     }
 }

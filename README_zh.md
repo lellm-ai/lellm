@@ -4,9 +4,9 @@
 
 > LeLLM 传递快乐。人嘛，最重要的就是开心。
 
-**用 Rust 将 AI Agent 构建为类型化的有向图。**
+**用可检查的思维构建 AI Agent。**
 
-编译期类型安全、持久化检查点、人工介入、无需外部服务。
+每个 Agent 都是编译后的有向图 —— 不是黑盒 `while` 循环。编译期类型安全、持久化检查点、人工介入、无需外部服务。
 
 [![crates.io](https://img.shields.io/crates/v/lellm.svg)](https://crates.io/crates/lellm)
 [![License](https://img.shields.io/crates/l/lellm)](LICENSE)
@@ -14,20 +14,14 @@
 
 ```rust
 use lellm::prelude::*;
-use std::sync::Arc;
 
 let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
+let model = ResolvedModel::new(provider, "gpt-5.6-sol");
 
 #[tool(name = "get_weather", description = "获取指定城市的天气")]
 async fn get_weather(city: String) -> ToolResult {
     Ok(serde_json::json!({"city": city, "temp": 25}))
 }
-
-let model = ResolvedModel {
-    provider: Arc::new(provider),
-    model: "gpt-4o".into(),
-    context_window: None,
-};
 
 let agent = AgentBuilder::new(model)
     .system("你是一个有用的助手。")
@@ -52,25 +46,22 @@ match result.stop_reason {
 
 ## 为什么选择 LeLLM
 
-大多数 AI 框架优化的是原型速度。**LeLLM 优化的是生产可靠性。**
+大多数 Agent 框架把循环藏成黑盒。LeLLM 把它编译为有向图 —— 你可以看到、暂停、恢复。
 
-| 挑战 | LeLLM 的方案 |
+| 黑盒循环让你头疼的问题 | LeLLM 的解决方案 |
 |---|---|
-| Provider 差异 | 统一 `ChatCodec` —— 一套 API，六个 Provider |
-| Agent 循环失控 | 硬性的 `max_iterations` + Token 预算 |
-| 上下文溢出 | 可插拔压缩，可观测的 Token 计数 |
-| 工具执行失败 | 类型化重试策略 + `ParallelSafety` 分类 |
-| 状态一致性 | Checkpoint + Mutation Log + 执行 Trace |
-| 人工审批门 | `BarrierNode` —— 暂停、决策、恢复 |
-| 并行工作流 | `ParallelNode` —— 扇出/扇入 + 类型化合并 |
+| Agent 循环无限空转 | 硬性 `max_iterations` + Token 预算，在图边界强制执行 |
+| 对话中途上下文溢出 | 可插拔压缩节点，可观测的 Token 计数 |
+| 工具失败导致整个流程崩溃 | 类型化重试策略 + `ParallelSafety` 分类 |
+| 崩溃 = 丢失所有对话状态 | Checkpoint + Mutation Log + 执行 Trace |
+| "信我就对了"的运行时类型 | Rust struct —— 无效状态编译时报错 |
+| 可观测性依赖付费云服务 | 内置 Trace + Mutation Log —— 零 SaaS 依赖 |
 
 ---
 
 ## 核心概念
 
-### Graph 是 Runtime，Agent 是 DSL
-
-每个 Agent 都是编译后的有向图。ReAct 循环不是 `while` —— 而是真正的图：
+### 每个 Agent 都是编译后的图
 
 ```
 START → budget_check ──(充足)──→ [llm] → [post_llm_check]
@@ -79,11 +70,11 @@ START → budget_check ──(充足)──→ [llm] → [post_llm_check]
                                    │       无工具 → [end]
 ```
 
-所有 Graph 功能 —— 检查点、Barrier、并行执行、追踪 —— 对 Agent 自动生效。
+ReAct 循环不是 `while` —— 而是带有类型化节点和边的真实有向图。所有图功能 —— 检查点、Barrier、并行执行、追踪 —— 对 Agent 自动生效。
 
 ### 持久化执行
 
-在节点边界持久化状态，从精确故障点恢复，自动校验 graph hash：
+在节点边界持久化状态，从精确故障点恢复：
 
 ```rust
 let checkpoint = session.checkpoint();
@@ -106,24 +97,8 @@ let graph = GraphBuilder::<State>::new("workflow")
     .end("act")
     .build()?;
 
-// Barrier 暂停执行 —— 控制平面做出决策：
 handle.decide(barrier_id, BarrierDecision::Approve).await?;
 ```
-
-### 全部类型安全
-
-状态是 struct，不是 `dict`。工具参数是 Rust 类型，自动生成 JSON Schema。无效状态编译时报错。
-
-### 多 Provider，一套 API
-
-| Provider | Codec | 流式 | 工具调用 |
-|---|---|---|---|
-| OpenAI | `OpenAICompatCodec::openai()` | ✅ | ✅ |
-| Anthropic | `AnthropicCodec` | ✅ | ✅ |
-| Google | `GoogleCodec` | ✅ | ✅ |
-| DeepSeek | `OpenAICompatCodec::deepseek()` | ✅ | ✅ |
-| NVIDIA | `OpenAICompatCodec::nvidia()` | ✅ | ✅ |
-| vLLM / LLaMA | `OpenAICompatCodec::vllm()` | ✅ | ✅ |
 
 ---
 
@@ -135,24 +110,18 @@ cargo add lellm
 
 ```toml
 [dependencies]
-# 默认：core + provider 适配器
-lellm = "0.4"
-
-# Agent 运行时（core + graph + provider + agent）
-lellm = { version = "0.4", features = ["agent"] }
-
-# 全部启用
-lellm = { version = "0.4", features = ["full"] }
+lellm = "0.4"                                    # core + provider 适配器
+lellm = { version = "0.4", features = ["agent"] } # 完整 Agent 运行时
+lellm = { version = "0.4", features = ["full"] }  # 全部启用
 ```
 
 | Feature | 包含 |
 |---|---|
 | `provider`（默认） | core + LLM 适配器 |
-| `graph` | 独立工作流引擎 —— 零 LLM 依赖 |
+| `graph` | 独立工作流引擎 —— **零 LLM 依赖** |
 | `agent` | 完整 Agent 运行时 —— ReAct + 工具 + 检查点 |
 | `mcp` | MCP 客户端/服务端 |
 | `derive` | `#[tool]` 和 `#[derive(Tool)]` 宏 |
-| `full` | 全部 |
 
 **系统要求：** Rust 2024 edition，stable 工具链。
 
@@ -187,17 +156,15 @@ lellm = { version = "0.4", features = ["full"] }
 | | **LeLLM** | **LangGraph** |
 |---|---|---|
 | 语言 | Rust | Python |
-| 类型安全 | 编译期 | 运行时（TypedDict） |
+| 类型安全 | 编译期（Rust struct） | 运行时（TypedDict） |
 | Agent = Graph | 是 —— 编译后的内部图 | 是 —— StateGraph |
-| 图引擎 | 内置，零 LLM 依赖 | 内置 |
+| 图引擎 | 内置，**零 LLM 依赖** | 内置 |
 | 检查点 | 内置，强类型，Mutation Log | 内置 |
 | 人工介入 | `BarrierNode` 带路由 | `interrupt()` |
 | 流式输出 | 解耦管道 | 多种模式 |
-| 运行时 | 无 GIL，真正并行 | asyncio |
+| 运行时 | 无 GIL，真正并行 | asyncio（受 GIL 限制） |
+| 可观测性 | **内置** Trace + Mutation Log | LangSmith（云服务） |
 | 部署 | Rust 能跑的任何地方 | 需要 Python 运行时 |
-| 可观测性 | 内置 Trace + Mutation Log | LangSmith（云服务） |
-
-LeLLM 的图引擎**对 LLM 零依赖**，可观测性**内置** —— 无需付费云服务。
 
 ---
 

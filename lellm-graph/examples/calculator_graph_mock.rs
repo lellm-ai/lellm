@@ -366,11 +366,7 @@ async fn main() {
         ),
     ];
 
-    let model = ResolvedModel {
-        provider: Arc::new(MockProvider::new(responses)),
-        model: "mock".into(),
-        context_window: None,
-    };
+    let model = ResolvedModel::new(MockProvider::new(responses), "mock");
 
     let graph = build_graph(model, 10).expect("Graph 构建失败");
     println!("=== Calculator Graph (Mock) ===");
