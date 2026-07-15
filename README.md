@@ -25,7 +25,7 @@ async fn get_weather(city: String) -> ToolResult {
 
 let agent = AgentBuilder::new(model)
     .system("You are a helpful assistant.")
-    .tool(get_weather_tool())
+    .tool(get_weather_tool()) // #[tool] macro generates {fn}_tool()
     .max_iterations(10)
     .compile();
 
