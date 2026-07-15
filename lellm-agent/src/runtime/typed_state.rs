@@ -222,9 +222,9 @@ impl WorkflowState for AgentState {
 /// - messages: 所有分支拼接（chain）
 /// - iterations: 取最大值
 /// - total_tool_calls: 取最大值
-/// - output_tokens: 累加
-/// - reasoning_tokens: 累加
-/// - compact_count: 累加
+/// - output_tokens: 取最大分支
+/// - reasoning_tokens: 取最大分支
+/// - compact_count: 取最大分支
 /// - stop_reason: 优先取后者
 /// - last_response: 优先取后者
 #[derive(Clone)]
@@ -241,9 +241,9 @@ impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {
             merged.messages.extend(branch.messages);
             merged.iterations = merged.iterations.max(branch.iterations);
             merged.total_tool_calls = merged.total_tool_calls.max(branch.total_tool_calls);
-            merged.output_tokens += branch.output_tokens;
-            merged.reasoning_tokens += branch.reasoning_tokens;
-            merged.compact_count += branch.compact_count;
+            merged.output_tokens = merged.output_tokens.max(branch.output_tokens);
+            merged.reasoning_tokens = merged.reasoning_tokens.max(branch.reasoning_tokens);
+            merged.compact_count = merged.compact_count.max(branch.compact_count);
             if merged.stop_reason.is_none() {
                 merged.stop_reason = branch.stop_reason;
             }

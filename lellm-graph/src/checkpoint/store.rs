@@ -134,11 +134,7 @@ impl BlobCheckpointStore for InMemoryBlobStore {
             .inner
             .write()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-        inner
-            .store
-            .remove(id)
-            .map(|_| true)
-            .ok_or_else(|| CheckpointStoreError::Storage("failed to acquire write lock".into()))
+        Ok(inner.store.remove(id).is_some())
     }
 
     async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError> {

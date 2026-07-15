@@ -146,6 +146,7 @@ impl LeafNode<AgentState> for PostLLMGuard {
                     ctx.record(AgentMutation::SetStopReason(
                         StopReason::ReasoningBudgetExceeded,
                     ));
+                    stopped = true;
                 }
             }
         }
