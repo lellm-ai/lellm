@@ -1,94 +1,122 @@
 # LeLLM
+
 English | [中文](./README_zh.md)
 
 > LeLLM spreads joy. The most important thing in life is to be happy.
 
-Type-safe LLM application framework for Rust.
+**Production-grade LLM orchestration framework in Rust** — with compile-time type safety, zero-cost abstractions, and predictable runtime behavior.
 
-Build production AI systems in Rust with predictable runtime behavior, provider abstraction, streaming pipelines, agent execution, and graph orchestration.
+Build reliable AI systems: agent loops, tool use, workflow graphs, checkpointing, and human-in-the-loop — all without magic.
 
 [![Rust](https://img.shields.io/badge/Rust-2024-orange)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.4.10-green)](./CHANGELOG.md)
 
-```bash
-cargo add lellm
-```
+## Quick Start
 
 ```rust
-use lellm::agent::AgentBuilder;
-use lellm::core::Message;
-use lellm::provider::ResolvedModel;
-use std::sync::Arc;
+use lellm::prelude::*;
 
+// 1. Provider — auto-loads from OPENAI_API_KEY
+let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
+
+// 2. Define a tool
+#[tool(name = "get_weather", description = "Get current weather for a city")]
+async fn get_weather(city: String) -> ToolResult {
+    Ok(serde_json::json!({"city": city, "temp": 25}))
+}
+
+// 3. Build an agent with tool-use loop
 let model = ResolvedModel {
     provider: Arc::new(provider),
     model: "gpt-4o".into(),
     context_window: None,
 };
 
-let loop_ = AgentBuilder::new(model)
+let agent = AgentBuilder::new(model)
     .system("You are a helpful assistant.")
-    .tool(weather_tool)
+    .tool(get_weather_tool())
     .max_iterations(10)
     .compile();
 
-let result = loop_.invoke(vec![Message::user_text("What's the weather in Shanghai?")]).await?;
+// 4. Run it
+let result = agent
+    .invoke(vec![Message::user_text("What's the weather in Shanghai?")])
+    .await?;
+
+match result.stop_reason {
+    StopReason::Complete => println!("Done in {} iterations", result.iterations),
+    StopReason::MaxIterationsReached => eprintln!("Max iterations reached"),
+    _ => eprintln!("Stopped: {:?}", result.stop_reason),
+}
 ```
+
+**That's a complete, production-ready agent loop** — with budget enforcement, tool retry, context compaction, and streaming support. All type-safe. All explicit.
 
 ---
 
 ## Why LeLLM
 
-Most AI frameworks optimize for speed of prototyping.
+Most AI frameworks optimize for speed of prototyping. **LeLLM optimizes for production reliability.**
 
-**LeLLM optimizes for production reliability.**
+When building real AI systems, calling an API is the easy part. The hard parts are:
 
-When building real AI systems, the hard parts are rarely calling an API. They are:
+| Problem | LeLLM's Answer |
+|---|---|
+| Provider differences (OpenAI / Anthropic / Gemini) | Unified `ChatCodec` — one API, six providers |
+| Runaway agent loops | Hard `max_iterations` + token budget enforcement |
+| Context overflow | Pluggable compaction strategy |
+| Tool execution failures | Typed retry policy + `ParallelSafety` categories |
+| Partial stream failures | Decoupled streaming pipeline — pure logic, no IO |
+| State consistency | Checkpoint + Mutation Log + Trace audit trail |
+| Human approval workflows | `BarrierNode` — pause, decide, resume |
+| Parallel workflows | `ParallelNode` — fan-out / fan-in with merge strategy |
 
-- Provider differences (OpenAI / Anthropic / Gemini / OpenRouter)
-- Streaming and partial failures
-- Tool execution and retries
-- Token budgets and runaway loops
-- Context growth and memory pressure
-- Runtime observability
+---
 
-LeLLM provides these as composable runtime primitives.
+## How LeLLM Compares
+
+| | **LeLLM** | **LangChain (Python)** | **LangGraph (Python)** | **Semantic Kernel** |
+|---|---|---|---|---|
+| **Language** | Rust | Python | Python | C#/Java/Python |
+| **Type Safety** | Compile-time guarantees | Runtime checks | Runtime checks | Partial |
+| **Graph Engine** | Built-in, zero LLM dep | External (LangGraph) | Built-in | Limited |
+| **Agent Loop** | ReAct = internal graph | Hand-rolled while loop | State machine | Linear chain |
+| **Checkpointing** | Built-in, typed | External | Built-in | Limited |
+| **Streaming** | Decoupled pipeline | Provider-specific | Provider-specific | Provider-specific |
+| **Runtime Overhead** | Minimal (no GIL) | CPython overhead | CPython overhead | .NET overhead |
+| **Deploy Target** | Anywhere Rust runs | Python runtime needed | Python runtime needed | .NET runtime needed |
+| **Philosophy** | Explicit, observable | Convention over config | DAG-based | SDK-style |
+
+**LeLLM is what LangGraph would look like if designed for Rust from day one.**
 
 ---
 
 ## Who LeLLM Is For
 
-LeLLM is designed for engineers building AI systems in Rust.
+### Built for you if you are:
 
-### Good fit
-
-- Backend and infrastructure engineers
-- Agent and workflow platform builders
-- Teams requiring deterministic runtime behavior
-- Edge / embedded / low-resource deployments
-- Rust users who want compile-time guarantees
+- **Backend / infrastructure engineers** building AI-powered services
+- **Platform teams** building agent runtimes or orchestration layers
+- **Performance-sensitive** applications (edge, embedded, low-latency)
+- Teams requiring **deterministic runtime behavior** and observability
+- **Rust shops** wanting compile-time guarantees for AI systems
 
 **Typical workloads:**
-
 - AI APIs and gateways
 - Internal copilots
-- Agent runtimes
-- Multi-provider orchestration
+- Agent runtimes & multi-agent orchestration
 - Real-time streaming applications
 - Long-running autonomous workflows
 
-### Probably not for you
+### Probably not for you if:
 
-- Notebook-first experimentation
-- Prompt engineering only
-- No-code workflows
-- Simple one-off API calls
-- Learning Rust through AI
+- You primarily experiment in Jupyter notebooks
+- Your app is just `HTTP → LLM → return` (use `reqwest` + `serde`)
+- You want no-code / low-code workflows
+- You're learning Rust through AI projects
 
-If your application is `HTTP → LLM → return`, `reqwest` + `serde` is probably enough.
-
-LeLLM starts paying off when orchestration complexity appears.
+LeLLM starts paying off when **orchestration complexity** appears.
 
 ---
 
@@ -96,16 +124,15 @@ LeLLM starts paying off when orchestration complexity appears.
 
 ### Type Safety First
 
-Invalid states should fail at compile time whenever possible.
+Invalid states should fail at compile time. `ToolArgs` is a strongly-typed struct, not a `dict`.
 
 ### Explicit Over Magic
 
-Retries, streaming, budgets, and memory policies remain observable and configurable.
+Retries, streaming, budgets, and memory policies are observable and configurable. No hidden behavior.
 
 ### Composition Over Framework Lock-In
 
-Diamond architecture — `lellm-graph` and `lellm-provider` are peer layers, both built on `lellm-core`.
-`lellm-agent` sits on top, composing both:
+Diamond architecture — `lellm-graph` and `lellm-provider` are peer layers, both built on `lellm-core`:
 
 ```
               lellm-core (protocol types)
@@ -115,38 +142,115 @@ Diamond architecture — `lellm-graph` and `lellm-provider` are peer layers, bot
   (LLM adapters)         (workflow engine)
             \                  /
              \                /
-              lellm-agent (ReAct loop = internal graph)
+      lellm-agent (ReAct = internal graph)
 ```
 
-- **lellm-core** — Zero-runtime protocol types (`Message`, `ChatRequest`, `LlmError`). Standalone.
-- **lellm-provider** — Provider adapters only. No graph, no agent. Standalone with core.
-- **lellm-graph** — Generic workflow engine (nodes, edges, barriers, parallel, checkpoints). No LLM dependency. Standalone with core.
-- **lellm-agent** — Composes provider + graph. ReAct loop is an internal graph (`LLMNode → ToolNode → …`).
+- **lellm-core** — Zero-runtime protocol types. Standalone.
+- **lellm-provider** — Provider adapters only. No graph, no agent.
+- **lellm-graph** — Generic workflow engine. **Zero LLM dependency.**
+- **lellm-agent** — Composes provider + graph. ReAct loop is an internal graph.
 
-### Provider Protocol ≠ Runtime Logic
+### Graph is Runtime, Agent is DSL
 
-Provider integration is separated into three concerns: `ChatCodec + ModelCapabilities + ProviderMeta`
+The ReAct agent loop is **not** a hand-rolled `while` loop — it's an internal graph:
+
+```
+START → budget_check ──(ok)──→ [llm] → [post_llm_check]
+         │                         │              │
+      (compact) → [compactor]     │       has_tools → [tool] → budget_check (loop)
+                                   │       no_tools  → [end]
+                              (thinking)
+```
+
+This means every graph feature — checkpointing, barriers, parallel execution, tracing — works for agents too.
 
 ---
 
-## Quick Start
+## Feature Overview
 
-### Install
+### Provider Abstraction
 
-Default feature: `provider` (includes core + provider adapters). Opt-in for more:
+One unified API for all LLM providers:
+
+| Provider | Codec | Streaming | Tools |
+|---|---|---|---|
+| OpenAI | `OpenAICompatCodec::openai()` | ✅ | ✅ |
+| Anthropic | `AnthropicCodec` | ✅ | ✅ |
+| Google | `GoogleCodec` | ✅ | ✅ |
+| DeepSeek | `OpenAICompatCodec::deepseek()` | ✅ | ✅ |
+| NVIDIA | `OpenAICompatCodec::nvidia()` | ✅ | ✅ |
+| vLLM / LLaMA | `OpenAICompatCodec::vllm()` | ✅ | ✅ |
+
+Provider integration is separated into three concerns: `ChatCodec + ModelCapabilities + ProviderMeta`.
+
+### Agent Runtime
+
+- **ReAct loop** as internal graph — not a `while` loop
+- **Tool use** with typed arguments, auto-generated JSON Schema
+- **Context budget** — hard token limits, pluggable compaction
+- **Retry policy** — configurable backoff, `ParallelSafety` categories
+- **Streaming** — `AgentStream` with `AgentEvent` events
+- **Fallback strategy** — graceful degradation on LLM errors
+
+### Graph Orchestration
+
+`lellm-graph` is a generic workflow engine — similar in scope to LangGraph / Temporal / Prefect.
+**Zero LLM dependency.**
+
+| Node | Purpose |
+|---|---|
+| `TaskNode` | Simple function node |
+| `ConditionNode` | Conditional branching by state |
+| `BarrierNode` | Human-in-the-loop — pause, decide, resume |
+| `ParallelNode` | Fan-out / fan-in with merge strategy |
+
+Three execution modes: **blocking**, **streaming** (channel-based), **inline** (zero-channel overhead).
+
+### Checkpoint & Trace
+
+- **Checkpoint** — persist state at node boundaries, resume from failure
+- **Mutation Log** — every state change recorded as typed mutation
+- **Execution Trace** — audit trail of every step, exportable to JSON
+- **Barrier Re-Wait** — re-engage human approval on recovery
+
+### Tool System
+
+Two ways to define tools:
+
+```rust
+// Option 1: #[tool] macro — 95% of cases
+#[tool(name = "get_weather", description = "Get current weather")]
+async fn get_weather(city: String) -> ToolResult {
+    Ok(serde_json::json!({"city": city, "temp": 25}))
+}
+
+// Option 2: #[derive(Tool)] — full control over struct
+#[derive(Deserialize, JsonSchema, Tool)]
+struct GetWeatherArgs {
+    /// City name
+    city: String,
+}
+```
+
+Tools are **never** `dict` — `ToolArgs` is a strongly-typed Rust struct with auto-generated JSON Schema.
+
+### MCP Integration
+
+Built-in MCP client/server support with dynamic tool catalogs, conflict resolution, and registry management.
+
+---
+
+## Installation
 
 ```toml
 [dependencies]
-# Default: core + provider adapters (call LLMs directly)
+# Default: core + provider adapters
 lellm = "0.4"
-
-# Graph orchestration only (workflow engine, no LLM dependency)
-lellm = { version = "0.4", features = ["graph"] }
 
 # Agent runtime (includes core + graph + provider + agent)
 lellm = { version = "0.4", features = ["agent"] }
 
-# Everything (graph + provider + agent + mcp + derive)
+# Everything
 lellm = { version = "0.4", features = ["full"] }
 ```
 
@@ -161,133 +265,6 @@ lellm = { version = "0.4", features = ["full"] }
 | `mcp` | core + graph + lellm-mcp |
 | `derive` | lellm-derive |
 | `full` | graph + provider + agent + mcp + derive |
-
-### Initialize a Provider
-
-```rust
-use lellm::provider::{CodecProvider, OpenAICompatCodec};
-
-// Auto-load from OPENAI_BASE_URL + OPENAI_API_KEY
-let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
-```
-
-**Supported providers:**
-
-| Provider | Codec |
-|---|---|
-| OpenAI | `OpenAICompatCodec::openai()` |
-| Anthropic | `AnthropicCodec` |
-| Google | `GoogleCodec` |
-| DeepSeek | `OpenAICompatCodec::deepseek()` |
-| NVIDIA | `OpenAICompatCodec::nvidia()` |
-| vLLM / LLaMA | `OpenAICompatCodec::vllm()` / `::llama()` |
-
-### Single Message Call
-
-```rust
-use lellm::core::{ChatRequest, ContentBlock};
-use lellm::provider::LlmProvider;
-
-let request = ChatRequest::user_prompt("Why do parrots have colorful feathers?".into())
-    .with_temperature(0.7);
-
-let response = provider.call(&request).await?;
-for block in &response.content {
-    if let ContentBlock::Text(t) = block {
-        print!("{}", t.text);
-    }
-}
-```
-
-### Agent Loop with Tools
-
-```rust
-use lellm::agent::{AgentBuilder, StopReason};
-use lellm::core::Message;
-use lellm::provider::ResolvedModel;
-use std::sync::Arc;
-
-let model = ResolvedModel {
-    provider: Arc::new(provider),
-    model: "gpt-4o".into(),
-    context_window: None,
-};
-
-let loop_ = AgentBuilder::new(model)
-    .system("You are a helpful assistant.")
-    .tool(search_tool)
-    .max_iterations(10)
-    .max_output_tokens(8000)
-    .compile();
-
-let result = loop_.invoke(vec![Message::user_text("What's the weather in Shanghai?")]).await?;
-
-match result.stop_reason {
-    StopReason::Complete => println!("Done in {} iterations", result.iterations),
-    StopReason::MaxIterationsReached => eprintln!("Max iterations reached"),
-    _ => eprintln!("Stopped: {:?}", result.stop_reason),
-}
-```
-
-### Streaming Output
-
-```rust
-use futures_util::StreamExt;
-use lellm::provider::{LlmProvider, ProviderEvent};
-
-let mut stream = provider.stream(&request).await?;
-
-while let Some(event) = stream.next().await {
-    match event? {
-        ProviderEvent::Token { token } => print!("{}", token),
-        ProviderEvent::ResponseComplete { usage, .. } => {
-            if let Some(u) = usage {
-                eprintln!("\nTokens: {}", u.total_tokens);
-            }
-        }
-        _ => {}
-    }
-}
-```
-
-### Tool Definition
-
-**Option 1: `#[tool]` function macro (recommended, 95% of cases)**
-
-```rust
-use lellm::core::ToolResult;
-use lellm::derive::tool;
-
-#[tool(name = "get_weather", description = "Get the current weather for a city")]
-async fn get_weather(city: String) -> ToolResult {
-    Ok(serde_json::json!({"city": city, "temp": 25}))
-}
-
-// Register:
-builder.tool(get_weather_tool());
-```
-
-**Option 2: `#[derive(Tool)]` struct macro**
-
-```rust
-use lellm::derive::Tool;
-use lellm::agent::ToolArgs;
-use lellm::core::ToolResult;
-use schemars::JsonSchema;
-use serde::Deserialize;
-
-#[derive(Deserialize, JsonSchema, Tool)]
-#[tool(name = "get_weather", description = "Get the current weather for a city")]
-struct GetWeatherArgs {
-    /// City name
-    city: String,
-}
-
-// Register — closure receives deserialized struct:
-let tool = GetWeatherArgs::safe(|args| async move {
-    Ok(serde_json::json!({"city": args.city, "temp": 25}))
-});
-```
 
 ---
 
@@ -306,77 +283,9 @@ lellm/
 │   └── deps: lellm-core + tokio
 ├── lellm-agent/         # Agent runtime (composes provider + graph)
 │   └── deps: lellm-core + lellm-provider + lellm-graph
-├── lellm-derive/        # Derive + attribute macros (proc-macro, no internal deps)
+├── lellm-derive/        # Derive + attribute macros (proc-macro)
 └── lellm-mcp/           # MCP (Model Context Protocol) client/server
     └── deps: lellm-core + optional lellm-agent
-```
-
-### Graph Orchestration
-
-`lellm-graph` is a generic workflow engine — similar in scope to LangGraph / Temporal / Prefect.
-It has **zero LLM dependency**, only depending on `lellm-core` for protocol types.
-
-**Node Types:**
-
-| Node | Purpose |
-|---|---|
-| `TaskNode` | Simple function node (`fn(&mut State) -> Result`) |
-| `External` | Custom `FlowNode<S>` impl (e.g. LLMNode, AgentFlowNode) |
-| `ConditionNode` | Conditional branching — routes to different targets by state |
-| `BarrierNode` | Human-in-the-loop — pauses execution, awaits external decision |
-| `ParallelNode` | Fan-out/fan-in — parallel branches with MergeStrategy |
-
-**Edge Model — Three-Tier Routing:**
-
-| Edge Type | Priority | Behavior |
-|---|---|---|
-| Conditional | Highest | Routes when condition function matches state |
-| Normal | Middle | Default path when no condition matches |
-| Fallback | Lowest | Final safety net — catches unrouted states |
-
-**Typed State System:**
-
-```
-State (HashMap<String, Value>) — backward compatible, dynamic
-AgentState (strongly-typed struct) — compile-time safe, zero serialization
-
-Nodes emit typed Effects → NodeContext buffers → Executor applies to State.
-Parallel branches clone base state, execute independently, merge via MergeStrategy.
-```
-
-**Execution Modes:**
-
-- **Blocking** — `executor.execute(graph, state)` → `GraphResult`
-- **Streaming** — `executor.execute_stream(graph, state)` → `GraphExecution` (channel-based events)
-- **Inline** — `graph.run_inline(&mut ctx, max_steps)` — used by ReAct loop (no channel overhead)
-
-**Checkpoint & Resume:**
-
-- `CheckpointStore` trait — persist state at node boundaries
-- `CheckpointPolicy` — `EveryNode` / `BarrierOnly` / `Manual`
-- `executor.resume_from(store, trace_id, graph)` — restore from last checkpoint
-
-**ReAct as Internal Graph:**
-
-The Agent's tool-use loop is NOT a hand-rolled while loop — it builds an internal graph:
-
-```
-START → budget_check ──(ok)──→ [llm] → [post_llm_check]
-         │                         │              │
-      (compact) → [compactor]     │       has_tools → [tool] → budget_check (loop)
-                                   │       no_tools  → [end]
-                              (thinking)
-```
-
-### Provider Three-Way Split
-
-```
-User → LlmProvider (public API)
-       → CodecProvider<C> (framework internal)
-          → ProviderExtension (ecosystem SPI)
-              ├── ChatCodec (protocol encoding/decoding)
-              ├── ModelCapabilities (capability matrix)
-              └── ProviderMeta (connection metadata)
 ```
 
 ### Decoupled Streaming Pipeline
@@ -397,11 +306,12 @@ SseParser + Codec + Accumulator (pure logic, no IO)
 
 | Version | Scope | Status |
 |---|---|---|
-| **v0.1** | Provider abstraction, streaming, tool execution, budget enforcement, context compaction | ✅ Done |
-| **v0.2** | Graph orchestration, provider extension API, memory architecture, more provider compatibility | ✅ Done |
+| **v0.1** | Provider abstraction, streaming, tool execution, budget enforcement | ✅ Done |
+| **v0.2** | Graph orchestration, provider extension API, memory architecture | ✅ Done |
 | **v0.3** | Agent graph runtime — ReAct loop, barriers, multi-agent coordination | ✅ Done |
-| **v0.4** | ReAct Graph mode, post-agent hooks, stop config export | ✅ Done |
-| **v0.5+** | Distributed execution, visual observability | 🔜 Planned |
+| **v0.4** | ReAct as internal graph, typed state, checkpoint, trace, parallel execution | ✅ Done |
+| **v0.5** | Graph is Runtime, Agent is DSL, checkpoint projection, execution session | 🔜 In Progress |
+| **v0.6** | Distributed execution, visual observability, human-in-the-loop SDK | Planned |
 
 ---
 
