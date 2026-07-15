@@ -6,8 +6,8 @@
 use lellm_core::{ChatResponse, Message};
 use lellm_graph::LeafContext;
 
-use super::typed_state::{AgentMutation, AgentState};
 use super::event::StopReason;
+use super::typed_state::{AgentMutation, AgentState};
 
 /// AgentState 的 LeafContext 扩展 trait。
 ///

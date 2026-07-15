@@ -223,13 +223,16 @@ pub async fn run_sse(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Ser
     Ok(())
 }
 
+/// SSE Server State — Router::with_state 传入的元组类型。
+type SseState = (
+    Arc<SimpleMcp>,
+    Arc<tokio::sync::broadcast::Sender<String>>,
+    Arc<std::sync::atomic::AtomicU64>,
+);
+
 /// SSE GET 请求处理 — 建立 SSE 连接。
 async fn handle_sse_get(
-    axum::extract::State((_server, tx, counter)): axum::extract::State<(
-        Arc<SimpleMcp>,
-        Arc<tokio::sync::broadcast::Sender<String>>,
-        Arc<std::sync::atomic::AtomicU64>,
-    )>,
+    axum::extract::State((_server, tx, counter)): axum::extract::State<SseState>,
 ) -> axum::response::sse::Sse<
     impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
@@ -251,11 +254,11 @@ async fn handle_sse_get(
         loop {
             match rx.recv().await {
                 Ok(msg) => {
-                    if let Some((msg_session, msg_data)) = msg.split_once(':') {
-                        if msg_session == session_id.to_string() {
-                            let data = msg_data.strip_prefix(' ').unwrap_or(msg_data);
-                            return Some((Ok(Event::default().event("message").data(data)), rx));
-                        }
+                    if let Some((msg_session, msg_data)) = msg.split_once(':')
+                        && msg_session == session_id.to_string()
+                    {
+                        let data = msg_data.strip_prefix(' ').unwrap_or(msg_data);
+                        return Some((Ok(Event::default().event("message").data(data)), rx));
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -271,11 +274,7 @@ async fn handle_sse_get(
 /// SSE POST 请求处理 — 接收 JSON-RPC 请求。
 async fn handle_sse_post(
     axum::extract::Path(session_id): axum::extract::Path<u64>,
-    axum::extract::State((server, tx, _)): axum::extract::State<(
-        Arc<SimpleMcp>,
-        Arc<tokio::sync::broadcast::Sender<String>>,
-        Arc<std::sync::atomic::AtomicU64>,
-    )>,
+    axum::extract::State((server, tx, _)): axum::extract::State<SseState>,
     axum::Json(req): axum::Json<JsonRpcRequest>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
     let resp = handle_request(&server, req).await;

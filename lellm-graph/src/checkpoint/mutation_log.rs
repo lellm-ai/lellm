@@ -158,7 +158,10 @@ impl MutationLogStore for InMemoryMutationLog {
             .read()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
         let entries = index.get(trace_id).cloned().unwrap_or_default();
-        Ok(entries.into_iter().filter(|e| e.step >= from_step).collect())
+        Ok(entries
+            .into_iter()
+            .filter(|e| e.step >= from_step)
+            .collect())
     }
 
     async fn truncate(

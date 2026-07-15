@@ -23,11 +23,11 @@ use lellm_graph::{GraphError, LeafContext, LeafNode, TerminalError};
 
 use super::super::config::{ToolUseConfig, build_request_inner_with_round};
 use super::super::context::{estimate_reasoning_block, estimate_text};
+use super::super::context_ext::AgentContextExt;
 use super::super::invoker::LlmInvoker;
 use super::super::runtime::ResolvedRound;
 use super::super::stream_translation::{TranslationResult, translate_provider_event};
 use super::super::tools::ToolExecutor;
-use super::super::context_ext::AgentContextExt;
 use super::super::typed_state::AgentState;
 
 /// 分离 output / reasoning token

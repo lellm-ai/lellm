@@ -45,10 +45,7 @@
 
 use proc_macro2::Span;
 use quote::quote;
-use syn::{
-    parse_quote, Data, DeriveInput, Expr, Fields, Ident, Meta,
-    spanned::Spanned,
-};
+use syn::{Data, DeriveInput, Expr, Fields, Ident, Meta, parse_quote, spanned::Spanned};
 
 /// 解析 `#[state(TypeName)]` 获取目标 State 类型。
 fn parse_state_type(input: &DeriveInput) -> syn::Result<syn::Type> {
@@ -57,9 +54,7 @@ fn parse_state_type(input: &DeriveInput) -> syn::Result<syn::Type> {
             continue;
         }
         return match &attr.meta {
-            Meta::List(list) => list
-                .parse_args::<syn::TypePath>()
-                .map(syn::Type::Path),
+            Meta::List(list) => list.parse_args::<syn::TypePath>().map(syn::Type::Path),
             _ => Err(syn::Error::new_spanned(
                 &attr.meta,
                 "#[state(TypeName)] expects a type in parentheses",
@@ -135,7 +130,7 @@ pub fn generate_state_mutation(input: &DeriveInput) -> proc_macro2::TokenStream 
                 input.ident.span(),
                 "StateMutation can only be derived on enums",
             )
-            .to_compile_error()
+            .to_compile_error();
         }
     };
 
@@ -177,7 +172,8 @@ pub fn generate_state_mutation(input: &DeriveInput) -> proc_macro2::TokenStream 
         .collect();
 
     // The trait path — use a well-known path that users can adjust with `use` statements
-    let trait_path: syn::TypePath = parse_quote!(lellm_graph::state::workflow_state::StateMutation<#state_type>);
+    let trait_path: syn::TypePath =
+        parse_quote!(lellm_graph::state::workflow_state::StateMutation<#state_type>);
 
     quote! {
         impl #trait_path for #enum_name {

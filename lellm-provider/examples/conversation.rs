@@ -46,7 +46,7 @@ async fn main() -> Result<(), LlmError> {
     match response {
         Ok(response) => {
             // ─── 提取并打印响应 ───
-            println!("===openai res success");
+            println!("===openai res success\n {:?}", response.raw);
             for block in &response.content {
                 if let ContentBlock::Text(t) = block {
                     println!("{}", t.text);

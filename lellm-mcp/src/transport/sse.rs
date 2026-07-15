@@ -228,7 +228,10 @@ impl McpTransport for SseTransport {
         let timeout = std::time::Duration::from_secs(10);
         if post_url_rx.borrow().is_some() {
             // 已经收到 endpoint
-        } else if let Err(_) = tokio::time::timeout(timeout, post_url_rx.changed()).await {
+        } else if tokio::time::timeout(timeout, post_url_rx.changed())
+            .await
+            .is_err()
+        {
             self.state.send(ConnectionState::Disconnected).ok();
             return Err(McpError::Transport(TransportError::Timeout));
         }

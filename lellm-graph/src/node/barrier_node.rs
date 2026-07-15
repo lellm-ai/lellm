@@ -111,7 +111,9 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
 #[async_trait]
 impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
     async fn execute(&self, ctx: &mut LeafContext<'_, S>) -> Result<(), GraphError> {
-        let occurrence = self.occurrence_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let occurrence = self
+            .occurrence_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let barrier_id = BarrierId::new(&self.name, occurrence);
         ctx.pause(barrier_id, self.timeout);
         ctx.set_has_side_effects();
@@ -123,7 +125,9 @@ impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for BarrierNode<S> {
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
-        let occurrence = self.occurrence_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let occurrence = self
+            .occurrence_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let barrier_id = BarrierId::new(&self.name, occurrence);
         ctx.pause(barrier_id, self.timeout);
         ctx.set_has_side_effects();

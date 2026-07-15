@@ -127,10 +127,10 @@ impl McpTransport for HttpTransport {
         }
 
         // 保存 session-id
-        if let Some(sid) = response.headers().get("mcp-session-id") {
-            if let Ok(sid_str) = sid.to_str() {
-                *inner.session_id.lock().await = Some(sid_str.to_string());
-            }
+        if let Some(sid) = response.headers().get("mcp-session-id")
+            && let Ok(sid_str) = sid.to_str()
+        {
+            *inner.session_id.lock().await = Some(sid_str.to_string());
         }
 
         let content_type = response
@@ -159,7 +159,7 @@ impl McpTransport for HttpTransport {
                 if event != "message" || data.is_empty() {
                     return None;
                 }
-                let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(&data) else {
+                let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(data) else {
                     return None;
                 };
                 match msg {
@@ -196,10 +196,10 @@ impl McpTransport for HttpTransport {
             }
 
             // Flush: 处理最后一个帧（可能没有尾随空行）
-            if !current_data.is_empty() {
-                if let Some(result) = process_frame(&current_event, &current_data, req.id) {
-                    return result;
-                }
+            if !current_data.is_empty()
+                && let Some(result) = process_frame(&current_event, &current_data, req.id)
+            {
+                return result;
             }
 
             Err(McpError::Protocol("No response in SSE stream".to_string()))

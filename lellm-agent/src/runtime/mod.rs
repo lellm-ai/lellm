@@ -36,6 +36,7 @@ pub use context::{
     CompactionResult, ContextBudget, ContextCompactor, LocalCompactor, estimate_message,
     estimate_text, estimate_tokens,
 };
+pub use context_ext::AgentContextExt;
 pub use event::{AgentEvent, AgentStream, StopReason};
 pub use fallback::{DefaultFallback, FallbackAction, FallbackContext, FallbackStrategy};
 pub use lellm_provider::ResolvedModel;
@@ -44,7 +45,6 @@ pub use request_opts::RequestOptions;
 pub use retry::{BackoffStrategy, RetryPolicy};
 pub use runtime::{ResolvedRound, ToolUseLoop, ToolUseResult};
 pub use typed_state::{AgentMutation, AgentState};
-pub use context_ext::AgentContextExt;
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};

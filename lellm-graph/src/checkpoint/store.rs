@@ -113,7 +113,11 @@ impl BlobCheckpointStore for InMemoryBlobStore {
             .inner
             .read()
             .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
-        let last_id = inner.index.get(trace_id).and_then(|ids| ids.last()).cloned();
+        let last_id = inner
+            .index
+            .get(trace_id)
+            .and_then(|ids| ids.last())
+            .cloned();
         match last_id {
             Some(id) => Ok(inner.store.get(&id).cloned()),
             None => Ok(None),

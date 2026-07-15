@@ -18,7 +18,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::{ToolError, ToolResult};
+#[cfg(feature = "tool")]
+use crate::ToolError;
+use crate::ToolResult;
 
 // ─── ToolSchema ─────────────────────────────────────────────────
 
