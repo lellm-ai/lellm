@@ -59,7 +59,7 @@ fn parse_state_type(input: &DeriveInput) -> syn::Result<syn::Type> {
         return match &attr.meta {
             Meta::List(list) => list
                 .parse_args::<syn::TypePath>()
-                .map(|tp| syn::Type::Path(tp)),
+                .map(syn::Type::Path),
             _ => Err(syn::Error::new_spanned(
                 &attr.meta,
                 "#[state(TypeName)] expects a type in parentheses",
@@ -144,33 +144,33 @@ pub fn generate_state_mutation(input: &DeriveInput) -> proc_macro2::TokenStream 
     let arms: Vec<_> = data
         .variants
         .iter()
-        .filter_map(|variant| {
+        .map(|variant| {
             let variant_name = &variant.ident;
             let expr = match parse_mutation_expr(variant) {
                 Ok(e) => e,
-                Err(e) => return Some(e.to_compile_error()),
+                Err(e) => return e.to_compile_error(),
             };
             let value_ident = match extract_value_ident(variant) {
                 Ok(id) => id,
-                Err(e) => return Some(e.to_compile_error()),
+                Err(e) => return e.to_compile_error(),
             };
 
             match value_ident {
                 Some(ref val) => {
                     // Tuple variant with one value: Pattern(value)
-                    Some(quote! {
+                    quote! {
                         #enum_name::#variant_name(#val) => {
                             #expr;
                         }
-                    })
+                    }
                 }
                 None => {
                     // Unit variant: Pattern
-                    Some(quote! {
+                    quote! {
                         #enum_name::#variant_name => {
                             #expr;
                         }
-                    })
+                    }
                 }
             }
         })

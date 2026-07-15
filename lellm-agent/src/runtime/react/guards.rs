@@ -128,27 +128,19 @@ impl LeafNode<AgentState> for PostLLMGuard {
         }
 
         // 4. 总输出 Token 超限
-        if !stopped {
-            if let Some(max) = self.stop_config.max_total_output_tokens {
-                if output_tokens >= max as usize {
-                    ctx.record(AgentMutation::SetStopReason(
-                        StopReason::OutputBudgetExceeded,
-                    ));
-                    stopped = true;
-                }
-            }
+        if !stopped && let Some(max) = self.stop_config.max_total_output_tokens && output_tokens >= max as usize {
+            ctx.record(AgentMutation::SetStopReason(
+                StopReason::OutputBudgetExceeded,
+            ));
+            stopped = true;
         }
 
         // 5. 总推理 Token 超限
-        if !stopped {
-            if let Some(max) = self.stop_config.max_total_reasoning_tokens {
-                if reasoning_tokens >= max as usize {
-                    ctx.record(AgentMutation::SetStopReason(
-                        StopReason::ReasoningBudgetExceeded,
-                    ));
-                    stopped = true;
-                }
-            }
+        if !stopped && let Some(max) = self.stop_config.max_total_reasoning_tokens && reasoning_tokens >= max as usize {
+            ctx.record(AgentMutation::SetStopReason(
+                StopReason::ReasoningBudgetExceeded,
+            ));
+            stopped = true;
         }
 
         if stopped {
