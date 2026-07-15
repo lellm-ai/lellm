@@ -9,7 +9,7 @@ repository = "https://github.com/lellm-ai/lellm"
 
 [dependencies]
 lellm-core = { workspace = true, features = ["anyhow", "tool"] }
-lellm-derive = { path = "../lellm-derive" }
+lellm-derive.workspace = true
 lellm-graph.workspace = true
 lellm-provider.workspace = true
 lellm-mcp = { workspace = true, optional = true }
