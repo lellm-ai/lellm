@@ -14,15 +14,17 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
-    /// 在 params 中注入 `_meta`。
+    /// 在 params 中注入 `_meta`，返回带 meta 的新 request。
     ///
     /// 用于 MCP 2026-07-28 的无状态模式，每请求自包含协议版本和客户端信息。
-    pub fn inject_meta(
-        &mut self,
+    /// 值语义 API：消费 self，返回注入后的请求。
+    #[must_use]
+    pub fn with_meta(
+        mut self,
         protocol_version: impl Into<String>,
         client_info: Option<&ImplementationInfo>,
         client_capabilities: Option<serde_json::Value>,
-    ) {
+    ) -> Self {
         let mut params = self.params.take().unwrap_or_else(|| serde_json::json!({}));
         let obj = params.as_object_mut().expect("params must be object");
 
@@ -49,6 +51,7 @@ impl JsonRpcRequest {
         obj.insert("_meta".to_string(), serde_json::Value::Object(meta));
 
         self.params = Some(params);
+        self
     }
 }
 
@@ -144,7 +147,7 @@ impl CallToolParams {
 ///
 /// 客户端用于发现服务器支持的协议版本、能力和身份信息。
 /// 可选指定客户端支持的协议版本列表。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoverParams {
     #[serde(rename = "protocolVersions", skip_serializing_if = "Option::is_none")]
     pub protocol_versions: Option<Vec<String>>,

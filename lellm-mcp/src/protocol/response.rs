@@ -2,6 +2,54 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 工具调用结果类型（MCP 2026-07-28+）。
+///
+/// 已知值类型化，未知值保留原始字符串，确保前向兼容。
+/// 设计原则：Known values are typed; unknown values are preserved。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultType {
+    /// 普通结果。
+    Complete,
+    /// MRTR 中间结果，需要客户端提供额外输入。
+    InputRequired,
+    /// 未知结果类型（协议前向兼容）。
+    Other(String),
+}
+
+impl Serialize for ResultType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ResultType::Complete => serializer.serialize_str("complete"),
+            ResultType::InputRequired => serializer.serialize_str("input_required"),
+            ResultType::Other(v) => serializer.serialize_str(v),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResultType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "complete" => Ok(ResultType::Complete),
+            "input_required" => Ok(ResultType::InputRequired),
+            _ => Ok(ResultType::Other(s)),
+        }
+    }
+}
+
+impl std::fmt::Display for ResultType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResultType::Complete => write!(f, "complete"),
+            ResultType::InputRequired => write!(f, "input_required"),
+            ResultType::Other(v) => write!(f, "{v}"),
+        }
+    }
+}
+
 /// JSON-RPC 2.0 Response 结果（成功或错误）。
 #[derive(Debug, Clone)]
 pub enum JsonRpcResult {
@@ -104,16 +152,17 @@ pub struct CallToolResult {
     #[serde(default)]
     pub is_error: bool,
     /// 结果类型（MCP 2026-07-28+）。
-    /// - `"complete"`: 普通结果
-    /// - `"input_required"`: MRTR 中间结果，需要客户端提供额外输入
+    /// - `Complete`: 普通结果
+    /// - `InputRequired`: MRTR 中间结果，需要客户端提供额外输入
+    /// - `Other(v)`: 未知结果类型（前向兼容）
     #[serde(rename = "resultType", skip_serializing_if = "Option::is_none")]
-    pub result_type: Option<String>,
+    pub result_type: Option<ResultType>,
 }
 
 impl CallToolResult {
     /// 检查结果是否为 MRTR 中间结果。
     pub fn is_input_required(&self) -> bool {
-        self.result_type.as_deref() == Some("input_required")
+        matches!(self.result_type, Some(ResultType::InputRequired))
     }
 }
 
@@ -125,7 +174,7 @@ impl CallToolResult {
 pub struct InputRequiredResult {
     #[serde(rename = "resultType")]
     #[allow(dead_code)]
-    pub result_type: String,
+    pub result_type: ResultType,
     #[serde(rename = "inputRequests")]
     #[allow(dead_code)]
     pub input_requests: Vec<InputRequest>,

@@ -6,10 +6,14 @@
 //! - 单端点 POST /mcp
 //! - 根据 Accept header 选择 JSON 或 SSE 响应
 //! - 无状态，无需 session-id
-//! - 支持 subscriptions/listen 长连接
+//! - 支持 subscriptions/listen 长连接 SSE 推送
 //! - 支持 server/discover 版本发现
+//! - SubscriptionManager 统一管理所有 SSE 订阅者
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use futures_util::StreamExt;
 
 use crate::protocol::{
     CallToolParams, DiscoverParams, DiscoveryResult, ImplementationInfo, JsonRpcNotification,
@@ -24,6 +28,93 @@ const PROTOCOL_VERSION: &str = "2026-07-28";
 
 /// 通知 channel 容量。
 const NOTIFICATION_BUFFER: usize = 64;
+
+// ─── 订阅管理器 ───────────────────────────────────────────────────────
+
+/// SSE 订阅管理器。
+///
+/// 维护所有活跃的 SSE 长连接订阅者，统一广播通知事件。
+#[derive(Clone)]
+pub struct SubscriptionManager {
+    /// 广播通知给所有 SSE 订阅者。
+    broadcast_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
+    /// 订阅者计数（用于生成 subscription ID）。
+    counter: Arc<AtomicU64>,
+}
+
+impl SubscriptionManager {
+    pub fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
+        Self {
+            broadcast_tx: tx,
+            counter: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// 创建新的 SSE 订阅流。
+    ///
+    /// 返回 (subscription_id, stream)，stream 会持续产出 SSE 格式的 notification 事件。
+    /// stream 是 'static 的，不借用任何外部数据。
+    pub fn subscribe(
+        &self,
+        subscriptions: Vec<String>,
+    ) -> (
+        String,
+        impl futures_util::Stream<Item = bytes::Bytes> + 'static,
+    ) {
+        let sub_id = format!("sub-{}", self.counter.fetch_add(1, Ordering::Relaxed));
+
+        let subs_json = serde_json::to_value(&subscriptions).unwrap_or_default();
+
+        tracing::info!(
+            subscription_id = %sub_id,
+            subscriptions = ?subscriptions,
+            "New SSE subscription created"
+        );
+
+        let rx = self.broadcast_tx.subscribe();
+
+        // 先发送 acknowledgement
+        let ack = bytes::Bytes::from(format!(
+            "event: acknowledged\ndata: {{\"subscriptionId\":\"{}\",\"subscriptions\":{}}}\n\n",
+            sub_id, subs_json
+        ));
+
+        let stream = futures_util::stream::once(async move { ack }).chain(
+            futures_util::stream::unfold(rx, move |mut rx| async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(notification) => {
+                            let json = serde_json::to_string(&notification).unwrap_or_default();
+                            let sse_event = format!("event: message\ndata: {json}\n\n");
+                            return Some((bytes::Bytes::from(sse_event), rx));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            tracing::warn!("SSE subscriber lagged, skipping old notifications");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::info!("SSE broadcast channel closed");
+                            return None;
+                        }
+                    }
+                }
+            }),
+        );
+
+        (sub_id, stream)
+    }
+
+    /// 发送通知给所有 SSE 订阅者。
+    ///
+    /// 当工具列表等资源发生变更时，调用此方法推送通知。
+    #[allow(dead_code)]
+    pub fn notify(&self, notification: JsonRpcNotification) {
+        if let Err(e) = self.broadcast_tx.send(notification) {
+            tracing::debug!(error = %e, "Failed to send notification (no subscribers?)");
+        }
+    }
+}
 
 // ─── 核心请求处理 ────────────────────────────────────────────────────
 
@@ -102,15 +193,6 @@ async fn handle_request(server: &SimpleMcp, req: JsonRpcRequest) -> JsonRpcRespo
                 },
                 Err(e) => return error_response(req.id, -32603, e.to_string()),
             }
-        }
-        methods::SUBSCRIPTIONS_LISTEN => {
-            let _params: Option<SubscriptionsListenParams> =
-                req.params.and_then(|p| serde_json::from_value(p).ok());
-
-            serde_json::json!({
-                "resultType": "complete",
-                "subscriptionId": format!("sub-{}", req.id)
-            })
         }
         methods::PING => serde_json::json!({}),
         _ => {
@@ -193,14 +275,14 @@ pub async fn run_stdio(server: &SimpleMcp) -> Result<(), super::ServerError> {
 ///
 /// 单端点 POST /mcp，符合 MCP 2026-07-28 规范。
 /// 根据 Accept header 选择 JSON 或 SSE 响应格式。
+/// 支持 subscriptions/listen 长连接 SSE 推送。
 pub async fn run_http(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::ServerError> {
     use axum::{Router, routing::post};
-    use tokio::sync::broadcast;
 
-    let (notification_tx, _) = broadcast::channel::<String>(NOTIFICATION_BUFFER);
+    let subscriptions = SubscriptionManager::new();
     let state = HttpState {
         server,
-        notification_tx,
+        subscriptions,
     };
 
     let app = Router::new()
@@ -212,6 +294,7 @@ pub async fn run_http(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Se
         addr = %addr,
         protocol = "streamable-http",
         version = PROTOCOL_VERSION,
+        subscriptions = "enabled",
         "MCP Server starting"
     );
 
@@ -230,16 +313,14 @@ pub async fn run_http(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Se
 #[derive(Clone)]
 pub struct HttpState {
     pub server: Arc<SimpleMcp>,
-    /// 预留：用于 subscriptions/listen 的主动推送通知。
-    #[allow(dead_code)]
-    pub notification_tx: tokio::sync::broadcast::Sender<String>,
+    /// SSE 订阅管理器，维护所有活跃的 subscriptions/listen 长连接。
+    pub subscriptions: SubscriptionManager,
 }
 
 /// Streamable HTTP 请求处理器。
 ///
-/// 根据 Accept header 决定响应格式：
-/// - `application/json` → 单条 JSON 响应
-/// - `text/event-stream` → SSE 流式响应
+/// - `subscriptions/listen` → 长活 SSE 流（持续推送订阅通知）
+/// - 其他请求 → 根据 Accept header 选择 JSON 或 SSE 响应
 async fn handle_streamable_http(
     state: axum::extract::State<HttpState>,
     headers: axum::http::HeaderMap,
@@ -248,50 +329,50 @@ async fn handle_streamable_http(
     use axum::body::Body;
     use axum::http::StatusCode;
     use axum::response::Response;
+    use futures_util::StreamExt;
 
+    // subscriptions/listen → 长活 SSE 流
+    if req.method_name == methods::SUBSCRIPTIONS_LISTEN {
+        let params: Option<SubscriptionsListenParams> =
+            req.params.and_then(|p| serde_json::from_value(p).ok());
+        let subs = params.map(|p| p.subscriptions).unwrap_or_default();
+
+        let (sub_id, stream) = state.subscriptions.subscribe(subs);
+
+        // 发送 acknowledgement 给调用者（日志记录）
+        tracing::info!(subscription_id = %sub_id, "Subscription acknowledged");
+
+        let stream = stream.map(Ok::<_, std::convert::Infallible>);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .header("Connection", "keep-alive")
+            .header("X-Accel-Buffering", "no")
+            .header("X-Subscription-Id", &sub_id)
+            .body(Body::from_stream(stream))
+            .unwrap_or_default();
+    }
+
+    // 普通请求
     let wants_sse = headers
         .get("Accept")
         .and_then(|v| v.to_str().ok())
         .map(|v: &str| v.contains("text/event-stream"))
         .unwrap_or(false);
 
-    let is_listen = req.method_name == methods::SUBSCRIPTIONS_LISTEN;
-
     let resp = handle_request(&state.server, req).await;
     let json = serde_json::to_string(&resp).unwrap_or_default();
 
-    if is_listen || wants_sse {
+    if wants_sse {
         let sse_event = format!("event: message\ndata: {}\n\n", json);
-
-        if is_listen {
-            let ack = JsonRpcNotification {
-                jsonrpc: "2.0".to_string(),
-                method_name: "notifications/subscriptions/acknowledged".to_string(),
-                params: Some(serde_json::json!({
-                    "subscriptionId": format!("sub-{}", resp.id)
-                })),
-            };
-            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
-            let ack_event = format!("event: message\ndata: {}\n\n", ack_json);
-            let full_body = format!("{}{}", ack_event, sse_event);
-
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("Content-Type", "text/event-stream")
-                .header("Cache-Control", "no-cache")
-                .header("Connection", "keep-alive")
-                .header("X-Accel-Buffering", "no")
-                .body(Body::from(full_body))
-                .unwrap_or_default()
-        } else {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("Content-Type", "text/event-stream")
-                .header("Cache-Control", "no-cache")
-                .header("X-Accel-Buffering", "no")
-                .body(Body::from(sse_event))
-                .unwrap_or_default()
-        }
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "text/event-stream")
+            .header("Cache-Control", "no-cache")
+            .header("X-Accel-Buffering", "no")
+            .body(Body::from(sse_event))
+            .unwrap_or_default()
     } else {
         Response::builder()
             .status(StatusCode::OK)

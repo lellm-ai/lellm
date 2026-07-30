@@ -3,6 +3,7 @@
 //! 核心设计：
 //! - request() 封装 request-id 生成与匹配
 //! - subscribe_notifications() 返回 broadcast Receiver（多订阅者）
+//! - subscribe() 建立 subscriptions/listen 长连接（可选能力）
 //! - 状态由 Transport 主动驱动，McpClient 订阅
 
 #[cfg(feature = "http")]
@@ -14,7 +15,7 @@ mod state;
 mod stdio;
 
 #[cfg(feature = "http")]
-pub use http::{HttpConfig, HttpTransport};
+pub use http::{HttpConfig, HttpTransport, SubscriptionHandle};
 #[cfg(feature = "sse")]
 #[allow(deprecated)]
 pub use sse::{SseConfig, SseTransport};
@@ -25,7 +26,9 @@ pub use stdio::{StdioConfig, StdioTransport};
 
 use async_trait::async_trait;
 
-use crate::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError};
+use crate::protocol::{
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, TransportError,
+};
 
 /// Transport 能力声明（编译时固定，不依赖连接状态）。
 ///
@@ -48,6 +51,7 @@ pub struct TransportCapabilities {
 /// - `connect()` — 建立连接
 /// - `request()` — 发送请求，等待响应（内部处理 request-id 匹配）
 /// - `subscribe_notifications()` — 订阅 notification（broadcast 模型）
+/// - `subscribe()` — 建立 subscriptions/listen 长连接（可选能力）
 /// - `capabilities()` — 声明 Transport 能力（编译时固定）
 /// - `close()` — 断开连接
 /// - `state()` — 获取连接状态订阅
@@ -57,6 +61,7 @@ pub struct TransportCapabilities {
 /// - request-id 由 McpClient 生成，Transport 不感知
 /// - 重连由 Runtime 决定，不在 Transport 层
 /// - 能力声明与运行时 handle 分离（不滥用 Option 语义）
+/// - 可选能力（如 subscribe）通过默认方法实现，Transport 自行覆盖
 #[async_trait]
 pub trait McpTransport: Send + Sync {
     /// 建立连接。
@@ -79,4 +84,28 @@ pub trait McpTransport: Send + Sync {
 
     /// 获取连接状态订阅。
     fn state(&self) -> tokio::sync::watch::Receiver<ConnectionState>;
+
+    /// 建立 subscriptions/listen 长连接（可选能力）。
+    ///
+    /// 默认返回 Unsupported，Transport 自行覆盖以实现 SSE 长连接订阅。
+    /// 请求已由 McpClient 构建完毕（id 分配、meta 注入）。
+    ///
+    /// 返回 `(receiver, handle)`：
+    /// - `receiver`: broadcast channel receiver，接收服务器推送的 notification
+    /// - `handle`: 订阅句柄，drop 时自动关闭连接
+    #[cfg(feature = "http")]
+    async fn subscribe(
+        &self,
+        _req: JsonRpcRequest,
+    ) -> Result<
+        (
+            tokio::sync::broadcast::Receiver<JsonRpcNotification>,
+            SubscriptionHandle,
+        ),
+        McpError,
+    > {
+        Err(McpError::Transport(TransportError::Unsupported(
+            "subscriptions not supported on this transport".to_string(),
+        )))
+    }
 }

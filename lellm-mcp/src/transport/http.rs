@@ -3,6 +3,7 @@
 //! 架构：
 //! - connect() 建立连接（无状态，仅初始化 reqwest Client）
 //! - request() 通过 HTTP POST 发送 JSON-RPC 请求，等待响应
+//! - subscribe() 建立 subscriptions/listen 长连接 SSE 订阅
 //! - 自动携带 MCP-Protocol-Version、Mcp-Method、Mcp-Name 标准 Headers
 //! - 支持 application/json 与 text/event-stream 两种响应格式
 //!
@@ -11,6 +12,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use tokio::sync::watch;
 
 use super::{ConnectionState, McpTransport, TransportCapabilities};
@@ -83,6 +85,228 @@ impl HttpTransport {
             state: tx,
             _state_rx: rx,
         }
+    }
+
+    /// 获取内部 reqwest 客户端的克隆。
+    pub fn client(&self) -> Option<reqwest::Client> {
+        self.inner.as_ref().map(|inner| inner.client.clone())
+    }
+
+    /// 发送流式订阅请求，返回 SSE 长连接。
+    ///
+    /// **请求已由 McpClient 构建完毕**（id 分配、meta 注入）。
+    /// 本方法只负责：发送 HTTP 请求 + 持续读取 SSE 流。
+    ///
+    /// 返回 `(receiver, handle)`：
+    /// - `receiver`: broadcast channel receiver，接收 SSE 推送的 notification
+    /// - `handle`: 订阅句柄，drop 时自动关闭 HTTP 连接
+    pub async fn subscribe(
+        &self,
+        req: JsonRpcRequest,
+    ) -> Result<
+        (
+            tokio::sync::broadcast::Receiver<JsonRpcNotification>,
+            SubscriptionHandle,
+        ),
+        McpError,
+    > {
+        let inner = self.inner.as_ref().ok_or_else(McpError::disconnected)?;
+
+        let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
+
+        // 发起 HTTP POST 请求
+        let response = inner
+            .client
+            .post(&self.config.endpoint_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("MCP-Protocol-Version", &self.config.protocol_version)
+            .header("Mcp-Method", &req.method_name)
+            .body(json)
+            .send()
+            .await
+            .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(McpError::Transport(TransportError::Http(format!(
+                "HTTP {}: {}",
+                status, body
+            ))));
+        }
+
+        let (notification_tx, receiver) =
+            tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
+
+        // 提取 subscription id from response header
+        let sub_id = response
+            .headers()
+            .get("X-Subscription-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // 后台任务：持续读取 SSE 流
+        let handle = spawn_subscription_reader(
+            response,
+            notification_tx,
+            sub_id,
+            self.config.endpoint_url.clone(),
+        );
+
+        Ok((receiver, handle))
+    }
+}
+
+/// 订阅句柄。Drop 时自动取消 HTTP 连接。
+pub struct SubscriptionHandle {
+    handle: Option<tokio::task::JoinHandle<()>>,
+    subscription_id: Option<String>,
+}
+
+impl SubscriptionHandle {
+    /// 获取订阅 ID。
+    pub fn subscription_id(&self) -> Option<&str> {
+        self.subscription_id.as_deref()
+    }
+
+    /// 主动取消订阅。
+    pub async fn cancel(mut self) {
+        self.cancel_inner().await;
+    }
+
+    async fn cancel_inner(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+            let _ = handle.await;
+            tracing::info!(
+                subscription_id = %self.subscription_id.as_deref().unwrap_or("?"),
+                "Subscription cancelled"
+            );
+        }
+    }
+}
+
+impl Drop for SubscriptionHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// 后台任务：持续读取 SSE 流，解析 notifications。
+///
+/// 使用 bytes_stream 逐 chunk 读取，缓冲不完整行以处理 chunk 边界。
+fn spawn_subscription_reader(
+    response: reqwest::Response,
+    notification_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
+    sub_id: Option<String>,
+    endpoint: String,
+) -> SubscriptionHandle {
+    let sub_id_for_handle = sub_id.clone();
+    let handle = tokio::spawn(async move {
+        let log_id = sub_id.as_deref().unwrap_or("?");
+        tracing::info!(
+            subscription_id = %log_id,
+            endpoint = %endpoint,
+            "Subscription SSE reader started"
+        );
+
+        // 行缓冲：SSE 事件可能跨 chunk 边界
+        let mut buffer = String::new();
+        let mut event = String::new();
+        let mut data = String::new();
+
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(chunk) => {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                    // 处理所有完整行
+                    let mut drain_until = 0;
+                    for ch in buffer[drain_until..].char_indices() {
+                        let abs_idx = drain_until + ch.0;
+                        if ch.1 == '\n' {
+                            let line = &buffer[drain_until..abs_idx];
+                            if line.starts_with("event:") || line.starts_with("event: ") {
+                                event = line.trim_start_matches("event:").trim().to_string();
+                            } else if line.starts_with("data:") || line.starts_with("data: ") {
+                                data.push_str(line.trim_start_matches("data:").trim());
+                            } else if line.is_empty() && !data.is_empty() {
+                                parse_and_send_sse(&event, &data, &notification_tx, log_id);
+                                event.clear();
+                                data.clear();
+                            }
+                            drain_until = abs_idx + 1;
+                        }
+                    }
+                    if drain_until > 0 {
+                        buffer.drain(..drain_until);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        subscription_id = %log_id,
+                        error = %e,
+                        "Subscription SSE stream error"
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Flush 最后一个不完整的帧
+        if !data.is_empty() {
+            parse_and_send_sse(&event, &data, &notification_tx, log_id);
+        }
+
+        tracing::info!(subscription_id = %log_id, "Subscription SSE reader finished");
+    });
+
+    SubscriptionHandle {
+        handle: Some(handle),
+        subscription_id: sub_id_for_handle,
+    }
+}
+
+/// 解析单个 SSE 事件并发送到 broadcast channel。
+fn parse_and_send_sse(
+    event: &str,
+    data: &str,
+    tx: &tokio::sync::broadcast::Sender<JsonRpcNotification>,
+    sub_id: &str,
+) {
+    let event_type = if event.is_empty() { "message" } else { event };
+
+    if event_type == "message" && !data.is_empty() {
+        match serde_json::from_str::<crate::protocol::JsonRpcMessage>(data) {
+            Ok(crate::protocol::JsonRpcMessage::Notification(ref notif)) => {
+                tracing::debug!(
+                    subscription_id = %sub_id,
+                    method = %notif.method_name,
+                    "Received subscription notification"
+                );
+                let _ = tx.send(notif.clone());
+            }
+            Ok(crate::protocol::JsonRpcMessage::Response(resp)) => {
+                if let crate::protocol::JsonRpcResult::Success(v) = &resp.result {
+                    tracing::info!(
+                        subscription_id = %sub_id,
+                        ?v,
+                        "Subscription acknowledged"
+                    );
+                }
+            }
+            _ => {}
+        }
+    } else if event_type == "acknowledged" && !data.is_empty() {
+        tracing::info!(
+            subscription_id = %sub_id,
+            ack_data = %data,
+            "Subscription acknowledged via SSE event"
+        );
     }
 }
 
@@ -251,6 +475,19 @@ impl McpTransport for HttpTransport {
 
     fn state(&self) -> tokio::sync::watch::Receiver<ConnectionState> {
         self.state.subscribe()
+    }
+
+    async fn subscribe(
+        &self,
+        req: JsonRpcRequest,
+    ) -> Result<
+        (
+            tokio::sync::broadcast::Receiver<JsonRpcNotification>,
+            SubscriptionHandle,
+        ),
+        McpError,
+    > {
+        Self::subscribe(self, req).await
     }
 }
 

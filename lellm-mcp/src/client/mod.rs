@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use super::protocol::{
     CallToolParams, CallToolResult, DiscoverParams, DiscoveryResult, ImplementationInfo,
     InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, ListToolsResult,
-    McpError, ServerError, SubscriptionsListenParams, TransportError, methods,
+    McpError, ServerError, TransportError, methods,
 };
 use super::transport::{ConnectionState, McpTransport, TransportCapabilities};
 
@@ -90,8 +90,10 @@ impl McpClient {
         let version = self.protocol_version.lock().await.clone();
         let params =
             InitializeParams::new(version).with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
-        self.request_inner(methods::INITIALIZE, Some(&params), false)
-            .await
+        let req = self
+            .build_request(methods::INITIALIZE, Some(&params), false)
+            .await?;
+        self.send_and_parse(req).await
     }
 
     /// 发现服务器能力（MCP 2026-07-28+）。
@@ -106,31 +108,49 @@ impl McpClient {
             Some(v) => DiscoverParams::new().with_versions(v),
             None => DiscoverParams::new(),
         };
-        self.request_inner(methods::SERVER_DISCOVER, Some(&params), true)
-            .await
+        let req = self
+            .build_request(methods::SERVER_DISCOVER, Some(&params), true)
+            .await?;
+        self.send_and_parse(req).await
     }
 
     /// 订阅服务器变更通知（MCP 2026-07-28+）。
     ///
-    /// 返回 SSE 长连接，服务器通过该连接推送订阅的通知。
-    /// 客户端应关闭连接以取消订阅。
+    /// 建立 SSE 长连接，服务器通过该连接持续推送订阅的通知。
+    /// 请求走统一流水线：状态检查 → id 分配 → meta 注入 → 发送。
     ///
-    /// **注意**：此方法需要 Transport 支持 SSE 长连接。
-    /// 当前 HttpTransport 尚不支持，将在后续版本实现。
-    #[allow(dead_code)]
-    pub async fn subscriptions_listen(&self, subscriptions: Vec<String>) -> Result<(), McpError> {
-        let params = SubscriptionsListenParams::new(subscriptions);
-        // TODO: 实现 SSE 长连接处理
-        let _: Result<serde_json::Value, McpError> = self
-            .request_inner(methods::SUBSCRIPTIONS_LISTEN, Some(&params), true)
-            .await;
-        Ok(())
+    /// 返回 `(receiver, handle)`：
+    /// - `receiver`: broadcast channel receiver，接收服务器推送的 notification
+    /// - `handle`: 订阅句柄，drop 时自动关闭 SSE 连接
+    ///
+    /// 如果 Transport 不支持 subscriptions，返回 `Err(McpError::Unsupported)`。
+    #[cfg(feature = "http")]
+    pub async fn subscriptions_listen(
+        &self,
+        subscriptions: Vec<String>,
+    ) -> Result<
+        (
+            tokio::sync::broadcast::Receiver<JsonRpcNotification>,
+            super::transport::SubscriptionHandle,
+        ),
+        McpError,
+    > {
+        // 统一流水线：构建请求
+        let params = super::protocol::SubscriptionsListenParams::new(subscriptions);
+        let req = self
+            .build_request(methods::SUBSCRIPTIONS_LISTEN, Some(&params), true)
+            .await?;
+
+        // 委托给 Transport，由 Transport 决定是否支持
+        self.transport.subscribe(req).await
     }
 
     /// 拉取工具列表。
     pub async fn tools_list(&self) -> Result<ListToolsResult, McpError> {
-        self.request_inner(methods::TOOLS_LIST, None::<&()>, true)
-            .await
+        let req = self
+            .build_request(methods::TOOLS_LIST, None::<&()>, true)
+            .await?;
+        self.send_and_parse(req).await
     }
 
     /// 调用工具。
@@ -140,8 +160,10 @@ impl McpClient {
         arguments: Option<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
         let params = CallToolParams::new(name, arguments);
-        self.request_inner(methods::TOOLS_CALL, Some(&params), true)
-            .await
+        let req = self
+            .build_request(methods::TOOLS_CALL, Some(&params), true)
+            .await?;
+        self.send_and_parse(req).await
     }
 
     /// 统一的请求入口——泛型返回。
@@ -153,30 +175,40 @@ impl McpClient {
         P: Serialize,
         R: for<'de> Deserialize<'de>,
     {
-        self.request_inner(method, params.as_ref(), true).await
+        let req = self.build_request(method, params.as_ref(), true).await?;
+        self.send_and_parse(req).await
     }
 
-    /// 内部请求方法。
-    async fn request_inner<P, R>(
+    // ─── 统一请求流水线 ─────────────────────────────────────────────
+    // 所有 outgoing request 必须经过此流水线：
+    //   状态检查 → id 分配 → 序列化 → meta 注入 → transport.send()
+
+    /// 构建一个完整的 JsonRpcRequest。
+    ///
+    /// 这是所有 outgoing request 的唯一入口：
+    /// 1. Fail-fast 状态检查
+    /// 2. 分配 request id（唯一来源）
+    /// 3. 序列化 params
+    /// 4. 注入 _meta（MCP 2026-07-28 无状态模式）
+    async fn build_request<P>(
         &self,
         method: &str,
         params: Option<&P>,
         inject_meta: bool,
-    ) -> Result<R, McpError>
+    ) -> Result<JsonRpcRequest, McpError>
     where
         P: Serialize,
-        R: for<'de> Deserialize<'de>,
     {
-        // Fail-fast 检查
+        // 1. Fail-fast 状态检查
         let state = *self.transport.state().borrow();
         if !state.allows_request() {
             return Err(McpError::Transport(TransportError::Disconnected));
         }
 
-        // 分配 request id
+        // 2. 分配 request id（唯一来源）
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
 
-        // 序列化 params
+        // 3. 序列化 params
         let params_value = match params {
             Some(p) => {
                 Some(serde_json::to_value(p).map_err(|e| McpError::Protocol(e.to_string()))?)
@@ -184,43 +216,28 @@ impl McpClient {
             None => None,
         };
 
-        // 注入 _meta（MCP 2026-07-28 无状态模式）
-        let params_value = if inject_meta {
+        let req = JsonRpcRequest::new(id, method, params_value);
+
+        // 4. 注入 _meta（MCP 2026-07-28 无状态模式）
+        let req = if inject_meta {
             let version = self.protocol_version.lock().await.clone();
             let client_info = self.client_info.lock().await.clone();
             let capabilities = self.client_capabilities.lock().await.clone();
-
-            let mut params = params_value.unwrap_or_else(|| serde_json::json!({}));
-            if let Some(obj) = params.as_object_mut() {
-                let mut meta = serde_json::Map::new();
-                meta.insert(
-                    "io.modelcontextprotocol/protocolVersion".to_string(),
-                    serde_json::Value::String(version),
-                );
-
-                if let Some(info) = client_info {
-                    meta.insert(
-                        "io.modelcontextprotocol/clientInfo".to_string(),
-                        serde_json::json!({ "name": info.name, "version": info.version }),
-                    );
-                }
-
-                meta.insert(
-                    "io.modelcontextprotocol/clientCapabilities".to_string(),
-                    capabilities,
-                );
-
-                obj.insert("_meta".to_string(), serde_json::Value::Object(meta));
-            }
-            Some(params)
+            req.with_meta(version, client_info.as_ref(), Some(capabilities))
         } else {
-            params_value
+            req
         };
 
-        let req = JsonRpcRequest::new(id, method, params_value);
+        Ok(req)
+    }
+
+    /// 发送请求并解析响应。
+    async fn send_and_parse<R>(&self, req: JsonRpcRequest) -> Result<R, McpError>
+    where
+        R: for<'de> Deserialize<'de>,
+    {
         let resp = self.transport.request(req).await?;
 
-        // 解析结果
         match resp.result {
             super::protocol::JsonRpcResult::Success(v) => {
                 serde_json::from_value(v).map_err(|e| McpError::Protocol(e.to_string()))

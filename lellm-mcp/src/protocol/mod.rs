@@ -22,7 +22,7 @@ pub use request::{
 };
 pub use response::{
     CallToolResult, ContentBlock, InitializeResult, InputRequest, InputRequiredResult,
-    JsonRpcError, JsonRpcResponse, JsonRpcResult, ListToolsResult, ToolInfo,
+    JsonRpcError, JsonRpcResponse, JsonRpcResult, ListToolsResult, ResultType, ToolInfo,
 };
 
 /// JSON-RPC 2.0 Message（Request / Response / Notification）。

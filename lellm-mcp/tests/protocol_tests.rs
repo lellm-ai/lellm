@@ -5,8 +5,8 @@
 
 use lellm_mcp::protocol::{
     CallToolParams, ContentBlock, ImplementationInfo, InitializeParams, JsonRpcMessage,
-    JsonRpcNotification, McpError, NotificationKind, RetryDisposition, ServerError, TransportError,
-    methods, notification_methods,
+    JsonRpcNotification, McpError, NotificationKind, ResultType, RetryDisposition, ServerError,
+    TransportError, methods, notification_methods,
 };
 
 // ============================================================================
@@ -386,4 +386,38 @@ fn test_implementation_info_roundtrip() {
     let decoded: ImplementationInfo = serde_json::from_value(json).unwrap();
     assert_eq!(decoded.name, "my-server");
     assert_eq!(decoded.version, "2.0.0");
+}
+
+// ============================================================================
+// ResultType 测试
+// ============================================================================
+
+#[test]
+fn test_result_type_complete() {
+    let rt: ResultType = serde_json::from_str(r#""complete""#).unwrap();
+    assert!(matches!(rt, ResultType::Complete));
+    let serialized = serde_json::to_string(&rt).unwrap();
+    assert_eq!(serialized, r#""complete""#);
+    assert_eq!(rt.to_string(), "complete");
+}
+
+#[test]
+fn test_result_type_input_required() {
+    let rt: ResultType = serde_json::from_str(r#""input_required""#).unwrap();
+    assert!(matches!(rt, ResultType::InputRequired));
+    let serialized = serde_json::to_string(&rt).unwrap();
+    assert_eq!(serialized, r#""input_required""#);
+    assert_eq!(rt.to_string(), "input_required");
+}
+
+#[test]
+fn test_result_type_unknown_preserved() {
+    let rt: ResultType = serde_json::from_str(r#""authorization_required""#).unwrap();
+    assert!(matches!(rt, ResultType::Other(_)));
+    if let ResultType::Other(ref v) = rt {
+        assert_eq!(v, "authorization_required");
+    }
+    let serialized = serde_json::to_string(&rt).unwrap();
+    assert_eq!(serialized, r#""authorization_required""#);
+    assert_eq!(rt.to_string(), "authorization_required");
 }

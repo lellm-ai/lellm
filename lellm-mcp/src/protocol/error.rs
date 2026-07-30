@@ -39,6 +39,10 @@ pub enum TransportError {
     /// IO 错误（子进程启动失败、管道断裂）
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    /// Transport 不支持该操作（如 stdio 上调用了 subscriptions/listen）
+    #[error("unsupported transport operation: {0}")]
+    Unsupported(String),
 }
 
 /// 恢复策略分类——Runtime 根据此枚举决定行为。
@@ -119,6 +123,7 @@ impl McpError {
                         _ => RetryDisposition::Backoff,
                     }
                 }
+                TransportError::Unsupported(_) => RetryDisposition::Never,
             },
             McpError::Protocol(_) => RetryDisposition::Never,
             McpError::InvalidParams(_) => RetryDisposition::Never,
