@@ -161,7 +161,10 @@ impl SimpleMcp {
         super::handler::run_stdio(self).await
     }
 
-    /// 以 HTTP 模式运行服务器。
+    /// 以 Streamable HTTP 模式运行服务器。
+    ///
+    /// 单端点 POST /mcp，支持 JSON 与 SSE 两种响应格式。
+    /// 符合 MCP 2026-07-28 Streamable HTTP 规范。
     ///
     /// - `port`: 监听端口
     pub async fn run_http(self, port: u16) -> Result<(), super::ServerError> {
@@ -171,7 +174,15 @@ impl SimpleMcp {
 
     /// 以 SSE 模式运行服务器。
     ///
+    /// **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
+    /// 请使用 `run_http`（Streamable HTTP）。
+    ///
     /// - `port`: 监听端口
+    #[deprecated(
+        since = "0.5.0",
+        note = "HTTP+SSE transport is deprecated per MCP 2026-07-28. Use run_http (Streamable HTTP) instead."
+    )]
+    #[allow(deprecated)]
     pub async fn run_sse(self, port: u16) -> Result<(), super::ServerError> {
         let server = std::sync::Arc::new(self);
         super::handler::run_sse(server, port).await

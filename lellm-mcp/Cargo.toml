@@ -25,10 +25,10 @@ futures = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 
 [features]
-default = ["stdio"]
+default = ["stdio", "http"]
 stdio = []
-sse = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
 http = ["dep:reqwest"]
+sse = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
 server = ["dep:axum"]
 
 [dev-dependencies]

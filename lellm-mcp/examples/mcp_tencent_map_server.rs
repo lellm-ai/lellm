@@ -3,6 +3,9 @@
 //! 暴露 `resolve_city` 工具：输入地址，返回城市信息（kebab-case 城市名）。
 //! 逻辑参考 `lellm-agent/examples/_shared/city_resolver.rs` 中的 `resolve_via_tencent_map`。
 //!
+//! 注意：SSE 模式已废弃，使用 `--mode http` 或 `--mode stdio`。
+
+#![allow(deprecated)]
 //! 前置条件：
 //! 1. 在腾讯位置服务申请 API Key: https://lbs.qq.com/service/webService/webServiceGuide/overview
 //! 2. 设置环境变量: export TENCENT_MAP_KEY=your_api_key

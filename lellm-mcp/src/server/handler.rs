@@ -190,8 +190,10 @@ pub async fn run_http(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Se
 
 /// 以 SSE 模式运行服务器。
 ///
+/// **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
 /// SSE 端点: GET /sse — 建立 SSE 连接
 /// 请求端点: POST /messages — 发送 JSON-RPC 请求
+#[allow(deprecated)]
 pub async fn run_sse(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::ServerError> {
     use axum::{
         Router,

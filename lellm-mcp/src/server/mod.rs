@@ -2,9 +2,10 @@
 //!
 //! 参考 Python FastMCP 设计，提供简洁的 API 来定义工具并运行服务器。
 //!
-//! 支持两种传输方式：
+//! 支持三种传输方式：
 //! - stdio: 本地子进程通信
-//! - streamable-http: 基于 Axum 的 HTTP 服务
+//! - streamable-http: 基于 Axum 的 Streamable HTTP 服务（**推荐**）
+//! - SSE: 基于 Axum 的 HTTP+SSE 服务（**已废弃**，仅兼容旧客户端）
 
 mod handler;
 mod simple;

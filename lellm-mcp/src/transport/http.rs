@@ -1,16 +1,17 @@
-//! HTTP Transport — 通过 Streamable HTTP 通信。
+//! HTTP Transport — Streamable HTTP 传输层。
 //!
 //! 架构：
-//! - connect() 建立连接
+//! - connect() 建立连接（无状态，仅初始化 reqwest Client）
 //! - request() 通过 HTTP POST 发送 JSON-RPC 请求，等待响应
-//! - 自动处理 mcp-session-id
+//! - 自动携带 MCP-Protocol-Version、Mcp-Method、Mcp-Name 标准 Headers
+//! - 支持 application/json 与 text/event-stream 两种响应格式
 //!
-//! 参考：https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http
+//! 参考：https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 use super::{ConnectionState, McpTransport, TransportCapabilities};
 use crate::protocol::{
@@ -23,6 +24,9 @@ const NOTIFICATION_BUFFER: usize = 64;
 /// 默认请求超时（秒）。
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// 默认协议版本（MCP 2026-07-28）。
+const DEFAULT_PROTOCOL_VERSION: &str = "2026-07-28";
+
 /// HTTP Transport 配置。
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
@@ -30,6 +34,8 @@ pub struct HttpConfig {
     pub endpoint_url: String,
     /// 单次请求超时（默认 30 秒）。
     pub request_timeout: std::time::Duration,
+    /// MCP 协议版本，默认 `2026-07-28`。
+    pub protocol_version: String,
 }
 
 impl HttpConfig {
@@ -37,11 +43,18 @@ impl HttpConfig {
         Self {
             endpoint_url: endpoint_url.into(),
             request_timeout: std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS),
+            protocol_version: DEFAULT_PROTOCOL_VERSION.to_string(),
         }
     }
 
     pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.request_timeout = timeout;
+        self
+    }
+
+    /// 设置 MCP 协议版本。
+    pub fn with_protocol_version(mut self, version: impl Into<String>) -> Self {
+        self.protocol_version = version.into();
         self
     }
 }
@@ -59,8 +72,6 @@ pub struct HttpTransport {
 struct HttpTransportInner {
     client: reqwest::Client,
     notification_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
-    /// 服务器返回的 session ID，后续请求自动携带。
-    session_id: Mutex<Option<String>>,
 }
 
 impl HttpTransport {
@@ -87,7 +98,6 @@ impl McpTransport for HttpTransport {
         self.inner = Some(Arc::new(HttpTransportInner {
             client,
             notification_tx,
-            session_id: Mutex::new(None),
         }));
 
         self.state.send(ConnectionState::Ready).ok();
@@ -99,16 +109,19 @@ impl McpTransport for HttpTransport {
 
         let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
 
-        // 构建请求，自动携带 session-id 和超时
+        // 构建请求，携带 Streamable HTTP 标准 Headers
         let mut builder = inner
             .client
             .post(&self.config.endpoint_url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", &self.config.protocol_version)
+            .header("Mcp-Method", &req.method_name)
             .timeout(self.config.request_timeout);
 
-        if let Some(ref sid) = *inner.session_id.lock().await {
-            builder = builder.header("Mcp-Session-Id", sid);
+        // Mcp-Name header（tools/call → params.name; resources/read, prompts/get → params.uri）
+        if let Some(name) = extract_mcp_name(&req.method_name, &req.params) {
+            builder = builder.header("Mcp-Name", &name);
         }
 
         let response = builder
@@ -124,13 +137,6 @@ impl McpTransport for HttpTransport {
                 "HTTP {}: {}",
                 status, body
             ))));
-        }
-
-        // 保存 session-id
-        if let Some(sid) = response.headers().get("mcp-session-id")
-            && let Ok(sid_str) = sid.to_str()
-        {
-            *inner.session_id.lock().await = Some(sid_str.to_string());
         }
 
         let content_type = response
@@ -245,5 +251,24 @@ impl McpTransport for HttpTransport {
 
     fn state(&self) -> tokio::sync::watch::Receiver<ConnectionState> {
         self.state.subscribe()
+    }
+}
+
+/// 从请求参数中提取 Mcp-Name header 值。
+///
+/// 规范约定：
+/// - `tools/call` → `params.name`
+/// - `resources/read`, `prompts/get` → `params.uri`
+fn extract_mcp_name(method: &str, params: &Option<serde_json::Value>) -> Option<String> {
+    let params = params.as_ref()?;
+    match method {
+        "tools/call" => params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        "resources/read" | "prompts/get" => {
+            params.get("uri").and_then(|v| v.as_str()).map(String::from)
+        }
+        _ => None,
     }
 }

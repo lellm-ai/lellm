@@ -1,5 +1,9 @@
 //! MCP Geocoder Example — 使用 QQ 地图 MCP 服务器解析地址 (SSE Transport)
 //!
+//! **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
+
+#![allow(deprecated)]
+//!
 //! 前置条件：
 //! 1. 在腾讯位置服务申请 API Key: https://lbs.qq.com/service/webService/webServiceGuide/overview
 //! 2. 设置环境变量: export TENCENT_MAP_KEY=your_api_key

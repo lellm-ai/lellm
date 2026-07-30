@@ -16,6 +16,7 @@ mod stdio;
 #[cfg(feature = "http")]
 pub use http::{HttpConfig, HttpTransport};
 #[cfg(feature = "sse")]
+#[allow(deprecated)]
 pub use sse::{SseConfig, SseTransport};
 pub use state::ConnectionState;
 #[cfg(feature = "stdio")]
@@ -31,13 +32,13 @@ use crate::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpE
 /// 用于让上层（如 Registry）在不猜测 `subscribe_notifications()` 返回值的情况下，
 /// 判断 Transport 是否支持某项能力。
 ///
-/// 未来可扩展 `streaming`、`batching` 等字段。
+/// 未来可扩展 `streaming`、`subscriptions` 等字段。
 #[derive(Debug, Clone, Default)]
 pub struct TransportCapabilities {
     /// Transport 是否支持服务器主动推送 notification。
     /// - Stdio: `true`（子进程 stdout 可推送）
     /// - SSE: `true`（SSE 流可推送）
-    /// - HTTP: `false`（无状态，无法主动推送）
+    /// - HTTP: `false`（无状态，需 subscriptions/listen 实现主动推送）
     pub notifications: bool,
 }
 

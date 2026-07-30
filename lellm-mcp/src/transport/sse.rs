@@ -32,6 +32,13 @@ const NOTIFICATION_BUFFER: usize = 64;
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 /// SSE Transport 配置。
+///
+/// **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
+/// 请使用 `HttpConfig` + `HttpTransport`（Streamable HTTP）。
+#[deprecated(
+    since = "0.5.0",
+    note = "HTTP+SSE transport is deprecated per MCP 2026-07-28. Use HttpConfig + HttpTransport (Streamable HTTP) instead."
+)]
 #[derive(Debug, Clone)]
 pub struct SseConfig {
     /// SSE 端点 URL（如 https://mcp.map.baidu.com/sse?ak=xxx）
@@ -40,6 +47,7 @@ pub struct SseConfig {
     pub request_timeout: std::time::Duration,
 }
 
+#[allow(deprecated)]
 impl SseConfig {
     pub fn new(sse_url: impl Into<String>) -> Self {
         Self {
@@ -56,6 +64,14 @@ impl SseConfig {
 }
 
 /// SSE Transport 实现。
+///
+/// **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
+/// 请使用 `HttpTransport`（Streamable HTTP）。
+#[deprecated(
+    since = "0.5.0",
+    note = "HTTP+SSE transport is deprecated per MCP 2026-07-28. Use HttpTransport (Streamable HTTP) instead."
+)]
+#[allow(deprecated)]
 pub struct SseTransport {
     config: SseConfig,
     inner: Option<Arc<SseTransportInner>>,
@@ -82,6 +98,7 @@ struct SseTransportInner {
 
 type PendingMap = HashMap<u64, oneshot::Sender<Result<JsonRpcResponse, McpError>>>;
 
+#[allow(deprecated)]
 impl SseTransport {
     pub fn new(config: SseConfig) -> Self {
         let (tx, rx) = watch::channel(ConnectionState::Disconnected);
@@ -95,6 +112,7 @@ impl SseTransport {
 }
 
 #[async_trait]
+#[allow(deprecated)]
 impl McpTransport for SseTransport {
     async fn connect(&mut self) -> Result<(), McpError> {
         self.state.send(ConnectionState::Connecting).ok();
