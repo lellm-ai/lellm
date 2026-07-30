@@ -27,7 +27,7 @@ use super::SimpleMcp;
 const PROTOCOL_VERSION: &str = "2026-07-28";
 
 /// 通知 channel 容量。
-const NOTIFICATION_BUFFER: usize = 64;
+const NOTIFICATION_BUFFER: usize = 256;
 
 // ─── 订阅管理器 ───────────────────────────────────────────────────────
 
@@ -40,6 +40,8 @@ pub struct SubscriptionManager {
     broadcast_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
     /// 订阅者计数（用于生成 subscription ID）。
     counter: Arc<AtomicU64>,
+    /// 累计丢失的通知数量（best-effort 语义，仅用于可观测性）。
+    lagged_total: Arc<AtomicU64>,
 }
 
 impl SubscriptionManager {
@@ -48,7 +50,18 @@ impl SubscriptionManager {
         Self {
             broadcast_tx: tx,
             counter: Arc::new(AtomicU64::new(1)),
+            lagged_total: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// 当前活跃的订阅者数量。
+    pub fn active_count(&self) -> usize {
+        self.broadcast_tx.receiver_count()
+    }
+
+    /// 累计丢失的通知数量（best-effort 语义）。
+    pub fn lagged_total(&self) -> u64 {
+        self.lagged_total.load(Ordering::Relaxed)
     }
 
     /// 创建新的 SSE 订阅流。
@@ -63,6 +76,7 @@ impl SubscriptionManager {
         impl futures_util::Stream<Item = bytes::Bytes> + 'static,
     ) {
         let sub_id = format!("sub-{}", self.counter.fetch_add(1, Ordering::Relaxed));
+        let lagged_total = self.lagged_total.clone();
 
         let subs_json = serde_json::to_value(&subscriptions).unwrap_or_default();
 
@@ -89,8 +103,12 @@ impl SubscriptionManager {
                             let sse_event = format!("event: message\ndata: {json}\n\n");
                             return Some((bytes::Bytes::from(sse_event), rx));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            tracing::warn!("SSE subscriber lagged, skipping old notifications");
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            lagged_total.fetch_add(n as u64, Ordering::Relaxed);
+                            tracing::warn!(
+                                lagged = n,
+                                "SSE subscriber lagged, skipping old notifications"
+                            );
                             continue;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
