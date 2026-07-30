@@ -1,40 +1,43 @@
 # MCP Transport 使用指南
 
-> 版本：v0.2 | 日期：2026-07-30 | 基于 MCP Spec 2026-07-28
+> 版本：v0.3 | 日期：2026-07-30 | 基于 MCP Spec 2026-07-28
 
 ## 概述
 
-LeLLM 的 MCP 模块支持三种传输方式：
+LeLLM 的 MCP 模块支持两种传输方式：
 
 1. **StdioTransport** — 通过本地子进程 stdin/stdout 通信
-2. **HttpTransport** — Streamable HTTP（**推荐**，MCP Spec 2025-03-26+）
-3. **SseTransport** — HTTP+SSE（**已废弃**，MCP Spec 2024-11-05，仅兼容旧服务器）
+2. **HttpTransport** — Streamable HTTP（**推荐**，MCP Spec 2026-07-28）
+
+> **注意**：SseTransport（HTTP+SSE）已在 MCP 2026-07-28 中被标记为 Deprecated，
+> 相关 API 已加 `#[deprecated]`。仅连接旧版 MCP Server 时才使用。
 
 ## 传输方式对比
 
-| 特性 | StdioTransport | HttpTransport | SseTransport（废弃） |
-|------|----------------|---------------|---------------------|
-| **规范状态** | Active | **Active（推荐）** | Deprecated |
-| **连接方式** | 本地子进程 | 单端点 HTTP POST | 双端点 SSE + POST |
-| **服务器状态** | 有状态 | **无状态** | 有状态（会话映射） |
-| **初始化握手** | 需要 initialize | 需要 initialize（兼容模式） | 需要 initialize |
-| **负载均衡** | N/A | **天然支持** | 不支持（会话绑定） |
-| **请求取消** | 不明确 | 关闭 SSE 响应流 = 取消 | 不明确 |
-| **通知推送** | broadcast | subscriptions/listen | SSE 全局流 |
-| **延迟** | 中 | 低 | 低 |
-| **稳定性** | 高 | 高 | 中 |
-| **适用场景** | 本地 MCP Server | **远程 MCP Server（首选）** | 兼容旧服务器 |
+| 特性 | StdioTransport | HttpTransport |
+|------|----------------|---------------|
+| **规范状态** | Active | **Active（推荐）** |
+| **连接方式** | 本地子进程 | 单端点 HTTP POST |
+| **服务器状态** | 有状态 | **无状态** |
+| **负载均衡** | N/A | **天然支持** |
+| **请求取消** | 不明确 | 关闭 SSE 响应流 = 取消 |
+| **通知推送** | broadcast | subscriptions/listen |
+| **延迟** | 中 | 低 |
+| **稳定性** | 高 | 高 |
+| **适用场景** | 本地 MCP Server | **远程 MCP Server（首选）** |
 
 ## 推荐：HttpTransport（Streamable HTTP）
 
 Streamable HTTP 于 MCP 2025-03-26 引入，取代 HTTP+SSE。2026-07-28 版本进一步强化了无状态设计。
 
-### 核心优势
+### 核心特性
 
-- **单端点** — 只需一个 HTTP POST 端点
+- **单端点** — 只需一个 `POST /mcp` 端点
 - **无状态** — 无需维护会话映射，天然支持水平扩展
-- **中间件友好** — `Mcp-Method`/`Mcp-Name` 等 Header 让 LB/Gateway 可直接路由
-- **请求级 SSE** — 服务器可选择返回单条 JSON 或 SSE 流，scoped 到当前请求
+- **标准 Headers** — `MCP-Protocol-Version`、`Mcp-Method`、`Mcp-Name` 让 LB/Gateway 可直接路由
+- **Accept 感知** — 自动检测 Accept header，返回 JSON 或 SSE 响应
+- **server/discover** — 版本发现，支持版本协商（返回支持的版本交集）
+- **subscriptions/listen** — 统一订阅机制，SSE 长连接 + acknowledgement 通知
 
 ### 使用示例
 
@@ -72,19 +75,34 @@ let config = StdioConfig::new("npx", vec![
 let transport = StdioTransport::new(config);
 ```
 
-## SseTransport（已废弃，仅兼容旧服务器）
+## Server 端使用
 
-> **警告**：HTTP+SSE 已在 MCP 2026-07-28 中被标记为 Deprecated。
-> 仅在你必须连接旧版 MCP Server 时使用。新 Server 应迁移到 Streamable HTTP。
+### SimpleMcp 服务器
 
 ```rust
-use lellm_mcp::transport::{SseConfig, SseTransport};
+use lellm_mcp::server::SimpleMcp;
 
-let config = SseConfig::new("https://mcp.map.qq.com/sse?key=your_api_key&format=0")
-    .with_request_timeout(std::time::Duration::from_secs(60));
+let mut mcp = SimpleMcp::new("My Server");
 
-let transport = SseTransport::new(config);
+mcp.tool("add", "Add two numbers", |args: serde_json::Value| async move {
+    let a = args["a"].as_i64().unwrap_or(0);
+    let b = args["b"].as_i64().unwrap_or(0);
+    Ok(serde_json::json!({ "result": a + b }))
+});
+
+// Streamable HTTP（推荐）
+mcp.run_http(3100).await?;
+
+// Stdio
+mcp.run_stdio().await?;
 ```
+
+### 协议版本支持
+
+Server 端 `server/discover` 返回支持的版本列表：
+`["2026-07-28", "2025-11-25", "2025-03-26", "2024-11-05"]`
+
+客户端指定版本列表时，返回交集。
 
 ## QQ 地图 MCP 配置
 
@@ -97,7 +115,6 @@ let transport = SseTransport::new(config);
 ### 传输端点
 
 - **Streamable HTTP（推荐）**: `https://mcp.map.qq.com/mcp?key=YOUR_KEY&format=0`
-- **SSE（废弃，仅兼容）**: `https://mcp.map.qq.com/sse?key=YOUR_KEY&format=0`
 
 ### 参数说明
 
@@ -106,20 +123,6 @@ let transport = SseTransport::new(config);
 | key | 是 | 开发者 API Key |
 | format | 否 | 返回格式：0=语义化文本（默认），1=原始 JSON |
 
-## 运行示例
-
-### HTTP 示例（推荐）
-
-```bash
-TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather_http --features http
-```
-
-### SSE 示例（仅兼容旧服务器）
-
-```bash
-TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather_sse --features sse
-```
-
 ## Feature Gates
 
 在 `Cargo.toml` 中启用需要的 feature：
@@ -127,8 +130,6 @@ TENCENT_MAP_KEY=your_api_key cargo run --example mcp_weather_sse --features sse
 ```toml
 [dependencies]
 lellm-mcp = { version = "0.4", features = ["http"] }     # Streamable HTTP（推荐）
-lellm-mcp = { version = "0.4", features = ["sse"] }      # HTTP+SSE（已废弃，仅兼容）
-lellm-mcp = { version = "0.4", features = ["http", "sse"] }  # 两者都启用
 ```
 
 ## 错误处理
@@ -140,12 +141,6 @@ lellm-mcp = { version = "0.4", features = ["http", "sse"] }  # 两者都启用
 | `TransportError::Disconnected` | 连接断开 | 重新连接 |
 | `McpError::Protocol` | 协议错误 | 检查请求格式 |
 
-## 性能优化
-
-1. **连接池**：`reqwest::Client` 自动管理连接池
-2. **超时设置**：根据网络情况调整超时时间
-3. **无状态设计**：HttpTransport 天然支持负载均衡，无需会话亲和
-
 ## MCP 规范版本说明
 
 | 规范版本 | 传输方式 | 状态 |
@@ -154,6 +149,4 @@ lellm-mcp = { version = "0.4", features = ["http", "sse"] }  # 两者都启用
 | 2025-03-26 | Streamable HTTP（单端点） | Active |
 | 2026-07-28 | Streamable HTTP（无状态，无 sessions） | **最新，Active** |
 
-当前 lellm-mcp 的 HttpTransport 实现了 Streamable HTTP 的核心功能（单端点 POST + SSE 响应解析），
-但尚未完全对齐 2026-07-28 规范的所有要求（如 `MCP-Protocol-Version` header、无状态模式等）。
-详见 [[mcp-streamable-http-analysis]]。
+lellm-mcp 的 HttpTransport 和 Server 端已完全对齐 MCP 2026-07-28 规范。
