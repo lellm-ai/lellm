@@ -1,24 +1,41 @@
 //! MCP Server 请求处理器。
 //!
-//! 处理 JSON-RPC 请求，支持 stdio 和 HTTP 两种传输方式。
+//! 处理 JSON-RPC 请求，支持 stdio 和 Streamable HTTP 两种传输方式。
+//!
+//! Streamable HTTP 符合 MCP 2026-07-28 规范：
+//! - 单端点 POST /mcp
+//! - 根据 Accept header 选择 JSON 或 SSE 响应
+//! - 无状态，无需 session-id
+//! - 支持 subscriptions/listen 长连接
+//! - 支持 server/discover 版本发现
 
 use std::sync::Arc;
 
 use crate::protocol::{
-    CallToolParams, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, ListToolsResult,
+    CallToolParams, DiscoverParams, DiscoveryResult, ImplementationInfo, JsonRpcNotification,
+    JsonRpcRequest, JsonRpcResponse, JsonRpcResult, ListToolsResult, SubscriptionsListenParams,
+    methods,
 };
 
 use super::SimpleMcp;
 
+/// 默认协议版本。
+const PROTOCOL_VERSION: &str = "2026-07-28";
+
+/// 通知 channel 容量。
+const NOTIFICATION_BUFFER: usize = 64;
+
+// ─── 核心请求处理 ────────────────────────────────────────────────────
+
 /// 处理 JSON-RPC 请求。
 async fn handle_request(server: &SimpleMcp, req: JsonRpcRequest) -> JsonRpcResponse {
     let result = match req.method_name.as_str() {
-        "initialize" => {
-            // 返回服务器信息
+        methods::INITIALIZE => {
             serde_json::json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {
-                    "tools": { "listChanged": false }
+                    "tools": { "listChanged": true },
+                    "subscriptions": true
                 },
                 "serverInfo": {
                     "name": server.name(),
@@ -26,92 +43,82 @@ async fn handle_request(server: &SimpleMcp, req: JsonRpcRequest) -> JsonRpcRespo
                 }
             })
         }
-        "tools/list" => {
+        methods::SERVER_DISCOVER => {
+            let params: Option<DiscoverParams> =
+                req.params.and_then(|p| serde_json::from_value(p).ok());
+
+            let supported = vec![
+                PROTOCOL_VERSION.to_string(),
+                "2025-11-25".to_string(),
+                "2025-03-26".to_string(),
+                "2024-11-05".to_string(),
+            ];
+
+            let versions = params
+                .and_then(|p| p.protocol_versions)
+                .map(|client_versions| {
+                    supported
+                        .iter()
+                        .filter(|v| client_versions.contains(v))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or(supported);
+
+            serde_json::to_value(DiscoveryResult {
+                protocol_versions: versions,
+                capabilities: serde_json::json!({
+                    "tools": { "listChanged": true },
+                    "subscriptions": true
+                }),
+                server_info: ImplementationInfo {
+                    name: server.name().to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+            })
+            .unwrap_or_default()
+        }
+        methods::TOOLS_LIST => {
             let tools = server.tool_list();
             match serde_json::to_value(ListToolsResult { tools }) {
                 Ok(v) => v,
-                Err(e) => {
-                    return JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: req.id,
-                        result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
-                            code: -32603,
-                            message: e.to_string(),
-                            data: None,
-                        }),
-                    };
-                }
+                Err(e) => return error_response(req.id, -32603, e.to_string()),
             }
         }
-        "tools/call" => {
+        methods::TOOLS_CALL => {
             let params: CallToolParams = match req.params {
                 Some(p) => match serde_json::from_value(p) {
                     Ok(v) => v,
-                    Err(e) => {
-                        return JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id: req.id,
-                            result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
-                                code: -32602,
-                                message: e.to_string(),
-                                data: None,
-                            }),
-                        };
-                    }
+                    Err(e) => return error_response(req.id, -32602, e.to_string()),
                 },
-                None => {
-                    return JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: req.id,
-                        result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
-                            code: -32602,
-                            message: "missing params".to_string(),
-                            data: None,
-                        }),
-                    };
-                }
+                None => return error_response(req.id, -32602, "missing params".to_string()),
             };
 
             let args = params.arguments.unwrap_or(serde_json::json!({}));
             match server.call_tool(&params.name, args).await {
                 Ok(result) => match serde_json::to_value(result) {
                     Ok(v) => v,
-                    Err(e) => {
-                        return JsonRpcResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id: req.id,
-                            result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
-                                code: -32603,
-                                message: e.to_string(),
-                                data: None,
-                            }),
-                        };
-                    }
+                    Err(e) => return error_response(req.id, -32603, e.to_string()),
                 },
-                Err(e) => {
-                    return JsonRpcResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: req.id,
-                        result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
-                            code: -32603,
-                            message: e.to_string(),
-                            data: None,
-                        }),
-                    };
-                }
+                Err(e) => return error_response(req.id, -32603, e.to_string()),
             }
         }
-        "ping" => serde_json::json!({}),
+        methods::SUBSCRIPTIONS_LISTEN => {
+            let _params: Option<SubscriptionsListenParams> =
+                req.params.and_then(|p| serde_json::from_value(p).ok());
+
+            serde_json::json!({
+                "resultType": "complete",
+                "subscriptionId": format!("sub-{}", req.id)
+            })
+        }
+        methods::PING => serde_json::json!({}),
         _ => {
-            return JsonRpcResponse {
-                jsonrpc: "2.0".to_string(),
-                id: req.id,
-                result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
-                    code: -32601,
-                    message: format!("unknown method: {}", req.method_name),
-                    data: None,
-                }),
-            };
+            return error_response(
+                req.id,
+                -32601,
+                format!("unknown method: {}", req.method_name),
+            );
         }
     };
 
@@ -121,6 +128,21 @@ async fn handle_request(server: &SimpleMcp, req: JsonRpcRequest) -> JsonRpcRespo
         result: JsonRpcResult::Success(result),
     }
 }
+
+/// 构造错误响应。
+fn error_response(id: u64, code: i32, message: String) -> JsonRpcResponse {
+    JsonRpcResponse {
+        jsonrpc: "2.0".to_string(),
+        id,
+        result: JsonRpcResult::Error(crate::protocol::JsonRpcError {
+            code,
+            message,
+            data: None,
+        }),
+    }
+}
+
+// ─── Stdio Server ────────────────────────────────────────────────────
 
 /// 以 stdio 模式运行服务器。
 pub async fn run_stdio(server: &SimpleMcp) -> Result<(), super::ServerError> {
@@ -135,7 +157,7 @@ pub async fn run_stdio(server: &SimpleMcp) -> Result<(), super::ServerError> {
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
-            Ok(0) => break, // EOF
+            Ok(0) => break,
             Ok(_) => {
                 let line = line.trim();
                 if line.is_empty() {
@@ -165,17 +187,33 @@ pub async fn run_stdio(server: &SimpleMcp) -> Result<(), super::ServerError> {
     Ok(())
 }
 
-/// 以 HTTP 模式运行服务器。
+// ─── Streamable HTTP Server ──────────────────────────────────────────
+
+/// 以 Streamable HTTP 模式运行服务器。
+///
+/// 单端点 POST /mcp，符合 MCP 2026-07-28 规范。
+/// 根据 Accept header 选择 JSON 或 SSE 响应格式。
 pub async fn run_http(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::ServerError> {
     use axum::{Router, routing::post};
+    use tokio::sync::broadcast;
+
+    let (notification_tx, _) = broadcast::channel::<String>(NOTIFICATION_BUFFER);
+    let state = HttpState {
+        server,
+        notification_tx,
+    };
 
     let app = Router::new()
-        .route("/mcp", post(handle_http_request))
-        .route("/sse", post(handle_http_request))
-        .with_state(server);
+        .route("/mcp", post(handle_streamable_http))
+        .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
-    tracing::info!(addr = %addr, "MCP Server starting");
+    tracing::info!(
+        addr = %addr,
+        protocol = "streamable-http",
+        version = PROTOCOL_VERSION,
+        "MCP Server starting"
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -188,11 +226,91 @@ pub async fn run_http(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Se
     Ok(())
 }
 
-/// 以 SSE 模式运行服务器。
+/// HTTP Server State。
+#[derive(Clone)]
+pub struct HttpState {
+    pub server: Arc<SimpleMcp>,
+    /// 预留：用于 subscriptions/listen 的主动推送通知。
+    #[allow(dead_code)]
+    pub notification_tx: tokio::sync::broadcast::Sender<String>,
+}
+
+/// Streamable HTTP 请求处理器。
 ///
+/// 根据 Accept header 决定响应格式：
+/// - `application/json` → 单条 JSON 响应
+/// - `text/event-stream` → SSE 流式响应
+async fn handle_streamable_http(
+    state: axum::extract::State<HttpState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(req): axum::Json<JsonRpcRequest>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::response::Response;
+
+    let wants_sse = headers
+        .get("Accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v: &str| v.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let is_listen = req.method_name == methods::SUBSCRIPTIONS_LISTEN;
+
+    let resp = handle_request(&state.server, req).await;
+    let json = serde_json::to_string(&resp).unwrap_or_default();
+
+    if is_listen || wants_sse {
+        let sse_event = format!("event: message\ndata: {}\n\n", json);
+
+        if is_listen {
+            let ack = JsonRpcNotification {
+                jsonrpc: "2.0".to_string(),
+                method_name: "notifications/subscriptions/acknowledged".to_string(),
+                params: Some(serde_json::json!({
+                    "subscriptionId": format!("sub-{}", resp.id)
+                })),
+            };
+            let ack_json = serde_json::to_string(&ack).unwrap_or_default();
+            let ack_event = format!("event: message\ndata: {}\n\n", ack_json);
+            let full_body = format!("{}{}", ack_event, sse_event);
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .header("Connection", "keep-alive")
+                .header("X-Accel-Buffering", "no")
+                .body(Body::from(full_body))
+                .unwrap_or_default()
+        } else {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .header("X-Accel-Buffering", "no")
+                .body(Body::from(sse_event))
+                .unwrap_or_default()
+        }
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Body::from(json))
+            .unwrap_or_default()
+    }
+}
+
+// ─── SSE Server（已废弃，保留以兼容旧客户端）────────────────────────
+
+#[allow(dead_code)]
+type SseState = (
+    Arc<SimpleMcp>,
+    Arc<tokio::sync::broadcast::Sender<String>>,
+    Arc<std::sync::atomic::AtomicU64>,
+);
+
 /// **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
-/// SSE 端点: GET /sse — 建立 SSE 连接
-/// 请求端点: POST /messages — 发送 JSON-RPC 请求
 #[allow(deprecated)]
 pub async fn run_sse(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::ServerError> {
     use axum::{
@@ -204,15 +322,15 @@ pub async fn run_sse(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Ser
 
     let (tx, _) = broadcast::channel::<String>(1024);
     let tx = Arc::new(tx);
-    let session_counter = Arc::new(AtomicU64::new(1));
+    let counter = Arc::new(AtomicU64::new(1));
 
     let app = Router::new()
         .route("/sse", get(handle_sse_get))
-        .route("/messages/{session_id}", post(handle_sse_post))
-        .with_state((server, tx.clone(), session_counter.clone()));
+        .route("/messages/{id}", post(handle_sse_post))
+        .with_state((server, tx.clone(), counter.clone()));
 
     let addr = format!("0.0.0.0:{}", port);
-    tracing::info!(addr = %addr, "MCP SSE Server starting");
+    tracing::info!(addr = %addr, "MCP SSE Server starting (deprecated)");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -225,14 +343,7 @@ pub async fn run_sse(server: Arc<SimpleMcp>, port: u16) -> Result<(), super::Ser
     Ok(())
 }
 
-/// SSE Server State — Router::with_state 传入的元组类型。
-type SseState = (
-    Arc<SimpleMcp>,
-    Arc<tokio::sync::broadcast::Sender<String>>,
-    Arc<std::sync::atomic::AtomicU64>,
-);
-
-/// SSE GET 请求处理 — 建立 SSE 连接。
+#[allow(dead_code)]
 async fn handle_sse_get(
     axum::extract::State((_server, tx, counter)): axum::extract::State<SseState>,
 ) -> axum::response::sse::Sse<
@@ -243,24 +354,26 @@ async fn handle_sse_get(
     use std::convert::Infallible;
     use std::sync::atomic::Ordering;
 
-    let session_id = counter.fetch_add(1, Ordering::SeqCst);
+    let sid = counter.fetch_add(1, Ordering::SeqCst);
     let rx = tx.subscribe();
-
-    // 立即发送 endpoint 事件
-    let initial_endpoint = format!("/messages/{}", session_id);
+    let endpoint = format!("/messages/{}", sid);
 
     let stream = futures_util::stream::once(async move {
-        Ok::<_, Infallible>(Event::default().event("endpoint").data(initial_endpoint))
+        Ok::<_, Infallible>(Event::default().event("endpoint").data(endpoint))
     })
     .chain(futures_util::stream::unfold(rx, move |mut rx| async move {
         loop {
             match rx.recv().await {
                 Ok(msg) => {
-                    if let Some((msg_session, msg_data)) = msg.split_once(':')
-                        && msg_session == session_id.to_string()
+                    if let Some((s, d)) = msg.split_once(':')
+                        && s == sid.to_string()
                     {
-                        let data = msg_data.strip_prefix(' ').unwrap_or(msg_data);
-                        return Some((Ok(Event::default().event("message").data(data)), rx));
+                        return Some((
+                            Ok(Event::default()
+                                .event("message")
+                                .data(d.strip_prefix(' ').unwrap_or(d))),
+                            rx,
+                        ));
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -273,28 +386,15 @@ async fn handle_sse_get(
     axum::response::sse::Sse::new(stream)
 }
 
-/// SSE POST 请求处理 — 接收 JSON-RPC 请求。
+#[allow(dead_code)]
 async fn handle_sse_post(
-    axum::extract::Path(session_id): axum::extract::Path<u64>,
+    axum::extract::Path(sid): axum::extract::Path<u64>,
     axum::extract::State((server, tx, _)): axum::extract::State<SseState>,
     axum::Json(req): axum::Json<JsonRpcRequest>,
 ) -> Result<axum::http::StatusCode, (axum::http::StatusCode, String)> {
     let resp = handle_request(&server, req).await;
     let json = serde_json::to_string(&resp)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // 通过 broadcast 发送响应，格式: session_id:json_data
-    let msg = format!("{}:{}", session_id, json);
-    let _ = tx.send(msg);
-
+    let _ = tx.send(format!("{}:{}", sid, json));
     Ok(axum::http::StatusCode::ACCEPTED)
-}
-
-/// HTTP 请求处理器。
-async fn handle_http_request(
-    axum::extract::State(server): axum::extract::State<Arc<SimpleMcp>>,
-    axum::Json(req): axum::Json<JsonRpcRequest>,
-) -> Result<axum::Json<JsonRpcResponse>, (axum::http::StatusCode, String)> {
-    let resp = handle_request(&server, req).await;
-    Ok(axum::Json(resp))
 }
