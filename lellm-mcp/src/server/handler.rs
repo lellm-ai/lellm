@@ -95,13 +95,13 @@ impl SubscriptionManager {
         ));
 
         let stream = futures_util::stream::once(async move { ack }).chain(
-            futures_util::stream::unfold(rx, move |mut rx| async move {
+            futures_util::stream::unfold((rx, lagged_total), |(mut rx, lagged_total)| async move {
                 loop {
                     match rx.recv().await {
                         Ok(notification) => {
                             let json = serde_json::to_string(&notification).unwrap_or_default();
                             let sse_event = format!("event: message\ndata: {json}\n\n");
-                            return Some((bytes::Bytes::from(sse_event), rx));
+                            return Some((bytes::Bytes::from(sse_event), (rx, lagged_total)));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             lagged_total.fetch_add(n as u64, Ordering::Relaxed);
