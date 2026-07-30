@@ -29,6 +29,161 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// 默认协议版本（MCP 2026-07-28）。
 const DEFAULT_PROTOCOL_VERSION: &str = "2026-07-28";
 
+// ─── SSE 帧解析（协议层基础设施）─────────────────────────────────────
+
+/// SSE 帧 — 由解析器从原始文本中提取。
+#[derive(Debug, Clone)]
+struct SseFrame {
+    /// event 字段（None 表示未指定，默认视为 "message"）。
+    event: Option<String>,
+    /// data 字段内容（多行 data 用 \n 拼接）。
+    data: String,
+}
+
+/// 解析一行 SSE 字段，返回 (key, value)。
+fn parse_sse_field(line: &str) -> Option<(&str, &str)> {
+    line.find(':').map(|pos| {
+        let key = line[..pos].trim();
+        let value = line[pos + 1..].trim_start_matches(' ');
+        (key, value)
+    })
+}
+
+/// 从完整文本中解析所有 SSE 帧。
+///
+/// 用于一次性读取完整 body 的场景（如 request-response）。
+fn parse_sse_frames(text: &str) -> Vec<SseFrame> {
+    let mut frames = Vec::new();
+    let mut event = None;
+    let mut data = String::new();
+
+    for line in text.lines() {
+        if line.is_empty() {
+            // 空行 = 帧边界
+            if !data.is_empty() {
+                frames.push(SseFrame {
+                    event: event.take(),
+                    data: std::mem::take(&mut data),
+                });
+            }
+        } else if let Some((key, value)) = parse_sse_field(line) {
+            match key {
+                "event" => {
+                    event = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    }
+                }
+                "data" => {
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(value);
+                }
+                _ => {} // id:, retry: 等忽略
+            }
+        }
+    }
+
+    // Flush: 最后一个帧可能没有尾随空行
+    if !data.is_empty() {
+        frames.push(SseFrame {
+            event: event.take(),
+            data,
+        });
+    }
+
+    frames
+}
+
+/// 增量式 SSE 解析器 — 维护行缓冲区 + 帧状态，处理 bytes_stream 的截断问题。
+///
+/// 用于流式读取场景（如 subscriptions/listen 长连接）。
+struct SseStreamParser {
+    /// 不完整的行尾部。
+    buffer: String,
+    /// 当前帧的 event 字段。
+    frame_event: Option<String>,
+    /// 当前帧的 data 字段。
+    frame_data: String,
+}
+
+impl SseStreamParser {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            frame_event: None,
+            frame_data: String::new(),
+        }
+    }
+
+    /// 喂入新的字节块，返回解析出的完整 SseFrame 列表。
+    ///
+    /// 不完整的帧保留在状态中，等待下一块数据补齐。
+    fn feed(&mut self, chunk: &[u8]) -> Vec<SseFrame> {
+        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+
+        let mut frames = Vec::new();
+        let mut drain_until = 0;
+
+        for (char_offset, ch) in self.buffer[drain_until..].char_indices() {
+            if ch != '\n' {
+                continue;
+            }
+
+            let abs_idx = drain_until + char_offset;
+            let line = &self.buffer[drain_until..abs_idx];
+            drain_until = abs_idx + 1;
+
+            if line.is_empty() {
+                // 空行 = 帧边界
+                if !self.frame_data.is_empty() {
+                    frames.push(SseFrame {
+                        event: self.frame_event.take(),
+                        data: std::mem::take(&mut self.frame_data),
+                    });
+                }
+            } else if let Some((key, value)) = parse_sse_field(line) {
+                match key {
+                    "event" => {
+                        self.frame_event = if value.is_empty() {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        }
+                    }
+                    "data" => {
+                        if !self.frame_data.is_empty() {
+                            self.frame_data.push('\n');
+                        }
+                        self.frame_data.push_str(value);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if drain_until > 0 {
+            self.buffer.drain(..drain_until);
+        }
+
+        frames
+    }
+
+    /// Flush 最后一个不完整的帧（没有尾随空行时）。
+    fn flush(&mut self) -> Option<SseFrame> {
+        if self.frame_data.is_empty() {
+            None
+        } else {
+            Some(SseFrame {
+                event: self.frame_event.take(),
+                data: std::mem::take(&mut self.frame_data),
+            })
+        }
+    }
+}
+
 /// HTTP Transport 配置。
 #[derive(Debug, Clone)]
 pub struct HttpConfig {
@@ -213,37 +368,14 @@ fn spawn_subscription_reader(
             "Subscription SSE reader started"
         );
 
-        // 行缓冲：SSE 事件可能跨 chunk 边界
-        let mut buffer = String::new();
-        let mut event = String::new();
-        let mut data = String::new();
+        let mut parser = SseStreamParser::new();
 
         let mut stream = response.bytes_stream();
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                    // 处理所有完整行
-                    let mut drain_until = 0;
-                    for ch in buffer[drain_until..].char_indices() {
-                        let abs_idx = drain_until + ch.0;
-                        if ch.1 == '\n' {
-                            let line = &buffer[drain_until..abs_idx];
-                            if line.starts_with("event:") || line.starts_with("event: ") {
-                                event = line.trim_start_matches("event:").trim().to_string();
-                            } else if line.starts_with("data:") || line.starts_with("data: ") {
-                                data.push_str(line.trim_start_matches("data:").trim());
-                            } else if line.is_empty() && !data.is_empty() {
-                                parse_and_send_sse(&event, &data, &notification_tx, log_id);
-                                event.clear();
-                                data.clear();
-                            }
-                            drain_until = abs_idx + 1;
-                        }
-                    }
-                    if drain_until > 0 {
-                        buffer.drain(..drain_until);
+                    for frame in parser.feed(&chunk) {
+                        handle_sse_frame(&frame, &notification_tx, log_id);
                     }
                 }
                 Err(e) => {
@@ -258,8 +390,8 @@ fn spawn_subscription_reader(
         }
 
         // Flush 最后一个不完整的帧
-        if !data.is_empty() {
-            parse_and_send_sse(&event, &data, &notification_tx, log_id);
+        if let Some(frame) = parser.flush() {
+            handle_sse_frame(&frame, &notification_tx, log_id);
         }
 
         tracing::info!(subscription_id = %log_id, "Subscription SSE reader finished");
@@ -271,17 +403,16 @@ fn spawn_subscription_reader(
     }
 }
 
-/// 解析单个 SSE 事件并发送到 broadcast channel。
-fn parse_and_send_sse(
-    event: &str,
-    data: &str,
+/// 处理单个 SSE 帧，分发到 broadcast channel。
+fn handle_sse_frame(
+    frame: &SseFrame,
     tx: &tokio::sync::broadcast::Sender<JsonRpcNotification>,
     sub_id: &str,
 ) {
-    let event_type = if event.is_empty() { "message" } else { event };
+    let event_type = frame.event.as_deref().unwrap_or("message");
 
-    if event_type == "message" && !data.is_empty() {
-        match serde_json::from_str::<crate::protocol::JsonRpcMessage>(data) {
+    if event_type == "message" && !frame.data.is_empty() {
+        match serde_json::from_str::<crate::protocol::JsonRpcMessage>(&frame.data) {
             Ok(crate::protocol::JsonRpcMessage::Notification(ref notif)) => {
                 tracing::debug!(
                     subscription_id = %sub_id,
@@ -301,10 +432,10 @@ fn parse_and_send_sse(
             }
             _ => {}
         }
-    } else if event_type == "acknowledged" && !data.is_empty() {
+    } else if event_type == "acknowledged" && !frame.data.is_empty() {
         tracing::info!(
             subscription_id = %sub_id,
-            ack_data = %data,
+            ack_data = %frame.data,
             "Subscription acknowledged via SSE event"
         );
     }
@@ -377,59 +508,32 @@ impl McpTransport for HttpTransport {
                 .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
             let body = String::from_utf8_lossy(&bytes);
 
-            // SSE 格式: event:xxx\ndata:xxx\n\n (冒号后可能有空格)
-            let mut current_event = String::new();
-            let mut current_data = String::new();
+            let frames = parse_sse_frames(&body);
 
-            // 辅助：处理一个完整的 SSE 帧
-            let process_frame = |event: &str,
-                                 data: &str,
-                                 req_id: u64|
-             -> Option<Result<JsonRpcResponse, McpError>> {
-                if event != "message" || data.is_empty() {
-                    return None;
-                }
-                let Ok(msg) = serde_json::from_str::<crate::protocol::JsonRpcMessage>(data) else {
-                    return None;
-                };
-                match msg {
-                    crate::protocol::JsonRpcMessage::Response(resp) => {
-                        if resp.id != req_id {
-                            Some(Err(McpError::Protocol(format!(
-                                "Response ID mismatch: expected {}, got {}",
-                                req_id, resp.id
-                            ))))
-                        } else {
-                            Some(Ok(resp))
+            for frame in frames {
+                let event_type = frame.event.as_deref().unwrap_or("message");
+                if event_type == "message" && !frame.data.is_empty() {
+                    let Ok(msg) =
+                        serde_json::from_str::<crate::protocol::JsonRpcMessage>(&frame.data)
+                    else {
+                        continue;
+                    };
+                    match msg {
+                        crate::protocol::JsonRpcMessage::Response(resp) => {
+                            if resp.id != req.id {
+                                return Err(McpError::Protocol(format!(
+                                    "Response ID mismatch: expected {}, got {}",
+                                    req.id, resp.id
+                                )));
+                            }
+                            return Ok(resp);
                         }
+                        crate::protocol::JsonRpcMessage::Notification(notif) => {
+                            let _ = inner.notification_tx.send(notif);
+                        }
+                        _ => {}
                     }
-                    crate::protocol::JsonRpcMessage::Notification(notif) => {
-                        let _ = inner.notification_tx.send(notif);
-                        None
-                    }
-                    _ => None,
                 }
-            };
-
-            for line in body.lines() {
-                if line.starts_with("event:") || line.starts_with("event: ") {
-                    current_event = line.trim_start_matches("event:").trim().to_string();
-                } else if line.starts_with("data:") || line.starts_with("data: ") {
-                    current_data = line.trim_start_matches("data:").trim().to_string();
-                } else if line.is_empty() && !current_data.is_empty() {
-                    if let Some(result) = process_frame(&current_event, &current_data, req.id) {
-                        return result;
-                    }
-                    current_event.clear();
-                    current_data.clear();
-                }
-            }
-
-            // Flush: 处理最后一个帧（可能没有尾随空行）
-            if !current_data.is_empty()
-                && let Some(result) = process_frame(&current_event, &current_data, req.id)
-            {
-                return result;
             }
 
             Err(McpError::Protocol("No response in SSE stream".to_string()))
