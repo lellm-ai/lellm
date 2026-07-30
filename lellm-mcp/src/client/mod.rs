@@ -276,6 +276,10 @@ impl McpClient {
     /// **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
     /// 请使用 `connect_http`（Streamable HTTP）。
     #[cfg(feature = "sse")]
+    #[deprecated(
+        since = "0.5.0",
+        note = "HTTP+SSE transport is deprecated per MCP 2026-07-28. Use connect_http (Streamable HTTP) instead."
+    )]
     #[allow(deprecated)]
     pub async fn connect_sse(url: impl Into<String>) -> Result<Self, McpError> {
         use crate::transport::{SseConfig, SseTransport};

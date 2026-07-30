@@ -1,5 +1,8 @@
 //! SSE Transport — 通过 Server-Sent Events 接收，HTTP POST 发送。
 //!
+//! **已废弃**：HTTP+SSE 传输已于 MCP 2026-07-28 被标记为 Deprecated。
+//! 请使用 `HttpTransport`（Streamable HTTP，单端点 POST /mcp）。
+//!
 //! 架构：
 //! - connect() 建立 SSE 连接，监听服务器事件
 //! - request() 通过 HTTP POST 发送 JSON-RPC 请求
