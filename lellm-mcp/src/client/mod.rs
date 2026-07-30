@@ -21,6 +21,27 @@ use super::transport::{ConnectionState, McpTransport, TransportCapabilities};
 /// 默认协议版本（MCP 2026-07-28）。
 const DEFAULT_PROTOCOL_VERSION: &str = "2026-07-28";
 
+/// 客户端元数据——协议版本、身份信息、能力声明。
+///
+/// 三个字段构成一个一致性单元，请求发送时需要完整快照。
+/// 统一维护在一个 struct 中，避免多把锁导致的不一致窗口。
+#[derive(Clone)]
+struct ClientMeta {
+    protocol_version: String,
+    client_info: Option<ImplementationInfo>,
+    client_capabilities: serde_json::Value,
+}
+
+impl ClientMeta {
+    fn default_new() -> Self {
+        Self {
+            protocol_version: DEFAULT_PROTOCOL_VERSION.to_string(),
+            client_info: None,
+            client_capabilities: serde_json::json!({}),
+        }
+    }
+}
+
 /// MCP Client。
 ///
 /// 管理连接生命周期，提供统一的 request 接口。
@@ -33,12 +54,8 @@ pub struct McpClient {
     transport: Box<dyn McpTransport>,
     /// 单调递增请求 ID，重连不重置。
     next_request_id: AtomicU64,
-    /// 协议版本，用于 `_meta` 注入。
-    protocol_version: Mutex<String>,
-    /// 客户端身份信息，用于 `_meta` 注入。
-    client_info: Mutex<Option<ImplementationInfo>>,
-    /// 客户端能力，用于 `_meta` 注入。
-    client_capabilities: Mutex<serde_json::Value>,
+    /// 客户端元数据（协议版本 + 身份信息 + 能力），统一锁保护一致性。
+    client_meta: Mutex<ClientMeta>,
 }
 
 impl McpClient {
@@ -50,15 +67,14 @@ impl McpClient {
         Self {
             transport: Box::new(transport),
             next_request_id: AtomicU64::new(1),
-            protocol_version: Mutex::new(DEFAULT_PROTOCOL_VERSION.to_string()),
-            client_info: Mutex::new(None),
-            client_capabilities: Mutex::new(serde_json::json!({})),
+            client_meta: Mutex::new(ClientMeta::default_new()),
         }
     }
 
     /// 设置客户端身份信息。
     pub async fn set_client_info(&self, name: impl Into<String>, version: impl Into<String>) {
-        *self.client_info.lock().await = Some(ImplementationInfo {
+        let mut meta = self.client_meta.lock().await;
+        meta.client_info = Some(ImplementationInfo {
             name: name.into(),
             version: version.into(),
         });
@@ -66,7 +82,14 @@ impl McpClient {
 
     /// 设置客户端能力。
     pub async fn set_client_capabilities(&self, capabilities: serde_json::Value) {
-        *self.client_capabilities.lock().await = capabilities;
+        let mut meta = self.client_meta.lock().await;
+        meta.client_capabilities = capabilities;
+    }
+
+    /// 设置协议版本。
+    pub async fn set_protocol_version(&self, version: impl Into<String>) {
+        let mut meta = self.client_meta.lock().await;
+        meta.protocol_version = version.into();
     }
 
     /// 连接到 MCP Server。
@@ -87,7 +110,10 @@ impl McpClient {
     /// 此方法仅用于兼容旧版服务器（2024-11-05, 2025-03-26, 2025-11-25）。
     /// 对于新版服务器，建议使用 `discover()`。
     pub async fn initialize(&self) -> Result<InitializeResult, McpError> {
-        let version = self.protocol_version.lock().await.clone();
+        let version = {
+            let meta = self.client_meta.lock().await;
+            meta.protocol_version.clone()
+        };
         let params =
             InitializeParams::new(version).with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
         let req = self
@@ -219,11 +245,14 @@ impl McpClient {
         let req = JsonRpcRequest::new(id, method, params_value);
 
         // 4. 注入 _meta（MCP 2026-07-28 无状态模式）
+        //    一次锁获取完整快照——protocol_version、client_info、capabilities 一致性单元
         let req = if inject_meta {
-            let version = self.protocol_version.lock().await.clone();
-            let client_info = self.client_info.lock().await.clone();
-            let capabilities = self.client_capabilities.lock().await.clone();
-            req.with_meta(version, client_info.as_ref(), Some(capabilities))
+            let meta = self.client_meta.lock().await;
+            req.with_meta(
+                meta.protocol_version.clone(),
+                meta.client_info.as_ref(),
+                Some(meta.client_capabilities.clone()),
+            )
         } else {
             req
         };
