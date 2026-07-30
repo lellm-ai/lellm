@@ -246,71 +246,6 @@ impl HttpTransport {
     pub fn client(&self) -> Option<reqwest::Client> {
         self.inner.as_ref().map(|inner| inner.client.clone())
     }
-
-    /// 发送流式订阅请求，返回 SSE 长连接。
-    ///
-    /// **请求已由 McpClient 构建完毕**（id 分配、meta 注入）。
-    /// 本方法只负责：发送 HTTP 请求 + 持续读取 SSE 流。
-    ///
-    /// 返回 `(receiver, handle)`：
-    /// - `receiver`: broadcast channel receiver，接收 SSE 推送的 notification
-    /// - `handle`: 订阅句柄，drop 时自动关闭 HTTP 连接
-    pub async fn subscribe(
-        &self,
-        req: JsonRpcRequest,
-    ) -> Result<
-        (
-            tokio::sync::broadcast::Receiver<JsonRpcNotification>,
-            SubscriptionHandle,
-        ),
-        McpError,
-    > {
-        let inner = self.inner.as_ref().ok_or_else(McpError::disconnected)?;
-
-        let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
-
-        // 发起 HTTP POST 请求
-        let response = inner
-            .client
-            .post(&self.config.endpoint_url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("MCP-Protocol-Version", &self.config.protocol_version)
-            .header("Mcp-Method", &req.method_name)
-            .body(json)
-            .send()
-            .await
-            .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(McpError::Transport(TransportError::Http(format!(
-                "HTTP {}: {}",
-                status, body
-            ))));
-        }
-
-        let (notification_tx, receiver) =
-            tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
-
-        // 提取 subscription id from response header
-        let sub_id = response
-            .headers()
-            .get("X-Subscription-Id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        // 后台任务：持续读取 SSE 流
-        let handle = spawn_subscription_reader(
-            response,
-            notification_tx,
-            sub_id,
-            self.config.endpoint_url.clone(),
-        );
-
-        Ok((receiver, handle))
-    }
 }
 
 /// 订阅句柄。Drop 时自动取消 HTTP 连接。
@@ -591,7 +526,51 @@ impl McpTransport for HttpTransport {
         ),
         McpError,
     > {
-        Self::subscribe(self, req).await
+        let inner = self.inner.as_ref().ok_or_else(McpError::disconnected)?;
+
+        let json = serde_json::to_string(&req).map_err(|e| McpError::Protocol(e.to_string()))?;
+
+        // 发起 HTTP POST 请求
+        let response = inner
+            .client
+            .post(&self.config.endpoint_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .header("MCP-Protocol-Version", &self.config.protocol_version)
+            .header("Mcp-Method", &req.method_name)
+            .body(json)
+            .send()
+            .await
+            .map_err(|e| McpError::Transport(TransportError::Http(e.to_string())))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(McpError::Transport(TransportError::Http(format!(
+                "HTTP {}: {}",
+                status, body
+            ))));
+        }
+
+        let (notification_tx, receiver) =
+            tokio::sync::broadcast::channel::<JsonRpcNotification>(NOTIFICATION_BUFFER);
+
+        // 提取 subscription id from response header
+        let sub_id = response
+            .headers()
+            .get("X-Subscription-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // 后台任务：持续读取 SSE 流
+        let handle = spawn_subscription_reader(
+            response,
+            notification_tx,
+            sub_id,
+            self.config.endpoint_url.clone(),
+        );
+
+        Ok((receiver, handle))
     }
 }
 
