@@ -146,12 +146,14 @@ impl SimpleMcp {
                     text: result.to_string(),
                 }],
                 is_error: false,
+                result_type: None,
             }),
             Err(e) => Ok(CallToolResult {
                 content: vec![ContentBlock::Text {
                     text: e.to_string(),
                 }],
                 is_error: true,
+                result_type: None,
             }),
         }
     }

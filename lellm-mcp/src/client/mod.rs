@@ -12,21 +12,33 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::protocol::{
-    CallToolParams, CallToolResult, InitializeParams, InitializeResult, JsonRpcNotification,
-    JsonRpcRequest, ListToolsResult, McpError, ServerError, TransportError, methods,
+    CallToolParams, CallToolResult, DiscoverParams, DiscoveryResult, ImplementationInfo,
+    InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, ListToolsResult,
+    McpError, ServerError, SubscriptionsListenParams, TransportError, methods,
 };
 use super::transport::{ConnectionState, McpTransport, TransportCapabilities};
+
+/// 默认协议版本（MCP 2026-07-28）。
+const DEFAULT_PROTOCOL_VERSION: &str = "2026-07-28";
 
 /// MCP Client。
 ///
 /// 管理连接生命周期，提供统一的 request 接口。
 /// 不管理重连策略（由 Runtime 决定）。
+///
+/// 支持 MCP 2026-07-28 无状态模式：
+/// - 每请求自动注入 `_meta`（protocolVersion, clientInfo, clientCapabilities）
+/// - 可选 initialize 握手（兼容旧服务器）
 pub struct McpClient {
     transport: Box<dyn McpTransport>,
     /// 单调递增请求 ID，重连不重置。
     next_request_id: AtomicU64,
-    /// initialize 协商后的协议版本，后续请求自动注入。
-    protocol_version: Mutex<Option<String>>,
+    /// 协议版本，用于 `_meta` 注入。
+    protocol_version: Mutex<String>,
+    /// 客户端身份信息，用于 `_meta` 注入。
+    client_info: Mutex<Option<ImplementationInfo>>,
+    /// 客户端能力，用于 `_meta` 注入。
+    client_capabilities: Mutex<serde_json::Value>,
 }
 
 impl McpClient {
@@ -38,8 +50,23 @@ impl McpClient {
         Self {
             transport: Box::new(transport),
             next_request_id: AtomicU64::new(1),
-            protocol_version: Mutex::new(None),
+            protocol_version: Mutex::new(DEFAULT_PROTOCOL_VERSION.to_string()),
+            client_info: Mutex::new(None),
+            client_capabilities: Mutex::new(serde_json::json!({})),
         }
+    }
+
+    /// 设置客户端身份信息。
+    pub async fn set_client_info(&self, name: impl Into<String>, version: impl Into<String>) {
+        *self.client_info.lock().await = Some(ImplementationInfo {
+            name: name.into(),
+            version: version.into(),
+        });
+    }
+
+    /// 设置客户端能力。
+    pub async fn set_client_capabilities(&self, capabilities: serde_json::Value) {
+        *self.client_capabilities.lock().await = capabilities;
     }
 
     /// 连接到 MCP Server。
@@ -55,11 +82,49 @@ impl McpClient {
     }
 
     /// 发送 initialize 请求，协商协议版本。
+    ///
+    /// **注意**：MCP 2026-07-28 删除了 initialize 握手。
+    /// 此方法仅用于兼容旧版服务器（2024-11-05, 2025-03-26, 2025-11-25）。
+    /// 对于新版服务器，建议使用 `discover()`。
     pub async fn initialize(&self) -> Result<InitializeResult, McpError> {
-        let params = InitializeParams::new("2024-11-05")
-            .with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
+        let version = self.protocol_version.lock().await.clone();
+        let params =
+            InitializeParams::new(version).with_client_info("lellm-mcp", env!("CARGO_PKG_VERSION"));
         self.request_inner(methods::INITIALIZE, Some(&params), false)
             .await
+    }
+
+    /// 发现服务器能力（MCP 2026-07-28+）。
+    ///
+    /// 用于替代 initialize 握手，获取服务器支持的协议版本、能力和身份信息。
+    /// 可选指定客户端支持的协议版本列表。
+    pub async fn discover(
+        &self,
+        versions: Option<Vec<String>>,
+    ) -> Result<DiscoveryResult, McpError> {
+        let params = match versions {
+            Some(v) => DiscoverParams::new().with_versions(v),
+            None => DiscoverParams::new(),
+        };
+        self.request_inner(methods::SERVER_DISCOVER, Some(&params), true)
+            .await
+    }
+
+    /// 订阅服务器变更通知（MCP 2026-07-28+）。
+    ///
+    /// 返回 SSE 长连接，服务器通过该连接推送订阅的通知。
+    /// 客户端应关闭连接以取消订阅。
+    ///
+    /// **注意**：此方法需要 Transport 支持 SSE 长连接。
+    /// 当前 HttpTransport 尚不支持，将在后续版本实现。
+    #[allow(dead_code)]
+    pub async fn subscriptions_listen(&self, subscriptions: Vec<String>) -> Result<(), McpError> {
+        let params = SubscriptionsListenParams::new(subscriptions);
+        // TODO: 实现 SSE 长连接处理
+        let _: Result<serde_json::Value, McpError> = self
+            .request_inner(methods::SUBSCRIPTIONS_LISTEN, Some(&params), true)
+            .await;
+        Ok(())
     }
 
     /// 拉取工具列表。
@@ -96,7 +161,7 @@ impl McpClient {
         &self,
         method: &str,
         params: Option<&P>,
-        inject_protocol_version: bool,
+        inject_meta: bool,
     ) -> Result<R, McpError>
     where
         P: Serialize,
@@ -119,24 +184,35 @@ impl McpClient {
             None => None,
         };
 
-        // 自动注入 protocolVersion
-        let params_value = if inject_protocol_version {
-            if let Some(ref ver) = *self.protocol_version.lock().await {
-                let mut params = params_value.unwrap_or_else(|| serde_json::json!({}));
-                // 不能合并：内层需要可变引用存活足够久以完成 insert
-                #[allow(clippy::collapsible_if)]
-                if let Some(obj) = params.as_object_mut() {
-                    if !obj.contains_key("protocolVersion") {
-                        obj.insert(
-                            "protocolVersion".to_string(),
-                            serde_json::Value::String(ver.clone()),
-                        );
-                    }
+        // 注入 _meta（MCP 2026-07-28 无状态模式）
+        let params_value = if inject_meta {
+            let version = self.protocol_version.lock().await.clone();
+            let client_info = self.client_info.lock().await.clone();
+            let capabilities = self.client_capabilities.lock().await.clone();
+
+            let mut params = params_value.unwrap_or_else(|| serde_json::json!({}));
+            if let Some(obj) = params.as_object_mut() {
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "io.modelcontextprotocol/protocolVersion".to_string(),
+                    serde_json::Value::String(version),
+                );
+
+                if let Some(info) = client_info {
+                    meta.insert(
+                        "io.modelcontextprotocol/clientInfo".to_string(),
+                        serde_json::json!({ "name": info.name, "version": info.version }),
+                    );
                 }
-                Some(params)
-            } else {
-                params_value
+
+                meta.insert(
+                    "io.modelcontextprotocol/clientCapabilities".to_string(),
+                    capabilities,
+                );
+
+                obj.insert("_meta".to_string(), serde_json::Value::Object(meta));
             }
+            Some(params)
         } else {
             params_value
         };

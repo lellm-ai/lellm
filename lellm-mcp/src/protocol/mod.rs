@@ -16,10 +16,13 @@ pub use error::{McpError, RetryDisposition, ServerError, TransportError};
 #[cfg(feature = "server")]
 pub use error::McpToolError;
 pub use notification::{JsonRpcNotification, NotificationKind, methods as notification_methods};
-pub use request::{CallToolParams, ImplementationInfo, InitializeParams, JsonRpcRequest, methods};
+pub use request::{
+    CallToolParams, DiscoverParams, DiscoveryResult, ImplementationInfo, InitializeParams,
+    JsonRpcRequest, SubscriptionsListenParams, methods,
+};
 pub use response::{
-    CallToolResult, ContentBlock, InitializeResult, JsonRpcError, JsonRpcResponse, JsonRpcResult,
-    ListToolsResult, ToolInfo,
+    CallToolResult, ContentBlock, InitializeResult, InputRequest, InputRequiredResult,
+    JsonRpcError, JsonRpcResponse, JsonRpcResult, ListToolsResult, ToolInfo,
 };
 
 /// JSON-RPC 2.0 Message（Request / Response / Notification）。

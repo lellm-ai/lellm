@@ -103,6 +103,48 @@ pub struct CallToolResult {
     pub content: Vec<ContentBlock>,
     #[serde(default)]
     pub is_error: bool,
+    /// 结果类型（MCP 2026-07-28+）。
+    /// - `"complete"`: 普通结果
+    /// - `"input_required"`: MRTR 中间结果，需要客户端提供额外输入
+    #[serde(rename = "resultType", skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<String>,
+}
+
+impl CallToolResult {
+    /// 检查结果是否为 MRTR 中间结果。
+    pub fn is_input_required(&self) -> bool {
+        self.result_type.as_deref() == Some("input_required")
+    }
+}
+
+/// MRTR（Multi Round-Trip Requests）中间结果。
+///
+/// 服务器返回 `InputRequiredResult` 表示需要客户端提供额外输入。
+/// 客户端应重试原请求，附带 `inputResponses`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputRequiredResult {
+    #[serde(rename = "resultType")]
+    #[allow(dead_code)]
+    pub result_type: String,
+    #[serde(rename = "inputRequests")]
+    #[allow(dead_code)]
+    pub input_requests: Vec<InputRequest>,
+}
+
+/// MRTR 输入请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputRequest {
+    /// 请求类型（如 "elicitation/create", "sampling/createMessage"）
+    #[allow(dead_code)]
+    pub method: String,
+    /// 请求参数
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+    /// 请求标识符，用于匹配响应
+    #[allow(dead_code)]
+    #[serde(rename = "requestId")]
+    pub request_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
