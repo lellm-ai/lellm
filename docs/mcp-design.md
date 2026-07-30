@@ -76,10 +76,19 @@ lellm-mcp/
 **Feature 设计**：
 ```toml
 [features]
-default = ["stdio"]
+default = ["stdio", "http"]
 stdio = []
-sse = []          # v0.4
+http = ["dep:reqwest"]        # Streamable HTTP（推荐）
+sse = ["dep:reqwest", ...]    # HTTP+SSE（Deprecated，仅兼容）
 ```
+
+**Transport 优先级**（按 MCP 2026-07-28 规范）：
+
+| Transport | 规范状态 | 推荐度 |
+|-----------|---------|--------|
+| Stdio | Active | ⭐⭐⭐ 本地首选 |
+| HttpTransport（Streamable HTTP） | Active | ⭐⭐⭐ 远程首选 |
+| SseTransport（HTTP+SSE） | **Deprecated** | ⭐ 仅兼容旧 Server |
 
 **依赖关系**：
 ```
@@ -470,7 +479,52 @@ pub trait CatalogRefresh: Send + Sync {
 - 职责更清晰：Watcher 只负责监听通知，刷新逻辑由 CatalogRefresher 实现
 - 避免 Watcher 持有 Client 或 Catalog 的 Arc
 
-### SSE POST URL — watch 替代 polling
+### Streamable HTTP（推荐）
+
+> MCP 2025-03-26 引入，2026-07-28 强化无状态设计。
+> 取代 HTTP+SSE（2024-11-05，已废弃）。
+
+**核心差异（vs 旧 HTTP+SSE）：**
+
+| 维度 | HTTP+SSE（旧，废弃） | Streamable HTTP（新，推荐） |
+|------|---------------------|---------------------------|
+| 端点 | 2 个（SSE + POST） | 1 个（POST） |
+| 服务器状态 | 有状态（会话映射） | **无状态** |
+| 初始化 | 需要 handshake | 每请求自包含 `_meta` |
+| 负载均衡 | 难（会话绑定） | **天然支持** |
+| 请求取消 | 不明确 | 关闭 SSE 响应流 = 取消 |
+| 中间件 | 难以插入 | Header 路由友好 |
+
+**请求流程：**
+```
+每条 JSON-RPC 消息 = 一次独立 HTTP POST
+请求 → 服务器选择回复方式：
+  (a) 单条 JSON（Content-Type: application/json）
+  (b) SSE 流（Content-Type: text/event-stream），scoped 到该请求
+长寿命通知 → subscriptions/listen POST → SSE 长连接
+```
+
+**必须携带的 Headers：**
+```http
+POST /mcp HTTP/1.1
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: get_weather
+```
+
+**2026-07-28 重大变更：**
+- 删除 protocol-level sessions（`Mcp-Session-Id` 不再存在）
+- 删除 GET 端点
+- 删除 initialize 握手（每请求自包含）
+- MRTR 替代 server-initiated requests
+- `subscriptions/listen` 替代 `resources/subscribe`
+
+### SSE POST URL — watch 替代 polling（仅旧 SseTransport）
+
+> **注意**：以下设计仅适用于已废弃的 SseTransport（HTTP+SSE）。
+> HttpTransport（Streamable HTTP）不需要此机制。
 
 ```rust
 // SSE reader 收到 endpoint 事件时：
