@@ -1,13 +1,13 @@
 //! MCP Multi-Server Example — 同时连接多个 MCP 服务器
 //!
 //! 演示 McpServerRegistry 用法：
-//! - 连接多个 MCP 服务器（SSE/HTTP）
+//! - 连接多个 MCP 服务器（Streamable HTTP）
 //! - 合并工具列表
 //! - 工具调用自动路由到对应服务器
 //!
 //! 运行：
 //! ```bash
-//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features "sse,http" -p lellm-agent
+//! TENCENT_MAP_KEY=your_api_key cargo run --example mcp_multi --features http -p lellm-agent
 //! ```
 
 use lellm_agent::McpServerRegistry;
@@ -21,15 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut registry = McpServerRegistry::new();
 
-    // 添加 SSE 服务器
-    let sse_url = format!("https://mcp.map.qq.com/sse?key={}&format=0", api_key);
-    let client = McpClient::connect_sse(&sse_url).await?;
-    registry.register("qq-map-sse", client).await?;
-
     // 添加 HTTP 服务器
     let http_url = format!("https://mcp.map.qq.com/mcp?key={}&format=0", api_key);
     let client = McpClient::connect_http(&http_url).await?;
-    registry.register("qq-map-http", client).await?;
+    registry.register("qq-map", client).await?;
 
     // 显示工具列表
     println!("已连接服务器:");

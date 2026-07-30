@@ -72,8 +72,6 @@ pub struct AgentBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_canonical_hash_stability() {
         // 相同输入应该产生相同的 hash

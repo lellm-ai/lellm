@@ -7,7 +7,7 @@
 //! `tokio::task::block_in_place` 来规避，或直接测试 Transport 层。
 
 use async_trait::async_trait;
-use lellm_agent::{CatalogRefresh, McpCatalog, ToolCatalog};
+use lellm_agent::{McpCatalog, ToolCatalog};
 use lellm_mcp::protocol::{
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, McpError, ServerError,
     TransportError,

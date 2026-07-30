@@ -423,8 +423,8 @@ mod tests {
         builder.end("a");
         let graph = Arc::new(builder.build().unwrap());
 
-        let session1 = ExecutionSession::new(State::new(), graph.clone());
-        let session2 = ExecutionSession::new(State::new(), graph.clone());
+        let _session1 = ExecutionSession::new(State::new(), graph.clone());
+        let _session2 = ExecutionSession::new(State::new(), graph.clone());
 
         // 验证 Arc 强引用计数
         assert_eq!(Arc::strong_count(&graph), 3); // original + session1 + session2
