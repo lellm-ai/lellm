@@ -36,7 +36,8 @@ use async_trait::async_trait;
 use lellm_core::{ChatRequest, ContentBlock, ExecutableTool, Message, ToolCall, ToolDefinition};
 use lellm_derive::tool;
 use lellm_graph::{
-    GraphBuilder, GraphError, NodeContext, NodeKind, State, StateMerge, StateMutation, TaskNode,
+    GraphBuilder, GraphError, LeafContext, NodeContext, NodeKind, State, StateMerge, StateMutation,
+    TaskNode,
 };
 use lellm_provider::{CodecProvider, ResolvedModel};
 use serde_json::Value;
@@ -177,7 +178,7 @@ impl LlmCallNode {
         }
     }
 
-    async fn run(&self, ctx: &mut NodeContext<'_, State>) -> Result<(), GraphError> {
+    async fn run(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         let messages = get_messages(ctx.state());
 
         let request = ChatRequest {
@@ -245,8 +246,8 @@ impl LlmCallNode {
 }
 
 #[async_trait]
-impl lellm_graph::FlowNode<State> for LlmCallNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_, State>) -> Result<(), GraphError> {
+impl lellm_graph::LeafNode<State> for LlmCallNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         self.run(ctx).await
     }
 }
@@ -335,7 +336,7 @@ fn build_agent_graph(
     );
     builder.node(
         "llm_call",
-        NodeKind::External(Arc::new(LlmCallNode::new(
+        NodeKind::ExternalLeaf(Arc::new(LlmCallNode::new(
             model,
             "你是一个智能助手。你可以使用 query_weather 查询天气，使用 calculator 进行数学计算。\n\
              当用户提问时，优先判断是否需要使用工具。如果需要，调用工具获取结果后再回答。",

@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use lellm_core::{ChatRequest, ContentBlock, ExecutableTool, Message, ToolCall, ToolDefinition};
 use lellm_derive::tool;
 use lellm_graph::{
-    GraphBuilder, GraphError, NodeContext, NodeKind, State, StateMerge, StateMutation, TaskNode,
+    GraphBuilder, GraphError, LeafContext, NodeContext, NodeKind, State, StateMerge, StateMutation,
+    TaskNode,
 };
 use lellm_provider::{CodecProvider, ResolvedModel};
 use serde_json::Value;
@@ -116,7 +117,7 @@ impl LlmCallNode {
         }
     }
 
-    async fn run(&self, ctx: &mut NodeContext<'_, State>) -> Result<(), GraphError> {
+    async fn run(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         let messages = get_messages(ctx.state());
 
         let request = ChatRequest {
@@ -184,8 +185,8 @@ impl LlmCallNode {
 }
 
 #[async_trait]
-impl lellm_graph::FlowNode<State> for LlmCallNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_, State>) -> Result<(), GraphError> {
+impl lellm_graph::LeafNode<State> for LlmCallNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         self.run(ctx).await
     }
 }
@@ -274,7 +275,7 @@ fn build_graph(
     );
     builder.node(
         "llm_call",
-        NodeKind::External(Arc::new(LlmCallNode::new(
+        NodeKind::ExternalLeaf(Arc::new(LlmCallNode::new(
             model,
             "You are a math assistant. Always use the calculator tools to compute results. \
              The user speaks Chinese but you can respond in either language.",

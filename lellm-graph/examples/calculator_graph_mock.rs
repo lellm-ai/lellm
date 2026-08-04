@@ -18,7 +18,8 @@ use lellm_core::{
 };
 use lellm_derive::tool;
 use lellm_graph::{
-    GraphBuilder, GraphError, NodeContext, NodeKind, State, StateMerge, StateMutation, TaskNode,
+    GraphBuilder, GraphError, LeafContext, NodeContext, NodeKind, State, StateMerge, StateMutation,
+    TaskNode,
 };
 use lellm_provider::{ProviderEvent, ProviderStream, ResolvedModel};
 use serde_json::Value;
@@ -175,7 +176,7 @@ impl LlmCallNode {
         Self { model }
     }
 
-    async fn run(&self, ctx: &mut NodeContext<'_, State>) -> Result<(), GraphError> {
+    async fn run(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         let messages = get_messages(ctx.state());
 
         let request = ChatRequest {
@@ -226,8 +227,8 @@ impl LlmCallNode {
 }
 
 #[async_trait]
-impl lellm_graph::FlowNode<State> for LlmCallNode {
-    async fn execute(&self, ctx: &mut NodeContext<'_, State>) -> Result<(), GraphError> {
+impl lellm_graph::LeafNode<State> for LlmCallNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         self.run(ctx).await
     }
 }
@@ -308,7 +309,7 @@ fn build_graph(
     );
     builder.node(
         "llm_call",
-        NodeKind::External(Arc::new(LlmCallNode::new(model))),
+        NodeKind::ExternalLeaf(Arc::new(LlmCallNode::new(model))),
     );
     builder.node("post_llm_route", NodeKind::Task(create_post_llm_route()));
     builder.node("tool_execute", NodeKind::Task(create_tool_execute(tools)));

@@ -1,8 +1,8 @@
 use lellm_graph::{
     BarrierDecision, BarrierDefaultAction, BarrierNode, BuildError, BuildErrors, Diagnostic,
-    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, NodeContext,
-    NodeKind, SK_COUNT, SK_STEPS, SimpleExecutor, State, StateExt, StateKey, StateMutation,
-    TaskNode, TerminalError, TraceId,
+    DiagnosticCategory, GraphBuilder, GraphError, GraphEvent, GraphExecution, LeafContext,
+    NodeContext, NodeKind, SK_COUNT, SK_STEPS, SimpleExecutor, State, StateExt, StateKey,
+    StateMutation, TaskNode, TerminalError, TraceId,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -1443,8 +1443,8 @@ async fn test_fallback_control_flow() {
     struct FallbackNode;
 
     #[async_trait]
-    impl lellm_graph::FlowNode for FallbackNode {
-        async fn execute(&self, _ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+    impl lellm_graph::LeafNode for FallbackNode {
+        async fn execute(&self, _ctx: &mut LeafContext<'_>) -> Result<(), GraphError> {
             Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: "fallback_node".into(),
                 source: "node failed".into(),
@@ -1454,7 +1454,7 @@ async fn test_fallback_control_flow() {
 
     let graph = build_graph("fallback_flow", |g| {
         let _ = g.start("fallback_node");
-        let _ = g.node("fallback_node", NodeKind::External(Arc::new(FallbackNode)));
+        let _ = g.node("fallback_node", NodeKind::ExternalLeaf(Arc::new(FallbackNode)));
         let _ = g.node(
             "fallback_target",
             NodeKind::Task(TaskNode::new(
@@ -1513,8 +1513,8 @@ async fn test_fallback_no_edge() {
     struct FailingNode;
 
     #[async_trait]
-    impl lellm_graph::FlowNode for FailingNode {
-        async fn execute(&self, _ctx: &mut NodeContext<'_>) -> Result<(), GraphError> {
+    impl lellm_graph::LeafNode for FailingNode {
+        async fn execute(&self, _ctx: &mut LeafContext<'_>) -> Result<(), GraphError> {
             Err(GraphError::Terminal(TerminalError::NodeExecutionFailed {
                 node: "failing_node".into(),
                 source: "intentional failure".into(),
@@ -1524,7 +1524,7 @@ async fn test_fallback_no_edge() {
 
     let graph = build_graph("no_fallback", |g| {
         let _ = g.start("failing_node");
-        let _ = g.node("failing_node", NodeKind::External(Arc::new(FailingNode)));
+        let _ = g.node("failing_node", NodeKind::ExternalLeaf(Arc::new(FailingNode)));
         let _ = g.node(
             "end",
             NodeKind::Task(TaskNode::new("end", |_ctx: &mut NodeContext<'_>| Ok(()))),
