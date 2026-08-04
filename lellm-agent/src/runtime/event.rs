@@ -10,6 +10,13 @@
 pub enum AgentEvent {
     /// Provider 层事件
     Provider(lellm_provider::ProviderEvent),
+    /// LLM 轮次开始（可观测性事件，标记 ReAct 迭代轮次）
+    LlmRoundStarted {
+        /// ReAct 迭代轮次（从 1 开始）
+        iteration: usize,
+        /// 模型标识
+        model: String,
+    },
     /// 工具开始执行
     ToolStart { tool_call_id: String, name: String },
     /// 工具执行完成

@@ -76,6 +76,12 @@ async fn main() {
                     }
                 }
             }
+            AgentEvent::LlmRoundStarted {
+                iteration: iter,
+                model,
+            } => {
+                println!("[LLM 轮次] iteration={}, model={}", iter, model);
+            }
             AgentEvent::ToolStart { tool_call_id, name } => {
                 println!("[工具开始] id={}, name={}", tool_call_id, name);
             }

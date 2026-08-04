@@ -55,12 +55,21 @@ pub async fn observe_react_loop(
 
     while let Some(event) = stream.recv().await {
         match event {
-            AgentEvent::Provider(ProviderEvent::Start { model: _ }) => {
-                iteration += 1;
+            AgentEvent::LlmRoundStarted {
+                iteration: iter,
+                model,
+            } => {
+                // Agent 级可观测性事件 — 标记 ReAct 迭代轮次
+                iteration = iter;
                 round = RoundState {
                     reasoning: String::new(),
                     step_start: Some(std::time::Instant::now()),
                 };
+                tracing::debug!(iteration = iter, model = %model, "LLM round started");
+            }
+
+            AgentEvent::Provider(ProviderEvent::Start { model: _ }) => {
+                // Provider 级协议事件 — 已由 LlmRoundStarted 处理
             }
 
             AgentEvent::Provider(ProviderEvent::Token { token }) => {

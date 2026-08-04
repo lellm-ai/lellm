@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 
 use lellm_core::{CacheControl, ChatResponse, ContentBlock, Message, TextBlock, ThinkingBlock};
-use lellm_graph::{GraphError, LeafContext, LeafNode, TerminalError};
+use lellm_graph::{GraphError, LeafContext, LeafNode, StreamChunk, TerminalError};
 
 use super::super::config::{ToolUseConfig, build_request_inner_with_round};
 use super::super::context::{estimate_reasoning_block, estimate_text};
@@ -102,6 +102,13 @@ impl LeafNode<AgentState> for LLMNode {
             &round.definitions,
             self.config.tool_cache_policy,
         );
+
+        // 3.5 Emit LlmRoundStarted — Agent 级可观测性事件，标记 ReAct 迭代轮次
+        let model_str = self.invoker.model().model.clone();
+        ctx.emit(StreamChunk::LlmRoundStarted {
+            iteration: iterations + 1,
+            model: model_str,
+        });
 
         // 4. 通过 LlmInvoker 执行流式调用（自动处理 retry/fallback）
         let mut stream = self

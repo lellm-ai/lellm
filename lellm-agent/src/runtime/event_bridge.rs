@@ -7,6 +7,7 @@
 //!
 //! | StreamChunk | AgentEvent |
 //! |---|---|
+//! | LlmRoundStarted | LlmRoundStarted |
 //! | TextDelta | Provider(Token) |
 //! | ThinkingDelta | Provider(ThinkingDelta) |
 //! | ToolLifecycle(Started) | ToolStart |
@@ -55,6 +56,9 @@ impl AgentEventSink {
 impl StreamSink for AgentEventSink {
     fn emit(&self, chunk: StreamChunk) {
         match chunk {
+            StreamChunk::LlmRoundStarted { iteration, model } => {
+                self.emit_event(AgentEvent::LlmRoundStarted { iteration, model });
+            }
             StreamChunk::TextDelta(token) => {
                 self.emit_event(AgentEvent::Provider(ProviderEvent::Token { token }));
             }

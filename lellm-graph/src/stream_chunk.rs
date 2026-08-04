@@ -47,6 +47,13 @@ pub enum StreamChunk {
         text: String,
         redacted: Option<String>,
     },
+    /// LLM 轮次开始（Agent 可观测性事件，携带迭代轮次）
+    LlmRoundStarted {
+        /// ReAct 迭代轮次（从 1 开始）
+        iteration: usize,
+        /// 模型标识
+        model: String,
+    },
     /// 工具生命周期事件（Queued / Started / Finished）
     ToolLifecycle {
         phase: ToolPhase,

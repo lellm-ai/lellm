@@ -123,11 +123,18 @@ impl<T: Send> Clone for SharedReceiver<T> {
 /// 通道 Sink — 通过 mpsc 通道等待决策。
 ///
 /// 生产环境使用，与 `GraphHandle::decide()` 配合。
+///
+/// **决策匹配协议：**
+/// - Exact 消息按 `barrier_id` 精准匹配
+/// - Wildcard 消息按 `node_id` 通配匹配并缓存
+/// - 不匹配的决策存入 `pending_queue`，供后续等待者消费
 pub struct ChannelBarrierSink {
     decision_rx: SharedReceiver<BarrierDecisionMessage>,
     cancel_rx: SharedReceiver<()>,
     cancel: Arc<tokio_util::sync::CancellationToken>,
     wildcard_cache: Arc<tokio::sync::RwLock<std::collections::HashMap<String, BarrierDecision>>>,
+    /// 待处理决策队列 — 不匹配的决策暂存于此，避免多 Barrier 场景下决策丢失。
+    pending_queue: Arc<tokio::sync::Mutex<Vec<BarrierDecisionMessage>>>,
 }
 
 impl ChannelBarrierSink {
@@ -141,6 +148,7 @@ impl ChannelBarrierSink {
             cancel_rx: SharedReceiver::new(cancel_rx),
             cancel: Arc::new(cancel),
             wildcard_cache: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            pending_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -154,7 +162,6 @@ impl BarrierSink for ChannelBarrierSink {
         // 先检查通配缓存 — clone 决策后再返回，避免借用冲突
         {
             let cache_guard = self.wildcard_cache.try_read();
-            // 不能合并 if-let：内层需要先 clone 决策值，再返回，避免借用冲突
             #[allow(clippy::collapsible_if)]
             if let Ok(cache) = cache_guard {
                 if let Some(decision) = cache.get(&barrier_id.node_id) {
@@ -168,62 +175,93 @@ impl BarrierSink for ChannelBarrierSink {
         let cancel_rx = self.cancel_rx.clone();
         let cancel = self.cancel.clone();
         let wildcard_cache = self.wildcard_cache.clone();
+        let pending_queue = self.pending_queue.clone();
         let barrier_id = barrier_id.clone();
 
         Box::pin(async move {
+            // 先检查待处理队列中是否有匹配的决策
+            {
+                let queued_idx = {
+                    let queue = pending_queue.lock().await;
+                    queue.iter().position(|msg| match msg {
+                        BarrierDecisionMessage::Exact {
+                            barrier_id: bid, ..
+                        } => *bid == barrier_id,
+                        BarrierDecisionMessage::Wildcard { node_id, .. } => {
+                            node_id == &barrier_id.node_id
+                        }
+                    })
+                };
+                if let Some(idx) = queued_idx {
+                    let msg = {
+                        let mut queue = pending_queue.lock().await;
+                        queue.remove(idx)
+                    };
+                    return match msg {
+                        BarrierDecisionMessage::Exact { decision, .. } => {
+                            BarrierOutcome::Decision(decision)
+                        }
+                        BarrierDecisionMessage::Wildcard { node_id, decision } => {
+                            wildcard_cache
+                                .write()
+                                .await
+                                .insert(node_id, decision.clone());
+                            BarrierOutcome::Decision(decision)
+                        }
+                    };
+                }
+            }
+
+            let inner = async move {
+                tokio::select! {
+                    biased;
+                    _ = cancel_rx.recv() => {
+                        cancel.cancel();
+                        BarrierOutcome::Cancelled
+                    }
+                    msg = decision_rx.recv() => match msg {
+                        Some(BarrierDecisionMessage::Exact { barrier_id: bid, decision }) => {
+                            if bid == barrier_id {
+                                BarrierOutcome::Decision(decision)
+                            } else {
+                                // 不匹配 → 存入待处理队列，供后续等待者消费
+                                pending_queue.lock().await.push(
+                                    BarrierDecisionMessage::Exact {
+                                        barrier_id: bid,
+                                        decision,
+                                    }
+                                );
+                                BarrierOutcome::Cancelled
+                            }
+                        }
+                        Some(BarrierDecisionMessage::Wildcard { node_id, decision }) => {
+                            if node_id == barrier_id.node_id {
+                                wildcard_cache.write().await.insert(node_id.clone(), decision.clone());
+                                BarrierOutcome::Decision(decision)
+                            } else {
+                                // 不匹配 → 存入待处理队列
+                                pending_queue.lock().await.push(
+                                    BarrierDecisionMessage::Wildcard {
+                                        node_id,
+                                        decision,
+                                    }
+                                );
+                                BarrierOutcome::Cancelled
+                            }
+                        }
+                        None => BarrierOutcome::Cancelled,
+                    },
+                }
+            };
+
             if let Some(dur) = timeout {
                 tokio::select! {
                     biased;
-                    _ = cancel_rx.recv() => {
-                        cancel.cancel();
-                        BarrierOutcome::Cancelled
-                    }
+                    outcome = inner => outcome,
                     _ = tokio::time::sleep(dur) => BarrierOutcome::TimedOut,
-                    msg = decision_rx.recv() => match msg {
-                        Some(BarrierDecisionMessage::Exact { barrier_id: bid, decision }) => {
-                            if bid == barrier_id {
-                                BarrierOutcome::Decision(decision)
-                            } else {
-                                BarrierOutcome::Cancelled
-                            }
-                        }
-                        Some(BarrierDecisionMessage::Wildcard { node_id, decision }) => {
-                            if node_id == barrier_id.node_id {
-                                wildcard_cache.write().await.insert(node_id.clone(), decision.clone());
-                                BarrierOutcome::Decision(decision)
-                            } else {
-                                BarrierOutcome::Cancelled
-                            }
-                        }
-                        None => BarrierOutcome::Cancelled,
-                    },
                 }
             } else {
-                tokio::select! {
-                    biased;
-                    _ = cancel_rx.recv() => {
-                        cancel.cancel();
-                        BarrierOutcome::Cancelled
-                    }
-                    msg = decision_rx.recv() => match msg {
-                        Some(BarrierDecisionMessage::Exact { barrier_id: bid, decision }) => {
-                            if bid == barrier_id {
-                                BarrierOutcome::Decision(decision)
-                            } else {
-                                BarrierOutcome::Cancelled
-                            }
-                        }
-                        Some(BarrierDecisionMessage::Wildcard { node_id, decision }) => {
-                            if node_id == barrier_id.node_id {
-                                wildcard_cache.write().await.insert(node_id.clone(), decision.clone());
-                                BarrierOutcome::Decision(decision)
-                            } else {
-                                BarrierOutcome::Cancelled
-                            }
-                        }
-                        None => BarrierOutcome::Cancelled,
-                    },
-                }
+                inner.await
             }
         })
     }
