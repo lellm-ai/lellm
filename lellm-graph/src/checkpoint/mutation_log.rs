@@ -16,8 +16,8 @@
 //! Conversation Archive     ← 长期存储
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -128,7 +128,7 @@ impl InMemoryMutationLog {
 
     /// 所有 trace 的条目总数。
     pub fn len(&self) -> usize {
-        let index = self.index.read().unwrap();
+        let index = self.index.read();
         index.values().map(|v| v.len()).sum()
     }
 
@@ -140,10 +140,7 @@ impl InMemoryMutationLog {
 #[async_trait]
 impl MutationLogStore for InMemoryMutationLog {
     async fn append(&self, entry: MutationLogEntry) -> Result<(), CheckpointStoreError> {
-        let mut index = self
-            .index
-            .write()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let mut index = self.index.write();
         index.entry(entry.trace_id).or_default().push(entry);
         Ok(())
     }
@@ -153,10 +150,7 @@ impl MutationLogStore for InMemoryMutationLog {
         trace_id: &TraceId,
         from_step: usize,
     ) -> Result<Vec<MutationLogEntry>, CheckpointStoreError> {
-        let index = self
-            .index
-            .read()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let index = self.index.read();
         let entries = index.get(trace_id).cloned().unwrap_or_default();
         Ok(entries
             .into_iter()
@@ -169,10 +163,7 @@ impl MutationLogStore for InMemoryMutationLog {
         trace_id: &TraceId,
         keep_from_step: usize,
     ) -> Result<usize, CheckpointStoreError> {
-        let mut index = self
-            .index
-            .write()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let mut index = self.index.write();
         let entries = index.entry(*trace_id).or_default();
         let original_len = entries.len();
         entries.retain(|e| e.step >= keep_from_step);

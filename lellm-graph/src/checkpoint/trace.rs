@@ -62,16 +62,23 @@ pub trait TraceSink<E>: Send + Sync {
     fn record_step(&mut self, step: TraceStep<E>);
 }
 
+/// MemoryTraceSink 默认最大步数。
+const DEFAULT_MAX_STEPS: usize = 10_000;
+
 /// 内存 TraceSink — v0.4 默认实现。
+///
+/// 超过最大步数时丢弃最旧的步骤（FIFO 淘汰）。
 #[derive(Debug)]
 pub struct MemoryTraceSink<E: Send + Sync> {
     pub trace: ExecutionTrace<E>,
+    max_steps: usize,
 }
 
 impl<E: Send + Sync> Default for MemoryTraceSink<E> {
     fn default() -> Self {
         Self {
             trace: ExecutionTrace::new(),
+            max_steps: DEFAULT_MAX_STEPS,
         }
     }
 }
@@ -79,6 +86,14 @@ impl<E: Send + Sync> Default for MemoryTraceSink<E> {
 impl<E: Send + Sync> MemoryTraceSink<E> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 设置最大步数（默认 10000）。
+    pub fn with_max_steps(max: usize) -> Self {
+        Self {
+            trace: ExecutionTrace::new(),
+            max_steps: max,
+        }
     }
 
     pub fn into_trace(self) -> ExecutionTrace<E> {
@@ -89,6 +104,10 @@ impl<E: Send + Sync> MemoryTraceSink<E> {
 impl<E: Send + Sync> TraceSink<E> for MemoryTraceSink<E> {
     fn record_step(&mut self, step: TraceStep<E>) {
         self.trace.push(step);
+        // 超过上限时丢弃最旧的步骤（FIFO）
+        while self.trace.steps.len() > self.max_steps {
+            self.trace.steps.remove(0);
+        }
     }
 }
 

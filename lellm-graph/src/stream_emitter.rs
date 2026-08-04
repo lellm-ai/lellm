@@ -46,24 +46,27 @@ pub trait StreamSink: Send + Sync {
 ///    ↓
 /// Consumer
 /// ```
+/// BufferedSink 默认容量。
+const BUFFERED_SINK_CAPACITY: usize = 4096;
+
 pub struct BufferedSink {
-    tx: mpsc::UnboundedSender<StreamChunk>,
+    tx: mpsc::Sender<StreamChunk>,
 }
 
 impl BufferedSink {
-    /// 创建 BufferedSink（无界队列）。
+    /// 创建 BufferedSink（有界队列，容量 4096）。
     ///
-    /// 取消机制负责清理：消费者离开 → cancel → Node 停止。
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<StreamChunk>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// channel 满时丢弃最旧数据，避免 OOM。
+    pub fn new() -> (Self, mpsc::Receiver<StreamChunk>) {
+        let (tx, rx) = mpsc::channel(BUFFERED_SINK_CAPACITY);
         (Self { tx }, rx)
     }
 }
 
 impl StreamSink for BufferedSink {
     fn emit(&self, chunk: StreamChunk) {
-        // unbounded send only fails if receiver is dropped
-        let _ = self.tx.send(chunk);
+        // try_send 失败 = channel 满（丢弃）或消费者已断开
+        let _ = self.tx.try_send(chunk);
     }
 }
 
@@ -194,7 +197,7 @@ pub fn noop_sink() -> Arc<dyn StreamSink> {
 ///
 /// 消费者断开（Receiver dropped）时，task 退出并触发 CancellationToken。
 pub fn spawn_forward_task(
-    mut buffer_rx: mpsc::UnboundedReceiver<StreamChunk>,
+    mut buffer_rx: mpsc::Receiver<StreamChunk>,
     tx: mpsc::Sender<StreamChunk>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {

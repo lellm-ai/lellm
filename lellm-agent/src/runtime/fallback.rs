@@ -65,7 +65,7 @@ impl DefaultFallback {
             LlmError::Timeout { .. } | LlmError::Network { .. } => true,
             LlmError::Provider {
                 status: Some(s), ..
-            } => *s >= 500,
+            } => *s >= 500 || *s == 429,
             _ => false,
         }
     }

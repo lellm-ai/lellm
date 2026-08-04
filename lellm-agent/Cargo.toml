@@ -24,6 +24,7 @@ tracing.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 indexmap.workspace = true
+parking_lot.workspace = true
 
 [features]
 default = []

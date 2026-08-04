@@ -447,9 +447,10 @@ impl ModelCapabilities for AnthropicCodec {
     fn capabilities_for(&self, model: &str) -> Capabilities {
         let mut caps = Capabilities::default();
         let lower = model.to_lowercase();
-        if lower.contains("claude-3") || lower.contains("claude-4") {
-            caps.supports_image_input = true;
-        }
+        // TODO(v0.5): 实现 Image 序列化后恢复
+        // if lower.contains("claude-3") || lower.contains("claude-4") {
+        //     caps.supports_image_input = true;
+        // }
         // Claude 3.5 Sonnet+ 和 Claude 4 系列支持 thinking 模式
         // TODO: 当前靠模型名启发式匹配。P2 应替换为模型元数据 API
         if lower.contains("sonnet")

@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use super::protocol::{
     CallToolParams, CallToolResult, DiscoverParams, DiscoveryResult, ImplementationInfo,
@@ -51,11 +51,15 @@ impl ClientMeta {
 /// - 每请求自动注入 `_meta`（protocolVersion, clientInfo, clientCapabilities）
 /// - 可选 initialize 握手（兼容旧服务器）
 pub struct McpClient {
-    transport: Box<dyn McpTransport>,
+    /// Transport 包装为 Mutex 以支持通过 Arc 调用 close()。
+    /// close() 仅在关闭路径执行，锁开销可忽略。
+    transport: Mutex<Box<dyn McpTransport>>,
     /// 单调递增请求 ID，重连不重置。
     next_request_id: AtomicU64,
     /// 客户端元数据（协议版本 + 身份信息 + 能力），统一锁保护一致性。
     client_meta: Mutex<ClientMeta>,
+    /// 连接状态接收器（缓存，避免通过 Mutex 访问 transport.state()）。
+    state_rx: watch::Receiver<ConnectionState>,
 }
 
 impl McpClient {
@@ -64,10 +68,12 @@ impl McpClient {
     where
         T: McpTransport + 'static,
     {
+        let state_rx = transport.state();
         Self {
-            transport: Box::new(transport),
+            transport: Mutex::new(Box::new(transport)),
             next_request_id: AtomicU64::new(1),
             client_meta: Mutex::new(ClientMeta::default_new()),
+            state_rx,
         }
     }
 
@@ -94,13 +100,13 @@ impl McpClient {
 
     /// 连接到 MCP Server。
     pub async fn connect(&mut self) -> Result<(), McpError> {
-        self.transport.connect().await
+        self.transport.lock().await.connect().await
     }
 
     /// 单次重连（connect + initialize），由 Runtime 决定是否调用。
     pub async fn reconnect_once(&mut self) -> Result<(), McpError> {
-        self.transport.close().await.ok();
-        self.transport.connect().await?;
+        self.transport.lock().await.close().await.ok();
+        self.transport.lock().await.connect().await?;
         self.initialize().await.map(|_| ())
     }
 
@@ -168,7 +174,7 @@ impl McpClient {
             .await?;
 
         // 委托给 Transport，由 Transport 决定是否支持
-        self.transport.subscribe(req).await
+        self.transport.lock().await.subscribe(req).await
     }
 
     /// 拉取工具列表。
@@ -226,7 +232,7 @@ impl McpClient {
         P: Serialize,
     {
         // 1. Fail-fast 状态检查
-        let state = *self.transport.state().borrow();
+        let state = *self.transport.lock().await.state().borrow();
         if !state.allows_request() {
             return Err(McpError::Transport(TransportError::Disconnected));
         }
@@ -265,7 +271,7 @@ impl McpClient {
     where
         R: for<'de> Deserialize<'de>,
     {
-        let resp = self.transport.request(req).await?;
+        let resp = self.transport.lock().await.request(req).await?;
 
         match resp.result {
             super::protocol::JsonRpcResult::Success(v) => {
@@ -279,25 +285,27 @@ impl McpClient {
     }
 
     /// 断开连接。
-    pub async fn close(&mut self) -> Result<(), McpError> {
-        self.transport.close().await
+    ///
+    /// 通过 `&self` 调用，支持通过 Arc<McpClient> 关闭。
+    pub async fn close(&self) -> Result<(), McpError> {
+        self.transport.lock().await.close().await
     }
 
     /// 获取当前连接状态。
-    pub fn state(&self) -> tokio::sync::watch::Receiver<ConnectionState> {
-        self.transport.state()
+    pub fn state(&self) -> watch::Receiver<ConnectionState> {
+        self.state_rx.clone()
     }
 
     /// 订阅 notification —— 委托给 Transport 的 broadcast channel。
-    pub fn subscribe_notifications(
+    pub async fn subscribe_notifications(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<JsonRpcNotification>> {
-        self.transport.subscribe_notifications()
+        self.transport.lock().await.subscribe_notifications()
     }
 
     /// 查询 Transport 能力（编译时固定，不依赖连接状态）。
-    pub fn capabilities(&self) -> TransportCapabilities {
-        self.transport.capabilities()
+    pub async fn capabilities(&self) -> TransportCapabilities {
+        self.transport.lock().await.capabilities()
     }
 
     // ─── 便捷构造 ─────────────────────────────────────────────────

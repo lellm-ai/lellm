@@ -72,8 +72,8 @@ pub struct StdioTransport {
 }
 
 struct StdioTransportInner {
-    #[allow(dead_code)]
-    child: Child,
+    /// tokio Mutex 保护 Child，允许通过 Arc 异步调用 kill/wait。
+    child: Mutex<Child>,
     stdin: Mutex<tokio::process::ChildStdin>,
     pending: Arc<Mutex<PendingMap>>,
     notification_tx: tokio::sync::broadcast::Sender<JsonRpcNotification>,
@@ -214,7 +214,7 @@ impl McpTransport for StdioTransport {
         });
 
         self.inner = Some(Arc::new(StdioTransportInner {
-            child,
+            child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             pending,
             notification_tx,
@@ -285,7 +285,15 @@ impl McpTransport for StdioTransport {
 
     async fn close(&mut self) -> Result<(), McpError> {
         if let Some(ref inner) = self.inner {
+            // 1. 发送优雅关闭信号
             let _ = inner.shutdown.send(true);
+            // 2. 短暂等待子进程自然退出
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // 3. 强制终止（tokio Mutex 保护，可通过 Arc 异步调用）
+            let mut child = inner.child.lock().await;
+            let _ = child.kill().await;
+            // 4. 等待进程退出
+            let _ = child.wait().await;
         }
         self.inner = None;
         self.state.send(ConnectionState::Closed).ok();

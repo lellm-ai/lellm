@@ -17,7 +17,9 @@
 //! - `McpCatalog` — 单 Server 目录，持有 Client 引用 + 工具快照
 //! - `CatalogRefresher` — 纯写接口，供 Watcher 调用刷新
 
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
+
+use parking_lot::RwLock;
 
 use indexmap::IndexMap;
 use lellm_core::{ToolDefinition, ToolError, ToolErrorKind};
@@ -45,17 +47,17 @@ impl CatalogStore {
 
     /// 加载当前快照（克隆 Arc，零锁竞争）。
     pub(crate) fn load(&self) -> Arc<ToolSnapshot> {
-        self.snapshot.read().unwrap().clone()
+        self.snapshot.read().clone()
     }
 
     /// 工具数量。
     pub(crate) fn len(&self) -> usize {
-        self.snapshot.read().unwrap().len()
+        self.snapshot.read().len()
     }
 
     /// 是否无工具。
     pub(crate) fn is_empty(&self) -> bool {
-        self.snapshot.read().unwrap().is_empty()
+        self.snapshot.read().is_empty()
     }
 }
 
@@ -67,7 +69,7 @@ pub(crate) trait CatalogStoreWrite {
 
 impl CatalogStoreWrite for CatalogStore {
     fn store_raw(&self, snapshot: Arc<ToolSnapshot>) {
-        *self.snapshot.write().unwrap() = snapshot;
+        *self.snapshot.write() = snapshot;
     }
 }
 

@@ -9,7 +9,8 @@
 //! - Registry 不实现 ToolCatalog，通过 catalog() 返回 RegistryCatalog
 
 use std::sync::Arc;
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
 
 use indexmap::IndexMap;
 use tokio_util::sync::CancellationToken;
@@ -131,9 +132,15 @@ struct ManagedServer {
 impl Drop for ManagedServer {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Some(handle) = &self.watcher {
+        if let Some(handle) = self.watcher.take() {
             handle.abort();
         }
+        // clone Arc 并 spawn 异步关闭传输层，避免孤儿进程/连接泄漏。
+        // close() 已改为 &self，可通过 Arc 调用。
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let _ = client.close().await;
+        });
     }
 }
 
@@ -215,8 +222,8 @@ impl McpServerRegistry {
         let cancel = CancellationToken::new();
 
         // 通过 TransportCapabilities 判断是否 spawn Watcher
-        let watcher = if client_arc.capabilities().notifications {
-            match client_arc.subscribe_notifications() {
+        let watcher = if client_arc.capabilities().await.notifications {
+            match client_arc.subscribe_notifications().await {
                 Some(rx) => {
                     let refresher =
                         CatalogRefresher::new(Arc::clone(&client_arc), Arc::clone(&store));
@@ -249,10 +256,7 @@ impl McpServerRegistry {
         );
 
         // 更新 stores 索引（RegistryCatalog 共享读取）
-        self.stores
-            .write()
-            .unwrap()
-            .insert(name, Arc::clone(&store));
+        self.stores.write().insert(name, Arc::clone(&store));
 
         Ok(())
     }
@@ -332,7 +336,7 @@ impl McpServerRegistry {
         let _server = self.servers.shift_remove(name);
 
         // 清理 stores 索引
-        self.stores.write().unwrap().shift_remove(name);
+        self.stores.write().shift_remove(name);
 
         // 清理 tool_index（仅 Error 策略下有效）
         if matches!(&self.conflict_policy, NameConflictPolicy::Error) {
@@ -427,7 +431,7 @@ struct RegistryCatalog {
 #[async_trait::async_trait]
 impl ToolCatalog for RegistryCatalog {
     async fn snapshot(&self) -> Arc<ToolSnapshot> {
-        let stores = self.stores.read().unwrap();
+        let stores = self.stores.read();
         let mut reg_map = IndexMap::new();
 
         for (server_name, store) in stores.iter() {

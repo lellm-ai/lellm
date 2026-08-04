@@ -127,7 +127,14 @@ impl McpError {
             },
             McpError::Protocol(_) => RetryDisposition::Never,
             McpError::InvalidParams(_) => RetryDisposition::Never,
-            McpError::Server(_) => RetryDisposition::Never,
+            McpError::Server(err) => {
+                // -32603 Internal error 可能是瞬态故障，允许退避重试
+                if err.code == -32603 {
+                    RetryDisposition::Backoff
+                } else {
+                    RetryDisposition::Never
+                }
+            }
             McpError::MethodNotFound(_) => RetryDisposition::Never,
         }
     }

@@ -2,8 +2,8 @@
 //!
 //! 存储层操作 `CheckpointBlob`（bytes in / bytes out），与 State 类型和序列化格式解耦。
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 
 use async_trait::async_trait;
 
@@ -69,7 +69,7 @@ impl InMemoryBlobStore {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.read().unwrap().store.len()
+        self.inner.read().store.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -85,10 +85,7 @@ impl BlobCheckpointStore for InMemoryBlobStore {
         blob: &CheckpointBlob,
     ) -> Result<(), CheckpointStoreError> {
         let id = blob.id.clone();
-        let mut inner = self
-            .inner
-            .write()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let mut inner = self.inner.write();
         inner.store.insert(id.clone(), blob.clone());
         inner.index.entry(*trace_id).or_default().push(id);
         Ok(())
@@ -98,10 +95,7 @@ impl BlobCheckpointStore for InMemoryBlobStore {
         &self,
         id: &CheckpointId,
     ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
-        let inner = self
-            .inner
-            .read()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let inner = self.inner.read();
         Ok(inner.store.get(id).cloned())
     }
 
@@ -109,10 +103,7 @@ impl BlobCheckpointStore for InMemoryBlobStore {
         &self,
         trace_id: &TraceId,
     ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
-        let inner = self
-            .inner
-            .read()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let inner = self.inner.read();
         let last_id = inner
             .index
             .get(trace_id)
@@ -125,27 +116,18 @@ impl BlobCheckpointStore for InMemoryBlobStore {
     }
 
     async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError> {
-        let inner = self
-            .inner
-            .read()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let inner = self.inner.read();
         let ids = inner.index.get(trace_id).cloned().unwrap_or_default();
         Ok(ids.into_iter().rev().collect())
     }
 
     async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError> {
-        let mut inner = self
-            .inner
-            .write()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let mut inner = self.inner.write();
         Ok(inner.store.remove(id).is_some())
     }
 
     async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError> {
-        let mut inner = self
-            .inner
-            .write()
-            .map_err(|e| CheckpointStoreError::Storage(e.to_string()))?;
+        let mut inner = self.inner.write();
         let to_delete: Vec<CheckpointId> = match inner.index.get_mut(trace_id) {
             Some(ids) if ids.len() > keep => {
                 let remove_count = ids.len() - keep;

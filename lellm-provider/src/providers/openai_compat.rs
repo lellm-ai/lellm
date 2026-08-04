@@ -395,10 +395,10 @@ impl ModelCapabilities for OpenAICompatCodec {
     fn capabilities_for(&self, model: &str) -> Capabilities {
         let mut caps = Capabilities::default();
         let lower = model.to_lowercase();
-        // Most OpenAI models with "vision" or "4o" support image input
-        if lower.contains("vision") || lower.contains("-4o") || lower.contains("gpt-4.5") {
-            caps.supports_image_input = true;
-        }
+        // TODO(v0.5): 实现 Image 序列化后恢复
+        // if lower.contains("vision") || lower.contains("-4o") || lower.contains("gpt-4.5") {
+        //     caps.supports_image_input = true;
+        // }
         // o1, o3, r1-style models support reasoning
         if lower.contains("o1-")
             || lower.contains("o3-")
