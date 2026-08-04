@@ -18,8 +18,8 @@ use lellm_core::{
 };
 use lellm_derive::tool;
 use lellm_graph::{
-    GraphBuilder, GraphError, LeafContext, NodeContext, NodeKind, State, StateMerge, StateMutation,
-    TaskNode,
+    ConditionNode, GraphBuilder, GraphError, LeafContext, LeafNode, NodeKind, State, StateMerge,
+    StateMutation,
 };
 use lellm_provider::{ProviderEvent, ProviderStream, ResolvedModel};
 use serde_json::Value;
@@ -157,16 +157,14 @@ fn get_iterations(state: &State) -> usize {
 
 // ─── Graph 节点 ─────────────────────────────────────────────────
 
-fn create_budget_check(max_iterations: usize) -> TaskNode<State> {
-    TaskNode::new("budget_chk", move |ctx: &mut NodeContext<'_, State>| {
-        let iterations = get_iterations(ctx.state());
-        if iterations >= max_iterations {
-            ctx.goto("done");
-        }
-        Ok(())
-    })
+/// 预算检查 — 纯路由，用 ConditionNode
+fn create_budget_check(max_iterations: usize) -> ConditionNode<State> {
+    ConditionNode::builder("budget_chk")
+        .branch("done", move |state| get_iterations(state) >= max_iterations)
+        .build()
 }
 
+/// LLM 调用 — 异步，用 LeafNode
 struct LlmCallNode {
     model: ResolvedModel,
 }
@@ -175,8 +173,11 @@ impl LlmCallNode {
     fn new(model: ResolvedModel) -> Self {
         Self { model }
     }
+}
 
-    async fn run(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
+#[async_trait]
+impl LeafNode<State> for LlmCallNode {
+    async fn execute(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
         let messages = get_messages(ctx.state());
 
         let request = ChatRequest {
@@ -226,33 +227,27 @@ impl LlmCallNode {
     }
 }
 
+/// 后 LLM 路由 — 纯路由，用 ConditionNode
+fn create_post_llm_route() -> ConditionNode<State> {
+    ConditionNode::builder("post_llm_route")
+        .branch("tool_execute", |state: &State| {
+            state
+                .get(KEY_TOOL_CALLS)
+                .and_then(|v| v.as_array())
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false)
+        })
+        .build()
+}
+
+/// 工具执行 — 有副作用，用 LeafNode
+struct ToolExecuteNode {
+    tools: Arc<Vec<ExecutableTool>>,
+}
+
 #[async_trait]
-impl lellm_graph::LeafNode<State> for LlmCallNode {
+impl LeafNode<State> for ToolExecuteNode {
     async fn execute(&self, ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
-        self.run(ctx).await
-    }
-}
-
-fn create_post_llm_route() -> TaskNode<State> {
-    TaskNode::new("post_llm_route", |ctx: &mut NodeContext<'_, State>| {
-        let has_tool_calls = ctx
-            .state()
-            .get(KEY_TOOL_CALLS)
-            .and_then(|v| v.as_array())
-            .map(|arr| !arr.is_empty())
-            .unwrap_or(false);
-
-        if has_tool_calls {
-            ctx.goto("tool_execute");
-        } else {
-            ctx.end();
-        }
-        Ok(())
-    })
-}
-
-fn create_tool_execute(tools: Arc<Vec<ExecutableTool>>) -> TaskNode<State> {
-    TaskNode::new("tool_execute", move |ctx: &mut NodeContext<'_, State>| {
         let tool_calls: Vec<ToolCall> = ctx
             .state()
             .get(KEY_TOOL_CALLS)
@@ -272,12 +267,9 @@ fn create_tool_execute(tools: Arc<Vec<ExecutableTool>>) -> TaskNode<State> {
 
         for tc in &tool_calls {
             let tool =
-                find_tool(&tc.name, &tools).unwrap_or_else(|| panic!("未知工具: {}", tc.name));
+                find_tool(&tc.name, &self.tools).unwrap_or_else(|| panic!("未知工具: {}", tc.name));
 
-            // 直接调用 ExecutableTool::execute — 自动反序列化参数
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(tool.execute(&tc.arguments))
-            });
+            let result = tool.execute(&tc.arguments).await;
             let tool_result_msg = Message::tool_result(tc, &result);
             msgs.push(tool_result_msg);
         }
@@ -289,7 +281,17 @@ fn create_tool_execute(tools: Arc<Vec<ExecutableTool>>) -> TaskNode<State> {
         ctx.record(StateMutation::Delete(KEY_TOOL_CALLS.into()));
         ctx.goto("budget_chk");
         Ok(())
-    })
+    }
+}
+
+/// 终止节点 — 空操作
+struct DoneNode;
+
+#[async_trait]
+impl LeafNode<State> for DoneNode {
+    async fn execute(&self, _ctx: &mut LeafContext<'_, State>) -> Result<(), GraphError> {
+        Ok(())
+    }
 }
 
 // ─── 构建 Graph ─────────────────────────────────────────────────
@@ -305,24 +307,28 @@ fn build_graph(
 
     builder.node(
         "budget_chk",
-        NodeKind::Task(create_budget_check(max_iterations)),
+        NodeKind::ExternalLeaf(Arc::new(create_budget_check(max_iterations))),
     );
     builder.node(
         "llm_call",
         NodeKind::ExternalLeaf(Arc::new(LlmCallNode::new(model))),
     );
-    builder.node("post_llm_route", NodeKind::Task(create_post_llm_route()));
-    builder.node("tool_execute", NodeKind::Task(create_tool_execute(tools)));
+    builder.node(
+        "post_llm_route",
+        NodeKind::ExternalLeaf(Arc::new(create_post_llm_route())),
+    );
+    builder.node(
+        "tool_execute",
+        NodeKind::ExternalLeaf(Arc::new(ToolExecuteNode { tools })),
+    );
     builder.node(
         "done",
-        NodeKind::Task(TaskNode::new(
-            "done",
-            |_ctx: &mut NodeContext<'_, State>| Ok(()),
-        )),
+        NodeKind::ExternalLeaf(Arc::new(DoneNode)),
     );
 
     builder.edge("budget_chk", "llm_call");
     builder.edge("llm_call", "post_llm_route");
+    builder.edge("post_llm_route", "done");
     builder.edge("tool_execute", "budget_chk");
     builder.end("done");
 
