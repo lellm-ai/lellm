@@ -427,6 +427,37 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                 let span_id = SpanId::new();
                 step_cb.on_barrier_waiting(&barrier_id, &current, span_id);
                 let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await;
+
+                // 从当前 Barrier 节点读取配置（reject_target / default_action）
+                let barrier = match node {
+                    NodeKind::Barrier(b) => b,
+                    _ => unreachable!("Pause 信号仅由 Barrier 节点产生"),
+                };
+
+                // 归约「是否拒绝」：显式 Reject，或超时且 default_action=Reject
+                let rejected = match &outcome {
+                    crate::node::barrier_sink::BarrierOutcome::Decision(
+                        crate::event::BarrierDecision::Reject { .. },
+                    ) => true,
+                    crate::node::barrier_sink::BarrierOutcome::TimedOut => matches!(
+                        barrier.default_action,
+                        crate::node::BarrierDefaultAction::Reject
+                    ),
+                    _ => false,
+                };
+
+                // 拒绝（显式 Reject 或超时 default_action=Reject）— 受保护动作不执行：
+                // 有 reject_target → 跳转处理；否则结束执行
+                if rejected {
+                    match &barrier.reject_target {
+                        Some(target) => {
+                            current = target.clone();
+                            continue;
+                        }
+                        None => return Ok(()),
+                    }
+                }
+
                 match outcome {
                     crate::node::barrier_sink::BarrierOutcome::Decision(
                         crate::event::BarrierDecision::Reroute { target },
@@ -434,21 +465,13 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
                         current = target;
                         continue;
                     }
-                    crate::node::barrier_sink::BarrierOutcome::Decision(
-                        crate::event::BarrierDecision::Approve
-                        | crate::event::BarrierDecision::Reject { .. }
-                        | crate::event::BarrierDecision::Modify { .. },
-                    ) => {
-                        // Approve/Reject/Modify — 继续正常路由
-                    }
-                    crate::node::barrier_sink::BarrierOutcome::TimedOut => {
-                        // 超时 — 默认 Reject 语义，继续正常路由
-                    }
                     crate::node::barrier_sink::BarrierOutcome::Cancelled => {
                         return Err(GraphError::Terminal(
                             crate::error::TerminalError::BarrierCancelled { node: current },
                         ));
                     }
+                    // Approve / Modify / Timeout(Approve|Skip) — 继续正常路由
+                    _ => {}
                 }
             }
 

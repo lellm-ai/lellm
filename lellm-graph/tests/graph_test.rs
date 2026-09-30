@@ -478,7 +478,10 @@ async fn test_barrier_reject_with_back_jump() {
                 Ok(())
             })),
         );
-        let _ = g.node("review", NodeKind::Barrier(BarrierNode::new("review")));
+        let _ = g.node(
+            "review",
+            NodeKind::Barrier(BarrierNode::new("review").reject_target("task")),
+        );
         let _ = g.edge("task", "review");
         let _ = g.edge_if("review", "task", |s: &State| {
             s.get("review.reject_reason").is_some()
@@ -675,6 +678,191 @@ async fn test_barrier_reroute() {
             GraphEvent::GraphError { error, .. } => {
                 panic!("unexpected error: {error}");
             }
+            _ => {}
+        }
+    }
+}
+
+// ─── P0 回归测试（R2）：HITL 拒绝/超时不执行受保护动作 ────────────
+
+/// P0 回归（R2）：Reject（无 reject_target）→ 受保护动作不执行，图正常结束。
+#[tokio::test]
+async fn test_barrier_reject_skips_protected_action() {
+    let graph = build_graph("reject_skip", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node("barrier", NodeKind::Barrier(BarrierNode::new("review")));
+        let _ = g.node(
+            "protected",
+            NodeKind::Task(TaskNode::new("protected", |ctx: &mut NodeContext<'_>| {
+                ctx.record(StateMutation::Put(
+                    "executed".into(),
+                    serde_json::json!(true),
+                ));
+                Ok(())
+            })),
+        );
+        let _ = g.edge("barrier", "protected");
+        let _ = g.end("protected");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution { mut stream, handle } =
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
+
+    let mut decided = false;
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::BarrierWaiting { barrier_id, .. } if !decided => {
+                decided = true;
+                let _ = handle
+                    .decide(
+                        barrier_id,
+                        BarrierDecision::Reject {
+                            reason: "no".into(),
+                        },
+                    )
+                    .await;
+            }
+            GraphEvent::GraphComplete { result } => {
+                assert!(
+                    result.state.get("executed").is_none(),
+                    "受保护动作必须在 Reject 后不执行"
+                );
+                break;
+            }
+            GraphEvent::GraphError { error, .. } => panic!("unexpected error: {error}"),
+            _ => {}
+        }
+    }
+}
+
+/// P0 回归（R2）：Reject（有 reject_target）→ 跳转到拒绝处理节点，受保护动作不执行。
+#[tokio::test]
+async fn test_barrier_reject_routes_to_target() {
+    let graph = build_graph("reject_target", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node(
+            "barrier",
+            NodeKind::Barrier(BarrierNode::new("review").reject_target("on_reject")),
+        );
+        let _ = g.node(
+            "protected",
+            NodeKind::Task(TaskNode::new("protected", |ctx: &mut NodeContext<'_>| {
+                ctx.record(StateMutation::Put(
+                    "executed".into(),
+                    serde_json::json!(true),
+                ));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "on_reject",
+            NodeKind::Task(TaskNode::new("on_reject", |ctx: &mut NodeContext<'_>| {
+                ctx.record(StateMutation::Put(
+                    "rejected_handled".into(),
+                    serde_json::json!(true),
+                ));
+                Ok(())
+            })),
+        );
+        let _ = g.node(
+            "end_node",
+            NodeKind::Task(TaskNode::new("end_node", |_ctx: &mut NodeContext<'_>| {
+                Ok(())
+            })),
+        );
+        let _ = g.edge("barrier", "protected");
+        let _ = g.edge("protected", "end_node");
+        let _ = g.edge("on_reject", "end_node");
+        let _ = g.end("end_node");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution { mut stream, handle } =
+        SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
+
+    let mut decided = false;
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            GraphEvent::BarrierWaiting { barrier_id, .. } if !decided => {
+                decided = true;
+                let _ = handle
+                    .decide(
+                        barrier_id,
+                        BarrierDecision::Reject {
+                            reason: "no".into(),
+                        },
+                    )
+                    .await;
+            }
+            GraphEvent::GraphComplete { result } => {
+                assert!(
+                    result.state.get("rejected_handled").is_some(),
+                    "拒绝处理节点必须执行"
+                );
+                assert!(
+                    result.state.get("executed").is_none(),
+                    "受保护动作必须不执行"
+                );
+                break;
+            }
+            GraphEvent::GraphError { error, .. } => panic!("unexpected error: {error}"),
+            _ => {}
+        }
+    }
+}
+
+/// P0 回归（R2）：超时（default_action=Reject）→ 受保护动作不执行。
+#[tokio::test]
+async fn test_barrier_timeout_reject_skips_protected() {
+    let graph = build_graph("timeout_skip", |g| {
+        let _ = g.start("barrier");
+        let _ = g.node(
+            "barrier",
+            NodeKind::Barrier(
+                BarrierNode::new("review")
+                    .timeout(Duration::from_millis(50))
+                    .default_action(BarrierDefaultAction::Reject),
+            ),
+        );
+        let _ = g.node(
+            "protected",
+            NodeKind::Task(TaskNode::new("protected", |ctx: &mut NodeContext<'_>| {
+                ctx.record(StateMutation::Put(
+                    "executed".into(),
+                    serde_json::json!(true),
+                ));
+                Ok(())
+            })),
+        );
+        let _ = g.edge("barrier", "protected");
+        let _ = g.end("protected");
+        Ok(())
+    })
+    .expect("build should succeed");
+
+    let GraphExecution {
+        mut stream,
+        handle: _handle,
+    } = SimpleExecutor::default().execute_stream(Arc::new(graph), State::new());
+
+    loop {
+        let event = stream.recv().await.expect("stream should not close");
+        match event {
+            // 故意不发送决策 — 触发超时（default_action=Reject）
+            GraphEvent::BarrierWaiting { .. } => {}
+            GraphEvent::GraphComplete { result } => {
+                assert!(
+                    result.state.get("executed").is_none(),
+                    "受保护动作必须在超时(Reject)后不执行"
+                );
+                break;
+            }
+            GraphEvent::GraphError { error, .. } => panic!("unexpected error: {error}"),
             _ => {}
         }
     }

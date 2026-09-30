@@ -36,6 +36,9 @@ pub struct BarrierNode<S: WorkflowState = State> {
     pub default_action: BarrierDefaultAction,
     pub reject_key: String,
     pub approve_key: String,
+    /// 拒绝（或超时 default_action=Reject）后的跳转目标节点。
+    /// 配置后 → goto 该节点处理拒绝；未配置 → 结束执行。
+    pub reject_target: Option<String>,
     /// 每次 execute() 递增，生成唯一的 BarrierId::occurrence。
     /// Arc 包裹确保 clone 后共享同一计数器。
     occurrence_counter: std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -52,6 +55,7 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
             default_action: BarrierDefaultAction::default(),
             reject_key: format!("{name}.reject_reason"),
             approve_key: format!("{name}.approved"),
+            reject_target: None,
             occurrence_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             _phantom: std::marker::PhantomData,
         }
@@ -74,6 +78,12 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
 
     pub fn approve_key(mut self, key: impl Into<String>) -> Self {
         self.approve_key = key.into();
+        self
+    }
+
+    /// 设置拒绝（或超时 default_action=Reject）后的跳转目标节点。
+    pub fn reject_target(mut self, target: impl Into<String>) -> Self {
+        self.reject_target = Some(target.into());
         self
     }
 
