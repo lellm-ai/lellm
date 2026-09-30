@@ -6,7 +6,7 @@
 
 **用可检查的思维构建 AI Agent。**
 
-每个 Agent 都是编译后的有向图 —— 不是黑盒 `while` 循环。编译期类型安全、持久化检查点、人工介入、无需外部服务。
+每个 Agent 都是编译后的有向图 —— 不是黑盒 `while` 循环。编译期类型安全、节点边界状态检查点、人工介入 Barrier、无需外部服务。
 
 [![crates.io](https://img.shields.io/crates/v/lellm.svg)](https://crates.io/crates/lellm)
 [![License](https://img.shields.io/crates/l/lellm)](LICENSE)
@@ -53,9 +53,9 @@ match result.stop_reason {
 | Agent 循环无限空转 | 硬性 `max_iterations` + Token 预算，在图边界强制执行 |
 | 对话中途上下文溢出 | 可插拔压缩节点，可观测的 Token 计数 |
 | 工具失败导致整个流程崩溃 | 类型化重试策略 + `ParallelSafety` 分类 |
-| 崩溃 = 丢失所有对话状态 | Checkpoint + Mutation Log + 执行 Trace |
+| 重启丢失进行中状态 | 节点边界状态检查点 + 执行 Trace（持久化恢复 + Mutation Log 见路线图） |
 | "信我就对了"的运行时类型 | Rust struct —— 无效状态编译时报错 |
-| 可观测性依赖付费云服务 | 内置 Trace + Mutation Log —— 零 SaaS 依赖 |
+| 可观测性依赖付费云服务 | 内置执行 Trace —— 零 SaaS 依赖（Mutation Log 见路线图） |
 
 ---
 
@@ -70,21 +70,25 @@ START → budget_check ──(充足)──→ [llm] → [post_llm_check]
                                    │       无工具 → [end]
 ```
 
-ReAct 循环不是 `while` —— 而是带有类型化节点和边的真实有向图。所有图功能 —— 检查点、Barrier、并行执行、追踪 —— 对 Agent 自动生效。
+ReAct 循环不是 `while` —— 而是带有类型化节点和边的真实有向图。图功能 —— Barrier、并行执行、追踪 —— 对 Agent 生效；Agent 路径自动检查点见路线图。
 
-### 持久化执行
+### 状态检查点
 
-在节点边界持久化状态，从精确故障点恢复：
+在节点边界快照状态并恢复：
 
 ```rust
 let checkpoint = session.checkpoint();
-// ... 崩溃、重启、部署 ...
+// ... 之后 ...
 let restored = ExecutionSession::restore(checkpoint, graph)?;
 ```
 
+> **当前行为**：restore 重建状态并从图起始节点重跑 —— 是状态快照，尚非从故障点续跑。磁盘持久化、从节点续跑的 durable 恢复见路线图。
+
 ### 人工介入
 
-在任意节点暂停，检查或修改状态，决定批准 / 拒绝 / 修改 / 重路由：
+在节点暂停并等待决策：
+
+> **当前行为**：`Approve`（继续）与 `Reroute`（跳转到节点）已完整支持；`Cancelled` 中止。`Reject`/`Modify`/超时的决策应用正在接通（见路线图）。
 
 ```rust
 let graph = GraphBuilder::<State>::new("workflow")
@@ -119,7 +123,7 @@ lellm = { version = "0.4", features = ["full"] }  # 全部启用
 |---|---|
 | `provider`（默认） | core + LLM 适配器 |
 | `graph` | 独立工作流引擎 —— **零 LLM 依赖** |
-| `agent` | 完整 Agent 运行时 —— ReAct + 工具 + 检查点 |
+| `agent` | 完整 Agent 运行时 —— ReAct + 工具（自动检查点见路线图） |
 | `mcp` | MCP 客户端/服务端 |
 | `derive` | `#[tool]` 和 `#[derive(Tool)]` 宏 |
 
@@ -159,11 +163,11 @@ lellm = { version = "0.4", features = ["full"] }  # 全部启用
 | 类型安全 | 编译期（Rust struct） | 运行时（TypedDict） |
 | Agent = Graph | 是 —— 编译后的内部图 | 是 —— StateGraph |
 | 图引擎 | 内置，**零 LLM 依赖** | 内置 |
-| 检查点 | 内置，强类型，Mutation Log | 内置 |
+| 检查点 | 内置，强类型状态快照（持久化恢复见路线图） | 内置 |
 | 人工介入 | `BarrierNode` 带路由 | `interrupt()` |
 | 流式输出 | 解耦管道 | 多种模式 |
 | 运行时 | 无 GIL，真正并行 | asyncio（受 GIL 限制） |
-| 可观测性 | **内置** Trace + Mutation Log | LangSmith（云服务） |
+| 可观测性 | **内置** 执行 Trace（Mutation Log 见路线图） | LangSmith（云服务） |
 | 部署 | Rust 能跑的任何地方 | 需要 Python 运行时 |
 
 ---
