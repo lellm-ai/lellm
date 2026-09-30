@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；第一批修复（README/并行/HITL/Google）已授权，持久恢复待单独评审
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1 已落地，16 测试全过）；HITL / Google 待办，持久恢复待单独评审
 
 ## 0. 审计基线（已锁定）
 
@@ -183,7 +183,7 @@
 
 | # | 复现 | 状态 | 命令 / feature / 工具链 | 预期 vs 实际 |
 |---|---|---|---|---|
-| R1 | 并行合并静默丢数据 | 已运行复现（算法复刻，`/tmp`）→ 待新增回归测试（调用真实 `ParallelNode`） | `cargo +1.88.0 test -p lellm-graph --test parallel_test` | 预期 `count=100`，复刻实际 `count=0` |
+| R1 | 并行合并静默丢数据 | ✅ 已转入仓库回归测试（`parallel_test.rs` 5 个 delta 回归测试，16 全过） | `cargo +1.88.0 test -p lellm-graph --test parallel_test` | 预期 `count=100`，修复后实际 `count=100` |
 | R2 | 拒绝/超时后受保护动作仍执行 | 源码推断 → 待新增回归测试 | `cargo +1.88.0 test -p lellm-graph --test graph_test barrier` | 预期 protected 不执行，源码推断会执行 |
 | R3 | Google 流式 tool-result 函数名 `"unknown"` | 源码推断 → 待新增回归测试（真实 codec + 固定样本） | `cargo +1.88.0 test -p lellm-provider --features mock` | 预期函数名正确，源码推断 `"unknown"` |
 | R4 | 恢复从头重跑（非断点续跑） | 源码推断 → 待新增回归测试（新进程加载） | `cargo +1.88.0 test -p lellm-graph` | 预期从断点续跑，源码推断从 start 重跑 |
@@ -197,7 +197,7 @@
 - [ ] **收紧 README** 中超出实现能力的承诺（Durable Execution、HITL 审批语义）
 
 **P0（优先处理）**：
-- [ ] 并行数据丢失（Q3 最小 delta + 冲突检测）+ R1 测试
+- [x] 并行数据丢失（Q3 最小 delta + 冲突检测）+ R1 测试 ✅ 2026-09-30（commit `ee16f2b`）
 - [ ] 审批拒绝/超时路径（Q2 阶段 1：单次运行行为）+ R2 测试
 - [ ] Google 工具往返（§6.1 小范围修）+ R3 测试
 
