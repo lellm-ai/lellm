@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成，待用户确认后进入实施
+- **状态**：分析完成；第一批修复（README/并行/HITL/Google）已授权，持久恢复待单独评审
 
 ## 0. 审计基线（已锁定）
 
@@ -27,7 +27,7 @@
 | 级别 | 问题 | 影响 |
 |---|---|---|
 | **P0** | 并行合并静默丢数据 | 单分支改 base key 被另一分支的 base 值覆盖（已实证） |
-| **P0** | HITL 拒绝/超时不阻止受保护动作 | barrier 后节点无论 Approve/Reject/Timeout 都执行；审批空转 |
+| **P0** | HITL 拒绝/超时未正确应用 | Reject/Modify/Timeout 未被正确应用、仍走正常路由，可能继续执行受保护动作（Reroute/Cancelled 另有行为） |
 | **P0** | Google 流式+工具往返实际坏 | 并行工具串号、tool-result 函数名 `"unknown"` |
 | **P0** | Durable Execution 名不副实 | 恢复从头重跑、仅内存 store、主路径无 checkpoint（**另设里程碑**） |
 | **P1** | 发布流程不保证发布包可用 + mcp feature 膨胀 | 无 test/`--no-verify`/`--allow-dirty`；mcp-only 用户编译 150 crate |
@@ -39,11 +39,11 @@
 | 文档承诺 | 代码实现（file:line） | 测试证据 | 缺口 / 风险 |
 |---|---|---|---|
 | **Durable checkpointing / Durable Execution** | restore 只还原 state，从 `start_node` 整图重跑（`session.rs:210`+`graph_core.rs:346`）；`current_node` 无消费者（`checkpoint_data.rs:97`）；**游标语义矛盾**（存的是刚完成节点，注释写「下一个节点」）；save 是 `tokio::spawn` fire-and-forget（`execution_loop.rs:144`）；仅内存 store（`store.rs:81`）；**Agent 主路径 checkpoint=None**（`runtime.rs:136-143`） | 11 个 checkpoint 测试全过（`cargo +1.88.0`），但只覆盖存/取/hash 校验 | 崩溃后**重复执行副作用工具**；无磁盘 store；`MutationLog` 死代码；`TimeBased` 静默 no-op；**无 crash-recovery / 重复执行 / 新进程恢复测试** |
-| **Human-in-the-loop** | 暂停/等待/re-wait 工作；但 `Approve\|Reject\|Modify` 同一 match 分支「继续正常路由」（`graph_core.rs:437-443`），`TimedOut` 注释称 Reject 却继续路由（`:444-446`）；`apply_decision_to_ctx` 死代码（`barrier_node.rs:80-107`） | 7 个 barrier 测试全过；`test_barrier_reject_with_back_jump`（`graph_test.rs:463`）弱断言掩盖死代码 | **拒绝/超时后受保护动作仍执行**；决策不改 state；崩溃后决策必丢；**无「拒绝后动作是否执行」测试** |
+| **Human-in-the-loop** | 暂停/等待/re-wait 工作；但 `Approve\|Reject\|Modify` 同一 match 分支「继续正常路由」（`graph_core.rs:437-443`），`TimedOut` 注释称 Reject 却继续路由（`:444-446`）；`apply_decision_to_ctx` 死代码（`barrier_node.rs:80-107`） | 7 个 barrier 测试全过；`test_barrier_reject_with_back_jump`（`graph_test.rs:463`）弱断言掩盖死代码 | **Reject/Modify/Timeout 未正确应用、仍走正常路由，可能继续执行受保护动作**（Reroute/Cancelled 另有行为）；决策不改 state；崩溃后决策必丢；**无「拒绝后动作是否执行」测试** |
 | **并行执行** | **全量 state 合并**（非 delta，`parallel_node.rs:218/235/259`）；同 key 按注册序 last-write-wins（`state_core.rs:117-125`）；`join_all` 等全部分支结束才处理 FailFast（`parallel_node.rs:266`） | 13 个 parallel 测试全过 | **单分支改 base key、另一分支不动 → 静默丢数据**（已实证）；`Reducer`/`StateConflict` 死代码；**FailFast 非执行层立即失败**；副作用不可回滚；**无 in-flight cancel / 单分支改 base key 测试** |
 | **多 Provider 流式** | 共享 `ToolCallAccumulator`；但 **Google `index=0`/`id="unknown"`**（`google.rs:323/324`）；finish reason 值三家全丢；帧错静默吞（`stream_processor.rs:188-197`） | 39 内联 + 3 集成全过，但**跨 provider 流式工具拼接覆盖 = 0** | **Google 流式+工具往返实际坏**；Google image 能力声明是假的；`LlmError::Provider.code` 恒 None；**默认 feature 下集成测试编译失败** |
-| **MCP client/server** | 实现完整；但 facade `mcp` feature 显式拉 `dep:lellm-agent`（`lellm/Cargo.toml:17`）→ **≈150 crate** | protocol/server 36 测试 | mcp-only 用户被迫编译 agent 运行时；死依赖（mcp `futures` 0 处 use、reqwest `blocking` src 0 处） |
-| **发布** | `publish.sh` 存在；但**无 `cargo test`**、`--no-verify`、`--allow-dirty`、"已发布跳过"死代码、`rm -rf`+硬编码路径（`publish.sh:71-73`） | **无 CI、无 CHANGELOG、无 tag** | 发布包可用性从未验证；部分失败后无法重跑；发布包与 commit 无法对应 |
+| **MCP client/server** | 有 36 个 protocol/server 测试，但无自动化流程验证完整功能；facade `mcp` feature 显式拉 `dep:lellm-agent`（`lellm/Cargo.toml:17`）→ **≈150 crate** | protocol/server 36 测试 | mcp-only 用户被迫编译 agent 运行时；死依赖（mcp `futures` 0 处 use、reqwest `blocking` src 0 处） |
+| **发布** | `publish.sh` 存在；但**无 `cargo test`**、`--no-verify`、`--allow-dirty`、"已发布跳过"死代码、`rm -rf`+硬编码路径（`publish.sh:71-73`） | **无 CI、无 CHANGELOG、无 tag** | 无自动化流程验证发布包（无法排除历史人工验证）；部分失败后无法重跑；发布包与 commit 无法对应 |
 
 ---
 
@@ -60,7 +60,7 @@
 
 1. **Durable Execution 游标语义矛盾**：`graph_core.rs:416` `emit_checkpoint(&current, step)` 在 execute+commit 之后调用，`current` 是**刚完成节点**；`execution_loop.rs:142` 把它存进 `Checkpoint.current_node`；但 `checkpoint_data.rs:96-97` 注释写「下一个要执行的节点」。**直接改恢复入口为 `current_node` 会重跑刚完成节点。**
 2. **两套 checkpoint 对象**：`Checkpoint`（带 `current_node`，`checkpoint_data.rs:93`）与 `SessionCheckpoint`（带 `frames`，`session.rs`）恢复契约不统一；`ExecutionSession::restore`（`session.rs:198-216`）还原 state+frames 后 `run_inline` 恒从 `start_node` 起跑。
-3. **HITL 决策不影响路由**：`graph_core.rs:437-446` 中 Approve/Reject/Modify/TimedOut 均「继续正常路由」，只有 Reroute/Cancelled 改变流向。**barrier 后节点无论决策都执行。**
+3. **HITL 部分决策未正确应用**：`graph_core.rs:437-446` 中 Reject/Modify/TimedOut 与 Approve 同走「继续正常路由」（未被正确应用），只有 Reroute/Cancelled 改变流向。**因此 Reject/Modify/Timeout 后可能继续执行受保护动作**（Reroute/Cancelled 行为不同，不在此列）。
 4. **`apply_decision_to_ctx` 死代码**：`barrier_node.rs:80-107` 无调用方，Reject 不写 `reject_reason`，Modify 不应用修改。
 5. **Google Provider**：`google.rs:323` `index=0`（并行串号）、`:324` `id=None`（finalize 成 `"unknown"`）、`:83-85` tool-result 回传 `name="unknown"`。
 6. **发布流程**：`publish.sh:53-54` 无 test、`:106` `--no-verify --allow-dirty`、`:93-102` 死跳过检查、`:71-73` `rm -rf`+硬编码 `/Users/pengh/data/...`。
@@ -84,7 +84,7 @@
 
 ### 问题 2：HITL 拒绝/超时不阻止受保护动作（P0）
 - **位置**：`graph_core.rs:437-446`、`barrier_node.rs:80-107`
-- **风险**：barrier 后节点无论 Approve/Reject/Timeout 都执行（决策不影响路由）；`apply_decision_to_ctx` 死代码使 Reject 不写 state、Modify 不应用。**审批空转。**
+- **风险**：Reject/Modify/Timeout 未被正确应用、与 Approve 同走正常路由，因此可能继续执行受保护动作（Reroute/Cancelled 另有行为）；`apply_decision_to_ctx` 死代码使 Reject 不写 state、Modify 不应用。
 - **测试证据**：7 个 barrier 测试全过，但 reject_back_jump 弱断言掩盖死代码；无「拒绝后动作是否执行」测试。
 - **建议**：见 §5 Q2（分阶段接通）。
 
@@ -102,13 +102,13 @@
 
 ### 问题 5：发布流程 + mcp feature 膨胀（P1）
 - **位置**：`publish.sh:53-54/71-73/93-102/106`、`lellm/Cargo.toml:17`
-- **风险**：发布包从未独立验证；`--allow-dirty` 让发布包与 commit 无法对应；部分失败无法重跑；mcp-only 用户编译 150 crate。
+- **风险**：仓库无自动化流程验证发布包独立构建（无法排除历史人工验证）；`--allow-dirty` 让发布包与 commit 无法对应；部分失败无法重跑；mcp-only 用户编译 150 crate。
 - **测试证据**：无 CI、无 CHANGELOG、无 tag。
 - **建议**：见 §6，含兼容策略。
 
 ---
 
-## 5. 已确认的决策（用户定稿）
+## 5. 拟采用方案（待授权实施）
 
 ### Q1：Durable Execution —— 收紧范围的第一阶段（C 的限定版）
 
@@ -178,15 +178,16 @@
 
 ## 7. 最小复现（待转入仓库测试）
 
-> 记录命令、feature、工具链、结果。**不要只保留 `/tmp` 中的验证。** 工具链统一 `cargo +1.88.0`（stable 损坏）。
+> 记录命令、feature、工具链。**不要只保留 `/tmp` 中的验证。** 工具链统一 `cargo +1.88.0`（stable 损坏）。
+> 状态分三类：**已运行复现**（已实际执行观测）/ **源码推断**（读代码确认，未运行）/ **待新增回归测试**（需调用仓库真实实现验证完整链路）。
 
-| # | 复现 | 命令 / feature / 工具链 | 预期 vs 实际 |
-|---|---|---|---|
-| R1 | 并行合并静默丢数据 | 新增 `lellm-graph/tests/parallel_test.rs` 用例；`cargo +1.88.0 test -p lellm-graph --test parallel_test` | 预期 `count=100`，实际 `count=0` |
-| R2 | 拒绝/超时后受保护动作仍执行 | 新增 `lellm-graph/tests/graph_test.rs` 用例（barrier → protected，Reject 决策）；`cargo +1.88.0 test -p lellm-graph --test graph_test barrier` | 预期 protected 不执行，实际执行 |
-| R3 | Google 流式 tool-result 函数名 `"unknown"` | 新增 `lellm-provider` 真实 codec `decode_sse` 测试；`cargo +1.88.0 test -p lellm-provider --features mock` | 预期函数名正确，实际 `"unknown"` |
-| R4 | 恢复从头重跑（非断点续跑） | 新增**新进程**加载 checkpoint 的集成测试；`cargo +1.88.0 test -p lellm-graph` | 预期从断点续跑，实际从 start 重跑 |
-| R5 | 默认 feature 集成测试编译失败 | `cargo +1.88.0 test -p lellm-provider`（默认 feature） | 预期编译通过，实际失败（需 `--features mock`） |
+| # | 复现 | 状态 | 命令 / feature / 工具链 | 预期 vs 实际 |
+|---|---|---|---|---|
+| R1 | 并行合并静默丢数据 | 已运行复现（算法复刻，`/tmp`）→ 待新增回归测试（调用真实 `ParallelNode`） | `cargo +1.88.0 test -p lellm-graph --test parallel_test` | 预期 `count=100`，复刻实际 `count=0` |
+| R2 | 拒绝/超时后受保护动作仍执行 | 源码推断 → 待新增回归测试 | `cargo +1.88.0 test -p lellm-graph --test graph_test barrier` | 预期 protected 不执行，源码推断会执行 |
+| R3 | Google 流式 tool-result 函数名 `"unknown"` | 源码推断 → 待新增回归测试（真实 codec + 固定样本） | `cargo +1.88.0 test -p lellm-provider --features mock` | 预期函数名正确，源码推断 `"unknown"` |
+| R4 | 恢复从头重跑（非断点续跑） | 源码推断 → 待新增回归测试（新进程加载） | `cargo +1.88.0 test -p lellm-graph` | 预期从断点续跑，源码推断从 start 重跑 |
+| R5 | 默认 feature 集成测试编译失败 | 已运行复现 | `cargo +1.88.0 test -p lellm-provider`（默认 feature） | 预期编译通过，实际失败（需 `--features mock`） |
 
 ---
 
@@ -207,10 +208,12 @@
 - [ ] 发布流程（§6.2）+ CI/CHANGELOG/tag
 - [ ] mcp feature 轻量入口 + 死依赖清理
 
-**待验证（不阻塞上述）**：
+**前置条件（修改对应接口/传播前必须先定义，不可先改后定义行为）**：
+- [ ] 泛型 `WorkflowState` 的 delta/merge 契约（**并行修复的前置**：改接口前必须明确，不能假定所有 state 可自动比较）
+- [ ] 帧解析失败分类策略（**错误传播修改的前置**：区分可忽略事件 vs 关键数据损坏）
+
+**暂缓（不阻塞上述，扩大功能时再做）**：
 - [ ] exactly-once 工具执行（幂等键方案）
-- [ ] 泛型 WorkflowState delta 契约
-- [ ] 帧解析失败分类策略
 
 ---
 
