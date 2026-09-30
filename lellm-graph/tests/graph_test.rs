@@ -1454,7 +1454,10 @@ async fn test_fallback_control_flow() {
 
     let graph = build_graph("fallback_flow", |g| {
         let _ = g.start("fallback_node");
-        let _ = g.node("fallback_node", NodeKind::ExternalLeaf(Arc::new(FallbackNode)));
+        let _ = g.node(
+            "fallback_node",
+            NodeKind::ExternalLeaf(Arc::new(FallbackNode)),
+        );
         let _ = g.node(
             "fallback_target",
             NodeKind::Task(TaskNode::new(
@@ -1524,7 +1527,10 @@ async fn test_fallback_no_edge() {
 
     let graph = build_graph("no_fallback", |g| {
         let _ = g.start("failing_node");
-        let _ = g.node("failing_node", NodeKind::ExternalLeaf(Arc::new(FailingNode)));
+        let _ = g.node(
+            "failing_node",
+            NodeKind::ExternalLeaf(Arc::new(FailingNode)),
+        );
         let _ = g.node(
             "end",
             NodeKind::Task(TaskNode::new("end", |_ctx: &mut NodeContext<'_>| Ok(()))),

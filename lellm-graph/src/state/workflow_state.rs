@@ -190,8 +190,11 @@ pub trait WorkflowState: Clone + Send + Sync {
 pub trait MergeStrategy<S>: Send + Sync {
     /// 合并多个并行分支的状态。
     ///
-    /// `branches` 按注册顺序排列（与 ParallelNode 的 branch 注册顺序一致）。
-    fn merge(branches: Vec<S>) -> Result<S, WorkflowError>;
+    /// `base` 是分支执行前的父状态；`branches` 按注册顺序排列（与 ParallelNode 的
+    /// branch 注册顺序一致）。策略应基于 `base` 计算每个分支的变更（delta），只合并
+    /// 实际变更的 key，避免未变更分支的 base 值覆盖其他分支的写入。对无法 diff 的
+    /// 泛型状态，策略可忽略 `base` 直接合并全量状态（如 LastWriteWins）。
+    fn merge(base: &S, branches: Vec<S>) -> Result<S, WorkflowError>;
 
     /// 创建策略的默认实例（供 ParallelNodeBuilder 使用）。
     /// 对于无状态策略（如 StateMerge、LastWriteWins），直接返回自身。
@@ -205,7 +208,7 @@ pub trait MergeStrategy<S>: Send + Sync {
 pub struct LastWriteWins;
 
 impl<S> MergeStrategy<S> for LastWriteWins {
-    fn merge(branches: Vec<S>) -> Result<S, WorkflowError> {
+    fn merge(_base: &S, branches: Vec<S>) -> Result<S, WorkflowError> {
         branches
             .into_iter()
             .last()

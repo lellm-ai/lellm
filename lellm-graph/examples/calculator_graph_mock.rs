@@ -321,10 +321,7 @@ fn build_graph(
         "tool_execute",
         NodeKind::ExternalLeaf(Arc::new(ToolExecuteNode { tools })),
     );
-    builder.node(
-        "done",
-        NodeKind::ExternalLeaf(Arc::new(DoneNode)),
-    );
+    builder.node("done", NodeKind::ExternalLeaf(Arc::new(DoneNode)));
 
     builder.edge("budget_chk", "llm_call");
     builder.edge("llm_call", "post_llm_route");

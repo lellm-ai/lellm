@@ -114,14 +114,52 @@ impl crate::state::workflow_state::WorkflowState for State {
 pub struct StateMerge;
 
 impl crate::state::workflow_state::MergeStrategy<State> for StateMerge {
-    fn merge(branches: Vec<State>) -> Result<State, crate::state::workflow_state::WorkflowError> {
-        let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-        for state in branches {
-            merged.extend(state.inner);
+    fn merge(
+        base: &State,
+        branches: Vec<State>,
+    ) -> Result<State, crate::state::workflow_state::WorkflowError> {
+        // Delta 合并：只合并各分支相对 base 实际变更的 key（新增/修改/删除）。
+        // 每个变更 key 记录各分支的新值（None = 删除）；多个分支改同一 key → 冲突。
+        let mut key_changes: std::collections::HashMap<String, Vec<Option<serde_json::Value>>> =
+            std::collections::HashMap::new();
+
+        for branch in &branches {
+            let base_keys: std::collections::HashSet<&String> = base.inner.keys().collect();
+            let branch_keys: std::collections::HashSet<&String> = branch.inner.keys().collect();
+            for key in base_keys.union(&branch_keys) {
+                let key = *key; // union 迭代器产出 &&String，解引用为 &String
+                if branch.inner.get(key) != base.inner.get(key) {
+                    key_changes
+                        .entry(key.to_string())
+                        .or_default()
+                        .push(branch.inner.get(key).cloned());
+                }
+            }
         }
-        Ok(State {
-            inner: merged.into_iter().collect(),
-        })
+
+        let mut merged = base.inner.clone();
+        for (key, changes) in key_changes {
+            if changes.len() > 1 {
+                return Err(crate::state::workflow_state::WorkflowError::MergeConflict(
+                    format!(
+                        "parallel merge conflict: key '{}' modified by {} branches",
+                        key,
+                        changes.len()
+                    ),
+                ));
+            }
+            match changes.into_iter().next() {
+                Some(Some(value)) => {
+                    merged.insert(key, value);
+                }
+                Some(None) => {
+                    merged.remove(&key);
+                }
+                None => {}
+            }
+        }
+
+        Ok(State { inner: merged })
     }
 
     fn default_instance() -> Self {

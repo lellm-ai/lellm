@@ -321,7 +321,8 @@ impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S
         }
 
         // Merge all branch states using MergeStrategy — Graph 层并行语义
-        let merged = M::merge(branch_states).map_err(|e| {
+        // 传入 base（分支执行前的父状态），策略据此计算各分支 delta，只合并实际变更的 key
+        let merged = M::merge(&base_state, branch_states).map_err(|e| {
             GraphError::Terminal(crate::error::TerminalError::StateError(format!(
                 "parallel merge conflict: {e}",
             )))

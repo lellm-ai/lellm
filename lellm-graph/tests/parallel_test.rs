@@ -4,7 +4,7 @@
 
 use lellm_graph::State;
 use lellm_graph::{
-    GraphBuilder, GraphError, NodeContext, NodeKind, ParallelErrorStrategy, ParallelNode,
+    FlowNode, GraphBuilder, GraphError, NodeContext, NodeKind, ParallelErrorStrategy, ParallelNode,
     SimpleExecutor, StateExt, StateMutation, TaskNode,
 };
 use std::sync::Arc;
@@ -162,7 +162,7 @@ async fn test_parallel_different_keys_no_conflict() {
 
 #[tokio::test]
 async fn test_parallel_same_key_conflict() {
-    // 两个分支写入同一 key，无 Reducer → 最后写入者胜
+    // 两个分支写入同一 key（无 reducer）→ 检测为冲突，返回错误
     let parallel = ParallelNode::builder()
         .branch(
             "writer_a",
@@ -188,20 +188,21 @@ async fn test_parallel_same_key_conflict() {
 
     let result = SimpleExecutor::default()
         .execute(Arc::new(graph), State::new())
-        .await
-        .expect("execution should succeed");
+        .await;
 
-    // 最后写入者胜（writer_b 后执行，其值覆盖 writer_a）
-    assert_eq!(result.state.get_u64("count"), Some(2));
+    assert!(
+        result.is_err(),
+        "two branches modifying the same key must be detected as a conflict"
+    );
 }
 
 #[tokio::test]
-async fn test_parallel_append_delta_merge() {
-    // 两个分支使用 ctx.record() 写入同一 key — 最后写入者胜
+async fn test_parallel_both_modify_base_key_conflict() {
+    // 两个分支都修改同一 base key → 检测为冲突，返回错误
     let parallel = ParallelNode::builder()
         .branch(
-            "appender_a",
-            Arc::new(TaskNode::new("appender_a", |ctx: &mut NodeContext<'_>| {
+            "writer_a",
+            Arc::new(TaskNode::new("writer_a", |ctx: &mut NodeContext<'_>| {
                 ctx.record(StateMutation::Put(
                     "items".into(),
                     serde_json::json!([1, 2]),
@@ -210,8 +211,8 @@ async fn test_parallel_append_delta_merge() {
             })),
         )
         .branch(
-            "appender_b",
-            Arc::new(TaskNode::new("appender_b", |ctx: &mut NodeContext<'_>| {
+            "writer_b",
+            Arc::new(TaskNode::new("writer_b", |ctx: &mut NodeContext<'_>| {
                 ctx.record(StateMutation::Put(
                     "items".into(),
                     serde_json::json!([3, 4]),
@@ -224,7 +225,45 @@ async fn test_parallel_append_delta_merge() {
     let mut initial_state = State::new();
     initial_state.set("items", serde_json::json!([0]));
 
-    let mut g = GraphBuilder::new("parallel_append");
+    let mut g = GraphBuilder::new("parallel_base_conflict");
+    let _ = g.start("p");
+    let _ = g.node("p", NodeKind::Parallel(parallel));
+    let _ = g.end("p");
+    let graph = g.build().expect("build should succeed");
+
+    let result = SimpleExecutor::default()
+        .execute(Arc::new(graph), initial_state)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "two branches modifying the same base key must be detected as a conflict"
+    );
+}
+
+// ─── Delta 合并回归测试（静默丢数据修复）─────────────────────
+
+#[tokio::test]
+async fn test_parallel_single_branch_modifies_base_key() {
+    // base 有 count=0；分支 A 改成 100，分支 B 不动 → 保留 A 的修改（修复静默丢数据）
+    let parallel = ParallelNode::builder()
+        .branch(
+            "modifier",
+            Arc::new(TaskNode::new("modifier", |ctx: &mut NodeContext<'_>| {
+                ctx.record(StateMutation::Put("count".into(), serde_json::json!(100)));
+                Ok(())
+            })),
+        )
+        .branch(
+            "idle",
+            Arc::new(TaskNode::new("idle", |_ctx: &mut NodeContext<'_>| Ok(()))),
+        )
+        .build();
+
+    let mut initial_state = State::new();
+    initial_state.set("count", 0u64);
+
+    let mut g = GraphBuilder::new("parallel_modify_base");
     let _ = g.start("p");
     let _ = g.node("p", NodeKind::Parallel(parallel));
     let _ = g.end("p");
@@ -235,12 +274,102 @@ async fn test_parallel_append_delta_merge() {
         .await
         .expect("execution should succeed");
 
-    let items = result.state.get("items").expect("items should exist");
-    let arr = items.as_array().expect("items should be array");
-    // 最后写入者胜 — appender_b 的 [3,4] 覆盖 appender_a 的 [1,2]
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0], serde_json::json!(3));
-    assert_eq!(arr[1], serde_json::json!(4));
+    assert_eq!(
+        result.state.get_u64("count"),
+        Some(100),
+        "single-branch modification of a base key must be preserved"
+    );
+}
+
+#[tokio::test]
+async fn test_parallel_single_branch_deletes_base_key() {
+    // base 有 temp=5；分支 A 删除 temp，分支 B 不动 → 保留删除
+    let parallel = ParallelNode::builder()
+        .branch(
+            "deleter",
+            Arc::new(TaskNode::new("deleter", |ctx: &mut NodeContext<'_>| {
+                ctx.record(StateMutation::Delete("temp".into()));
+                Ok(())
+            })),
+        )
+        .branch(
+            "idle",
+            Arc::new(TaskNode::new("idle", |_ctx: &mut NodeContext<'_>| Ok(()))),
+        )
+        .build();
+
+    let mut initial_state = State::new();
+    initial_state.set("temp", 5u64);
+
+    let mut g = GraphBuilder::new("parallel_delete_base");
+    let _ = g.start("p");
+    let _ = g.node("p", NodeKind::Parallel(parallel));
+    let _ = g.end("p");
+    let graph = g.build().expect("build should succeed");
+
+    let result = SimpleExecutor::default()
+        .execute(Arc::new(graph), initial_state)
+        .await
+        .expect("execution should succeed");
+
+    assert!(
+        result.state.get("temp").is_none(),
+        "single-branch deletion of a base key must be preserved"
+    );
+}
+
+#[tokio::test]
+async fn test_parallel_reverse_order_deterministic() {
+    // 反转分支顺序，单分支修改 base key 的结果应一致（确定性）
+    let modifier = |name: &str| -> Arc<dyn FlowNode<State>> {
+        Arc::new(TaskNode::new(name, |_ctx: &mut NodeContext<'_>| {
+            _ctx.record(StateMutation::Put("count".into(), serde_json::json!(100)));
+            Ok(())
+        }))
+    };
+    let idle = |name: &str| -> Arc<dyn FlowNode<State>> {
+        Arc::new(TaskNode::new(name, |_ctx: &mut NodeContext<'_>| Ok(())))
+    };
+
+    let run = |first: Arc<dyn FlowNode<State>>, second: Arc<dyn FlowNode<State>>| async move {
+        let parallel = ParallelNode::builder()
+            .branch("b1", first)
+            .branch("b2", second)
+            .build();
+        let mut g = GraphBuilder::new("parallel_reverse");
+        let _ = g.start("p");
+        let _ = g.node("p", NodeKind::Parallel(parallel));
+        let _ = g.end("p");
+        let graph = g.build().expect("build should succeed");
+        let mut initial_state = State::new();
+        initial_state.set("count", 0u64);
+        SimpleExecutor::default()
+            .execute(Arc::new(graph), initial_state)
+            .await
+    };
+
+    let r1 = run(modifier("modifier"), idle("idle"))
+        .await
+        .expect("modifier-first should succeed");
+    let r2 = run(idle("idle"), modifier("modifier"))
+        .await
+        .expect("idle-first should succeed");
+
+    assert_eq!(
+        r1.state.get_u64("count"),
+        Some(100),
+        "modifier-first preserves modification"
+    );
+    assert_eq!(
+        r2.state.get_u64("count"),
+        Some(100),
+        "idle-first preserves modification"
+    );
+    assert_eq!(
+        r1.state.get_u64("count"),
+        r2.state.get_u64("count"),
+        "branch order must not affect the merged result"
+    );
 }
 
 // ─── 错误策略 ────────────────────────────────────────────────
