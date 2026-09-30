@@ -302,6 +302,10 @@ impl ChatCodec for GoogleCodec {
                 let parts = content.get("parts").and_then(|p| p.as_array());
                 if let Some(parts) = parts {
                     let mut results: Vec<StreamChunk> = Vec::new();
+                    // functionCall part 序号 → ToolCallDelta.index：让同帧并行工具调用
+                    // 聚合到不同 index（避免串号）。只计数 functionCall part，
+                    // 不受同帧 text part 位置影响。
+                    let mut func_index: usize = 0;
 
                     for part in parts {
                         // 文本增量
@@ -320,11 +324,14 @@ impl ChatCodec for GoogleCodec {
                             let args = func_call.get("args").map(|v| v.to_string());
 
                             results.push(StreamChunk::ToolCallDelta(ToolCallDelta {
-                                index: 0,
-                                id: None,
+                                index: func_index,
+                                // Gemini 无独立 tool_call_id：id 用函数名（与非流式
+                                // decode 约定一致），否则 finalize 兜底成 "unknown"
+                                id: name.clone(),
                                 name,
                                 arguments_delta: args,
                             }));
+                            func_index += 1;
                         }
                     }
 
@@ -373,10 +380,8 @@ impl ModelCapabilities for GoogleCodec {
         if lower.contains("gemini") {
             caps.supports_tool_call = true;
         }
-        // Gemini 2.0 Pro 支持图片
-        if lower.contains("pro") || lower.contains("2.0") {
-            caps.supports_image_input = true;
-        }
+        // 注意：不声明 supports_image_input — serialize_google_parts 对 Image
+        // 返回 UnsupportedFeature，声明必须与编码能力一致（避免"假能力"）。
         caps
     }
 }
@@ -475,5 +480,88 @@ mod tests {
             .collect();
         // Google 只取文本，忽略 cache_control
         assert_eq!(text, "hello");
+    }
+
+    // ─── R3 回归：流式工具调用 id / 并行 index（§6.1）───
+
+    /// 构造 Gemini 流式 functionCall 帧。
+    fn gemini_function_call_frame(parts: serde_json::Value) -> SseFrame {
+        SseFrame {
+            event: None,
+            data: serde_json::json!({
+                "candidates": [{
+                    "content": { "parts": parts, "role": "model" },
+                    "finishReason": "STOP"
+                }]
+            })
+            .to_string(),
+        }
+    }
+
+    /// R3：单工具调用流式 — id 应为函数名（非 "unknown"），参数完整。
+    #[test]
+    fn test_stream_single_function_call_id_is_name() {
+        use crate::providers::stream::tool_call_accumulator::ToolCallAccumulator;
+
+        let frame = gemini_function_call_frame(serde_json::json!([
+            { "functionCall": { "name": "get_weather", "args": { "city": "SF" } } }
+        ]));
+
+        let result = GoogleCodec.decode_sse(&frame).unwrap();
+        let mut acc = ToolCallAccumulator::new();
+        for chunk in &result.chunks {
+            if let StreamChunk::ToolCallDelta(d) = chunk {
+                acc.push(d);
+            }
+        }
+        let calls = acc.finalize().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        // 关键断言：id 是函数名，而非兜底的 "unknown"
+        assert_eq!(calls[0].id, "get_weather");
+        assert_ne!(calls[0].id, "unknown");
+        assert_eq!(calls[0].arguments["city"], "SF");
+    }
+
+    /// R3：同帧并行工具调用 — 各得独立 index（不串号），全部保留，id/name 正确。
+    #[test]
+    fn test_stream_parallel_function_calls_distinct_index() {
+        use crate::providers::stream::tool_call_accumulator::ToolCallAccumulator;
+
+        let frame = gemini_function_call_frame(serde_json::json!([
+            { "functionCall": { "name": "get_weather", "args": { "city": "SF" } } },
+            { "functionCall": { "name": "get_time", "args": {} } }
+        ]));
+
+        let result = GoogleCodec.decode_sse(&frame).unwrap();
+        let deltas: Vec<&ToolCallDelta> = result
+            .chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::ToolCallDelta(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+
+        // 两个并行 functionCall → 两个 delta，index 分别为 0、1
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].index, 0);
+        assert_eq!(deltas[1].index, 1);
+        assert_eq!(deltas[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(deltas[1].name.as_deref(), Some("get_time"));
+        assert_eq!(deltas[0].id.as_deref(), Some("get_weather"));
+        assert_eq!(deltas[1].id.as_deref(), Some("get_time"));
+
+        // 入累积器 finalize → 两个独立 tool call（不串号、不丢失）
+        let mut acc = ToolCallAccumulator::new();
+        for d in &deltas {
+            acc.push(d);
+        }
+        let calls = acc.finalize().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[1].name, "get_time");
+        assert_eq!(calls[0].id, "get_weather");
+        assert_eq!(calls[1].id, "get_time");
     }
 }

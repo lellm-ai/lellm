@@ -22,7 +22,9 @@ struct FrameResult {
     text: Option<String>,
     thinking: Option<String>,
     thinking_redacted: Option<String>,
-    tool_call_delta: Option<ToolCallDelta>,
+    /// 一帧可能含多个工具调用增量（并行工具调用），用 Vec 保留全部，
+    /// 避免单 Option 互相覆盖导致并行调用丢失。
+    tool_call_deltas: Vec<ToolCallDelta>,
     usage_delta: Option<UsageDelta>,
     is_done: bool,
 }
@@ -94,9 +96,9 @@ where
                         return;
                     }
 
-                    // ToolCall 增量
-                    if let Some(delta) = fr.tool_call_delta {
-                        tool_call_acc.push(&delta);
+                    // ToolCall 增量 — 一帧可能含多个（并行工具调用），全部入累积器
+                    for delta in &fr.tool_call_deltas {
+                        tool_call_acc.push(delta);
                     }
 
                     // Usage 增量
@@ -146,7 +148,7 @@ fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> FrameResult {
         text: None,
         thinking: None,
         thinking_redacted: None,
-        tool_call_delta: None,
+        tool_call_deltas: Vec::new(),
         usage_delta: None,
         is_done: false,
     };
@@ -163,7 +165,7 @@ fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> FrameResult {
                         result.thinking_redacted = redacted;
                     }
                     StreamChunk::ToolCallDelta(delta) => {
-                        result.tool_call_delta = Some(ToolCallDelta {
+                        result.tool_call_deltas.push(ToolCallDelta {
                             index: delta.index,
                             id: delta.id.clone(),
                             name: delta.name.clone(),
@@ -204,3 +206,38 @@ fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> FrameResult {
 // 由于 ProviderCodec trait 涉及 parse_sse_frame(JSON 解析)，
 // 完整的集成测试放在 tests/integration.rs 中。
 // SseParser, ToolCallAccumulator, UsageAccumulator 已有独立的单元测试。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::google::GoogleCodec;
+
+    /// 回归：一帧含多个并行工具调用增量时，FrameResult 必须保留全部。
+    /// 此前 `tool_call_delta` 为单 `Option`，同帧第二个 delta 覆盖第一个 → 并行调用丢失。
+    #[test]
+    fn test_handle_frame_preserves_parallel_tool_call_deltas() {
+        let frame = SseFrame {
+            event: None,
+            data: serde_json::json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [
+                            { "functionCall": { "name": "get_weather", "args": { "city": "SF" } } },
+                            { "functionCall": { "name": "get_time", "args": {} } }
+                        ],
+                        "role": "model"
+                    },
+                    "finishReason": "STOP"
+                }]
+            })
+            .to_string(),
+        };
+
+        let fr = handle_frame(&GoogleCodec, &frame);
+        assert_eq!(fr.tool_call_deltas.len(), 2);
+        assert_eq!(fr.tool_call_deltas[0].index, 0);
+        assert_eq!(fr.tool_call_deltas[1].index, 1);
+        assert_eq!(fr.tool_call_deltas[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(fr.tool_call_deltas[1].name.as_deref(), Some("get_time"));
+    }
+}
