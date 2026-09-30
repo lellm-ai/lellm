@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）；Google 往返待办，持久恢复待单独评审
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）；持久恢复待单独评审
 
 ## 0. 审计基线（已锁定）
 
@@ -185,7 +185,7 @@
 |---|---|---|---|---|
 | R1 | 并行合并静默丢数据 | ✅ 已转入仓库回归测试（`parallel_test.rs` 5 个 delta 回归测试，16 全过） | `cargo +1.88.0 test -p lellm-graph --test parallel_test` | 预期 `count=100`，修复后实际 `count=100` |
 | R2 | 拒绝/超时后受保护动作仍执行 | ✅ 已转入仓库回归测试（`graph_test.rs` 3 个 R2 回归测试，10 barrier 测试全过） | `cargo +1.88.0 test -p lellm-graph --test graph_test barrier` | 预期 protected 不执行，修复后实际不执行 |
-| R3 | Google 流式 tool-result 函数名 `"unknown"` | 源码推断 → 待新增回归测试（真实 codec + 固定样本） | `cargo +1.88.0 test -p lellm-provider --features mock` | 预期函数名正确，源码推断 `"unknown"` |
+| R3 | Google 流式 tool-result 函数名 `"unknown"` | ✅ 已转入仓库回归测试（`google.rs` 2 个 R3 测试 + `handle_frame` 并行 delta 测试，51 全过） | `cargo +1.88.0 test -p lellm-provider --features mock` | 预期函数名正确，修复后实际正确（id=函数名） |
 | R4 | 恢复从头重跑（非断点续跑） | 源码推断 → 待新增回归测试（新进程加载） | `cargo +1.88.0 test -p lellm-graph` | 预期从断点续跑，源码推断从 start 重跑 |
 | R5 | 默认 feature 集成测试编译失败 | 已运行复现 | `cargo +1.88.0 test -p lellm-provider`（默认 feature） | 预期编译通过，实际失败（需 `--features mock`） |
 
@@ -199,7 +199,7 @@
 **P0（优先处理）**：
 - [x] 并行数据丢失（Q3 最小 delta + 冲突检测）+ R1 测试 ✅ 2026-09-30（commit `ee16f2b`）
 - [x] 审批拒绝/超时路径（Q2 阶段 1：单次运行行为）+ R2 测试 ✅ 2026-09-30（commit `bdd973a`；state 记录 / Modify 应用推迟 phase 1b，需泛型缝决策）
-- [ ] Google 工具往返（§6.1 小范围修）+ R3 测试
+- [x] Google 工具往返（§6.1 小范围修）+ R3 测试 ✅ 2026-09-30（commit `a24c0bb`；**附带修复** `stream_processor.rs` FrameResult 并行 delta 丢失 bug——原 `tool_call_delta` 单 `Option` 同帧互相覆盖，审计报告未列出，是"并行串号"根因之一）
 
 **里程碑（明确边界，单独排期）**：
 - [ ] 恢复能力第一阶段（Q1 限定版）+ R4 新进程恢复测试
