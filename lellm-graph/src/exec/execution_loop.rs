@@ -275,6 +275,36 @@ pub(crate) async fn run_execution_loop<S, M>(
     // 发射 GraphStart
     let _ = event_tx.send(GraphEvent::GraphStart { trace_id }).await;
 
+    // 「恢复已完成」：零执行 — 发 GraphStart + GraphComplete，
+    // 不执行任何节点、不保存新检查点（完成态 + 预算耗尽合法）
+    if let Some(cp) = &restore_from {
+        if cp.next_node.is_none() {
+            let duration = start_time.elapsed();
+            let result = GraphResult {
+                trace_id,
+                state: engine_state,
+                execution_log: Vec::new(),
+                duration,
+                trace: None,
+            };
+            let _ = event_tx.try_send(GraphEvent::GraphComplete { result });
+            return;
+        }
+    }
+
+    // 恢复分支：从 next_node 续跑，预算从 steps_used 延续（max_steps 为总预算）
+    let (start_node, steps_used) = match &restore_from {
+        Some(cp) => (
+            cp.next_node
+                .as_ref()
+                .expect("next_node 为 Some（上面已处理 None）")
+                .0
+                .clone(),
+            cp.steps_used,
+        ),
+        None => (graph.start_node().to_string(), 0),
+    };
+
     // step_cb 在 Engine 外部创建，以便在 Engine drop 后获取 execution_log
     let mut step_cb = EventStepCallback::new(start_time, event_tx.clone(), trace_id);
 
@@ -287,9 +317,14 @@ pub(crate) async fn run_execution_loop<S, M>(
             cp_sink.as_mut().map(|s| s as &mut dyn CheckpointSink<S>),
             Some(&mut barrier_sink),
         );
-        // 首次运行：start_node() + steps_used=0（恢复分支在 Task 6 加入）
         graph
-            .run_inline_from(&mut engine, graph.start_node(), 0, max_steps, &mut step_cb)
+            .run_inline_from(
+                &mut engine,
+                &start_node,
+                steps_used,
+                max_steps,
+                &mut step_cb,
+            )
             .await
     };
 

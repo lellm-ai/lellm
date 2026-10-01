@@ -1,21 +1,26 @@
 //! 测试用执行器 — 替代已删除的 SimpleExecutor。
 //!
-//! 提供两种执行模式：
+//! 提供四种执行模式：
 //! - `execute()` — 阻塞执行，返回 `GraphResult`
-//! - `execute_stream()` — 流式执行，返回 `GraphExecution { stream, handle }`
+//! - `execute_stream()` — 非持久化流式执行
+//! - `execute_stream_with_checkpoint()` — 持久化执行（每节点同步保存检查点）
+//! - `execute_stream_with_restore()` — 持久化恢复（从检查点续跑，同一 trace 继续保存）
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::error::GraphError;
+use crate::checkpoint::Checkpoint;
+use crate::error::{GraphError, TerminalError};
 use crate::event::{GraphExecution, GraphHandle};
+use crate::exec::CheckpointConfig;
 use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
 use crate::graph::Graph;
 use crate::ids::TraceId;
 #[allow(deprecated)]
 use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
+use crate::state::workflow_state::WorkflowState;
 use crate::state::{ExecutionEntry, GraphResult, State};
 
 // ─── SimpleExecutor 兼容层 ────────────────────────────────────────
@@ -156,23 +161,129 @@ impl SimpleExecutor {
         })
     }
 
+    /// 非持久化执行（行为不变，不做图结构校验）。
     pub fn execute_stream(&self, graph: Arc<Graph>, state: State) -> GraphExecution<State> {
-        self.execute_stream_with_restore(graph, state, None)
+        self.spawn(graph, state, TraceId::new(), None, None)
     }
 
-    pub fn execute_stream_with_restore(
+    /// 持久化执行 — 每节点同步保存检查点（新 trace）。
+    ///
+    /// 入口校验：含 Parallel/Subgraph/Barrier 的图在此拒绝（`RestoreUnsupported`），
+    /// 不等崩溃后恢复才报错。
+    pub fn execute_stream_with_checkpoint(
         &self,
         graph: Arc<Graph>,
         state: State,
-        restore_from: Option<crate::checkpoint::Checkpoint<State>>,
+        config: CheckpointConfig<State>,
+    ) -> Result<GraphExecution<State>, GraphError> {
+        graph.validate_persistable()?;
+        Ok(self.spawn(graph, state, TraceId::new(), Some(config), None))
+    }
+
+    /// 持久化恢复 — 从检查点续跑，并**继续保存**到同一 trace。
+    ///
+    /// - `trace_id` — 延续原 trace（新检查点保存于该 trace，seq 单调前进）
+    /// - `config` — 恢复后继续保存的持久化配置（store/retention）
+    ///
+    /// # 入口校验（覆盖直接构造的检查点）
+    ///
+    /// 图结构 / format_version / graph_hash / next_node 存在 / 步数边界 /
+    /// **最新性**（`config.store` 存在时：传入检查点必须是该 trace 最新，
+    /// 否则 `RestoreNotLatest` — 要恢复旧检查点请换新 trace）。
+    pub async fn execute_stream_with_restore(
+        &self,
+        graph: Arc<Graph>,
+        restore_from: Checkpoint<State>,
+        trace_id: TraceId,
+        config: CheckpointConfig<State>,
+    ) -> Result<GraphExecution<State>, GraphError> {
+        graph.validate_persistable()?;
+        Self::validate_restore_checkpoint(&graph, &restore_from, self.max_steps)?;
+
+        // 最新性检查（需 store I/O → 本方法 async）：
+        // 只接受该 trace 的最新检查点并续写原 trace，避免未定义的历史分叉
+        if let Some(store) = &config.store {
+            match store.load_latest(&trace_id).await {
+                Ok(Some(latest)) => {
+                    if latest.id != restore_from.checkpoint_id {
+                        return Err(GraphError::Terminal(TerminalError::RestoreNotLatest {
+                            checkpoint: restore_from.checkpoint_id.to_string(),
+                            latest: latest.id.to_string(),
+                        }));
+                    }
+                }
+                Ok(None) => {
+                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                        reason: format!("no checkpoints found for trace {trace_id}"),
+                    }));
+                }
+                Err(e) => {
+                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                        reason: format!("load latest checkpoint: {e}"),
+                    }));
+                }
+            }
+        }
+
+        let state = State::restore(restore_from.state.clone());
+        Ok(self.spawn(graph, state, trace_id, Some(config), Some(restore_from)))
+    }
+
+    /// 恢复入口同步校验（版本 / 指纹 / 节点存在 / 步数边界）。
+    fn validate_restore_checkpoint(
+        graph: &Graph,
+        cp: &Checkpoint<State>,
+        max_steps: usize,
+    ) -> Result<(), GraphError> {
+        if cp.format_version != crate::checkpoint::CHECKPOINT_FORMAT_VERSION {
+            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                reason: format!(
+                    "unsupported checkpoint format_version: {} (expected {})",
+                    cp.format_version,
+                    crate::checkpoint::CHECKPOINT_FORMAT_VERSION
+                ),
+            }));
+        }
+        if cp.graph_hash != graph.canonical_hash() {
+            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                reason: format!(
+                    "graph hash mismatch: expected {:016x}, got {:016x}",
+                    graph.canonical_hash(),
+                    cp.graph_hash
+                ),
+            }));
+        }
+        if let Some(n) = &cp.next_node {
+            if !graph.node_map().contains_key(&n.0) {
+                return Err(GraphError::Terminal(TerminalError::NodeNotFound(
+                    n.0.clone(),
+                )));
+            }
+            // 还有下一节点但预算已耗尽 → 执行前报错（完成态除外）
+            if cp.steps_used >= max_steps {
+                return Err(GraphError::Terminal(TerminalError::StepsExceeded {
+                    limit: max_steps,
+                }));
+            }
+        }
+        // next_node = None（完成态）：允许预算耗尽（零执行直接返回完成）
+        Ok(())
+    }
+
+    /// 统一 spawn — 通道 + run_execution_loop。
+    fn spawn(
+        &self,
+        graph: Arc<Graph>,
+        state: State,
+        trace_id: TraceId,
+        checkpoint: Option<CheckpointConfig<State>>,
+        restore_from: Option<Checkpoint<State>>,
     ) -> GraphExecution<State> {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
         let (decision_tx, decision_rx) = tokio::sync::mpsc::channel(256);
         let (cancel_tx, cancel_rx) = tokio::sync::mpsc::channel(1);
 
-        let trace_id = TraceId::new();
         let cancel = CancellationToken::new();
-
         let handle = GraphHandle::new(decision_tx, cancel_tx);
 
         tokio::spawn(crate::exec::execution_loop::run_execution_loop(
@@ -184,7 +295,7 @@ impl SimpleExecutor {
             decision_rx,
             cancel_rx,
             cancel,
-            None, // checkpoint
+            checkpoint,
             None, // trace_sink
             restore_from,
         ));

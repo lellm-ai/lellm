@@ -13,8 +13,9 @@ fn two_node_graph(effects: &Arc<std::sync::Mutex<Vec<String>>>) -> lellm_graph::
     let g = effects.clone();
     let mk = |name: &str| {
         let g = g.clone();
-        TaskNode::new(name, move |_ctx| {
-            g.lock().expect("effects").push(name.to_string());
+        let name = name.to_string();
+        TaskNode::new(name.clone(), move |_ctx| {
+            g.lock().expect("effects").push(name.clone());
             Ok(())
         })
     };
@@ -39,7 +40,7 @@ async fn t7c_keep_latest_zero_rejected() {
         .with_retention(RetentionPolicy::KeepLatest(0));
 
     let executor = SimpleExecutor::new(100);
-    let exec = executor
+    let mut exec = executor
         .execute_stream_with_checkpoint(Arc::new(graph), State::new(), config)
         .expect("entry");
 

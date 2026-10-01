@@ -138,3 +138,147 @@ async fn t4_strict_loading_rejects_legacy_and_missing() {
         other => panic!("case8 expected Corrupted, got: {other:?}"),
     }
 }
+
+/// 消费事件流直至 GraphComplete/GraphError，返回 (trace_id, 结果)。
+///
+/// 与 restore_test.rs 的 `drain` 同实现（测试文件独立，选择复制）。
+async fn drain_stream(
+    mut stream: lellm_graph::GraphStream,
+) -> (lellm_graph::TraceId, Result<State, String>) {
+    let mut trace_id = None;
+    loop {
+        match stream.recv().await {
+            Some(lellm_graph::GraphEvent::GraphStart { trace_id: t }) => trace_id = Some(t),
+            Some(lellm_graph::GraphEvent::GraphComplete { result }) => {
+                return (trace_id.expect("GraphStart"), Ok(result.state));
+            }
+            Some(lellm_graph::GraphEvent::GraphError { error, .. }) => {
+                return (trace_id.expect("GraphStart"), Err(error.to_string()));
+            }
+            Some(_) => {}
+            None => panic!("stream closed without terminal event"),
+        }
+    }
+}
+
+/// expect_err 等价 — `GraphExecution` 未实现 Debug，标准 `expect_err` 不可用。
+fn expect_err<T, E>(result: Result<T, E>, msg: &str) -> E {
+    match result {
+        Err(e) => e,
+        Ok(_) => panic!("{msg}"),
+    }
+}
+
+/// T7b: 恢复入口校验 — 直接构造的检查点（绕过反序列化）也被拦截
+#[tokio::test]
+async fn t7b_restore_entry_validation_direct_construction() {
+    use lellm_graph::{
+        CheckpointConfig, GraphBuilder, InMemoryBlobStore, NodeKind, SerdeCheckpointCodec,
+        SimpleExecutor, TaskNode, TraceId, TypedCheckpointStore,
+    };
+    use std::sync::Arc;
+
+    let graph = {
+        let mut b = GraphBuilder::<State>::new("ab");
+        b.start("a");
+        b.node("a", NodeKind::Task(TaskNode::new("a", |_ctx| Ok(()))));
+        b.node("b", NodeKind::Task(TaskNode::new("b", |_ctx| Ok(()))));
+        b.edge("a", "b");
+        b.end("b");
+        b.build().expect("build")
+    };
+    let hash = graph.canonical_hash();
+    let store = Arc::new(InMemoryBlobStore::new());
+    let config =
+        || CheckpointConfig::for_store(store.clone(), SerdeCheckpointCodec::<State>::new(), hash);
+    let tid = TraceId::new();
+    let executor = SimpleExecutor::new(5);
+
+    // 基准合法检查点（next=b, su=1）
+    let base = Checkpoint::new(Some(NodeId("b".into())), &State::new(), hash, 1);
+
+    // 1. format_version 错 → 拒绝
+    let mut bad = base.clone();
+    bad.format_version = 999;
+    let err = expect_err(
+        executor
+            .execute_stream_with_restore(Arc::new(graph.clone()), bad, tid, config())
+            .await,
+        "bad version",
+    );
+    assert!(err.to_string().contains("format_version"), "got: {err:?}");
+
+    // 2. graph_hash 错 → 拒绝
+    let mut bad = base.clone();
+    bad.graph_hash = hash ^ 0xFF;
+    let err = expect_err(
+        executor
+            .execute_stream_with_restore(Arc::new(graph.clone()), bad, tid, config())
+            .await,
+        "bad hash",
+    );
+    assert!(
+        err.to_string().contains("graph hash mismatch"),
+        "got: {err:?}"
+    );
+
+    // 3. next_node 指向不存在节点 → 拒绝
+    let mut bad = base.clone();
+    bad.next_node = Some(NodeId("nonexistent".into()));
+    let err = expect_err(
+        executor
+            .execute_stream_with_restore(Arc::new(graph.clone()), bad, tid, config())
+            .await,
+        "bad node",
+    );
+    assert!(err.to_string().contains("nonexistent"), "got: {err:?}");
+
+    // 4. next_node=Some 且 steps_used >= max_steps → 执行前报错
+    let mut bad = base.clone();
+    bad.steps_used = 5;
+    let err = expect_err(
+        executor
+            .execute_stream_with_restore(Arc::new(graph.clone()), bad, tid, config())
+            .await,
+        "budget exhausted",
+    );
+    assert!(err.to_string().contains("step limit"), "got: {err:?}");
+
+    // 5. next_node=None 且 steps_used >= max_steps → 合法（完成态，零执行）
+    //    store=None 跳过最新性检查（续写目标由 save_fn 决定）
+    let mut done = base.clone();
+    done.next_node = None;
+    done.steps_used = 5;
+    let config_nostore = CheckpointConfig::new(
+        move |_cp, _t| Box::pin(async { Ok::<(), CheckpointStoreError>(()) }),
+        hash,
+    );
+    let exec = executor
+        .execute_stream_with_restore(Arc::new(graph.clone()), done, tid, config_nostore)
+        .await
+        .expect("completed state with exhausted budget is valid");
+    let (_t, r) = drain_stream(exec.stream).await;
+    r.expect("zero-execution complete");
+
+    // 6. 非最新检查点 → RestoreNotLatest
+    //    保存 cp1（next=b）与 cp2（next=None）到同一 trace，cp2 为最新
+    let codec = SerdeCheckpointCodec::<State>::new();
+    let typed = TypedCheckpointStore::new(&*store, codec);
+    let cp1 = Checkpoint::new(Some(NodeId("b".into())), &State::new(), hash, 1);
+    let cp2 = Checkpoint::new(None, &State::new(), hash, 2);
+    typed
+        .save_with_trace(&tid, &cp1, hash)
+        .await
+        .expect("save cp1");
+    typed
+        .save_with_trace(&tid, &cp2, hash)
+        .await
+        .expect("save cp2");
+    let err = expect_err(
+        executor
+            .execute_stream_with_restore(Arc::new(graph), cp1, tid, config())
+            .await,
+        "not latest",
+    );
+    assert!(err.to_string().contains("not the latest"), "got: {err:?}");
+}
