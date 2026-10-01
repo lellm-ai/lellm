@@ -53,7 +53,7 @@ pub use node::{BarrierOutcome, BarrierSink, ChannelBarrierSink, MockBarrierSink,
 pub use checkpoint::{CheckpointCodec, SerdeCheckpointCodec, TypedCheckpointStore};
 
 // ─── Store ───────────────────────────────────────────────────
-pub use checkpoint::{BlobCheckpointStore, InMemoryBlobStore};
+pub use checkpoint::{BlobCheckpointStore, FileBlobStore, InMemoryBlobStore};
 
 // ─── Error Types ─────────────────────────────────────────────
 pub use error::{

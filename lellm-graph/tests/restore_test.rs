@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use lellm_graph::{
     BlobCheckpointStore, CheckpointCodec, CheckpointConfig, CheckpointStoreError, GraphBuilder,
-    InMemoryBlobStore, SerdeCheckpointCodec, SimpleExecutor, State, TaskNode,
+    InMemoryBlobStore, NodeKind, SerdeCheckpointCodec, SimpleExecutor, State, TaskNode,
 };
 
 /// 线性图 a→b→c（end=c），每节点向 effects 追加自身名。
@@ -22,16 +22,15 @@ fn linear_graph(effects: &Arc<std::sync::Mutex<Vec<String>>>) -> lellm_graph::Gr
             Ok(())
         })
     };
-    GraphBuilder::<State>::new("linear")
-        .start("a")
-        .node("a", mk("a"))
-        .node("b", mk("b"))
-        .node("c", mk("c"))
-        .edge("a", "b")
-        .edge("b", "c")
-        .end("c")
-        .build()
-        .expect("build")
+    let mut b = GraphBuilder::<State>::new("linear");
+    b.start("a");
+    b.node("a", NodeKind::Task(mk("a")));
+    b.node("b", NodeKind::Task(mk("b")));
+    b.node("c", NodeKind::Task(mk("c")));
+    b.edge("a", "b");
+    b.edge("b", "c");
+    b.end("c");
+    b.build().expect("build")
 }
 
 /// 消费事件流直至 GraphComplete/GraphError，返回 (trace_id, 结果)。
