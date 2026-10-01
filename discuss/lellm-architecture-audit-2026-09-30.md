@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）；持久恢复待单独评审
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、mcp 轻量入口 + 死依赖清理 ✅（P1）；发布流程 / 持久恢复待单独排期
 
 ## 0. 审计基线（已锁定）
 
@@ -206,7 +206,7 @@
 
 **P1**：
 - [ ] 发布流程（§6.2）+ CI/CHANGELOG/tag
-- [ ] mcp feature 轻量入口 + 死依赖清理
+- [x] mcp feature 轻量入口 + 死依赖清理 ✅ 2026-10-01：新增 facade `mcp-stdio`（仅 stdio，不拉 agent/provider/reqwest/hyper/TLS）；根 workspace `lellm-mcp` 改 `default-features = false`，agent 侧显式 `default-features = true` 保行为；删 `lellm-mcp` 死依赖 `futures`（0 处 use，sse 验证通过）；`lellm::mcp` 导出开放给 `mcp-stdio`。**附带修复** P0-1 遗留的 `AgentStateMerge::merge` 签名未对齐 base-based trait（`typed_state.rs:234`，既有编译错误，阻塞 mcp/agent/full 构建）。独立消费项目实测：mcp-stdio 仅 ~52 crate（原 mcp 181），依赖边界干净
 
 **前置条件（修改对应接口/传播前必须先定义，不可先改后定义行为）**：
 - [ ] 泛型 `WorkflowState` 的 delta/merge 契约（**并行修复的前置**：改接口前必须明确，不能假定所有 state 可自动比较）

@@ -12,7 +12,7 @@ lellm-core = { workspace = true, features = ["anyhow", "tool"] }
 lellm-derive.workspace = true
 lellm-graph.workspace = true
 lellm-provider.workspace = true
-lellm-mcp = { workspace = true, optional = true }
+lellm-mcp = { workspace = true, optional = true, default-features = true }
 tokio-util = { workspace = true, optional = true }
 async-trait.workspace = true
 serde.workspace = true

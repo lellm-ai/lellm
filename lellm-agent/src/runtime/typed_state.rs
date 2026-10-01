@@ -231,7 +231,11 @@ impl WorkflowState for AgentState {
 pub struct AgentStateMerge;
 
 impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {
-    fn merge(branches: Vec<AgentState>) -> Result<AgentState, lellm_graph::WorkflowError> {
+    // AgentState 采用全量合并策略（extend messages + max counters），无需基于 base 的 delta diff
+    fn merge(
+        _base: &AgentState,
+        branches: Vec<AgentState>,
+    ) -> Result<AgentState, lellm_graph::WorkflowError> {
         let mut iter = branches.into_iter();
         let mut merged = iter.next().ok_or_else(|| {
             lellm_graph::WorkflowError::MergeConflict("no branches to merge".into())

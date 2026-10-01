@@ -15,6 +15,8 @@ provider = ["dep:lellm-core", "dep:lellm-provider"]
 graph = ["dep:lellm-core", "dep:lellm-graph"]
 agent = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-provider", "dep:lellm-agent", "lellm-core/tool"]
 mcp = ["dep:lellm-core", "dep:lellm-graph", "dep:lellm-mcp", "dep:lellm-agent", "lellm-core/tool", "lellm-agent/mcp", "lellm-agent/sse", "lellm-agent/http"]
+# 轻量 MCP 入口：仅 stdio 传输，不拉入 agent/provider/graph（无 reqwest/hyper/TLS）
+mcp-stdio = ["dep:lellm-mcp", "lellm-mcp/stdio"]
 derive = ["dep:lellm-derive"]
 full = ["graph", "provider", "agent", "mcp", "derive", "tool"]
 

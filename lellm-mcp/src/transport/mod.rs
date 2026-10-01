@@ -27,8 +27,11 @@ pub use stdio::{StdioConfig, StdioTransport};
 use async_trait::async_trait;
 
 use crate::protocol::{
-    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError, TransportError,
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpError,
 };
+// TransportError 仅在 http 的 subscribe() 默认实现中使用
+#[cfg(feature = "http")]
+use crate::protocol::TransportError;
 
 /// Transport 能力声明（编译时固定，不依赖连接状态）。
 ///

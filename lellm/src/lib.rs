@@ -12,8 +12,11 @@
 //! # 需要 Agent 运行时
 //! lellm = { version = "0.4", features = ["agent"] }
 //!
-//! # 需要 MCP 协议
+//! # 需要 MCP 协议（完整：agent 集成 + http/sse 传输）
 //! lellm = { version = "0.4", features = ["mcp"] }
+//!
+//! # 轻量 MCP：仅 stdio 传输，不拉入 agent/provider（无 reqwest/hyper/TLS）
+//! lellm = { version = "0.4", default-features = false, features = ["mcp-stdio"] }
 //!
 //! # 全部启用
 //! lellm = { version = "0.4", features = ["full"] }
@@ -83,7 +86,7 @@ pub use lellm_graph as graph;
 #[cfg(feature = "agent")]
 pub use lellm_agent as agent;
 
-#[cfg(feature = "mcp")]
+#[cfg(any(feature = "mcp", feature = "mcp-stdio"))]
 pub use lellm_mcp as mcp;
 
 #[cfg(feature = "derive")]

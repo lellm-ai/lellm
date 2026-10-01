@@ -16,7 +16,7 @@ Every agent is a compiled directed graph — not a black-box `while` loop. Compi
 use lellm::prelude::*;
 
 let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
-let model = ResolvedModel::new(provider, "gpt-5.6-sol");
+let model = ResolvedModel::new(provider, "gpt-6.1-sol");
 
 #[tool(name = "get_weather", description = "Get current weather for a city")]
 async fn get_weather(city: String) -> ToolResult {
@@ -117,6 +117,8 @@ cargo add lellm
 lellm = "0.4"                                    # core + provider adapters
 lellm = { version = "0.4", features = ["agent"] } # full agent runtime
 lellm = { version = "0.4", features = ["full"] }  # everything
+# lightweight MCP: stdio transport only, no agent/provider (no reqwest/hyper/TLS)
+lellm = { version = "0.4", default-features = false, features = ["mcp-stdio"] }
 ```
 
 | Feature | Includes |
@@ -124,7 +126,8 @@ lellm = { version = "0.4", features = ["full"] }  # everything
 | `provider` (default) | core + LLM adapters |
 | `graph` | standalone workflow engine — **zero LLM dependency** |
 | `agent` | full agent runtime — ReAct + tools (auto-checkpoint on roadmap) |
-| `mcp` | MCP client/server |
+| `mcp` | MCP client/server + agent integration (stdio/http/sse) |
+| `mcp-stdio` | lightweight MCP client/server — stdio only, **no agent/provider/reqwest** |
 | `derive` | `#[tool]` and `#[derive(Tool)]` macros |
 
 **Requirements:** Rust 2024 edition, stable toolchain.

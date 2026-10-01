@@ -16,7 +16,7 @@
 use lellm::prelude::*;
 
 let provider = CodecProvider::load(OpenAICompatCodec::openai())?;
-let model = ResolvedModel::new(provider, "gpt-5.6-sol");
+let model = ResolvedModel::new(provider, "gpt-6.1-sol");
 
 #[tool(name = "get_weather", description = "获取指定城市的天气")]
 async fn get_weather(city: String) -> ToolResult {
@@ -117,6 +117,8 @@ cargo add lellm
 lellm = "0.4"                                    # core + provider 适配器
 lellm = { version = "0.4", features = ["agent"] } # 完整 Agent 运行时
 lellm = { version = "0.4", features = ["full"] }  # 全部启用
+# 轻量 MCP：仅 stdio 传输，不拉入 agent/provider（无 reqwest/hyper/TLS）
+lellm = { version = "0.4", default-features = false, features = ["mcp-stdio"] }
 ```
 
 | Feature | 包含 |
@@ -124,7 +126,8 @@ lellm = { version = "0.4", features = ["full"] }  # 全部启用
 | `provider`（默认） | core + LLM 适配器 |
 | `graph` | 独立工作流引擎 —— **零 LLM 依赖** |
 | `agent` | 完整 Agent 运行时 —— ReAct + 工具（自动检查点见路线图） |
-| `mcp` | MCP 客户端/服务端 |
+| `mcp` | MCP 客户端/服务端 + agent 集成（stdio/http/sse） |
+| `mcp-stdio` | 轻量 MCP 客户端/服务端 —— 仅 stdio，**不含 agent/provider/reqwest** |
 | `derive` | `#[tool]` 和 `#[derive(Tool)]` 宏 |
 
 **系统要求：** Rust 2024 edition，stable 工具链。

@@ -22,14 +22,13 @@ tracing.workspace = true
 thiserror.workspace = true
 reqwest = { workspace = true, optional = true }
 eventsource-stream = { version = "0.2", optional = true }
-futures = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 
 [features]
 default = ["stdio", "http"]
 stdio = []
 http = ["dep:reqwest"]
-sse = ["dep:reqwest", "dep:eventsource-stream", "dep:futures"]
+sse = ["dep:reqwest", "dep:eventsource-stream"]
 server = ["dep:axum", "dep:bytes"]
 
 [dev-dependencies]
