@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::checkpoint::{Checkpoint, CheckpointSink, CheckpointStoreError, FrameInfo, TraceId};
+use crate::checkpoint::{Checkpoint, CheckpointSink, TraceId};
 use crate::event::{BarrierDecisionMessage, BarrierId, GraphEvent};
+use crate::exec::checkpoint_save_sink::CheckpointSaveSink;
 use crate::exec::execution_engine::ExecutionEngine;
 use crate::graph::{Graph, StepCallback};
 use crate::ids::SpanId;
@@ -29,11 +30,11 @@ pub struct CheckpointConfig<S: WorkflowState> {
     /// 保留策略
     pub retention: crate::checkpoint::checkpoint_policy::RetentionPolicy,
     /// 保存回调
-    save_fn: Arc<crate::checkpoint::checkpoint_policy::CheckpointSaveFn<S>>,
+    pub(crate) save_fn: Arc<crate::checkpoint::checkpoint_policy::CheckpointSaveFn<S>>,
     /// 图结构指纹
-    graph_hash: u64,
+    pub(crate) graph_hash: u64,
     /// 存储后端引用（用于 prune）
-    store: Option<Arc<dyn crate::checkpoint::store::BlobCheckpointStore>>,
+    pub(crate) store: Option<Arc<dyn crate::checkpoint::store::BlobCheckpointStore>>,
 }
 
 impl<S: WorkflowState> CheckpointConfig<S> {
@@ -85,6 +86,38 @@ impl<S: WorkflowState> CheckpointConfig<S> {
         self
     }
 
+    /// 便捷构造器 — 从 store + codec 构建 save_fn（serialize + save_with_trace）。
+    pub fn for_store(
+        store: Arc<dyn crate::checkpoint::store::BlobCheckpointStore>,
+        codec: impl crate::checkpoint::checkpoint_codec::CheckpointCodec<S>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+        graph_hash: u64,
+    ) -> Self
+    where
+        S: 'static,
+    {
+        let config_store = store.clone();
+        let save_fn: crate::checkpoint::checkpoint_policy::CheckpointSaveFn<S> =
+            Box::new(move |cp, trace_id| {
+                let store = store.clone();
+                let codec = codec.clone();
+                Box::pin(async move {
+                    let blob = codec.serialize(&cp, graph_hash)?;
+                    store.save_with_trace(&trace_id, &blob).await
+                })
+            });
+        Self {
+            save_fn: Arc::new(save_fn),
+            trigger: crate::checkpoint::checkpoint_policy::TriggerPolicy::default(),
+            retention: crate::checkpoint::checkpoint_policy::RetentionPolicy::default(),
+            graph_hash,
+            store: Some(config_store),
+        }
+    }
+
     #[allow(deprecated)]
     pub fn with_policy(mut self, policy: crate::checkpoint::CheckpointPolicy) -> Self {
         self.trigger = policy.into();
@@ -104,65 +137,6 @@ impl<S: WorkflowState> CheckpointConfig<S> {
                 }
             }
         }
-        Ok(())
-    }
-}
-
-// ─── CheckpointSaveSink ─────────────────────────────────────────
-
-/// Checkpoint 保存 Sink — 包装 CheckpointConfig 为 CheckpointSink。
-pub struct CheckpointSaveSink<S: WorkflowState> {
-    save_fn: Arc<crate::checkpoint::checkpoint_policy::CheckpointSaveFn<S>>,
-    graph_hash: u64,
-    trace_id: TraceId,
-    retention: crate::checkpoint::checkpoint_policy::RetentionPolicy,
-    store: Option<Arc<dyn crate::checkpoint::store::BlobCheckpointStore>>,
-}
-
-impl<S: WorkflowState> CheckpointSaveSink<S> {
-    pub fn new(config: CheckpointConfig<S>, trace_id: TraceId) -> Self {
-        Self {
-            save_fn: config.save_fn,
-            graph_hash: config.graph_hash,
-            trace_id,
-            retention: config.retention,
-            store: config.store,
-        }
-    }
-}
-
-#[allow(clippy::collapsible_if)]
-#[async_trait::async_trait]
-impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
-    async fn on_checkpoint(
-        &mut self,
-        state: &S,
-        frame: &FrameInfo,
-    ) -> Result<(), CheckpointStoreError> {
-        let save_fn = self.save_fn.clone();
-        let graph_hash = self.graph_hash;
-        let trace_id = self.trace_id;
-        let retention = self.retention.clone();
-        let store = self.store.clone();
-        let cp = Checkpoint::new(frame.next_node.clone(), state, graph_hash, frame.step);
-
-        // Task 1 最小适配：保留 fire-and-forget（Task 4 重写为同步等待）
-        tokio::spawn(async move {
-            match save_fn(cp, trace_id).await {
-                Ok(()) => {
-                    if let Some(keep) = retention.prune_keep() {
-                        if let Some(s) = &store {
-                            if let Err(e) = s.prune(&trace_id, keep).await {
-                                tracing::warn!(error = %e, "checkpoint retention failed");
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "checkpoint save failed");
-                }
-            }
-        });
         Ok(())
     }
 }
@@ -294,9 +268,9 @@ pub(crate) async fn run_execution_loop<S, M>(
     // 组装 Barrier Sink
     let mut barrier_sink = ChannelBarrierSink::new(decision_rx, cancel_rx, cancel.clone());
 
-    // 组装 Checkpoint Sink
+    // 组装 Checkpoint Sink（同步保存 + CheckpointSaved 事件）
     let mut cp_sink: Option<CheckpointSaveSink<S>> =
-        checkpoint.map(|cfg| CheckpointSaveSink::new(cfg, trace_id));
+        checkpoint.map(|cfg| CheckpointSaveSink::new(cfg, trace_id, Some(event_tx.clone())));
 
     // 发射 GraphStart
     let _ = event_tx.send(GraphEvent::GraphStart { trace_id }).await;

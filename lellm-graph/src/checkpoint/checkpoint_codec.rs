@@ -53,7 +53,7 @@ pub trait CheckpointCodec<S: WorkflowState = State>: Send + Sync {
 ///
 /// 使用 `serde_json` 进行序列化，适用于大多数场景。
 /// 对于性能敏感场景，可替换为 Bincode 或 MessagePack。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SerdeCheckpointCodec<S: WorkflowState = State> {
     _phantom: std::marker::PhantomData<S>,
 }

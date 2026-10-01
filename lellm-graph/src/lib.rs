@@ -44,6 +44,7 @@ pub use checkpoint::{
 
 // ─── Checkpoint Policy ───────────────────────────────────────
 pub use checkpoint::{RetentionPolicy, TriggerPolicy};
+pub use exec::CheckpointConfig;
 
 // ─── Barrier Sink ────────────────────────────────────────────
 pub use node::{BarrierOutcome, BarrierSink, ChannelBarrierSink, MockBarrierSink, NoopBarrierSink};
