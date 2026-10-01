@@ -6,9 +6,9 @@
 
 use lellm_graph::{
     BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointId, CheckpointStoreError,
-    InMemoryBlobStore, SerdeCheckpointCodec, State, TraceId, TriggerPolicy, TypedCheckpointStore,
+    InMemoryBlobStore, NodeId, SerdeCheckpointCodec, State, TraceId, TriggerPolicy,
+    TypedCheckpointStore,
 };
-use uuid::Uuid;
 
 const TEST_GRAPH_HASH: u64 = 0x1234_5678_9abc_def0;
 
@@ -17,7 +17,7 @@ const TEST_GRAPH_HASH: u64 = 0x1234_5678_9abc_def0;
 async fn test_serde_codec_roundtrip() {
     let codec = SerdeCheckpointCodec::<State>::new();
     let state = State::new();
-    let cp = Checkpoint::new("test_node", &state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new(Some(NodeId("test_node".into())), &state, TEST_GRAPH_HASH, 0);
 
     let blob = codec
         .serialize(&cp, TEST_GRAPH_HASH)
@@ -30,7 +30,7 @@ async fn test_serde_codec_roundtrip() {
         .deserialize(&blob, TEST_GRAPH_HASH)
         .expect("deserialize should succeed");
     assert_eq!(restored.checkpoint_id, cp.checkpoint_id);
-    assert_eq!(restored.current_node, cp.current_node);
+    assert_eq!(restored.next_node, cp.next_node);
 }
 
 /// 测试 graph_hash 不匹配时 deserialize 返回 GraphMismatch
@@ -38,7 +38,7 @@ async fn test_serde_codec_roundtrip() {
 async fn test_graph_hash_mismatch_rejected() {
     let codec = SerdeCheckpointCodec::<State>::new();
     let state = State::new();
-    let cp = Checkpoint::new("test_node", &state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new(Some(NodeId("test_node".into())), &state, TEST_GRAPH_HASH, 0);
 
     let blob = codec
         .serialize(&cp, TEST_GRAPH_HASH)
@@ -65,7 +65,7 @@ async fn test_typed_store_save_and_load() {
 
     let trace_id = TraceId::new();
     let state = State::new();
-    let cp = Checkpoint::new("start", &state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new(Some(NodeId("start".into())), &state, TEST_GRAPH_HASH, 0);
     let cp_id = cp.checkpoint_id.clone();
 
     typed
@@ -80,7 +80,7 @@ async fn test_typed_store_save_and_load() {
         .expect("checkpoint should exist");
 
     assert_eq!(loaded.checkpoint_id, cp_id);
-    assert_eq!(loaded.current_node, cp.current_node);
+    assert_eq!(loaded.next_node, cp.next_node);
 }
 
 /// 测试 CheckpointBlob 结构
@@ -89,7 +89,7 @@ fn test_checkpoint_blob_structure() {
     use lellm_graph::CheckpointBlob;
     use std::time::SystemTime;
 
-    let id = CheckpointId(Uuid::new_v4());
+    let id = CheckpointId::new();
     let blob = CheckpointBlob::new(
         id.clone(),
         vec![1, 2, 3],
@@ -114,7 +114,7 @@ async fn test_blob_store_operations() {
     assert!(store.is_empty());
     assert_eq!(store.len(), 0);
 
-    let id = CheckpointId(Uuid::new_v4());
+    let id = CheckpointId::new();
     let blob = CheckpointBlob::new(
         id.clone(),
         vec![1, 2, 3],
@@ -157,7 +157,7 @@ fn test_checkpoint_error_variants() {
     let storage_err = CheckpointStoreError::Storage("disk full".into());
     assert!(format!("{storage_err}").contains("disk full"));
 
-    let not_found = CheckpointStoreError::NotFound(CheckpointId(Uuid::nil()));
+    let not_found = CheckpointStoreError::NotFound(CheckpointId::new());
     assert!(format!("{not_found}").contains("not found"));
 
     let corrupted = CheckpointStoreError::Corrupted("invalid json".into());

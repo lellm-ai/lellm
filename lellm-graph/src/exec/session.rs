@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::checkpoint::{CheckpointSink, Frame, FrameInfo, FrameStack};
+use crate::checkpoint::{CheckpointSink, CheckpointStoreError, Frame, FrameInfo, FrameStack};
 use crate::graph::Graph;
 use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
@@ -90,17 +90,27 @@ where
     }
 }
 
+#[async_trait::async_trait]
 impl<S: WorkflowState> CheckpointSink<S> for SessionCheckpointSink<'_, S>
 where
     S::Checkpoint: Debug + Sync,
 {
-    fn on_checkpoint(&mut self, state: &S, frame: &FrameInfo) {
+    async fn on_checkpoint(
+        &mut self,
+        state: &S,
+        frame: &FrameInfo,
+    ) -> Result<(), CheckpointStoreError> {
         self.frame_stack.push(Frame {
             graph_id: self.graph_name.clone(),
-            node_id: frame.node_id.clone(),
+            node_id: frame
+                .next_node
+                .as_ref()
+                .map(|n| n.0.clone())
+                .unwrap_or_default(),
             state: state.snapshot(),
             cursor: frame.step,
         });
+        Ok(())
     }
 }
 

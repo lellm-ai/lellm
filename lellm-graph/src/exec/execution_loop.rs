@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::checkpoint::{Checkpoint, CheckpointSink, FrameInfo, TraceId};
+use crate::checkpoint::{Checkpoint, CheckpointSink, CheckpointStoreError, FrameInfo, TraceId};
 use crate::event::{BarrierDecisionMessage, BarrierId, GraphEvent};
 use crate::exec::execution_engine::ExecutionEngine;
 use crate::graph::{Graph, StepCallback};
@@ -132,15 +132,21 @@ impl<S: WorkflowState> CheckpointSaveSink<S> {
 }
 
 #[allow(clippy::collapsible_if)]
+#[async_trait::async_trait]
 impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
-    fn on_checkpoint(&mut self, state: &S, frame: &FrameInfo) {
+    async fn on_checkpoint(
+        &mut self,
+        state: &S,
+        frame: &FrameInfo,
+    ) -> Result<(), CheckpointStoreError> {
         let save_fn = self.save_fn.clone();
         let graph_hash = self.graph_hash;
         let trace_id = self.trace_id;
         let retention = self.retention.clone();
         let store = self.store.clone();
-        let cp = Checkpoint::new(frame.node_id.clone(), state, graph_hash);
+        let cp = Checkpoint::new(frame.next_node.clone(), state, graph_hash, frame.step);
 
+        // Task 1 最小适配：保留 fire-and-forget（Task 4 重写为同步等待）
         tokio::spawn(async move {
             match save_fn(cp, trace_id).await {
                 Ok(()) => {
@@ -157,6 +163,7 @@ impl<S: WorkflowState + 'static> CheckpointSink<S> for CheckpointSaveSink<S> {
                 }
             }
         });
+        Ok(())
     }
 }
 

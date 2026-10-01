@@ -45,3 +45,5 @@ bytes = "1"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 parking_lot = "0.12"
+sparkid = { version = "2.2", features = ["serde"] }
+base64 = "0.22"

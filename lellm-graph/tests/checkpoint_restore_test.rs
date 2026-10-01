@@ -3,8 +3,8 @@
 //! 参见: `docs/adr/v04-execution-model-redesign.md` 决策 4 (Phase D)
 
 use lellm_graph::{
-    Checkpoint, CheckpointStoreError, InMemoryBlobStore, SerdeCheckpointCodec, State, StateExt,
-    TraceId, TypedCheckpointStore,
+    Checkpoint, CheckpointStoreError, InMemoryBlobStore, NodeId, SerdeCheckpointCodec, State,
+    StateExt, TraceId, TypedCheckpointStore,
 };
 
 const TEST_GRAPH_HASH: u64 = 0xABCD_EF01_2345_6789;
@@ -23,7 +23,12 @@ async fn test_checkpoint_restore_roundtrip() {
     state.insert("user_id".to_string(), serde_json::json!("u123"));
     state.insert("step".to_string(), serde_json::json!(42));
 
-    let cp = Checkpoint::new("process_order", &state, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new(
+        Some(NodeId("process_order".into())),
+        &state,
+        TEST_GRAPH_HASH,
+        0,
+    );
     let cp_id = cp.checkpoint_id.clone();
 
     // 保存
@@ -41,12 +46,18 @@ async fn test_checkpoint_restore_roundtrip() {
 
     // 验证恢复的数据完整性
     assert_eq!(restored.checkpoint_id, cp_id);
-    assert_eq!(restored.current_node.0, "process_order");
+    assert_eq!(
+        restored.next_node.as_ref().expect("next_node").0,
+        "process_order"
+    );
     assert_eq!(restored.state.get_str("user_id"), Some("u123"));
     assert_eq!(restored.state.get_i64("step"), Some(42));
 
     // 验证可以从恢复的节点继续执行
-    assert_eq!(restored.current_node.to_string(), "process_order");
+    assert_eq!(
+        restored.next_node.as_ref().expect("next_node").to_string(),
+        "process_order"
+    );
 }
 
 /// 测试 load_latest 返回最新的 Checkpoint
@@ -67,7 +78,7 @@ async fn test_load_latest_checkpoint() {
 
     // 保存第一个 Checkpoint
     let state1 = State::new();
-    let cp1 = Checkpoint::new("node_a", &state1, TEST_GRAPH_HASH);
+    let cp1 = Checkpoint::new(Some(NodeId("node_a".into())), &state1, TEST_GRAPH_HASH, 0);
     typed
         .save_with_trace(&trace_id, &cp1, TEST_GRAPH_HASH)
         .await
@@ -75,7 +86,7 @@ async fn test_load_latest_checkpoint() {
 
     // 保存第二个 Checkpoint
     let state2 = State::new();
-    let cp2 = Checkpoint::new("node_b", &state2, TEST_GRAPH_HASH);
+    let cp2 = Checkpoint::new(Some(NodeId("node_b".into())), &state2, TEST_GRAPH_HASH, 0);
     typed
         .save_with_trace(&trace_id, &cp2, TEST_GRAPH_HASH)
         .await
@@ -101,14 +112,14 @@ async fn test_trace_isolation() {
     let trace_b = TraceId::new();
 
     let state_a = State::new();
-    let cp_a = Checkpoint::new("node_a", &state_a, TEST_GRAPH_HASH);
+    let cp_a = Checkpoint::new(Some(NodeId("node_a".into())), &state_a, TEST_GRAPH_HASH, 0);
     typed
         .save_with_trace(&trace_a, &cp_a, TEST_GRAPH_HASH)
         .await
         .expect("save cp_a");
 
     let state_b = State::new();
-    let cp_b = Checkpoint::new("node_b", &state_b, TEST_GRAPH_HASH);
+    let cp_b = Checkpoint::new(Some(NodeId("node_b".into())), &state_b, TEST_GRAPH_HASH, 0);
     typed
         .save_with_trace(&trace_b, &cp_b, TEST_GRAPH_HASH)
         .await
@@ -140,7 +151,12 @@ async fn test_graph_hash_mismatch_on_load() {
 
     let trace_id = TraceId::new();
     let state_init = State::new();
-    let cp = Checkpoint::new("node_a", &state_init, TEST_GRAPH_HASH);
+    let cp = Checkpoint::new(
+        Some(NodeId("node_a".into())),
+        &state_init,
+        TEST_GRAPH_HASH,
+        0,
+    );
     let cp_id = cp.checkpoint_id.clone();
 
     typed

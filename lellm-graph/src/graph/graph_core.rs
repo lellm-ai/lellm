@@ -411,9 +411,9 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             // commit mutations (Unit of Work) — 对 Parallel 是空操作
             exec_ctx.commit();
 
-            // checkpoint — 通知 Sink 到达了合法的恢复边界。
-            // 顺序：execute → commit → checkpoint → route
-            exec_ctx.emit_checkpoint(&current, step);
+            // checkpoint — 通知 Sink 到达恢复边界（同步等待保存完成）。
+            // 顺序：execute → commit → checkpoint → route（Task 3 重排后传真实 next）
+            exec_ctx.emit_checkpoint(None, step).await?;
 
             // 提取控制信号
             let (next_action, signal) = exec_ctx.take_control();

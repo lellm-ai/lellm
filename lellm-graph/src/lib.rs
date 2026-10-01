@@ -38,8 +38,8 @@ pub use state::{
 // ─── Checkpoint ──────────────────────────────────────────────
 #[allow(deprecated)]
 pub use checkpoint::{
-    Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy, CheckpointSink,
-    CheckpointStoreError, FrameInfo, MemorySink, NodeId, NoopCheckpointSink,
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy,
+    CheckpointSink, CheckpointStoreError, FrameInfo, MemorySink, NodeId, NoopCheckpointSink,
 };
 
 // ─── Checkpoint Policy ───────────────────────────────────────

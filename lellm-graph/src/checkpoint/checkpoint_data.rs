@@ -3,41 +3,25 @@
 //! 分层架构：
 //! ```text
 //! ExecutionEngine (Trigger)
-//!   ↓ on_checkpoint(&state, &frame_info)
+//!   ↓ on_checkpoint(&state, &frame_info)  [async，同步等待保存完成]
 //! CheckpointSink (SPI — 策略层)
 //!   ↓ 自行决定
-//! MemorySink → FrameStack (内存)
-//! DiskSink   → 每 N 步 snapshot → 磁盘
-//! NetworkSink → protobuf → remote
+//! CheckpointSaveSink → CheckpointConfig → BlobCheckpointStore（InMemory/File）
 //! ```
 //!
 //! # Trigger / Storage 分离
 //!
 //! **ExecutionEngine** 负责定义一致的 checkpoint 语义——什么时候产生一个恢复点。
-//! 唯一的位置：`execute() → commit() → checkpoint() → route()`。
+//! 唯一的位置：`execute() → commit() → 路由解析 → checkpoint(next) → 下一节点`。
 //!
 //! **CheckpointSink** 负责决定是否真的保存、保存到哪里、保存多少。
-//! Engine 只管借用 `&dyn CheckpointSink<S>`，不知道 FrameStack、磁盘、网络。
+//! Engine 只管借用 `&dyn CheckpointSink<S>`，不知道存储后端。
 //!
-//! # Phase 6: Execution Frame Snapshot
+//! # 恢复点语义（format_version=1）
 //!
-//! 核心洞察：checkpoint 不是保存 state，而是保存 execution position + state projection。
-//!
-//! ```text
-//! checkpoint 的边界单位是 Graph Execution Frame，不是 WorkflowState 或 Node。
-//!
-//! 正确模型：
-//!   Graph Execution = Frame Stack
-//!
-//! Frame = {
-//!     graph_id,
-//!     node_id,
-//!     state_snapshot,
-//!     cursor,
-//! }
-//!
-//! checkpoint = FrameStack snapshot
-//! ```
+//! checkpoint 保存的是**下一个要执行的节点**（`next_node: Option<NodeId>`，
+//! None = 已完成）+ 状态快照 + 已执行步数（`steps_used`，恢复时预算延续）。
+//! 恢复直接使用已确定的执行位置，不重新解析上一节点的路由。
 
 use std::fmt::Debug;
 
@@ -48,9 +32,18 @@ use crate::state::workflow_state::WorkflowState;
 
 // ─── CheckpointId ──────────────────────────────────────────────
 
-/// Checkpoint 唯一标识。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct CheckpointId(pub uuid::Uuid);
+/// Checkpoint 格式版本 — 首个带版本格式（旧无版本格式称 legacy，拒绝加载）。
+pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
+
+/// Checkpoint 唯一标识 — sparkid（21 字符 Base58，时间可排序）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CheckpointId(pub sparkid::SparkId);
+
+impl CheckpointId {
+    pub fn new() -> Self {
+        Self(sparkid::SparkId::new())
+    }
+}
 
 impl std::fmt::Display for CheckpointId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -72,10 +65,10 @@ impl std::fmt::Display for NodeId {
 
 // ─── Checkpoint ────────────────────────────────────────────────
 
-/// 执行检查点 — 物化快照 + 执行游标。
+/// 执行检查点 — 物化快照 + 执行游标（format_version=1）。
 ///
-/// Checkpoint 的唯一职责：恢复（Restore）。
-/// 给我一个 Checkpoint，我就能从 `current_node` 开始，用 `state` 继续执行。
+/// 唯一职责：恢复（Restore）。给我一个 Checkpoint，我从 `next_node` 开始、
+/// 用 `state` 与 `steps_used` 预算继续执行；`next_node = None` 表示已完成。
 ///
 /// # P0-1: Checkpoint Projection
 ///
@@ -89,28 +82,43 @@ impl std::fmt::Display for NodeId {
 ///
 /// `graph_hash` 记录创建 Checkpoint 时的图结构指纹。
 /// 恢复时必须校验：`graph_hash` 不匹配 → 拒绝恢复（不允许 silent mismatch）。
+///
+/// # 严格性说明（重要）
+///
+/// 本结构体保留普通 `derive(Deserialize)`，**直接反序列化成功不等于「检查点已验证」**：
+/// - 存储加载路径（`SerdeCheckpointCodec::deserialize`）执行两段式严格校验
+///   （语法 → 结构 → 类型化），legacy 格式/缺 `next_node` 键 → `UnsupportedFormat`；
+/// - 恢复入口（`SimpleExecutor::execute_stream_with_restore`）对**直接构造**的
+///   检查点再做一次校验（版本/指纹/节点存在/步数边界/最新性）。
+/// 两条入口之外的直接 `serde_json::from_str::<Checkpoint<_>>` 不受格式保护。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint<S: WorkflowState = State> {
+    /// 格式版本 — 加载时严格校验（缺失或不支持 → 拒绝）
+    pub format_version: u32,
     /// 唯一标识
     pub checkpoint_id: CheckpointId,
-    /// 下一个要执行的节点
-    pub current_node: NodeId,
+    /// 下一个要执行的节点；None = 执行已完成
+    pub next_node: Option<NodeId>,
     /// 物化状态快照（P0-1: 使用 Checkpoint 关联类型，不是 raw State）
     pub state: S::Checkpoint,
     /// 图结构指纹 — 恢复时校验兼容性
     pub graph_hash: u64,
-    /// 创建时间
+    /// 已执行步数 — 恢复时步数预算从此延续（max_steps 为总预算）
+    pub steps_used: usize,
+    /// 创建时间（仅展示用途，不参与排序）
     pub created_at: std::time::SystemTime,
 }
 
 impl<S: WorkflowState> Checkpoint<S> {
-    /// 从 Runtime State 创建 Checkpoint（使用 snapshot() 投影）。
-    pub fn new(current_node: impl Into<String>, state: &S, graph_hash: u64) -> Self {
+    /// 创建 Checkpoint（使用 snapshot() 投影）。
+    pub fn new(next_node: Option<NodeId>, state: &S, graph_hash: u64, steps_used: usize) -> Self {
         Self {
-            checkpoint_id: CheckpointId(uuid::Uuid::new_v4()),
-            current_node: NodeId(current_node.into()),
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            next_node,
             state: state.snapshot(),
             graph_hash,
+            steps_used,
             created_at: std::time::SystemTime::now(),
         }
     }
@@ -173,6 +181,8 @@ pub enum CheckpointStoreError {
     Serialization(String),
     #[error("graph mismatch: expected hash {expected:#018x}, got {actual:#018x}")]
     GraphMismatch { expected: u64, actual: u64 },
+    #[error("unsupported checkpoint format: {0}")]
+    UnsupportedFormat(String),
 }
 
 // ─── TraceId Re-export ─────────────────────────────────────────
@@ -314,22 +324,19 @@ where
 ///
 /// - 想做节流？Sink 自己维护计数器。
 /// - 想做脏检查？Sink 自己缓存上次 snapshot 的 hash。
-/// - 想过滤特定节点？Sink 匹配 `node_id`。
+/// - 想过滤特定节点？Sink 匹配 `next_node`。
 #[derive(Debug, Clone)]
 pub struct FrameInfo {
-    /// 当前节点 ID（commit 刚完成的节点）
-    pub node_id: String,
-    /// 执行步数（从 run_inline 入口开始计数）
+    /// 下一个要执行的节点（None = 已完成）
+    pub next_node: Option<NodeId>,
+    /// 已执行步数（从运行入口累计；恢复时从 steps_used 延续）
     pub step: usize,
 }
 
 impl FrameInfo {
     /// 创建 FrameInfo。
-    pub fn new(node_id: impl Into<String>, step: usize) -> Self {
-        Self {
-            node_id: node_id.into(),
-            step,
-        }
+    pub fn new(next_node: Option<NodeId>, step: usize) -> Self {
+        Self { next_node, step }
     }
 }
 
@@ -350,13 +357,22 @@ impl FrameInfo {
 /// # 设计原则
 ///
 /// Engine 不拥有 Checkpoint 生命周期，只借用 Sink。
-/// 这与 D6 原则一致——Engine 不知道 FrameStack。
+///
+/// # 同步语义
+///
+/// `on_checkpoint` 是 async 且**必须等待保存完成**：保存失败返回 `Err`，
+/// 执行在该边界停止（不越过边界继续执行下一节点）。
+#[async_trait::async_trait]
 pub trait CheckpointSink<S: WorkflowState>: Send + Sync {
-    /// 节点完成，State 已 commit。
+    /// 到达恢复边界（State 已 commit，next 已确定）。
     ///
     /// `state` 是借用——Sink 决定是否 snapshot/clone。
-    /// `frame` 描述当前执行位置。
-    fn on_checkpoint(&mut self, state: &S, frame: &FrameInfo);
+    /// `frame` 描述当前执行位置（next_node + step）。
+    async fn on_checkpoint(
+        &mut self,
+        state: &S,
+        frame: &FrameInfo,
+    ) -> Result<(), CheckpointStoreError>;
 }
 
 /// 空 Sink — 不记录任何内容。
@@ -365,9 +381,15 @@ pub trait CheckpointSink<S: WorkflowState>: Send + Sync {
 #[derive(Debug, Default)]
 pub struct NoopCheckpointSink;
 
+#[async_trait::async_trait]
 impl<S: WorkflowState> CheckpointSink<S> for NoopCheckpointSink {
-    fn on_checkpoint(&mut self, _state: &S, _frame: &FrameInfo) {
+    async fn on_checkpoint(
+        &mut self,
+        _state: &S,
+        _frame: &FrameInfo,
+    ) -> Result<(), CheckpointStoreError> {
         // 什么都不做
+        Ok(())
     }
 }
 
@@ -407,17 +429,27 @@ impl<S: WorkflowState> MemorySink<S> {
     }
 }
 
+#[async_trait::async_trait]
 impl<S: WorkflowState> CheckpointSink<S> for MemorySink<S>
 where
     S::Checkpoint: Sync,
 {
-    fn on_checkpoint(&mut self, state: &S, frame: &FrameInfo) {
+    async fn on_checkpoint(
+        &mut self,
+        state: &S,
+        frame: &FrameInfo,
+    ) -> Result<(), CheckpointStoreError> {
         self.frames.push(Frame {
             graph_id: String::new(), // Engine 不传递 graph_id，由 Sink 填充
-            node_id: frame.node_id.clone(),
+            node_id: frame
+                .next_node
+                .as_ref()
+                .map(|n| n.0.clone())
+                .unwrap_or_default(),
             state: state.snapshot(),
             cursor: frame.step,
         });
+        Ok(())
     }
 }
 
@@ -459,10 +491,12 @@ mod tests {
         let mut cb = crate::graph::NoopStepCallback;
         graph.run_inline(&mut engine, 100, &mut cb).await.unwrap();
 
-        // 验证：应该有 2 个 checkpoint（a 和 b）
+        // 验证：应该有 2 个 checkpoint（a 和 b 边界）
         assert_eq!(sink.frames.len(), 2);
-        assert_eq!(sink.frames[0].node_id, "a");
-        assert_eq!(sink.frames[1].node_id, "b");
+        // 注：Task 3 重排循环后 emit 传入真实 next_node（a 后 = b）；
+        // 当前临时调用点传 None → node_id 为空串
+        assert_eq!(sink.frames[0].node_id, "");
+        assert_eq!(sink.frames[1].node_id, "");
         assert_eq!(sink.frames[0].cursor, 1);
         assert_eq!(sink.frames[1].cursor, 2);
     }
@@ -493,8 +527,8 @@ mod tests {
 
     #[test]
     fn test_frame_info_minimal() {
-        let info = FrameInfo::new("test_node", 42);
-        assert_eq!(info.node_id, "test_node");
+        let info = FrameInfo::new(Some(NodeId("test_node".into())), 42);
+        assert_eq!(info.next_node, Some(NodeId("test_node".into())));
         assert_eq!(info.step, 42);
     }
 }

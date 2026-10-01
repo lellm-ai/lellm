@@ -59,7 +59,8 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::checkpoint::CheckpointSink;
+use crate::checkpoint::{CheckpointSink, NodeId};
+use crate::error::GraphError;
 use crate::node::barrier_sink::BarrierSink;
 use crate::state::workflow_state::WorkflowState;
 use crate::stream_chunk::StreamChunk;
@@ -243,14 +244,24 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
         }
     }
 
-    /// 通知 Checkpoint Sink 到达了合法的恢复边界（crate 内部使用）。
+    /// 通知 Checkpoint Sink 到达恢复边界并**同步等待保存完成**（crate 内部使用）。
     ///
-    /// 由 Graph::run_inline() 在 commit() 之后调用。
-    /// 这个方法在 Engine 内部同时访问 state 和 sink，避免借用冲突。
-    pub(crate) fn emit_checkpoint(&mut self, node_id: impl Into<String>, step: usize) {
+    /// 由 Graph 执行循环在 commit + 路由解析之后调用。
+    /// 保存失败 → `GraphError::Terminal(CheckpointSaveFailed)`，不越过边界。
+    pub(crate) async fn emit_checkpoint(
+        &mut self,
+        next_node: Option<NodeId>,
+        step: usize,
+    ) -> Result<(), GraphError> {
         if let Some(ref mut sink) = self.checkpoint {
-            use crate::checkpoint::FrameInfo;
-            sink.on_checkpoint(self.state, &FrameInfo::new(node_id, step));
+            let frame = crate::checkpoint::FrameInfo::new(next_node, step);
+            sink.on_checkpoint(self.state, &frame).await.map_err(|e| {
+                GraphError::Terminal(crate::error::TerminalError::CheckpointSaveFailed {
+                    error: e.to_string(),
+                })
+            })
+        } else {
+            Ok(())
         }
     }
 
