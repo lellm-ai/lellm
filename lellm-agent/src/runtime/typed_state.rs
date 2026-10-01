@@ -217,52 +217,9 @@ impl WorkflowState for AgentState {
     }
 }
 
-/// AgentState 的默认合并策略。
-///
-/// - messages: 所有分支拼接（chain）
-/// - iterations: 取最大值
-/// - total_tool_calls: 取最大值
-/// - output_tokens: 取最大分支
-/// - reasoning_tokens: 取最大分支
-/// - compact_count: 取最大分支
-/// - stop_reason: 优先取后者
-/// - last_response: 优先取后者
-#[derive(Clone)]
-pub struct AgentStateMerge;
-
-impl lellm_graph::MergeStrategy<AgentState> for AgentStateMerge {
-    // AgentState 采用全量合并策略（extend messages + max counters），无需基于 base 的 delta diff
-    fn merge(
-        _base: &AgentState,
-        branches: Vec<AgentState>,
-    ) -> Result<AgentState, lellm_graph::WorkflowError> {
-        let mut iter = branches.into_iter();
-        let mut merged = iter.next().ok_or_else(|| {
-            lellm_graph::WorkflowError::MergeConflict("no branches to merge".into())
-        })?;
-
-        for branch in iter {
-            merged.messages.extend(branch.messages);
-            merged.iterations = merged.iterations.max(branch.iterations);
-            merged.total_tool_calls = merged.total_tool_calls.max(branch.total_tool_calls);
-            merged.output_tokens = merged.output_tokens.max(branch.output_tokens);
-            merged.reasoning_tokens = merged.reasoning_tokens.max(branch.reasoning_tokens);
-            merged.compact_count = merged.compact_count.max(branch.compact_count);
-            if merged.stop_reason.is_none() {
-                merged.stop_reason = branch.stop_reason;
-            }
-            if merged.last_response.is_none() {
-                merged.last_response = branch.last_response;
-            }
-        }
-
-        Ok(merged)
-    }
-
-    fn default_instance() -> Self {
-        AgentStateMerge
-    }
-}
+// AgentState 的并行合并策略（基于 base 的 delta 合并）已拆到 typed_state_merge 模块，
+// 此处 re-export 以保持公开路径 runtime::typed_state::AgentStateMerge 不变。
+pub use super::typed_state_merge::AgentStateMerge;
 
 // ─── NOTE: 序列化桥接已删除 ─────────────────────────
 // to_value() / from_value() / apply_from_value() / AGENT_STATE_KEY

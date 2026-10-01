@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod stream_translation;
 pub mod tools;
 pub mod typed_state;
+mod typed_state_merge;
 
 // ─── 工具系统 re-export ──────────────────────────────────────────
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::{ContentBlock, ToolCall};
 
 /// 统一的聊天响应。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatResponse {
     /// 响应内容块列表，与 `Message::Assistant` 的 content 类型对齐。
     pub content: Vec<ContentBlock>,
@@ -38,7 +38,7 @@ impl ChatResponse {
 }
 
 /// Token 消耗统计。
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
