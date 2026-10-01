@@ -141,10 +141,11 @@ pub enum GraphEvent<S: crate::state::workflow_state::WorkflowState = State> {
         error: ObservedError,
         node_name: String,
     },
-    /// Checkpoint 已保存。
+    /// Checkpoint 已保存（尽力而为的观测信号 — try_send 可能丢，不作可靠握手）。
     CheckpointSaved {
         checkpoint_id: CheckpointId,
-        node_name: String,
+        /// 下一个要执行的节点（None = 已完成）
+        next_node: Option<String>,
         step: usize,
     },
     /// Graph 执行完成（恰好一次）

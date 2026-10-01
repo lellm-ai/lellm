@@ -3,6 +3,7 @@
 pub(crate) mod graph_analysis;
 pub(crate) mod graph_builder;
 pub(crate) mod graph_core;
+pub(crate) mod run_loop;
 
 pub use graph_analysis::*;
 pub use graph_builder::{GraphBuilder, PendingEdge};

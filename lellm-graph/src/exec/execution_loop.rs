@@ -313,7 +313,10 @@ pub(crate) async fn run_execution_loop<S, M>(
             cp_sink.as_mut().map(|s| s as &mut dyn CheckpointSink<S>),
             Some(&mut barrier_sink),
         );
-        graph.run_inline(&mut engine, max_steps, &mut step_cb).await
+        // 首次运行：start_node() + steps_used=0（恢复分支在 Task 6 加入）
+        graph
+            .run_inline_from(&mut engine, graph.start_node(), 0, max_steps, &mut step_cb)
+            .await
     };
 
     // engine 已 drop，可以安全访问 engine_state

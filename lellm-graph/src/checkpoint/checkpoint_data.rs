@@ -493,9 +493,8 @@ mod tests {
 
         // 验证：应该有 2 个 checkpoint（a 和 b 边界）
         assert_eq!(sink.frames.len(), 2);
-        // 注：Task 3 重排循环后 emit 传入真实 next_node（a 后 = b）；
-        // 当前临时调用点传 None → node_id 为空串
-        assert_eq!(sink.frames[0].node_id, "");
+        // a 完成后 next=b；b 是 end 节点，next=None → 空串
+        assert_eq!(sink.frames[0].node_id, "b");
         assert_eq!(sink.frames[1].node_id, "");
         assert_eq!(sink.frames[0].cursor, 1);
         assert_eq!(sink.frames[1].cursor, 2);

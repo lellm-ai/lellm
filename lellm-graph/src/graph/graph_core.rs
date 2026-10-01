@@ -17,10 +17,10 @@ use super::graph_analysis::{self, CycleAnalysis};
 use super::graph_builder::fnv_hash;
 use crate::error::{GraphDiagnostics, GraphError, TerminalError};
 use crate::event::BarrierId;
-use crate::exec::execution_engine::{ExecutionEngine, ExecutionSignal, ExecutorState, NextAction};
+use crate::exec::execution_engine::ExecutionEngine;
 use crate::ids::SpanId;
 #[allow(deprecated)]
-use crate::node::{BarrierNode, ConditionNode, FlowNode, LeafNode, NodeKind};
+use crate::node::NodeKind;
 use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
 
@@ -316,179 +316,61 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
 
     // ─── 内联执行 ────────────────────────────────────────────
 
-    /// 内联执行 — 唯一的执行路径。
+    /// 内联执行 — 首次运行语义（start_node()，steps_used=0）。
     ///
-    /// 接收 [`ExecutionEngine`]（借用 State），内部循环构建 [`NodeContext`]（能力视图）
-    /// 供节点使用。
-    ///
-    /// 数据流：
-    /// ```text
-    /// ExecutionEngine
-    ///   → build_node_context()  → NodeContext<'_, S>
-    ///   → node.execute(ctx)     → 节点 record() Mutations
-    ///   → drop(ctx)             → 释放借用
-    ///   → commit()              → apply Mutations 到 State
-    ///   → emit_checkpoint()     → 通知 CheckpointSink
-    ///   → step_cb.on_step()     → 通知 wrapper（追踪/事件）
-    ///   → take_control()        → 获取路由信号
-    /// ```
-    ///
-    /// # StepCallback
-    ///
-    /// 每步回调在 commit + checkpoint 之后、take_control 之前调用。
-    /// 用于 wrapper（如 `run_execution_loop`）追踪 execution_log 或发射 per-node 事件。
+    /// 公共签名保持不变（lellm-agent / examples / subgraph_spec 零改动）。
+    /// 执行循环本体见 [`crate::graph::run_loop::run_graph_loop`]。
     pub async fn run_inline<'cb>(
         &self,
         exec_ctx: &mut ExecutionEngine<'_, S>,
         max_steps: usize,
         step_cb: &mut dyn StepCallback<'cb>,
     ) -> Result<(), GraphError> {
-        let mut current = self.start_node().to_string();
-        let mut step: usize = 0;
+        self.run_inline_from(exec_ctx, self.start_node(), 0, max_steps, step_cb)
+            .await
+    }
 
-        loop {
-            step += 1;
-            if step > max_steps {
-                return Err(GraphError::Terminal(TerminalError::StepsExceeded {
-                    limit: max_steps,
+    /// 统一执行入口 — 首次运行与恢复共用（pub(crate)）。
+    ///
+    /// - `start_node` — 首次运行 = `start_node()`；恢复 = `checkpoint.next_node`
+    /// - `steps_used` — 首次运行 = 0；恢复 = `checkpoint.steps_used`（预算延续）
+    /// - `max_steps` — **总预算**（恢复时同样传总预算）
+    pub(crate) async fn run_inline_from<'cb>(
+        &self,
+        exec_ctx: &mut ExecutionEngine<'_, S>,
+        start_node: &str,
+        steps_used: usize,
+        max_steps: usize,
+        step_cb: &mut dyn StepCallback<'cb>,
+    ) -> Result<(), GraphError> {
+        crate::graph::run_loop::run_graph_loop(
+            self, exec_ctx, start_node, steps_used, max_steps, step_cb,
+        )
+        .await
+    }
+
+    /// 持久化执行校验 — 拒绝含 Parallel/Subgraph/Barrier 的图。
+    ///
+    /// 第一阶段（串行含循环）在**启动持久化执行时**显式拒绝，
+    /// 不等崩溃后恢复才报错；恢复入口再校验一次。
+    /// 非持久化执行不受影响（不调用此方法）。
+    pub fn validate_persistable(&self) -> Result<(), GraphError> {
+        for (name, kind) in self.node_map() {
+            #[allow(deprecated)]
+            let unsupported = match kind {
+                NodeKind::Parallel(_) => Some("Parallel"),
+                NodeKind::Subgraph(_) => Some("Subgraph"),
+                NodeKind::Barrier(_) => Some("Barrier"),
+                _ => None,
+            };
+            if let Some(kind_name) = unsupported {
+                return Err(GraphError::Terminal(TerminalError::RestoreUnsupported {
+                    node: name.clone(),
+                    kind: kind_name.to_string(),
                 }));
             }
-
-            let node = self.nodes.get(&current).ok_or_else(|| {
-                GraphError::Terminal(TerminalError::NodeNotFound(current.clone()))
-            })?;
-
-            let node_start = std::time::Instant::now();
-            let span_id = SpanId::new();
-
-            // 通知 wrapper 节点即将开始执行
-            step_cb.on_node_start(&current, span_id, step);
-
-            // 根据 NodeKind 分发执行
-            #[allow(deprecated)]
-            let exec_result = match node {
-                NodeKind::Task(n) => {
-                    let mut ctx = exec_ctx.build_node_context();
-                    n.execute(&mut ctx).await
-                }
-                NodeKind::Condition(n) => {
-                    let mut ctx = exec_ctx.build_leaf_context();
-                    <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
-                }
-                NodeKind::Barrier(n) => {
-                    let mut ctx = exec_ctx.build_leaf_context();
-                    <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
-                }
-                NodeKind::External(n) => {
-                    let mut ctx = exec_ctx.build_node_context();
-                    n.execute(&mut ctx).await
-                }
-                NodeKind::ExternalLeaf(n) => {
-                    let mut ctx = exec_ctx.build_leaf_context();
-                    n.execute(&mut ctx).await
-                }
-                NodeKind::Parallel(p) => {
-                    // ExecutorOperation 直接接收 &mut ExecutionEngine
-                    p.execute(exec_ctx).await
-                }
-                NodeKind::Subgraph(spec) => {
-                    // Subgraph 执行 — 通过 CompiledSubgraph 的 StateProjector 递归执行内层 Graph
-                    let stream = exec_ctx.stream_sink();
-                    let cancel = exec_ctx.cancel_token().clone();
-                    spec.execute(exec_ctx.state_mut(), stream, cancel).await
-                }
-            };
-
-            let node_duration = node_start.elapsed();
-            let success = exec_result.is_ok();
-
-            // 通知 wrapper 节点执行完成
-            step_cb.on_node_end(&current, span_id, step, node_duration, success);
-
-            // 如果节点执行失败，传播错误
-            exec_result?;
-
-            // commit mutations (Unit of Work) — 对 Parallel 是空操作
-            exec_ctx.commit();
-
-            // checkpoint — 通知 Sink 到达恢复边界（同步等待保存完成）。
-            // 顺序：execute → commit → checkpoint → route（Task 3 重排后传真实 next）
-            exec_ctx.emit_checkpoint(None, step).await?;
-
-            // 提取控制信号
-            let (next_action, signal) = exec_ctx.take_control();
-
-            // 处理 Barrier Pause 信号
-            if let Some(ExecutionSignal::Pause {
-                barrier_id,
-                timeout,
-            }) = signal
-            {
-                let span_id = SpanId::new();
-                step_cb.on_barrier_waiting(&barrier_id, &current, span_id);
-                let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await;
-
-                // 从当前 Barrier 节点读取配置（reject_target / default_action）
-                let barrier = match node {
-                    NodeKind::Barrier(b) => b,
-                    _ => unreachable!("Pause 信号仅由 Barrier 节点产生"),
-                };
-
-                // 归约「是否拒绝」：显式 Reject，或超时且 default_action=Reject
-                let rejected = match &outcome {
-                    crate::node::barrier_sink::BarrierOutcome::Decision(
-                        crate::event::BarrierDecision::Reject { .. },
-                    ) => true,
-                    crate::node::barrier_sink::BarrierOutcome::TimedOut => matches!(
-                        barrier.default_action,
-                        crate::node::BarrierDefaultAction::Reject
-                    ),
-                    _ => false,
-                };
-
-                // 拒绝（显式 Reject 或超时 default_action=Reject）— 受保护动作不执行：
-                // 有 reject_target → 跳转处理；否则结束执行
-                if rejected {
-                    match &barrier.reject_target {
-                        Some(target) => {
-                            current = target.clone();
-                            continue;
-                        }
-                        None => return Ok(()),
-                    }
-                }
-
-                match outcome {
-                    crate::node::barrier_sink::BarrierOutcome::Decision(
-                        crate::event::BarrierDecision::Reroute { target },
-                    ) => {
-                        current = target;
-                        continue;
-                    }
-                    crate::node::barrier_sink::BarrierOutcome::Cancelled => {
-                        return Err(GraphError::Terminal(
-                            crate::error::TerminalError::BarrierCancelled { node: current },
-                        ));
-                    }
-                    // Approve / Modify / Timeout(Approve|Skip) — 继续正常路由
-                    _ => {}
-                }
-            }
-
-            // 处理路由
-            match next_action {
-                NextAction::End => return Ok(()),
-                NextAction::Goto(target) => {
-                    current = target;
-                }
-                NextAction::Next => {
-                    if current == self.end_node() {
-                        return Ok(());
-                    }
-                    current = self.resolve_next_inline(&current, exec_ctx.state())?;
-                }
-            }
         }
+        Ok(())
     }
 }
 
