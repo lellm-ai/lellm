@@ -42,3 +42,7 @@ path = "examples/calculator_graph.rs"
 [[example]]
 name = "calculator_graph_mock"
 path = "examples/calculator_graph_mock.rs"
+
+[[example]]
+name = "persistent_restore"
+path = "examples/persistent_restore.rs"

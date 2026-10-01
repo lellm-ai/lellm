@@ -72,17 +72,30 @@ START → budget_check ──(ok)──→ [llm] → [post_llm_check]
 
 The ReAct loop is not a `while` — it's a real directed graph with typed nodes and edges. Graph features — barriers, parallel execution, tracing — work for agents; agent-path auto-checkpointing is on the roadmap.
 
-### State Checkpointing
+### State Checkpointing (Durable Execution)
 
-Snapshot state at node boundaries and restore it:
+Snapshot state **and the execution cursor** at node boundaries; a new process resumes from the checkpoint without rerunning committed nodes:
 
 ```rust
-let checkpoint = session.checkpoint();
-// ... later ...
-let restored = ExecutionSession::restore(checkpoint, graph)?;
+let store = Arc::new(FileBlobStore::new("./checkpoints"));
+let config = CheckpointConfig::for_store(
+    store,
+    SerdeCheckpointCodec::new(),
+    graph.canonical_hash(),
+);
+let exec = executor.execute_stream_with_checkpoint(graph.clone(), state, config.clone())?;
+// ... process crash (panic / SIGKILL) ... (new process)
+let cp = typed.load_latest(&trace_id, graph.canonical_hash()).await?;
+let exec = executor
+    .execute_stream_with_restore(graph, cp, trace_id, config)
+    .await?;
 ```
 
-> **Current behavior**: restore rebuilds state and reruns the graph from its start node — a state snapshot, not yet resume-from-failure. Disk-backed, resume-from-node durable recovery is on the roadmap.
+> **Phase 1 scope**: serial graphs (including loops). Graphs containing Parallel / Subgraph / Barrier are rejected **at the persistence entry**, not after a crash. Checkpoint/restore is wired into the graph execution path only; the agent runtime (ToolUseLoop) is not yet wired (phase 2+).
+>
+> **Durability boundary**: flush + rename guarantees write completion and atomic visibility — **process-crash safe** (panic / SIGKILL). It does **not** guarantee visibility after power loss (requires file + directory fsync; phase 2).
+>
+> **No exactly-once**: if the process dies after a node's side effect succeeded but before the checkpoint landed, restore reruns that node. Use idempotency keys / dedup / business compensation.
 
 ### Human-in-the-Loop
 

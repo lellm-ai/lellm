@@ -24,6 +24,7 @@ use crate::state::{ExecutionEntry, GraphResult};
 // ─── CheckpointConfig ──────────────────────────────────────────
 
 /// Checkpoint 保存配置 — 传入 `run_execution_loop` 即可启用自动保存。
+#[derive(Clone)]
 pub struct CheckpointConfig<S: WorkflowState> {
     /// 触发策略
     pub trigger: crate::checkpoint::checkpoint_policy::TriggerPolicy,

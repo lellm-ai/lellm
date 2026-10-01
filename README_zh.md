@@ -72,17 +72,30 @@ START → budget_check ──(充足)──→ [llm] → [post_llm_check]
 
 ReAct 循环不是 `while` —— 而是带有类型化节点和边的真实有向图。图功能 —— Barrier、并行执行、追踪 —— 对 Agent 生效；Agent 路径自动检查点见路线图。
 
-### 状态检查点
+### 状态检查点（持久化执行）
 
-在节点边界快照状态并恢复：
+在节点边界快照状态**与执行游标**；新进程从检查点恢复，不重跑已提交节点：
 
 ```rust
-let checkpoint = session.checkpoint();
-// ... 之后 ...
-let restored = ExecutionSession::restore(checkpoint, graph)?;
+let store = Arc::new(FileBlobStore::new("./checkpoints"));
+let config = CheckpointConfig::for_store(
+    store,
+    SerdeCheckpointCodec::new(),
+    graph.canonical_hash(),
+);
+let exec = executor.execute_stream_with_checkpoint(graph.clone(), state, config.clone())?;
+// ... 进程崩溃（panic / SIGKILL）...（新进程）
+let cp = typed.load_latest(&trace_id, graph.canonical_hash()).await?;
+let exec = executor
+    .execute_stream_with_restore(graph, cp, trace_id, config)
+    .await?;
 ```
 
-> **当前行为**：restore 重建状态并从图起始节点重跑 —— 是状态快照，尚非从故障点续跑。磁盘持久化、从节点续跑的 durable 恢复见路线图。
+> **第一阶段范围**：串行图（含循环）。含 Parallel / Subgraph / Barrier 的图在**持久化入口**即被拒绝，而不是崩溃后才报错。检查点/恢复仅接入图执行路径；Agent 运行时（ToolUseLoop）尚未接入（phase 2+）。
+>
+> **落盘边界**：flush + rename 保证写入完成与原子可见 —— **进程崩溃安全**（panic / SIGKILL）。**不保证**断电/OS 崩溃后的数据可见（需文件 + 目录 fsync，phase 2 评估）。
+>
+> **不承诺 exactly-once**：若进程在节点副作用成功之后、检查点落盘之前终止，恢复会重跑该节点。请使用幂等键 / 去重 / 业务补偿。
 
 ### 人工介入
 
