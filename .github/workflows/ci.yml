@@ -1,0 +1,56 @@
+# LeLLM CI —— 把「默认构建过、其他 feature 编译失败」这类问题挡在合并前。
+#
+# 设计原则（对齐发布前验证）：
+#   - 用「针对性最小 feature 组合」验证，不用 --all-features 代替，也不穷举所有组合。
+#   - 工具链 1.88.0 是「固定验证版本」，非 MSRV（MSRV 另行声明；README 仍写 stable）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TOOLCHAIN: 1.88.0
+
+jobs:
+  # 普通构建 + 关键 feature 组合 + 针对性测试 + workspace 回归
+  test:
+    name: 构建 + 测试 + feature 组合
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 工具链（固定验证版本 1.88.0，非 MSRV）
+        uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: workspace 回归测试
+        run: cargo test --workspace
+
+      - name: provider 普通默认构建 + 默认测试
+        run: |
+          cargo build -p lellm-provider
+          cargo test -p lellm-provider
+
+      - name: facade feature 组合（默认 / mcp-stdio 关默认 / mcp / full）
+        run: |
+          cargo build -p lellm
+          cargo build -p lellm --no-default-features --features mcp-stdio
+          cargo build -p lellm --features mcp
+          cargo build -p lellm --features full
+
+      - name: MCP SSE 构建
+        run: cargo build -p lellm-mcp --features sse
+
+  # 独立消费项目验证 mcp-stdio 的导出与依赖边界（比 workspace 内 cargo tree 更强的外部视角）
+  mcp-stdio-boundary:
+    name: mcp-stdio 依赖边界（独立消费项目）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Rust 工具链（固定验证版本 1.88.0，非 MSRV）
+        uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: 依赖边界检查
+        run: bash scripts/check-mcp-stdio-boundary.sh

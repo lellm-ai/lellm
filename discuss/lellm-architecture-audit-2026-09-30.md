@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**，发布流程/CI 仍待办）、L1 AgentStateMerge base-delta 合并 ✅、R5 默认 feature 编译修复 ✅；持久恢复待单独排期
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**）、L1 AgentStateMerge base-delta 合并 ✅、R5 默认 feature 编译修复 ✅、发布前验证 ✅（P1：publish.sh/CI/CHANGELOG，实际发布·tag 待办）；持久恢复待单独排期
 
 ## 0. 审计基线（已锁定）
 
@@ -168,11 +168,11 @@
 - **补跨 provider 流式工具拼接一致性测试**。
 
 ### 6.2 发布 + 依赖（问题 5）
-- **`publish.sh`**：加 `cargo test`；去 `--no-verify`/`--allow-dirty`；修「已发布跳过」死检查；去 `rm -rf`+硬编码路径（违反安全规则）；**验证打包产物**（`cargo package` + 独立构建）；处理 workspace 包发布顺序（不能只删两个参数）。
+- **`publish.sh`** ✅ 已重写（发布前验证）：默认仅验证 + `--publish` 显式发布；工作区干净检查（`git status --porcelain`）；去 `rm -rf`/`--no-verify`/`--allow-dirty`；加 `cargo test` + 针对性 feature 矩阵（非 `--all-features`）；sparse index 三态版本检查（存在/不存在/查询失败，非 `cargo search`）+ 发布后可见性重试；本批包组合验证（`verify-package-build.sh`：打包+解包+构建，≠ registry 验证）。
 - **mcp feature**：收窄现有 `mcp` feature 可能破坏既有用户，**优先新增轻量入口（如 `mcp-stdio`）+ 迁移路径**，不直接收窄。
 - **reqwest `blocking`**：删除前给仍使用它的 examples（4 处）保留所需配置。
 - **死依赖**：删 lellm-mcp 的 `futures`（0 处 use）。
-- **加 CI + CHANGELOG + git tag**。
+- **加 CI + CHANGELOG + git tag**：CI ✅（`.github/workflows/ci.yml`）+ CHANGELOG ✅（`CHANGELOG.md` Unreleased）；**git tag 待办**（需实际发布）。
 
 ---
 
@@ -194,7 +194,7 @@
 ## 8. 行动清单（优先级）
 
 **前置（验证完成前）**：
-- [ ] **收紧 README** 中超出实现能力的承诺（Durable Execution、HITL 审批语义）
+- [x] **收紧 README** ✅ 已完成（commit `deccc3d`）：Durable Execution / HITL 均标注「Current behavior」（restore 为 state snapshot 非断点续跑；Reject/Modify/timeout 决策应用 being wired）
 
 **P0（优先处理）**：
 - [x] 并行数据丢失（Q3 最小 delta + 冲突检测）+ R1 测试 ✅ 2026-09-30（commit `ee16f2b`）
@@ -204,8 +204,8 @@
 **里程碑（明确边界，单独排期）**：
 - [ ] 恢复能力第一阶段（Q1 限定版）+ R4 新进程恢复测试
 
-**P1（MCP 依赖瘦身子项已完成；发布流程/CI 仍待办，整个 P1 未完结）**：
-- [ ] 发布流程（§6.2）+ CI/CHANGELOG/tag
+**P1（MCP 依赖瘦身 ✅；发布前验证 ✅，实际发布/tag 待办）**：
+- [x] **发布前验证** ✅：重写 `publish.sh`（默认仅验证 + `--publish` 显式发布 + 工作区干净检查 + 无 `rm -rf`/`--no-verify`/`--allow-dirty` + 针对性 feature 矩阵 + sparse index 三态版本检查 + 发布后可见性重试）；新增 `verify-package-build.sh`（打包+解包+构建本批包组合，≠ registry 验证）；新增 `.github/workflows/ci.yml`（provider 默认 + facade 四组合 + MCP SSE + mcp-stdio 边界 + workspace 回归）；新增 `CHANGELOG.md`（Unreleased）。**实际发布/tag 仍待办**（需 `CARGO_REGISTRY_TOKEN` + 显式 `--publish`）。
 - [x] **MCP 依赖瘦身** ✅ 2026-10-01（commit `babf271`）：新增 facade `mcp-stdio`（仅 stdio，不拉 agent/provider/reqwest/hyper/TLS）；根 workspace `lellm-mcp` 改 `default-features = false`，agent 侧显式 `default-features = true` 保行为；删 `lellm-mcp` 死依赖 `futures`（0 处 use，sse 验证通过）；`lellm::mcp` 导出开放给 `mcp-stdio`。独立消费项目实测：mcp-stdio 仅 ~52 crate（原 mcp 181），依赖边界干净（无 agent/provider/reqwest/hyper/TLS）
   - **编译 + 语义均已修复**：P0-1 遗留的 `AgentStateMerge::merge` 签名未对齐 base-based trait 已加 `_base` 参数对齐；**合并语义**已按 `StateMerge` 的 base-delta 契约重写（commit `4b25670`）——见下方 L1
 
@@ -220,7 +220,7 @@
   - **仍为潜在路径**：ReAct 图纯串行，`merge` 运行时仍未被调用；但语义已正确且有测试覆盖，agent 图引入 ParallelNode 时合并已就绪。
 
 **前置条件（修改对应接口/传播前必须先定义，不可先改后定义行为）**：
-- [ ] 泛型 `WorkflowState` 的 delta/merge 契约（**并行修复的前置**：改接口前必须明确，不能假定所有 state 可自动比较）
+- [x] 泛型 `WorkflowState` 的 delta/merge 契约 ✅ 已落地：`MergeStrategy<S>::merge(base, branches)` base-based 签名 + trait 文档明确「应基于 base 算 delta；无法 diff 的泛型 state 可**显式选择**忽略 base 全量合并（`LastWriteWins`，覆盖策略而非数据保留保证）」；`StateMerge`/`AgentStateMerge` 实现 delta，`LastWriteWins` 为显式覆盖策略。并行修复（Q3）与 L1 均按此契约实现，无需再重构
 - [ ] 帧解析失败分类策略（**错误传播修改的前置**：区分可忽略事件 vs 关键数据损坏）
 
 **暂缓（不阻塞上述，扩大功能时再做）**：

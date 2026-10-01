@@ -201,10 +201,13 @@ pub trait MergeStrategy<S>: Send + Sync {
     fn default_instance() -> Self;
 }
 
-/// 默认合并策略 — 最后一个分支获胜。
+/// 合并策略 — 最后一个分支获胜（**显式选择的覆盖策略**）。
 ///
-/// 适用于大多数场景：各分支从同一 base 出发，
-/// 最后一个分支的写入覆盖前面的。
+/// 用于**无法自动 diff** 的泛型状态：`MergeStrategy` 契约要求每个状态类型显式
+/// 选择合并策略，`LastWriteWins` 是「忽略 base、取最后分支」的显式选择。它解决
+/// 「无法自动比较的泛型状态如何满足 `merge(base, branches)` 接口」的问题，但
+/// **不提供 delta 合并的数据保留保证**（并发写会静默覆盖，而非冲突检测）。
+/// 若状态可 diff，应实现基于 base 的 delta 合并（如 `StateMerge`/`AgentStateMerge`）。
 pub struct LastWriteWins;
 
 impl<S> MergeStrategy<S> for LastWriteWins {
