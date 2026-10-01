@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**，发布流程/CI 仍待办）、L1 AgentStateMerge base-delta 合并 ✅；持久恢复待单独排期
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**，发布流程/CI 仍待办）、L1 AgentStateMerge base-delta 合并 ✅、R5 默认 feature 编译修复 ✅；持久恢复待单独排期
 
 ## 0. 审计基线（已锁定）
 
@@ -54,7 +54,7 @@
 ### 3.1 已复现缺陷（有最小复现，见 §7）
 
 1. **并行合并静默丢数据**：base `count=0`，分支 A 改 `count=100`，分支 B 不动 → 合并结果 `count=0`（A 的写入丢失）。已在 `/tmp/merge_check` 用 `state_core.rs:117-125` 逐行复刻实证。**待转入仓库测试。**
-2. **默认 feature 下 lellm-provider 集成测试编译失败**：`MockProvider` 被 `mock` feature gate（`lib.rs:16`）却在 `integration.rs` 无条件使用，`cargo test -p lellm-provider`（默认 feature）编译失败，必须 `--features mock`。
+2. **默认 feature 下 lellm-provider 集成测试编译失败**：`MockProvider` 被 `mock` feature gate（`lib.rs:16`）却在 `integration.rs` 无条件使用，`cargo test -p lellm-provider`（默认 feature）编译失败，必须 `--features mock`。✅ 已修复（commit `98eb55e`）：加自引用 `[dev-dependencies]` 启用 `mock`（测试构建 union 进 feature 集），对齐 workspace 既有模式，不影响下游 default feature。
 
 ### 3.2 源码确认的契约缺口（读代码确认）
 
@@ -164,7 +164,7 @@
 - **小范围优先修**：Google `index`/`id`（`google.rs:323/324`）、能力声明与编码一致（Google image）。
 - **帧解析失败**：不能一律吞掉，也不能不分类就一律终止；**区分可忽略事件与损坏的关键数据**（可忽略 → warn 跳过；关键数据损坏 → 发 `StreamEvent::Error`）。
 - **finish reason 传递**：新增可能影响公共 API（`ProviderEvent` 无 FinishReason 变体），需评估 API 兼容。
-- **默认 feature 编译修复**：`MockProvider` 的 feature gate 与测试用法对齐。
+- **默认 feature 编译修复**：`MockProvider` 的 feature gate 与测试用法对齐。✅ 已完成（commit `98eb55e`）。
 - **补跨 provider 流式工具拼接一致性测试**。
 
 ### 6.2 发布 + 依赖（问题 5）
@@ -187,7 +187,7 @@
 | R2 | 拒绝/超时后受保护动作仍执行 | ✅ 已转入仓库回归测试（`graph_test.rs` 3 个 R2 回归测试，10 barrier 测试全过） | `cargo +1.88.0 test -p lellm-graph --test graph_test barrier` | 预期 protected 不执行，修复后实际不执行 |
 | R3 | Google 流式 tool-result 函数名 `"unknown"` | ✅ 已转入仓库回归测试（`google.rs` 2 个 R3 测试 + `handle_frame` 并行 delta 测试，51 全过） | `cargo +1.88.0 test -p lellm-provider --features mock` | 预期函数名正确，修复后实际正确（id=函数名） |
 | R4 | 恢复从头重跑（非断点续跑） | 源码推断 → 待新增回归测试（新进程加载） | `cargo +1.88.0 test -p lellm-graph` | 预期从断点续跑，源码推断从 start 重跑 |
-| R5 | 默认 feature 集成测试编译失败 | 已运行复现 | `cargo +1.88.0 test -p lellm-provider`（默认 feature） | 预期编译通过，实际失败（需 `--features mock`） |
+| R5 | 默认 feature 集成测试编译失败 | ✅ 已修复（commit `98eb55e`，默认 feature 3 集成测试全过） | `cargo +1.88.0 test -p lellm-provider`（默认 feature） | 预期编译通过，修复后实际编译通过 + 3 测试全过 |
 
 ---
 
