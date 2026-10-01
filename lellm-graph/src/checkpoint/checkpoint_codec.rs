@@ -96,10 +96,52 @@ where
                 actual: blob.graph_hash,
             });
         }
-        let cp: Checkpoint<S> = serde_json::from_slice(&blob.data)
+
+        // 段 1：语法 — 解析为通用 Value
+        let value: serde_json::Value = serde_json::from_slice(&blob.data)
             .map_err(|e| CheckpointStoreError::Corrupted(e.to_string()))?;
-        Ok(cp)
+        if !value.is_object() {
+            return Err(CheckpointStoreError::Corrupted(
+                "checkpoint is not a JSON object".into(),
+            ));
+        }
+
+        // 段 2：格式校验 — 对 Value 做结构化检查（三态在此天然可分：
+        // 键缺失 ≠ Value::Null ≠ 值）
+        validate_checkpoint_format(&value)?;
+
+        // 段 3：类型化 — 类型不符 → Corrupted
+        serde_json::from_value(value).map_err(|e| CheckpointStoreError::Corrupted(e.to_string()))
     }
+}
+
+/// 段 2 格式校验 — 缺失键 / 版本不符 → UnsupportedFormat（不靠错误文本分类）。
+///
+/// - 缺 `format_version` 或版本不支持 → `UnsupportedFormat`（legacy 格式）
+/// - 缺 `next_node` 键 → `UnsupportedFormat`（禁止解释为已完成）
+/// - 显式 `"next_node": null` 合法（已完成）
+pub(crate) fn validate_checkpoint_format(
+    v: &serde_json::Value,
+) -> Result<(), CheckpointStoreError> {
+    let fmt_version = v.get("format_version").ok_or_else(|| {
+        CheckpointStoreError::UnsupportedFormat("missing format_version (legacy format?)".into())
+    })?;
+    let expected = super::checkpoint_data::CHECKPOINT_FORMAT_VERSION as u64;
+    fmt_version
+        .as_u64()
+        .filter(|x| *x == expected)
+        .ok_or_else(|| {
+            CheckpointStoreError::UnsupportedFormat(format!(
+                "unsupported format_version: {fmt_version}"
+            ))
+        })?;
+    // next_node 键必须存在：缺失 = legacy（拒绝）；null = 已完成（合法）
+    if v.get("next_node").is_none() {
+        return Err(CheckpointStoreError::UnsupportedFormat(
+            "missing next_node (legacy current_node format?)".into(),
+        ));
+    }
+    Ok(())
 }
 
 // ─── TypedCheckpointStore ──────────────────────────────────────
