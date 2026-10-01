@@ -30,3 +30,8 @@ secrecy.workspace = true
 url.workspace = true
 http = "1"
 bytes = "1"
+
+[dev-dependencies]
+# 自引用：测试构建时启用 mock feature（MockProvider 供 tests/integration.rs 使用）。
+# 不影响下游 default feature —— mock 是测试辅助，不进默认 feature 集。
+lellm-provider = { path = ".", features = ["mock"] }
