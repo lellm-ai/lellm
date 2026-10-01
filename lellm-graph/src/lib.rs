@@ -39,7 +39,7 @@ pub use state::{
 #[allow(deprecated)]
 pub use checkpoint::{
     CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy,
-    CheckpointSink, CheckpointStoreError, FrameInfo, MemorySink, NodeId, NoopCheckpointSink,
+    CheckpointSink, CheckpointStoreError, FrameInfo, NodeId, NoopCheckpointSink,
 };
 
 // ─── Checkpoint Policy ───────────────────────────────────────
@@ -85,10 +85,6 @@ pub use node::{CompiledSubgraph, StateProjector};
 // ─── StateLens + SubgraphSpec ──────────────────────────────
 pub use node::SubgraphSpec;
 pub use state::{IdentityLens, StateLens};
-
-// ─── ExecutionSession + SessionCheckpoint + SessionError ────
-pub use checkpoint::{Frame, FrameStack};
-pub use exec::{ExecutionSession, SessionCheckpoint, SessionCheckpointSink, SessionError};
 
 // ─── Test Executor (SimpleExecutor 兼容层) ────────────────────
 pub use test_executor::SimpleExecutor;
