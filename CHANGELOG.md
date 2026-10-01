@@ -23,6 +23,7 @@
 ### Fixed
 - 默认 feature 下 `lellm-provider` 集成测试编译失败（`MockProvider` 的 feature gate 与测试用法对齐：自引用 dev-dependency 启用 `mock`）。
 - `stream_processor` 帧解析并行 delta 丢失（`tool_call_delta` 单 `Option` 同帧互相覆盖）。
+- **帧解析失败不再被静默吞掉**（`lellm-provider`）：`handle_frame` 现传播 codec 的解码错误，`process_stream` 对「无法安全继续处理的解码错误」（当前实例为 JSON 损坏）发 `StreamEvent::Error` 并中止流；可忽略帧（空帧 / 结束信号 / 未知事件）继续处理。注：此为**修复既有解码错误被吞掉**，非完整协议错误分类（合法但被当前实现忽略的 JSON 不必然语义可忽略）。
 
 ### Compatibility
 - ⚠️ **破坏性（API）**：`MergeStrategy::merge` 签名改为 base-based —— `fn merge(base: &S, branches: Vec<S>)`。实现该 trait 的类型需同步更新签名。

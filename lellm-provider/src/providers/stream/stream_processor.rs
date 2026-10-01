@@ -74,7 +74,22 @@ where
                 let frames = parser.feed(&bytes);
 
                 for frame in frames {
-                    let fr = handle_frame(codec, &frame);
+                    let fr = match handle_frame(codec, &frame) {
+                        Ok(fr) => fr,
+                        Err(e) => {
+                            // 关键数据损坏 — 帧本应携带数据却无法可靠解析。
+                            // 发 Error 并中止（对齐下方字节流 Err 路径）；不再静默吞掉。
+                            // 日志只记录错误与长度，不输出原始帧或工具参数。
+                            tracing::error!(
+                                elapsed = ?stream_start.elapsed(),
+                                error = %e,
+                                data_len = frame.data.len(),
+                                "critical frame decode error — aborting stream"
+                            );
+                            sink.emit(StreamEvent::Error(e)).await;
+                            return;
+                        }
+                    };
 
                     // 文本增量
                     if let Some(text) = fr.text
@@ -143,7 +158,13 @@ where
 }
 
 /// 处理单个 SseFrame — 调用 Codec 解析，返回结构化结果。
-fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> FrameResult {
+///
+/// 帧错误分类（复用 `decode_sse` 的 `Ok`/`Err` 契约）：
+/// - `Ok` — 帧已安全解析（含良性 no-op：空帧 / 结束信号 / 未知事件 / 有效 JSON 但无相关字段）
+///   → 提取 chunks，调用方继续处理后续帧。
+/// - `Err` — 无法安全继续处理的解码错误（关键数据损坏）→ 此处用 `?` 传播，
+///   由 `process_stream` 发 `StreamEvent::Error` 并中止。绝不静默吞掉。
+fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> Result<FrameResult, LlmError> {
     let mut result = FrameResult {
         text: None,
         thinking: None,
@@ -153,53 +174,41 @@ fn handle_frame<A: ChatCodec>(codec: &A, frame: &SseFrame) -> FrameResult {
         is_done: false,
     };
 
-    match codec.decode_sse(frame) {
-        Ok(parse_result) => {
-            for chunk in parse_result.chunks {
-                match chunk {
-                    StreamChunk::TextDelta(text) => {
-                        result.text = Some(text);
-                    }
-                    StreamChunk::ThinkingDelta { thinking, redacted } => {
-                        result.thinking = Some(thinking);
-                        result.thinking_redacted = redacted;
-                    }
-                    StreamChunk::ToolCallDelta(delta) => {
-                        result.tool_call_deltas.push(ToolCallDelta {
-                            index: delta.index,
-                            id: delta.id.clone(),
-                            name: delta.name.clone(),
-                            arguments_delta: delta.arguments_delta.clone(),
-                        });
-                    }
-                    StreamChunk::Usage(u) => {
-                        result.usage_delta = Some(UsageDelta::Full(u));
-                    }
-                    StreamChunk::InputTokens(it) => {
-                        result.usage_delta = Some(UsageDelta::InputTokens(it));
-                    }
-                    StreamChunk::OutputTokens(ot) => {
-                        result.usage_delta = Some(UsageDelta::OutputTokens(ot));
-                    }
-                    StreamChunk::Done => {
-                        result.is_done = true;
-                    }
-                }
+    let parse_result = codec.decode_sse(frame)?;
+
+    for chunk in parse_result.chunks {
+        match chunk {
+            StreamChunk::TextDelta(text) => {
+                result.text = Some(text);
             }
-        }
-        Err(e) => {
-            // [DONE]、空 frame 等是可预期的跳过，不报警
-            if frame.data != "[DONE]" && !frame.data.is_empty() {
-                tracing::warn!(
-                    error = %e,
-                    data_len = frame.data.len(),
-                    "failed to parse provider SSE frame"
-                );
+            StreamChunk::ThinkingDelta { thinking, redacted } => {
+                result.thinking = Some(thinking);
+                result.thinking_redacted = redacted;
+            }
+            StreamChunk::ToolCallDelta(delta) => {
+                result.tool_call_deltas.push(ToolCallDelta {
+                    index: delta.index,
+                    id: delta.id.clone(),
+                    name: delta.name.clone(),
+                    arguments_delta: delta.arguments_delta.clone(),
+                });
+            }
+            StreamChunk::Usage(u) => {
+                result.usage_delta = Some(UsageDelta::Full(u));
+            }
+            StreamChunk::InputTokens(it) => {
+                result.usage_delta = Some(UsageDelta::InputTokens(it));
+            }
+            StreamChunk::OutputTokens(ot) => {
+                result.usage_delta = Some(UsageDelta::OutputTokens(ot));
+            }
+            StreamChunk::Done => {
+                result.is_done = true;
             }
         }
     }
 
-    result
+    Ok(result)
 }
 
 // NOTE: process_stream 的单元测试需要 Mock Adapter。
@@ -233,11 +242,197 @@ mod tests {
             .to_string(),
         };
 
-        let fr = handle_frame(&GoogleCodec, &frame);
+        let fr = handle_frame(&GoogleCodec, &frame).unwrap();
         assert_eq!(fr.tool_call_deltas.len(), 2);
         assert_eq!(fr.tool_call_deltas[0].index, 0);
         assert_eq!(fr.tool_call_deltas[1].index, 1);
         assert_eq!(fr.tool_call_deltas[0].name.as_deref(), Some("get_weather"));
         assert_eq!(fr.tool_call_deltas[1].name.as_deref(), Some("get_time"));
+    }
+
+    /// 分类单测：损坏帧（非法 JSON）→ handle_frame 返回 Err（关键数据损坏）。
+    #[test]
+    fn test_handle_frame_corrupt_returns_err() {
+        let frame = SseFrame {
+            event: None,
+            data: "{not valid json".into(),
+        };
+        assert!(handle_frame(&GoogleCodec, &frame).is_err());
+    }
+
+    /// 分类单测：可忽略帧（合法 JSON 但无相关字段）→ 返回 Ok 且无 chunks。
+    #[test]
+    fn test_handle_frame_ignorable_returns_ok_empty() {
+        let frame = SseFrame {
+            event: None,
+            data: serde_json::json!({"foo": "bar"}).to_string(),
+        };
+        let fr = handle_frame(&GoogleCodec, &frame).unwrap();
+        assert!(fr.text.is_none());
+        assert!(fr.tool_call_deltas.is_empty());
+        assert!(fr.usage_delta.is_none());
+        assert!(!fr.is_done);
+    }
+
+    // ─── 帧错误分类：process_stream 行为测试 ────────────────────
+    //
+    // 用真实 GoogleCodec + 记录型 sink 覆盖验收点：
+    // 损坏帧 → 发 Error 并中止（不再静默吞掉）；可忽略帧 → 继续；
+    // 结束信号 → 按 codec 语义完成（非 no-op）；EOF 收尾损坏 → 同样传播。
+
+    use futures_util::stream;
+
+    /// 记录型 EventSink — 捕获 process_stream 发出的全部事件。
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Vec<StreamEvent>,
+    }
+
+    impl EventSink for RecordingSink {
+        async fn emit(&mut self, event: StreamEvent) -> bool {
+            self.events.push(event);
+            true
+        }
+    }
+
+    /// 包装为 SSE 帧（`data: <payload>\n\n`，尾随空行是帧边界）。
+    fn sse_frame(payload: &str) -> String {
+        format!("data: {payload}\n\n")
+    }
+
+    /// 构造字节流：每个元素是一个完整 SSE 帧。
+    fn frames_stream(frames: Vec<String>) -> impl Stream<Item = Result<Bytes, LlmError>> + Unpin {
+        stream::iter(
+            frames
+                .into_iter()
+                .map(|f| Ok::<_, LlmError>(Bytes::from(f))),
+        )
+    }
+
+    /// 提取事件类型名，便于断言。
+    fn kinds(events: &[StreamEvent]) -> Vec<&'static str> {
+        events
+            .iter()
+            .map(|e| match e {
+                StreamEvent::Start { .. } => "Start",
+                StreamEvent::Token { .. } => "Token",
+                StreamEvent::ThinkingDelta { .. } => "ThinkingDelta",
+                StreamEvent::Error(_) => "Error",
+                StreamEvent::ResponseComplete { .. } => "ResponseComplete",
+            })
+            .collect()
+    }
+
+    /// 提取所有 Token 事件的文本。
+    fn tokens(events: &[StreamEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Token { token } => Some(token.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 正常帧 → 损坏帧 → 正常帧：前面的正常事件保留；只发一次 Error；后续帧不再处理。
+    #[tokio::test]
+    async fn test_corrupt_frame_aborts_and_skips_rest() {
+        let frames = vec![
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"}}]})
+                    .to_string(),
+            ),
+            sse_frame("{this is not valid json"),
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"text":"bye"}],"role":"model"}}]})
+                    .to_string(),
+            ),
+        ];
+        let mut sink = RecordingSink::default();
+        process_stream(&mut sink, &GoogleCodec, "m".into(), frames_stream(frames)).await;
+
+        let k = kinds(&sink.events);
+        assert_eq!(k, vec!["Start", "Token", "Error"]);
+        assert_eq!(k.iter().filter(|e| **e == "Error").count(), 1);
+        assert!(!tokens(&sink.events).contains(&"bye".to_string()));
+        assert!(!k.contains(&"ResponseComplete"));
+    }
+
+    /// 损坏发生时已有部分工具参数：不输出拼接中的工具调用，不发 ResponseComplete。
+    #[tokio::test]
+    async fn test_corrupt_with_partial_tool_args_no_response_complete() {
+        let frames = vec![
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"par"}}}],"role":"model"}}]})
+                    .to_string(),
+            ),
+            sse_frame("{broken"),
+        ];
+        let mut sink = RecordingSink::default();
+        process_stream(&mut sink, &GoogleCodec, "m".into(), frames_stream(frames)).await;
+
+        let k = kinds(&sink.events);
+        assert_eq!(k, vec!["Start", "Error"]);
+        assert!(!k.contains(&"ResponseComplete"));
+    }
+
+    /// 空帧／明确可忽略事件 → 正常帧：继续处理正常数据。
+    /// 注：当前 codec 对「合法但无相关字段」的帧返回 Ok(empty) 而忽略——
+    /// 这里只验证流不中断，不宣称该帧一定是良性事件。
+    #[tokio::test]
+    async fn test_continues_past_ignored_frame() {
+        let frames = vec![
+            sse_frame(&serde_json::json!({"foo":"bar"}).to_string()),
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"}}]})
+                    .to_string(),
+            ),
+        ];
+        let mut sink = RecordingSink::default();
+        process_stream(&mut sink, &GoogleCodec, "m".into(), frames_stream(frames)).await;
+
+        let k = kinds(&sink.events);
+        assert_eq!(k, vec!["Start", "Token", "ResponseComplete"]);
+        assert_eq!(tokens(&sink.events), vec!["hi".to_string()]);
+    }
+
+    /// 正常结束信号（finishReason）：按 codec 语义完成，不归入 no-op（后续帧不处理）。
+    #[tokio::test]
+    async fn test_end_signal_completes_not_noop() {
+        let frames = vec![
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP"}]})
+                    .to_string(),
+            ),
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"text":"AFTER_DONE"}],"role":"model"}}]})
+                    .to_string(),
+            ),
+        ];
+        let mut sink = RecordingSink::default();
+        process_stream(&mut sink, &GoogleCodec, "m".into(), frames_stream(frames)).await;
+
+        let k = kinds(&sink.events);
+        assert_eq!(k, vec!["Start", "Token", "ResponseComplete"]);
+        assert_eq!(tokens(&sink.events), vec!["hi".to_string()]);
+        assert!(!tokens(&sink.events).contains(&"AFTER_DONE".to_string()));
+    }
+
+    /// 最后一帧在 EOF 收尾时解析失败：同样传播 Error，不能吞掉。
+    #[tokio::test]
+    async fn test_last_frame_corrupt_at_eof_propagates_error() {
+        let frames = vec![
+            sse_frame(
+                &serde_json::json!({"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"}}]})
+                    .to_string(),
+            ),
+            sse_frame("{corrupt tail"),
+        ];
+        let mut sink = RecordingSink::default();
+        process_stream(&mut sink, &GoogleCodec, "m".into(), frames_stream(frames)).await;
+
+        let k = kinds(&sink.events);
+        assert_eq!(k, vec!["Start", "Token", "Error"]);
+        assert!(!k.contains(&"ResponseComplete"));
     }
 }

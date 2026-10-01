@@ -238,6 +238,15 @@ pub trait ChatCodec: Send + Sync {
 
     /// 解码单个 SSE 帧的 data 字段。
     /// SSE 协议解析（缓冲、行拆分、event/data 提取）由 CodecProvider 统一处理，构建 SseFrame。
+    ///
+    /// # 返回分类（帧错误分类契约）
+    /// - `Ok` — 帧已安全解析。可能是有效数据（含 chunks），也可能是**良性 no-op**
+    ///   （空帧 / 结束信号 / 未知事件 / 有效 JSON 但无相关字段），调用方应继续处理后续帧。
+    ///   注意：「当前实现忽略的合法 JSON」不等于「一定是良性事件」—— 此处只保证不中断流，
+    ///   不承诺该帧语义上可忽略。
+    /// - `Err` — **无法安全继续处理的解码错误**：帧本应携带数据却无法可靠解析。
+    ///   当前实例是 JSON 损坏；未来可包含已知事件缺少必要字段等协议错误。
+    ///   调用方必须将其作为错误传播（发 `StreamEvent::Error` 并中止），不得静默吞掉。
     fn decode_sse(&self, frame: &SseFrame) -> Result<StreamParseResult, LlmError>;
 }
 

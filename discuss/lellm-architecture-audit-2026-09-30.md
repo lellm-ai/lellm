@@ -221,7 +221,7 @@
 
 **前置条件（修改对应接口/传播前必须先定义，不可先改后定义行为）**：
 - [x] 泛型 `WorkflowState` 的 delta/merge 契约 ✅ 已落地：`MergeStrategy<S>::merge(base, branches)` base-based 签名 + trait 文档明确「应基于 base 算 delta；无法 diff 的泛型 state 可**显式选择**忽略 base 全量合并（`LastWriteWins`，覆盖策略而非数据保留保证）」；`StateMerge`/`AgentStateMerge` 实现 delta，`LastWriteWins` 为显式覆盖策略。并行修复（Q3）与 L1 均按此契约实现，无需再重构
-- [ ] 帧解析失败分类策略（**错误传播修改的前置**：区分可忽略事件 vs 关键数据损坏）
+- [x] 帧解析失败分类策略 ✅ 已落地（2026-10-01，未 push）：复用 `decode_sse` 的 `Ok`/`Err` 契约 —— `Ok`=已安全解析（含良性 no-op：空帧 / 结束信号 / 未知事件），`Err`=**无法安全继续处理的解码错误**（当前实例为 JSON 损坏）。`handle_frame` 用 `?` 传播 `Err`，`process_stream` 发 `StreamEvent::Error` 并中止；可忽略帧继续处理。**注：此为修复既有解码错误被吞掉，非完整协议错误分类**（合法但被当前实现忽略的 JSON 不必然语义可忽略；`Err` 定义已放宽，未来可含已知事件缺必要字段等协议错误）。retry / fallback / 上游消费策略仍属后续项。8 个测试钉死（`stream_processor`）
 
 **暂缓（不阻塞上述，扩大功能时再做）**：
 - [ ] exactly-once 工具执行（幂等键方案）
