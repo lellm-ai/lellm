@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、mcp 轻量入口 + 死依赖清理 ✅（P1）；发布流程 / 持久恢复待单独排期
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**，发布流程/CI 仍待办）；遗留问题 L1（AgentStateMerge 语义）待并行 agent 用例出现时处理；持久恢复待单独排期
 
 ## 0. 审计基线（已锁定）
 
@@ -204,9 +204,18 @@
 **里程碑（明确边界，单独排期）**：
 - [ ] 恢复能力第一阶段（Q1 限定版）+ R4 新进程恢复测试
 
-**P1**：
+**P1（MCP 依赖瘦身子项已完成；发布流程/CI 仍待办，整个 P1 未完结）**：
 - [ ] 发布流程（§6.2）+ CI/CHANGELOG/tag
-- [x] mcp feature 轻量入口 + 死依赖清理 ✅ 2026-10-01：新增 facade `mcp-stdio`（仅 stdio，不拉 agent/provider/reqwest/hyper/TLS）；根 workspace `lellm-mcp` 改 `default-features = false`，agent 侧显式 `default-features = true` 保行为；删 `lellm-mcp` 死依赖 `futures`（0 处 use，sse 验证通过）；`lellm::mcp` 导出开放给 `mcp-stdio`。**附带修复** P0-1 遗留的 `AgentStateMerge::merge` 签名未对齐 base-based trait（`typed_state.rs:234`，既有编译错误，阻塞 mcp/agent/full 构建）。独立消费项目实测：mcp-stdio 仅 ~52 crate（原 mcp 181），依赖边界干净
+- [x] **MCP 依赖瘦身** ✅ 2026-10-01（commit `babf271`）：新增 facade `mcp-stdio`（仅 stdio，不拉 agent/provider/reqwest/hyper/TLS）；根 workspace `lellm-mcp` 改 `default-features = false`，agent 侧显式 `default-features = true` 保行为；删 `lellm-mcp` 死依赖 `futures`（0 处 use，sse 验证通过）；`lellm::mcp` 导出开放给 `mcp-stdio`。独立消费项目实测：mcp-stdio 仅 ~52 crate（原 mcp 181），依赖边界干净（无 agent/provider/reqwest/hyper/TLS）
+  - **仅编译修复，非合并语义修复**：P0-1 遗留的 `AgentStateMerge::merge` 签名未对齐 base-based trait（`typed_state.rs:234`，既有编译错误，阻塞 mcp/agent/full 构建）已加 `_base` 参数对齐。**但合并语义本身仍错误且潜在**——见下方遗留问题 L1
+
+**遗留问题（已确认但未修，非本次范围）**：
+- [ ] **L1：`AgentStateMerge::merge` 合并语义错误（潜在）** — `typed_state.rs:233`。当前是朴素全量合并：`messages.extend(branch.messages)` 追加**整个**分支消息列表、计数器用 `max`、`stop_reason`/`last_response` 取首个非 None。与 P0-1 修好的 `StateMerge`（base-based delta）不同，它**没有** base 语义。核查结论（若被调用）：
+  - A 改已有字段、B 不动 → B 的全量历史被重追加，旧值复活（修改**未**正确保留）
+  - 两分支各追加消息 → 公共历史重复（追加未丢，但顺序/重复错误）
+  - A 清空/删除 → 被 B 的旧状态恢复（清空被撤销）
+  - 计数器 `max` → 分支无法 reset（base 高值恒胜）
+  - **为何潜在**：它被接入为 ReAct 图的 merge 策略（`Graph<AgentState, AgentStateMerge>`），但 ReAct 图纯串行（`graph_builder.rs` 无 ParallelNode），`merge` 运行时**从未被调用**；且无任何测试覆盖。故本次仅做编译修复，未改语义（无并行 agent 用例，改语义属投机）。**触发条件**：一旦 agent 图引入 ParallelNode（如把并行工具执行从 `ToolExecutor::execute_batch` 迁到图层），此 bug 会静默损坏 state。届时须按 `StateMerge` 的 base-based delta 契约重写并补测试。
 
 **前置条件（修改对应接口/传播前必须先定义，不可先改后定义行为）**：
 - [ ] 泛型 `WorkflowState` 的 delta/merge 契约（**并行修复的前置**：改接口前必须明确，不能假定所有 state 可自动比较）
