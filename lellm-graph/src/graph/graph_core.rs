@@ -15,6 +15,7 @@ use indexmap::IndexMap;
 
 use super::graph_analysis::{self, CycleAnalysis};
 use super::graph_builder::fnv_hash;
+use crate::checkpoint::Checkpoint;
 use crate::error::{GraphDiagnostics, GraphError, TerminalError};
 use crate::event::BarrierId;
 use crate::exec::execution_engine::ExecutionEngine;
@@ -330,12 +331,12 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
             .await
     }
 
-    /// 统一执行入口 — 首次运行与恢复共用（pub(crate)）。
+    /// 统一执行入口 — 首次运行与恢复共用。
     ///
     /// - `start_node` — 首次运行 = `start_node()`；恢复 = `checkpoint.next_node`
     /// - `steps_used` — 首次运行 = 0；恢复 = `checkpoint.steps_used`（预算延续）
     /// - `max_steps` — **总预算**（恢复时同样传总预算）
-    pub(crate) async fn run_inline_from<'cb>(
+    pub async fn run_inline_from<'cb>(
         &self,
         exec_ctx: &mut ExecutionEngine<'_, S>,
         start_node: &str,
@@ -372,6 +373,137 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
         }
         Ok(())
     }
+
+    /// 恢复入口同步校验（版本 / 指纹 / 节点存在 / 步数边界）。
+    ///
+    /// 泛型版 — 供 `SimpleExecutor`（`State`）与 Agent 层（`AgentState`）共用。
+    /// 只做图结构层面校验，不识别具体 State 类型 / 节点语义
+    /// （节点输入完整性由上层，如 Agent 的 last_response 校验，负责）。
+    pub fn validate_restore_checkpoint(
+        &self,
+        cp: &Checkpoint<S>,
+        max_steps: usize,
+    ) -> Result<(), GraphError> {
+        if cp.format_version != crate::checkpoint::CHECKPOINT_FORMAT_VERSION {
+            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                reason: format!(
+                    "unsupported checkpoint format_version: {} (expected {})",
+                    cp.format_version,
+                    crate::checkpoint::CHECKPOINT_FORMAT_VERSION
+                ),
+            }));
+        }
+        if cp.graph_hash != self.canonical_hash() {
+            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                reason: format!(
+                    "graph hash mismatch: expected {:016x}, got {:016x}",
+                    self.canonical_hash(),
+                    cp.graph_hash
+                ),
+            }));
+        }
+        if let Some(n) = &cp.next_node {
+            if !self.node_map().contains_key(&n.0) {
+                return Err(GraphError::Terminal(TerminalError::NodeNotFound(
+                    n.0.clone(),
+                )));
+            }
+            // 还有下一节点但预算已耗尽 → 执行前报错（完成态除外）
+            if cp.steps_used >= max_steps {
+                return Err(GraphError::Terminal(TerminalError::StepsExceeded {
+                    limit: max_steps,
+                }));
+            }
+        }
+        // next_node = None（完成态）：允许预算耗尽（零执行直接返回完成）
+        Ok(())
+    }
 }
 
 // GraphBuilder, PendingEdge 已在 mod.rs 中 re-export
+
+#[cfg(test)]
+mod restore_validation_tests {
+    use super::*;
+    use crate::checkpoint::{CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointId, NodeId};
+    use crate::error::TerminalError;
+    use crate::{GraphBuilder, NodeKind, State, StateMerge, TaskNode};
+    use std::time::SystemTime;
+
+    fn single_node_graph() -> Graph<State, StateMerge> {
+        let mut b = GraphBuilder::<State, StateMerge>::new("t");
+        b.start("a");
+        b.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        b.end("a");
+        b.build().expect("build")
+    }
+
+    fn cp(next: Option<NodeId>, hash: u64, steps: usize) -> Checkpoint<State> {
+        Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            checkpoint_id: CheckpointId::new(),
+            next_node: next,
+            state: State::new(),
+            graph_hash: hash,
+            steps_used: steps,
+            created_at: SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn valid_checkpoint_passes() {
+        let g = single_node_graph();
+        let h = g.canonical_hash();
+        assert!(
+            g.validate_restore_checkpoint(&cp(Some(NodeId("a".into())), h, 0), 10)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn graph_hash_mismatch_rejected() {
+        let g = single_node_graph();
+        let h = g.canonical_hash();
+        let err = g
+            .validate_restore_checkpoint(&cp(Some(NodeId("a".into())), h ^ 0xff, 0), 10)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::RestoreFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn node_not_found_rejected() {
+        let g = single_node_graph();
+        let h = g.canonical_hash();
+        let err = g
+            .validate_restore_checkpoint(&cp(Some(NodeId("nope".into())), h, 0), 10)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::NodeNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn steps_exhausted_with_next_rejected() {
+        let g = single_node_graph();
+        let h = g.canonical_hash();
+        let err = g
+            .validate_restore_checkpoint(&cp(Some(NodeId("a".into())), h, 10), 10)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::StepsExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn completed_with_exhausted_budget_allowed() {
+        let g = single_node_graph();
+        let h = g.canonical_hash();
+        // next_node=None（完成态）允许预算耗尽
+        assert!(g.validate_restore_checkpoint(&cp(None, h, 10), 10).is_ok());
+    }
+}

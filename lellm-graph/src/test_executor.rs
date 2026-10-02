@@ -198,7 +198,7 @@ impl SimpleExecutor {
         config: CheckpointConfig<State>,
     ) -> Result<GraphExecution<State>, GraphError> {
         graph.validate_persistable()?;
-        Self::validate_restore_checkpoint(&graph, &restore_from, self.max_steps)?;
+        graph.validate_restore_checkpoint(&restore_from, self.max_steps)?;
 
         // 最新性检查（需 store I/O → 本方法 async）：
         // 只接受该 trace 的最新检查点并续写原 trace，避免未定义的历史分叉
@@ -227,47 +227,6 @@ impl SimpleExecutor {
 
         let state = State::restore(restore_from.state.clone());
         Ok(self.spawn(graph, state, trace_id, Some(config), Some(restore_from)))
-    }
-
-    /// 恢复入口同步校验（版本 / 指纹 / 节点存在 / 步数边界）。
-    fn validate_restore_checkpoint(
-        graph: &Graph,
-        cp: &Checkpoint<State>,
-        max_steps: usize,
-    ) -> Result<(), GraphError> {
-        if cp.format_version != crate::checkpoint::CHECKPOINT_FORMAT_VERSION {
-            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                reason: format!(
-                    "unsupported checkpoint format_version: {} (expected {})",
-                    cp.format_version,
-                    crate::checkpoint::CHECKPOINT_FORMAT_VERSION
-                ),
-            }));
-        }
-        if cp.graph_hash != graph.canonical_hash() {
-            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                reason: format!(
-                    "graph hash mismatch: expected {:016x}, got {:016x}",
-                    graph.canonical_hash(),
-                    cp.graph_hash
-                ),
-            }));
-        }
-        if let Some(n) = &cp.next_node {
-            if !graph.node_map().contains_key(&n.0) {
-                return Err(GraphError::Terminal(TerminalError::NodeNotFound(
-                    n.0.clone(),
-                )));
-            }
-            // 还有下一节点但预算已耗尽 → 执行前报错（完成态除外）
-            if cp.steps_used >= max_steps {
-                return Err(GraphError::Terminal(TerminalError::StepsExceeded {
-                    limit: max_steps,
-                }));
-            }
-        }
-        // next_node = None（完成态）：允许预算耗尽（零执行直接返回完成）
-        Ok(())
     }
 
     /// 统一 spawn — 通道 + run_execution_loop。
