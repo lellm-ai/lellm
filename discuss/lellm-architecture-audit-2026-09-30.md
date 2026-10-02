@@ -202,7 +202,13 @@
 - [x] Google 工具往返（§6.1 小范围修）+ R3 测试 ✅ 2026-09-30（commit `a24c0bb`；**附带修复** `stream_processor.rs` FrameResult 并行 delta 丢失 bug——原 `tool_call_delta` 单 `Option` 同帧互相覆盖，审计报告未列出，是"并行串号"根因之一）
 
 **里程碑（明确边界，单独排期）**：
-- [ ] 恢复能力第一阶段（Q1 限定版）+ R4 新进程恢复测试
+- [x] **恢复能力第一阶段（Q1 限定版）+ R4 新进程恢复测试** ✅ 2026-10-02（commit `5468c20`..`89f333c`，C1/C2/C3 共 10 个 task）。
+  - **C1 恢复实现**：`Checkpoint` `format_version=1`（`next_node` 游标 + `steps_used` + sparkid `CheckpointId`）；Codec 两段式严格加载（legacy/缺 `next_node` → `UnsupportedFormat`）；执行循环重排（`run_inline_from` 统一入口 + 路由后**同步**保存，移除 fire-and-forget）；`CheckpointSaveSink` 同步保存 + `CheckpointSaved` 事件；`FileBlobStore` 磁盘后端（trace 内单调 seq + flush/rename 原子可见 + 单写者约束）；恢复入口 `execute_stream_with_checkpoint` / `execute_stream_with_restore`（入口校验 + 零执行完成态 + 最新性检查 + 预算延续）。
+  - **C2 旧 API 删除**：移除 `ExecutionSession` / `SessionCheckpoint` / `SessionCheckpointSink` / `SessionError` / `Frame` / `FrameStack` / `MemorySink`。
+  - **C3 策略清理**：删 `TriggerPolicy`（死代码）/ deprecated `CheckpointPolicy` / `RetentionPolicy::TimeBased`（no-op）/ `CheckpointConfig::{with_trigger, with_policy}`；`CheckpointConfig` 精简为 `retention` + `save_fn` + `graph_hash` + `store`。
+  - **R4 新进程恢复测试**：`restore_probe` 辅助二进制 + T8/T9/T10（kill -9 + 磁盘握手 + 预算延续 + 双重恢复 seq 延续），全过（套件 < 1s）。
+  - **T1-T10 全绿**（`cargo test -p lellm-graph`，rustc 1.98.1）；workspace 全量回归 + `lellm-core --features tool` / `lellm-agent` / `lellm` 构建全过。
+  - **边界（不承诺）**：仅串行图（含循环）；Parallel/Subgraph/Barrier 入口显式拒绝；非 exactly-once（工具成功但保存前崩溃 → 重跑该节点）；进程崩溃安全 ≠ 断电安全（无 fsync）；单写者约束；仅接受该 trace 最新检查点；agent runtime 未接入（phase 2+）。
 
 **P1（MCP 依赖瘦身 ✅；发布前验证 ✅，实际发布/tag 待办）**：
 - [x] **发布前验证** ✅：重写 `publish.sh`（默认仅验证 + `--publish` 显式发布 + 工作区干净检查 + 无 `rm -rf`/`--no-verify`/`--allow-dirty` + 针对性 feature 矩阵 + sparse index 三态版本检查 + 发布后可见性重试）；新增 `verify-package-build.sh`（打包+解包+构建本批包组合，≠ registry 验证）；新增 `.github/workflows/ci.yml`（provider 默认 + facade 四组合 + MCP SSE + mcp-stdio 边界 + workspace 回归）；新增 `CHANGELOG.md`（Unreleased）。**实际发布/tag 仍待办**（需 `CARGO_REGISTRY_TOKEN` + 显式 `--publish`）。
