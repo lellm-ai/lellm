@@ -339,3 +339,141 @@ async fn g3_missing_last_response_rejected() {
         assert_eq!(result.stop_reason, StopReason::Complete);
     }
 }
+
+// ─── Group 2: 恢复后再次保存及恢复（预算延续 + 磁盘往返）──────────
+
+/// G2: 恢复后续写同一 trace（FileBlobStore 磁盘往返）；Graph 步数预算 + Agent 业务预算均延续（未重置）。
+#[tokio::test]
+async fn g2_budget_continues_and_disk_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store: Arc<dyn lellm_graph::BlobCheckpointStore> =
+        Arc::new(FileBlobStore::new(tmp.path().to_path_buf()));
+    let codec = SerdeCheckpointCodec::<AgentState>::new();
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_call_response(),
+        text_response("final"),
+    ]));
+    let model = ResolvedModel::new(provider.clone(), "test-model");
+    let agent = AgentBuilder::new(model)
+        .max_iterations(5)
+        .tools(vec![make_tool(tool_calls.clone())])
+        .compile();
+    let hash = agent.graph().canonical_hash();
+    let trace_id = TraceId::new();
+
+    // 阶段 A：崩溃在 next=budget_check（tool 后）→ latest = next=tool（steps_used=3）
+    let crash_store: Arc<InMemoryBlobStore> = Arc::new(InMemoryBlobStore::new());
+    let config_a = crash_config(crash_store.clone(), codec.clone(), hash, "budget_check");
+    let result_a = agent
+        .invoke_with_checkpoint(vec![Message::user_text("q")], trace_id, config_a)
+        .await;
+    assert!(result_a.is_err());
+
+    // 把阶段 A 的检查点搬到磁盘 store（模拟真实持久化路径）
+    let blob = crash_store
+        .load_latest(&trace_id)
+        .await
+        .unwrap()
+        .expect("latest");
+    store.save_with_trace(&trace_id, &blob).await.unwrap();
+    let cp = codec.deserialize(&blob, hash).unwrap();
+    assert_eq!(cp.next_node, Some(NodeId("tool".into())));
+    let steps_used_a = cp.steps_used;
+    assert_eq!(steps_used_a, 3, "阶段 A 最新检查点 steps_used=3");
+
+    // 阶段 B：从磁盘 store 恢复并续写（同一 trace）
+    tool_calls.store(0, Ordering::SeqCst);
+    let config_b = CheckpointConfig::for_store(store.clone(), codec.clone(), hash);
+    let result_b = agent
+        .invoke_with_restore(cp, trace_id, config_b)
+        .await
+        .unwrap();
+
+    // 磁盘往返：最终检查点从磁盘加载
+    let final_blob = store
+        .load_latest(&trace_id)
+        .await
+        .unwrap()
+        .expect("final on disk");
+    let final_cp = codec.deserialize(&final_blob, hash).unwrap();
+    assert!(
+        final_cp.steps_used > steps_used_a,
+        "Graph 步数预算延续未重置 ({} > {})",
+        final_cp.steps_used,
+        steps_used_a
+    );
+    assert_eq!(final_cp.next_node, None, "完成态");
+
+    // Agent 业务预算：iterations 延续（未重置为 1）
+    assert!(
+        result_b.iterations >= 2,
+        "iterations 延续, got: {}",
+        result_b.iterations
+    );
+    assert!(ContentBlock::flatten_text(&result_b.response.content).contains("final"));
+    // 磁盘上确实有检查点文件
+    assert!(tmp.path().exists());
+}
+
+// ─── Group 4: 运行期保存失败接线 ─────────────────────────────────
+
+/// G4: 运行期 checkpoint 保存失败 → 执行在该边界停止，错误映射为 Provider（非 RestoreFailed）。
+#[tokio::test]
+async fn g4_runtime_save_failure_maps_to_provider() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_call_response(),
+        text_response("x"),
+    ]));
+    let model = ResolvedModel::new(provider, "test-model");
+    let agent = AgentBuilder::new(model).max_iterations(5).compile();
+    let hash = agent.graph().canonical_hash();
+
+    // save_fn 总是失败（模拟磁盘满）
+    let config = CheckpointConfig::new(
+        |_cp: Checkpoint<AgentState>, _tid: TraceId| {
+            Box::pin(async { Err(CheckpointStoreError::Storage("disk full".into())) })
+        },
+        hash,
+    );
+    let err = agent
+        .invoke_with_checkpoint(vec![Message::user_text("q")], TraceId::new(), config)
+        .await
+        .unwrap_err();
+    // 运行期保存失败 → Provider（非 RestoreFailed）
+    match err {
+        LlmError::Provider { provider, .. } => {
+            assert_eq!(provider, "react_graph");
+        }
+        other => panic!("expected Provider, got {other:?}"),
+    }
+}
+
+/// G4b: 恢复入口运行期保存失败同样映射为 Provider。
+#[tokio::test]
+async fn g4b_restore_runtime_save_failure_maps_to_provider() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+    let model = ResolvedModel::new(provider, "test-model");
+    let agent = AgentBuilder::new(model).max_iterations(5).compile();
+    let hash = agent.graph().canonical_hash();
+    let state = AgentState::from_messages(vec![Message::user_text("q")]);
+    // 合法检查点（next=budget_check，last_response=None 允许）
+    let cp = Checkpoint::new(Some(NodeId("budget_check".into())), &state, hash, 1);
+    // save_fn 总是失败
+    let config = CheckpointConfig::new(
+        |_cp: Checkpoint<AgentState>, _tid: TraceId| {
+            Box::pin(async { Err(CheckpointStoreError::Storage("disk full".into())) })
+        },
+        hash,
+    );
+    let err = agent
+        .invoke_with_restore(cp, TraceId::new(), config)
+        .await
+        .unwrap_err();
+    match err {
+        LlmError::Provider { provider, .. } => {
+            assert_eq!(provider, "react_graph");
+        }
+        other => panic!("expected Provider, got {other:?}"),
+    }
+}
