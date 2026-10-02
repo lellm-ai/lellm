@@ -31,6 +31,43 @@ pub enum LellmError {
     Parse(#[from] ParseError),
 }
 
+/// 恢复校验失败原因分类。
+///
+/// `#[non_exhaustive]` — 调用方 `match` 必须带 `_` 兜底，允许后续扩展。
+/// 仅表达「恢复校验失败」，不表达运行期错误（后者归 `LlmError::Provider`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RestoreFailureReason {
+    /// 恢复目标节点需要 last_response 但检查点缺失（Agent 层）。
+    MissingExecutionContext,
+    /// 检查点不是该 trace 的最新检查点。
+    NotLatest,
+    /// graph_hash 不匹配（图结构已变更）。
+    GraphMismatch,
+    /// 检查点格式版本不支持（legacy 格式）。
+    UnsupportedFormat,
+    /// 步数预算已耗尽（steps_used >= max_steps）。
+    StepsExceeded,
+    /// next_node 在图中不存在。
+    NodeNotFound,
+    /// 其他未分类原因。
+    Other,
+}
+
+impl std::fmt::Display for RestoreFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingExecutionContext => write!(f, "missing execution context"),
+            Self::NotLatest => write!(f, "not the latest checkpoint"),
+            Self::GraphMismatch => write!(f, "graph hash mismatch"),
+            Self::UnsupportedFormat => write!(f, "unsupported checkpoint format"),
+            Self::StepsExceeded => write!(f, "step budget exhausted"),
+            Self::NodeNotFound => write!(f, "next node not found"),
+            Self::Other => write!(f, "other"),
+        }
+    }
+}
+
 /// LLM API 错误。
 ///
 /// 错误分类：
@@ -72,6 +109,13 @@ pub enum LlmError {
 
     #[error("unexpected EOF: stream ended without ResponseComplete")]
     UnexpectedEof,
+
+    /// 恢复校验失败（仅校验阶段；运行期错误归 `Provider`）。
+    #[error("restore failed: {reason}: {message}")]
+    RestoreFailed {
+        reason: RestoreFailureReason,
+        message: String,
+    },
 }
 
 /// 工具执行错误的分类。
@@ -462,5 +506,55 @@ mod tests {
         let err = ToolError::not_found("search");
         assert_eq!(err.kind, ToolErrorKind::NotFound);
         assert_eq!(err.message, "search");
+    }
+
+    #[test]
+    fn restore_failure_reason_display() {
+        assert_eq!(
+            RestoreFailureReason::MissingExecutionContext.to_string(),
+            "missing execution context"
+        );
+        assert_eq!(
+            RestoreFailureReason::NotLatest.to_string(),
+            "not the latest checkpoint"
+        );
+        assert_eq!(
+            RestoreFailureReason::GraphMismatch.to_string(),
+            "graph hash mismatch"
+        );
+        assert_eq!(
+            RestoreFailureReason::UnsupportedFormat.to_string(),
+            "unsupported checkpoint format"
+        );
+        assert_eq!(
+            RestoreFailureReason::StepsExceeded.to_string(),
+            "step budget exhausted"
+        );
+        assert_eq!(
+            RestoreFailureReason::NodeNotFound.to_string(),
+            "next node not found"
+        );
+        assert_eq!(RestoreFailureReason::Other.to_string(), "other");
+    }
+
+    #[test]
+    fn llm_error_restore_failed_display() {
+        let e = LlmError::RestoreFailed {
+            reason: RestoreFailureReason::MissingExecutionContext,
+            message: "tool node requires last_response".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("missing execution context"), "got: {s}");
+        assert!(s.contains("tool node requires last_response"), "got: {s}");
+    }
+
+    #[test]
+    fn restore_failure_reason_derives() {
+        let a = RestoreFailureReason::NotLatest;
+        let b = a; // Copy
+        let c = a.clone(); // Clone
+        assert_eq!(a, b); // PartialEq
+        assert_eq!(a, c); // Eq
+        assert_ne!(a, RestoreFailureReason::GraphMismatch);
     }
 }
