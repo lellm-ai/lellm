@@ -10,6 +10,8 @@
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-10-02
+
 ### Added
 - **`lellm::mcp` 新增 `mcp-stdio` 轻量入口**：仅 stdio 传输，不引入 agent/provider/reqwest/hyper/TLS。独立消费项目实测约 52 个 crate（原 `mcp` feature 约 181）。
   - 用法：`lellm = { version = "0.4", default-features = false, features = ["mcp-stdio"] }`
