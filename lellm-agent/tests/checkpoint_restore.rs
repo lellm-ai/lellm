@@ -257,3 +257,85 @@ async fn g1b_restore_at_post_llm_check_guard_reads_last_response() {
     assert!(ContentBlock::flatten_text(&result_b.response.content).contains("done"));
     assert_eq!(provider.call_count(), 2);
 }
+
+// ─── Group 3: MissingExecutionContext ───────────────────────────
+
+/// G3: 恢复目标节点需要 last_response 但检查点缺失 → MissingExecutionContext。
+#[tokio::test]
+async fn g3_missing_last_response_rejected() {
+    // (a) 直接构造（store=None，跳过最新性）
+    {
+        let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
+        let model = ResolvedModel::new(provider, "test-model");
+        let agent = AgentBuilder::new(model).max_iterations(5).compile();
+        let hash = agent.graph().canonical_hash();
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        // last_response 默认 None
+        let cp = Checkpoint::new(Some(NodeId("tool".into())), &state, hash, 3);
+        let config = CheckpointConfig::new(
+            |_cp: Checkpoint<AgentState>, _tid: TraceId| {
+                Box::pin(async { Ok::<(), CheckpointStoreError>(()) })
+            },
+            hash,
+        );
+        let err = agent
+            .invoke_with_restore(cp, TraceId::new(), config)
+            .await
+            .unwrap_err();
+        match err {
+            LlmError::RestoreFailed { reason, .. } => {
+                assert_eq!(reason, RestoreFailureReason::MissingExecutionContext);
+            }
+            other => panic!("expected RestoreFailed, got {other:?}"),
+        }
+    }
+
+    // (b) 存储往返（store 存在，最新性通过，last_response 校验失败）
+    {
+        let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
+        let model = ResolvedModel::new(provider, "test-model");
+        let agent = AgentBuilder::new(model).max_iterations(5).compile();
+        let hash = agent.graph().canonical_hash();
+        let store = Arc::new(InMemoryBlobStore::new());
+        let codec = SerdeCheckpointCodec::<AgentState>::new();
+        let trace_id = TraceId::new();
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        let cp = Checkpoint::new(Some(NodeId("tool".into())), &state, hash, 3);
+        let blob = codec.serialize(&cp, hash).unwrap();
+        store.save_with_trace(&trace_id, &blob).await.unwrap();
+        let loaded = store.load_latest(&trace_id).await.unwrap().unwrap();
+        let cp_loaded = codec.deserialize(&loaded, hash).unwrap();
+        let config = CheckpointConfig::for_store(store, codec, hash);
+        let err = agent
+            .invoke_with_restore(cp_loaded, trace_id, config)
+            .await
+            .unwrap_err();
+        match err {
+            LlmError::RestoreFailed { reason, .. } => {
+                assert_eq!(reason, RestoreFailureReason::MissingExecutionContext);
+            }
+            other => panic!("expected RestoreFailed, got {other:?}"),
+        }
+    }
+
+    // (c) 对照：next=budget_check + last_response=None → 正常恢复（不误报）
+    {
+        let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+        let model = ResolvedModel::new(provider, "test-model");
+        let agent = AgentBuilder::new(model).max_iterations(5).compile();
+        let hash = agent.graph().canonical_hash();
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        let cp = Checkpoint::new(Some(NodeId("budget_check".into())), &state, hash, 1);
+        let config = CheckpointConfig::new(
+            |_cp: Checkpoint<AgentState>, _tid: TraceId| {
+                Box::pin(async { Ok::<(), CheckpointStoreError>(()) })
+            },
+            hash,
+        );
+        let result = agent
+            .invoke_with_restore(cp, TraceId::new(), config)
+            .await
+            .unwrap();
+        assert_eq!(result.stop_reason, StopReason::Complete);
+    }
+}

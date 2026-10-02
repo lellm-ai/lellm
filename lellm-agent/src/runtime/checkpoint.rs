@@ -68,10 +68,19 @@ pub(crate) fn reconstruct_response_from_messages(messages: &[Message]) -> ChatRe
 ///
 /// `post_llm_check` / `tool` 需要 `last_response = Some`，否则 `MissingExecutionContext`；
 /// `budget_check` / `llm` / `compactor` / `end` / `None` 允许 `None`。
-///
-/// **Task 5 桩** — 本任务返回 `Ok(())`；Task 6 落实真实校验。
-pub(crate) fn validate_last_response(_cp: &Checkpoint<AgentState>) -> Result<(), LlmError> {
-    Ok(())
+pub(crate) fn validate_last_response(cp: &Checkpoint<AgentState>) -> Result<(), LlmError> {
+    match cp.next_node.as_ref().map(|n| n.0.as_str()) {
+        Some("post_llm_check") | Some("tool") if cp.state.last_response.is_none() => {
+            Err(LlmError::RestoreFailed {
+                reason: RestoreFailureReason::MissingExecutionContext,
+                message: format!(
+                    "node '{}' requires last_response but checkpoint has none (old checkpoint?)",
+                    cp.next_node.as_ref().unwrap().0
+                ),
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// 恢复**校验**阶段错误 → `LlmError::RestoreFailed{reason}`。
