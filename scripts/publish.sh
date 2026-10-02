@@ -24,7 +24,10 @@ set -euo pipefail
 CRATES="lellm-core lellm-derive lellm-provider lellm-graph lellm-mcp lellm-agent lellm"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*= *"\([^"]*\)".*/\1/')"
-TOOLCHAIN="${CARGO_TOOLCHAIN:-1.88.0}"
+
+# shell 全局 DYLD_LIBRARY_PATH（Homebrew llvm/sqlite）会劫持 rustc 1.98+ 的
+# dylib 解析，导致 `dyld: missing symbol called` (SIGABRT)。发布验证不需要它。
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
 
 MODE="verify"
 [ "${1:-}" = "--publish" ] && MODE="publish"
@@ -135,14 +138,14 @@ run_verification() {
   log_ok "工作区干净"
 
   log_info "[2/3] workspace 构建 + 测试 + 针对性 feature 矩阵（非 --all-features）..."
-  run_log "workspace build"            cargo +"$TOOLCHAIN" build --workspace
-  run_log "workspace test"             cargo +"$TOOLCHAIN" test --workspace
-  run_log "provider 默认构建"           cargo +"$TOOLCHAIN" build -p lellm-provider
-  run_log "facade 默认构建"             cargo +"$TOOLCHAIN" build -p lellm
-  run_log "facade mcp-stdio(关默认)"    cargo +"$TOOLCHAIN" build -p lellm --no-default-features --features mcp-stdio
-  run_log "facade mcp"                 cargo +"$TOOLCHAIN" build -p lellm --features mcp
-  run_log "facade full"                cargo +"$TOOLCHAIN" build -p lellm --features full
-  run_log "mcp sse"                    cargo +"$TOOLCHAIN" build -p lellm-mcp --features sse
+  run_log "workspace build"            cargo build --workspace
+  run_log "workspace test"             cargo test --workspace
+  run_log "provider 默认构建"           cargo build -p lellm-provider
+  run_log "facade 默认构建"             cargo build -p lellm
+  run_log "facade mcp-stdio(关默认)"    cargo build -p lellm --no-default-features --features mcp-stdio
+  run_log "facade mcp"                 cargo build -p lellm --features mcp
+  run_log "facade full"                cargo build -p lellm --features full
+  run_log "mcp sse"                    cargo build -p lellm-mcp --features sse
 
   log_info "[3/3] 本批包组合验证（打包+解包+构建，≠ registry 验证）..."
   if ! bash "$PROJECT_ROOT/scripts/verify-package-build.sh" >"$LOG_DIR/pkg-combo.log" 2>&1; then
@@ -172,7 +175,7 @@ publish_crates() {
     fi
 
     log_info "[${crate}] v${VERSION} 未发布，开始 cargo publish..."
-    if (cd "$PROJECT_ROOT/$crate" && cargo +"$TOOLCHAIN" publish --registry crates-io 2>&1 | tee -a "$LOG_DIR/publish.log"); then
+    if (cd "$PROJECT_ROOT/$crate" && cargo publish --registry crates-io 2>&1 | tee -a "$LOG_DIR/publish.log"); then
       log_ok "[${crate}] v${VERSION} 发布成功"
       # 发布后可见性检查；依赖它下游的 crate 在其可解析前不发布
       if ! wait_until_resolvable "$crate" "$VERSION"; then
@@ -193,7 +196,7 @@ publish_crates() {
 # ─── 主流程 ────────────────────────────────────────────────────────
 
 echo "========================================"
-log_info "LeLLM Workspace - ${MODE} 模式（v${VERSION}，工具链 +${TOOLCHAIN}）"
+log_info "LeLLM Workspace - ${MODE} 模式（v${VERSION}，宿主机默认工具链）"
 echo "========================================"
 echo ""
 

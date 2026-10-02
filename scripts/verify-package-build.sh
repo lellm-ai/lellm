@@ -21,7 +21,10 @@ set -euo pipefail
 CRATES="lellm-core lellm-derive lellm-provider lellm-graph lellm-mcp lellm-agent lellm"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*= *"\([^"]*\)".*/\1/')"
-TOOLCHAIN="${CARGO_TOOLCHAIN:-1.88.0}"
+
+# shell 全局 DYLD_LIBRARY_PATH（Homebrew llvm/sqlite）会劫持 rustc 1.98+ 的
+# dylib 解析，导致 `dyld: missing symbol called` (SIGABRT)。打包验证不需要它。
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
 
 log() { echo -e "\033[0;36m[verify-pkg]\033[0m $*"; }
 err() { echo -e "\033[0;31m[verify-pkg][ERROR]\033[0m $*" >&2; }
@@ -35,12 +38,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "版本 v${VERSION}，工具链 +${TOOLCHAIN}（固定验证版本，非 MSRV）"
+log "版本 v${VERSION}，宿主机默认工具链（裸 cargo）"
 
 # ── 1. 打包（--no-verify：只组装 .crate；.crate 落在临时 target-dir，不污染共享缓存）──
 log "[1/4] cargo package 各 crate（--no-verify，只打包不构建）..."
 for c in $CRATES; do
-  if ! cargo +"$TOOLCHAIN" package -p "$c" --no-verify --target-dir "$WORK/pkg-target" >/dev/null 2>&1; then
+  if ! cargo package -p "$c" --no-verify --target-dir "$WORK/pkg-target" >/dev/null 2>&1; then
     err "打包 $c 失败"
     exit 1
   fi
@@ -87,7 +90,7 @@ echo "" > "$WORK/verify/src/lib.rs"
 # 不指定 --target-dir：复用全局配置 target 的外部依赖缓存，只重编 7 个 lellm crate。
 log "[4/4] 构建验证包（full feature）..."
 BUILD_LOG="$WORK/build.log"
-if (cd "$WORK/verify" && cargo +"$TOOLCHAIN" build >"$BUILD_LOG" 2>&1); then
+if (cd "$WORK/verify" && cargo build >"$BUILD_LOG" 2>&1); then
   log "✅ 本批包组合构建通过：解包后 .crate 可独立编译（full feature）"
   log "   边界：这是「本批包组合验证」，≠ registry 验证（内部依赖尚不在 crates.io）"
 else

@@ -2,7 +2,7 @@
 #
 # 设计原则（对齐发布前验证）：
 #   - 用「针对性最小 feature 组合」验证，不用 --all-features 代替，也不穷举所有组合。
-#   - 工具链 1.88.0 是「固定验证版本」，非 MSRV（MSRV 另行声明；README 仍写 stable）。
+#   - 使用 stable 工具链（不 pin 具体版本，非 MSRV；MSRV 另行声明）。
 name: CI
 
 on:
@@ -12,7 +12,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_TOOLCHAIN: 1.88.0
 
 jobs:
   # 普通构建 + 关键 feature 组合 + 针对性测试 + workspace 回归
@@ -21,8 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 安装 Rust 工具链（固定验证版本 1.88.0，非 MSRV）
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: 安装 Rust 工具链（stable，不 pin 具体版本）
+        uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       - name: workspace 回归测试
@@ -49,8 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 安装 Rust 工具链（固定验证版本 1.88.0，非 MSRV）
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: 安装 Rust 工具链（stable，不 pin 具体版本）
+        uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: 依赖边界检查
         run: bash scripts/check-mcp-stdio-boundary.sh

@@ -10,7 +10,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
-TOOLCHAIN="${CARGO_TOOLCHAIN:-1.88.0}"
+
+# shell 全局 DYLD_LIBRARY_PATH（Homebrew llvm/sqlite）会劫持 rustc 1.98+ 的
+# dylib 解析，导致 `dyld: missing symbol called` (SIGABRT)。边界检查不需要它。
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
 
 # 禁用 crate 模式：mcp-stdio 绝不应引入这些
 FORBIDDEN='lellm-agent|lellm-provider|lellm-graph|reqwest|hyper|native-tls|rustls|tokio-native|tower|openssl|eventsource|axum'
@@ -52,11 +55,11 @@ async fn main() {
 }
 EOF
 
-echo "🔍 [1/3] 编译独立消费项目 (cargo +${TOOLCHAIN}) ..."
-(cd "$CONSUMER_DIR" && cargo +"$TOOLCHAIN" build 2>&1 | grep -E "error|Finished" || true)
+echo "🔍 [1/3] 编译独立消费项目 (cargo) ..."
+(cd "$CONSUMER_DIR" && cargo build 2>&1 | grep -E "error|Finished" || true)
 
 echo "🔍 [2/3] 检查依赖边界（应无禁用 crate）..."
-if (cd "$CONSUMER_DIR" && cargo +"$TOOLCHAIN" tree -e normal,build --prefix none 2>/dev/null | grep -iE "$FORBIDDEN"); then
+if (cd "$CONSUMER_DIR" && cargo tree -e normal,build --prefix none 2>/dev/null | grep -iE "$FORBIDDEN"); then
   echo "❌ 依赖边界被破坏：mcp-stdio 引入了禁用 crate（见上）"
   exit 1
 else
@@ -64,6 +67,6 @@ else
 fi
 
 echo "📊 [3/3] mcp-stdio 唯一 crate 数（统计口径：cargo tree -e normal,build --prefix none | sort -u）："
-(cd "$CONSUMER_DIR" && cargo +"$TOOLCHAIN" tree -e normal,build --prefix none 2>/dev/null | sort -u | wc -l | tr -d ' ')
+(cd "$CONSUMER_DIR" && cargo tree -e normal,build --prefix none 2>/dev/null | sort -u | wc -l | tr -d ' ')
 
 echo "✅ mcp-stdio 依赖边界检查通过"
