@@ -132,7 +132,8 @@
 | `post_llm_check` | 必须 `Some` | `MissingExecutionContext` |
 | `tool` | 必须 `Some` | `MissingExecutionContext` |
 | `budget_check` / `llm` / `compactor` | 不依赖（下次是 LLM 调用） | 允许 `None` |
-| `None`（完成态） | 不依赖 | 零执行，直接返回 |
+| `end` | 不依赖（终态 TaskNode，无输入） | 允许 `None` |
+| `None`（完成态） | 执行不依赖；**结果构造依赖**（§5.4） | 见 §5.4 |
 
 > 其他位置「按实际依赖判断」——当前 ReAct 图只有 `post_llm_check` / `tool` 依赖 `last_response`。
 
@@ -142,6 +143,18 @@
 - 但**必须经过 §5.2 的节点相关校验**：恢复到 `post_llm_check` / `tool` 且 `last_response == None` → 报错；其他位置按依赖判断；完成态零执行。
 - **直接构造的检查点**（不经存储加载）也必须经过同样校验。
 - 即：「旧检查点兼容」≠「跳过校验」，而是「按 `None` 加载 + 节点相关校验」。
+
+### 5.4 完成态结果构造契约
+
+区分「无需继续执行节点」与「能正确构造 `ToolUseResult`」：完成态（`next_node = None`）允许缺少 `last_response`（无节点再读它），但**结果构造仍依赖它**。
+
+`ToolUseResult.response` 取自 `AgentState.last_response`（`runtime.rs:161-168`），当前 `None` 时回退 `empty_response()`。若旧完成态检查点缺 `last_response`，直接恢复会得到**空 response，丢失最终回答**。
+
+**契约**：完成态恢复时——
+
+- `last_response` 存在 → `response = last_response`（完整保真）。
+- `last_response` 缺失（旧检查点）→ **从 `messages` 的最后一条 assistant 消息重建 `response`（文本内容）**，保证最终回答不丢失。此重建在完成态安全：循环结束于 PostLLMGuard 判定「无 tool calls」，故最后一条 assistant 消息即最终回答。
+- 保真度说明：重建的 `response` 仅含文本，丢失 finish_reason / usage / provider metadata；**权威最终回答始终在 `messages`**（已入 checkpoint），调用方亦可从 `messages` 读取。
 
 ---
 
@@ -198,9 +211,17 @@ impl ToolUseLoop {
 ### 7.2 四个约束
 
 1. **trace_id 调用方预提供**：内联路径无内建 trace 生成机制（`CheckpointSaveSink` 构造时固定 trace_id，`checkpoint_save_sink.rs:30`）。若只在正常完成的 `ToolUseResult` 返回 trace_id，进程中途崩溃时调用方无法知道加载哪个检查点。故 `trace_id` 作为入参，调用方预先持有。
-2. **恢复继续保存**：同一 trace 延续检查点序号（FileBlobStore seq）、步数（`steps_used`）和 Agent 预算（`max_steps` 为总预算，从 `steps_used` 延续）。恢复入口不收新 messages。
+2. **恢复继续保存**：同一 trace 延续检查点序号（FileBlobStore seq）与 **Graph 步数预算**（`max_steps` 为图节点执行总预算，从 `steps_used` 延续，恢复不重置）。**Agent 业务预算**（`iterations` / `total_tool_calls` / token 计数，属 Durable State）随 checkpoint 快照独立延续，与 Graph 步数预算相互独立。恢复入口不收新 messages。
 3. **校验分层**：泛型 helper 管通用规则（版本 / graph_hash / 游标 / 步数 / 最新性）；Agent 层管节点输入完整性（`last_response`）。**graph 层不识别 `post_llm_check` / `tool` 等 Agent 节点名**。
 4. **配置兼容**：见 §10。
+
+### 7.3 trace_id 绑定规则
+
+两个入口的 `trace_id` 均由调用方提供，绑定规则：
+
+1. **首次执行**（`invoke_with_checkpoint`）：要求该 `trace_id` **没有既有检查点**（`store.load_latest(trace_id)` 为空），避免新状态接在旧执行历史后。已有检查点 → 拒绝（提示改用 `invoke_with_restore`）。
+2. **恢复**（`invoke_with_restore`）：要求传入检查点**属于该 `trace_id`** 且是**其最新检查点**（与 `store.load_latest(trace_id)` 一致），否则 `NotLatest`。
+3. **并发**：沿用 Phase 1「同一 trace 单活跃执行者」约束；最新性检查本身**不提供并发互斥**（两个执行者同时读最新仍可能都通过），并发安全由调用方保证。
 
 ---
 
@@ -227,10 +248,11 @@ impl ToolUseLoop {
 
 - 通用恢复失败（版本 / 指纹 / 游标 / 步数 / 最新性）→ graph 层 `TerminalError` 既有变体（`RestoreUnsupported` / `RestoreNotLatest` / `RestoreFailed` / `StepsExceeded` / `NodeNotFound`）。
 - `MissingExecutionContext` → **Agent 层**校验产生，graph helper 不判断 Agent 节点名。
+- **运行期保存失败**（`CheckpointSaveFailed`，执行中发生）→ **非恢复失败**，不属 `RestoreFailed`，沿用 `LlmError::Provider`（见 §9.2）。
 
 ### 9.2 对外映射（决策）
 
-两个入口返回 `Result<ToolUseResult, LlmError>`。为保留**可供程序识别**的恢复失败原因（不能只剩字符串），**新增 `LlmError` 变体**：
+两个入口返回 `Result<ToolUseResult, LlmError>`。为保留**可供程序识别**的恢复失败原因（不能只剩字符串），**新增 `LlmError` 变体**，**仅表达恢复校验失败**：
 
 ```rust
 LlmError::RestoreFailed {
@@ -239,9 +261,10 @@ LlmError::RestoreFailed {
 }
 ```
 
-`RestoreFailureReason`（lellm-core，`#[non_exhaustive]`）：
+`RestoreFailureReason`（lellm-core，`#[non_exhaustive]`）——**仅恢复校验失败**：
 
 ```rust
+#[non_exhaustive]
 pub enum RestoreFailureReason {
     MissingExecutionContext,  // Agent 层：next_node 依赖 last_response 但缺失
     NotLatest,               // 传入检查点非该 trace 最新
@@ -249,14 +272,14 @@ pub enum RestoreFailureReason {
     UnsupportedFormat,       // 版本/格式不支持
     StepsExceeded,           // 步数预算耗尽
     NodeNotFound,            // next_node 不存在
-    SaveFailed,              // 保存失败
     Other,                   // 兜底
 }
 ```
 
-- graph helper 的 `TerminalError` 变体 + Agent 的 `MissingExecutionContext` 统一映射到 `RestoreFailureReason`。
-- **API 影响**：`LlmError` 新增变体 + 新增公开 enum。项目 pre-1.0（v0.5.0-alpha 路线），可接受；`#[non_exhaustive]` 降低未来破坏面。
-- **备选**（若需最小化公共 API 面）：`LlmError::RestoreFailed { code: &'static str, message: String }`，用稳定 code 字符串供程序匹配。默认采用类型化 enum。
+**运行期保存失败 ≠ 恢复失败**：首次 `invoke_with_checkpoint` 或恢复执行中的 `CheckpointSaveFailed` 都**未发生恢复校验**，不属 `RestoreFailed`；沿用现有映射 `LlmError::Provider { provider: "react_graph", .. }`（`runtime.rs:149-154`），不新增恢复语义。
+
+- 映射来源：graph helper 的恢复 `TerminalError` 变体（`RestoreNotLatest` / `RestoreFailed` / `StepsExceeded` / `NodeNotFound`）+ `CheckpointStoreError`（`GraphMismatch` / `UnsupportedFormat`）+ Agent 的 `MissingExecutionContext`，统一映射到 `RestoreFailureReason`。
+- **API 影响**：`LlmError` 新增变体（pre-1.0 可接受）+ 新增 `#[non_exhaustive]` 公开 enum `RestoreFailureReason`。既有 `LlmError` 是否加 `#[non_exhaustive]` 属另一兼容性决定，本轮不扩大修改。
 
 ---
 
@@ -276,8 +299,8 @@ pub enum RestoreFailureReason {
 - `AgentCheckpoint` 增加 `last_response`（pending context）
 - 恢复完整性校验（Agent 层 `MissingExecutionContext` + 共享泛型 helper）
 - `ToolUseLoop::invoke_with_checkpoint` / `invoke_with_restore`（两个非流式入口）
-- `LlmError::RestoreFailed` + `RestoreFailureReason`
-- 三组必测场景（§12）
+- `LlmError::RestoreFailed` + `RestoreFailureReason`（`#[non_exhaustive]`，仅恢复校验失败）
+- 四组必测场景（§12，含运行期保存失败接线）
 
 **本阶段不做**：
 
@@ -290,7 +313,7 @@ pub enum RestoreFailureReason {
 
 ---
 
-## 12. 测试计划（三组必测场景）
+## 12. 测试计划（四组必测场景）
 
 > 使用**真实 snapshot / 序列化 / 加载链路**（非内存对象直接传递），走 `CheckpointConfig::for_store` + `SerdeCheckpointCodec<AgentState>` + store。
 
@@ -300,18 +323,23 @@ pub enum RestoreFailureReason {
 - **1b `next_node = post_llm_check`**：运行到 post_llm_check 的检查点 → 恢复 → 断言 PostLLMGuard 正确读取 last_response（路由到 tool，而非误判 Complete）。
 - 两个位置分别验证，避免漏掉 guard 对响应的依赖。
 
-### 组 2：恢复后再次保存及恢复
+### 组 2：恢复后再次保存及恢复（区分两类预算）
 
 - 恢复 → 继续执行 → 再保存 → 再恢复。断言：
   - 检查点序号（FileBlobStore seq）延续
-  - 步数（`steps_used`）延续
-  - **Agent 预算实际生效**：`max_steps` 为总预算，恢复后**不重新获得完整额度**（从 `steps_used` 延续，剩余预算正确递减）。
+  - **Graph 步数预算**延续：`steps_used` 从恢复点延续，`max_steps` 总预算不重置（不重新获得完整图执行额度）
+  - **Agent 业务预算实际生效**：至少一个现有业务预算（如 `max_iterations`）在恢复后确实触发限制——恢复不重置 `iterations`，达到上限仍按原逻辑停止（而非恢复后重新获得完整业务额度）
 
 ### 组 3：缺失必要响应直接报错
 
 - `next_node ∈ {post_llm_check, tool}` 且 `last_response == None` → 断言返回 `LlmError::RestoreFailed { reason: MissingExecutionContext, .. }`，**不静默继续**。
 - 覆盖：存储加载的旧检查点 + 直接构造的检查点，两条路径都报错。
 - 对照：`next_node` 为不依赖 last_response 的位置 + `last_response == None` → 正常恢复（不误报）。
+
+### 组 4：运行期保存失败接线
+
+- 构造使 `CheckpointSaveSink` 保存失败的 config（指向无效/只读路径的 store，或注入失败 save_fn）。
+- 断言：`invoke_with_checkpoint` 返回错误（`LlmError::Provider { provider: "react_graph" }`，**非** `RestoreFailed`），且保存失败边界**之后**的 LLM/工具节点**未执行**（执行在该边界停止，不越过）。
 
 ### 验证证据限定
 
@@ -325,7 +353,7 @@ pub enum RestoreFailureReason {
 
 | # | 项 | 处理 |
 |---|---|---|
-| R1 | `LlmError` 新增变体的破坏面 | `LlmError`（`lellm-core/src/error.rs:46`）当前**非 `#[non_exhaustive]`**，新增变体对穷举 match 是破坏性变更。pre-1.0 可接受；建议同时给 `LlmError` 加 `#[non_exhaustive]` 以降未来破坏面（其本身也是一次破坏）；备选 code 字符串方案（§9.2） |
+| R1 | `LlmError` 新增变体的破坏面 | `LlmError`（`lellm-core/src/error.rs:46`）当前**非 `#[non_exhaustive]`**，新增 `RestoreFailed` 变体对穷举 match 是破坏性变更。pre-1.0 可接受。既有 `LlmError` 是否加 `#[non_exhaustive]` 属另一兼容性决定，本轮不扩大修改；新 `RestoreFailureReason` 直接 `#[non_exhaustive]` |
 | R2 | `SerdeCheckpointCodec<AgentState>` 实例化 | **已确认**：`AgentState` 已 derive `Serialize + Deserialize`（`typed_state.rs:27`），codec 边界 `S: Serialize + Deserialize` 满足，可直接实例化。实际序列化载荷是投影 `AgentCheckpoint`（非完整 runtime state）；新增 `last_response: Option<ChatResponse>` 可序列化（`ChatResponse` 已被 `AgentState.last_response` 使用） |
 | R3 | 配置漂移 | 第一版文档约束，不自动检测（§10） |
 | R4 | 流式 checkpoint | 本阶段不做，留待需求 |
