@@ -271,4 +271,18 @@ mod checkpoint_last_response_tests {
         let restored = AgentState::restore(cp);
         assert!(restored.last_response.is_none());
     }
+
+    #[test]
+    fn old_format_json_without_last_response_deserializes_to_none() {
+        // 旧格式 JSON：字段真正缺失（非 null）→ #[serde(default)] → None
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        let cp = state.snapshot();
+        let mut v = serde_json::to_value(&cp).unwrap();
+        v.as_object_mut().unwrap().remove("last_response");
+        let old: AgentCheckpoint = serde_json::from_value(v).unwrap();
+        assert!(
+            old.last_response.is_none(),
+            "旧格式（字段缺失）应反序列化为 None"
+        );
+    }
 }

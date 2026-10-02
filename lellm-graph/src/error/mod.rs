@@ -65,7 +65,15 @@ pub enum TerminalError {
     RestoreUnsupported { node: String, kind: String },
     /// 传入的检查点不是该 trace 的最新检查点 — 拒绝续写原 trace（避免历史分叉）
     RestoreNotLatest { checkpoint: String, latest: String },
-    /// 恢复前置条件失败（如加载最新检查点时损坏/缺失）
+    /// 检查点格式版本不支持（legacy 格式）
+    RestoreUnsupportedFormat { actual: u32, expected: u32 },
+    /// graph_hash 不匹配（图结构已变更）
+    RestoreGraphMismatch { expected: u64, actual: u64 },
+    /// trace 已有检查点 — 首次执行入口要求 trace 新鲜
+    TraceNotFresh { trace: String, latest: String },
+    /// 检查点加载失败（存储读取错误 — 存储故障语义，非恢复校验失败）
+    CheckpointLoadFailed { error: String },
+    /// 恢复前置条件失败（其他未结构化原因）
     RestoreFailed { reason: String },
 }
 
@@ -187,6 +195,21 @@ impl fmt::Display for TerminalError {
                 f,
                 "checkpoint {checkpoint} is not the latest of this trace (latest: {latest}); restore requires the latest checkpoint or a new trace"
             ),
+            Self::RestoreUnsupportedFormat { actual, expected } => write!(
+                f,
+                "unsupported checkpoint format_version: {actual} (expected {expected})"
+            ),
+            Self::RestoreGraphMismatch { expected, actual } => write!(
+                f,
+                "graph hash mismatch: expected {expected:016x}, got {actual:016x}"
+            ),
+            Self::TraceNotFresh { trace, latest } => write!(
+                f,
+                "trace {trace} already has checkpoint {latest} (use restore entry)"
+            ),
+            Self::CheckpointLoadFailed { error } => {
+                write!(f, "checkpoint load failed: {error}")
+            }
             Self::RestoreFailed { reason } => write!(f, "restore precondition failed: {reason}"),
         }
     }

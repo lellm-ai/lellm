@@ -149,8 +149,9 @@ impl<S: WorkflowState> CheckpointConfig<S> {
                     }));
                 }
                 Err(e) => {
-                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                        reason: format!("load latest checkpoint: {e}"),
+                    // 存储读取失败 → 存储故障语义（非"没有检查点"，非恢复校验失败）
+                    return Err(GraphError::Terminal(TerminalError::CheckpointLoadFailed {
+                        error: e.to_string(),
                     }));
                 }
             }
@@ -161,22 +162,21 @@ impl<S: WorkflowState> CheckpointConfig<S> {
     /// 首次执行新鲜度校验 — 要求该 trace 无既有检查点。
     ///
     /// `store` 不存在时跳过（无持久化 → 无既有检查点）。
-    /// 已有检查点 → 报错（提示改用恢复入口），避免新状态接在旧执行历史后。
+    /// 已有检查点 → `TraceNotFresh`（调用方应改用恢复入口）；
+    /// 存储读取失败 → `CheckpointLoadFailed`（存储故障语义，非用户输入错误）。
     pub async fn assert_fresh_trace(&self, trace_id: &TraceId) -> Result<(), GraphError> {
         if let Some(store) = &self.store {
             match store.load_latest(trace_id).await {
                 Ok(Some(latest)) => {
-                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                        reason: format!(
-                            "trace {trace_id} already has checkpoint {} (use restore entry)",
-                            latest.id
-                        ),
+                    return Err(GraphError::Terminal(TerminalError::TraceNotFresh {
+                        trace: trace_id.to_string(),
+                        latest: latest.id.to_string(),
                     }));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                        reason: format!("load latest checkpoint: {e}"),
+                    return Err(GraphError::Terminal(TerminalError::CheckpointLoadFailed {
+                        error: e.to_string(),
                     }));
                 }
             }
@@ -433,14 +433,15 @@ pub(crate) fn send_complete<S: WorkflowState>(
 mod restore_latestness_tests {
     use super::*;
     use crate::checkpoint::{
-        BlobCheckpointStore, CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointCodec, CheckpointId,
-        NodeId,
+        BlobCheckpointStore, CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointBlob,
+        CheckpointCodec, CheckpointId, CheckpointStoreError, NodeId,
     };
     use crate::error::TerminalError;
     use crate::{
         GraphBuilder, InMemoryBlobStore, NodeKind, SerdeCheckpointCodec, State, StateMerge,
         TaskNode,
     };
+    use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::SystemTime;
 
@@ -535,7 +536,7 @@ mod restore_latestness_tests {
         let err = cfg.assert_fresh_trace(&tid).await.unwrap_err();
         assert!(matches!(
             err,
-            GraphError::Terminal(TerminalError::RestoreFailed { .. })
+            GraphError::Terminal(TerminalError::TraceNotFresh { .. })
         ));
     }
 
@@ -546,5 +547,83 @@ mod restore_latestness_tests {
         let codec = SerdeCheckpointCodec::<State>::new();
         let cfg = CheckpointConfig::for_store(store, codec, h);
         assert!(cfg.assert_fresh_trace(&crate::TraceId::new()).await.is_ok());
+    }
+
+    /// load_latest 总是失败的 store — 验证存储故障语义（非"没有检查点"、非放行）。
+    struct FailingStore;
+
+    #[async_trait::async_trait]
+    impl BlobCheckpointStore for FailingStore {
+        async fn save_with_trace(
+            &self,
+            _trace_id: &crate::TraceId,
+            _blob: &CheckpointBlob,
+        ) -> Result<(), CheckpointStoreError> {
+            Err(CheckpointStoreError::Storage("simulated failure".into()))
+        }
+        async fn load(
+            &self,
+            _id: &CheckpointId,
+        ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
+            Err(CheckpointStoreError::Storage("simulated failure".into()))
+        }
+        async fn load_latest(
+            &self,
+            _trace_id: &crate::TraceId,
+        ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
+            Err(CheckpointStoreError::Storage(
+                "simulated read failure".into(),
+            ))
+        }
+        async fn list(
+            &self,
+            _trace_id: &crate::TraceId,
+        ) -> Result<Vec<CheckpointId>, CheckpointStoreError> {
+            Err(CheckpointStoreError::Storage("simulated failure".into()))
+        }
+        async fn delete(&self, _id: &CheckpointId) -> Result<bool, CheckpointStoreError> {
+            Err(CheckpointStoreError::Storage("simulated failure".into()))
+        }
+        async fn prune(
+            &self,
+            _trace_id: &crate::TraceId,
+            _keep: usize,
+        ) -> Result<usize, CheckpointStoreError> {
+            Err(CheckpointStoreError::Storage("simulated failure".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn check_restore_latest_load_failure_is_storage_error() {
+        let (_g, h) = single_node_graph();
+        let store = Arc::new(FailingStore);
+        let codec = SerdeCheckpointCodec::<State>::new();
+        let cfg = CheckpointConfig::for_store(store, codec, h);
+        let err = cfg
+            .check_restore_latest(&crate::TraceId::new(), &cp(CheckpointId::new(), h))
+            .await
+            .unwrap_err();
+        // 存储读取失败 → CheckpointLoadFailed（不当作"没有检查点"，不放行）
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::CheckpointLoadFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn assert_fresh_trace_load_failure_is_storage_error() {
+        let (_g, h) = single_node_graph();
+        let store = Arc::new(FailingStore);
+        let codec = SerdeCheckpointCodec::<State>::new();
+        let cfg = CheckpointConfig::for_store(store, codec, h);
+        let err = cfg
+            .assert_fresh_trace(&crate::TraceId::new())
+            .await
+            .unwrap_err();
+        // 存储读取失败 → CheckpointLoadFailed（非 TraceNotFresh，不放行）
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::CheckpointLoadFailed { .. })
+        ));
     }
 }

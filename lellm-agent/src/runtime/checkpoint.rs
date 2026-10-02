@@ -85,21 +85,29 @@ pub(crate) fn validate_last_response(cp: &Checkpoint<AgentState>) -> Result<(), 
 
 /// 恢复**校验**阶段错误 → `LlmError::RestoreFailed{reason}`。
 ///
-/// 承接 4 个校验步骤：`validate_persistable`（`RestoreUnsupported` → catch-all → `Other`）、
-/// `validate_restore_checkpoint`、`check_restore_latest`、`validate_last_response`。
+/// graph 层提供结构化原因（类型化变体），本函数**按类型映射**（不做字符串分类）：
+/// - `RestoreUnsupportedFormat` → `UnsupportedFormat`
+/// - `RestoreGraphMismatch` → `GraphMismatch`
+/// - `RestoreNotLatest` → `NotLatest`
+/// - `NodeNotFound` / `StepsExceeded` → 对应 reason
+/// - `CheckpointLoadFailed` → 存储故障语义（`Provider`，与保存失败一致），非恢复校验失败
+/// - 其他终态错误（含 `RestoreUnsupported` / 未结构化 `RestoreFailed`）→ `Other` 兜底
 pub(crate) fn map_restore_error(e: GraphError) -> LlmError {
     match e {
-        GraphError::Terminal(TerminalError::RestoreFailed { reason }) => {
-            let r = if reason.contains("format_version") {
-                RestoreFailureReason::UnsupportedFormat
-            } else if reason.contains("hash mismatch") {
-                RestoreFailureReason::GraphMismatch
-            } else {
-                RestoreFailureReason::Other
-            };
+        GraphError::Terminal(TerminalError::RestoreUnsupportedFormat { actual, expected }) => {
             LlmError::RestoreFailed {
-                reason: r,
-                message: reason,
+                reason: RestoreFailureReason::UnsupportedFormat,
+                message: format!(
+                    "unsupported checkpoint format_version: {actual} (expected {expected})"
+                ),
+            }
+        }
+        GraphError::Terminal(TerminalError::RestoreGraphMismatch { expected, actual }) => {
+            LlmError::RestoreFailed {
+                reason: RestoreFailureReason::GraphMismatch,
+                message: format!(
+                    "graph hash mismatch: expected {expected:016x}, got {actual:016x}"
+                ),
             }
         }
         GraphError::Terminal(TerminalError::RestoreNotLatest { checkpoint, latest }) => {
@@ -116,10 +124,35 @@ pub(crate) fn map_restore_error(e: GraphError) -> LlmError {
             reason: RestoreFailureReason::StepsExceeded,
             message: format!("step budget exhausted (limit {limit})"),
         },
+        // 存储读取失败 → 存储故障语义（与运行期保存失败一致 → Provider），
+        // 不属恢复校验失败，也不是用户输入错误。
+        GraphError::Terminal(TerminalError::CheckpointLoadFailed { error }) => LlmError::Provider {
+            provider: "react_graph".into(),
+            status: None,
+            code: None,
+            message: format!("checkpoint load failed: {error}"),
+        },
         GraphError::Terminal(other) => LlmError::RestoreFailed {
             reason: RestoreFailureReason::Other,
             message: format!("{other:?}"),
         },
+    }
+}
+
+/// 首次执行新鲜度校验（`assert_fresh_trace`）错误映射。
+///
+/// - trace 已有检查点（`TraceNotFresh`）→ `InvalidRequest`（调用方用错入口，属用户输入错误）
+/// - 存储读取失败（`CheckpointLoadFailed`）→ 存储故障语义（`Provider`），不归为用户输入错误
+pub(crate) fn map_fresh_trace_error(e: GraphError) -> LlmError {
+    match e {
+        GraphError::Terminal(TerminalError::TraceNotFresh { trace, latest }) => {
+            LlmError::InvalidRequest {
+                message: format!(
+                    "trace {trace} already has checkpoint {latest}; use invoke_with_restore"
+                ),
+            }
+        }
+        other => map_runtime_error(other),
     }
 }
 
@@ -147,14 +180,11 @@ impl ToolUseLoop {
         config: CheckpointConfig<AgentState>,
     ) -> Result<ToolUseResult, LlmError> {
         // 首次执行绑定规则：trace 必须新鲜
+        // （trace 已存在 → InvalidRequest；存储读取失败 → Provider 存储故障语义）
         config
             .assert_fresh_trace(&trace_id)
             .await
-            .map_err(|e| LlmError::InvalidRequest {
-                message: format!(
-                    "trace {trace_id} already has checkpoints; use invoke_with_restore: {e}"
-                ),
-            })?;
+            .map_err(map_fresh_trace_error)?;
 
         let initial_messages = build_request_messages_inner(self.config(), &messages)?;
         let max_steps = max_steps_for(self.config());

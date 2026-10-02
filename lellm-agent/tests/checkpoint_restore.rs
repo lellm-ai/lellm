@@ -15,8 +15,9 @@ use lellm_core::{
     ToolCall, ToolDefinition, ToolSchema,
 };
 use lellm_graph::{
-    BlobCheckpointStore, Checkpoint, CheckpointCodec, CheckpointConfig, CheckpointStoreError,
-    FileBlobStore, InMemoryBlobStore, NodeId, SerdeCheckpointCodec, TraceId,
+    BlobCheckpointStore, Checkpoint, CheckpointBlob, CheckpointCodec, CheckpointConfig,
+    CheckpointId, CheckpointStoreError, FileBlobStore, InMemoryBlobStore, NodeId,
+    SerdeCheckpointCodec, TraceId,
 };
 use lellm_provider::{LlmProvider, ProviderEvent, ProviderStream};
 
@@ -124,6 +125,19 @@ fn make_tool(counter: Arc<AtomicUsize>) -> ExecutableTool {
             Ok(serde_json::json!("42"))
         }
     })
+}
+
+/// 读取 trace 下的磁盘 seq 列表（FileBlobStore 文件名前缀 `{seq}_`）。
+fn trace_seqs(store: &FileBlobStore, trace_id: &TraceId) -> Vec<u64> {
+    let dir = store.root().join(trace_id.to_string());
+    std::fs::read_dir(&dir)
+        .expect("trace dir")
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.split('_').next()?.parse::<u64>().ok()
+        })
+        .collect()
 }
 
 /// 构造「在 next_node 命中 target 时拒绝保存」的 config（崩溃模拟）。
@@ -348,6 +362,8 @@ async fn g2_budget_continues_and_disk_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
     let store: Arc<dyn lellm_graph::BlobCheckpointStore> =
         Arc::new(FileBlobStore::new(tmp.path().to_path_buf()));
+    // 检视句柄 — 与 store 共享同一 root，仅用于读磁盘 seq（FileBlobStore 非 Clone）
+    let inspect = FileBlobStore::new(tmp.path().to_path_buf());
     let codec = SerdeCheckpointCodec::<AgentState>::new();
     let tool_calls = Arc::new(AtomicUsize::new(0));
     let provider = Arc::new(ScriptedProvider::new(vec![
@@ -382,6 +398,11 @@ async fn g2_budget_continues_and_disk_roundtrip() {
     let steps_used_a = cp.steps_used;
     assert_eq!(steps_used_a, 3, "阶段 A 最新检查点 steps_used=3");
 
+    // 恢复前记录磁盘 seq（spec §12 组 2：检查点序号延续）
+    let seqs_before = trace_seqs(&inspect, &trace_id);
+    assert_eq!(seqs_before.len(), 1, "阶段 A 恰好写入 1 个检查点到磁盘");
+    let max_seq_before = *seqs_before.iter().max().unwrap();
+
     // 阶段 B：从磁盘 store 恢复并续写（同一 trace）
     tool_calls.store(0, Ordering::SeqCst);
     let config_b = CheckpointConfig::for_store(store.clone(), codec.clone(), hash);
@@ -404,6 +425,34 @@ async fn g2_budget_continues_and_disk_roundtrip() {
         steps_used_a
     );
     assert_eq!(final_cp.next_node, None, "完成态");
+
+    // 磁盘序号延续：同一 trace 严格递增；已有检查点未被覆盖（不要求连续无间隙）
+    let seqs_after = trace_seqs(&inspect, &trace_id);
+    let max_seq_after = *seqs_after.iter().max().unwrap();
+    assert!(
+        max_seq_after > max_seq_before,
+        "同一 trace 下磁盘序号严格递增 ({max_seq_after} > {max_seq_before})"
+    );
+    assert!(
+        seqs_after.len() > seqs_before.len(),
+        "恢复后续写产生了新检查点"
+    );
+    for s in &seqs_before {
+        assert!(seqs_after.contains(s), "已有检查点 seq={s} 未被覆盖");
+    }
+
+    // 最新检查点可再次恢复（完成态：零执行，不产生新检查点）
+    let config_c = CheckpointConfig::for_store(store.clone(), codec.clone(), hash);
+    let result_c = agent
+        .invoke_with_restore(final_cp.clone(), trace_id, config_c)
+        .await
+        .unwrap();
+    assert_eq!(result_c.stop_reason, StopReason::Complete);
+    assert_eq!(
+        trace_seqs(&inspect, &trace_id),
+        seqs_after,
+        "完成态恢复零执行，磁盘 seq 集合不变"
+    );
 
     // Agent 业务预算：iterations 延续（未重置为 1）
     assert!(
@@ -542,6 +591,175 @@ async fn g4b_restore_runtime_save_failure_maps_to_provider() {
         provider.call_count(),
         0,
         "恢复入口保存失败边界后的 LLM 未执行"
+    );
+}
+
+// ─── 收尾项：恢复失败原因类型化（按类型映射，非字符串分类）──────
+
+/// 无 store config（跳过最新性检查）— 直接构造检查点做校验层测试。
+fn no_store_config(hash: u64) -> CheckpointConfig<AgentState> {
+    CheckpointConfig::new(
+        |_cp: Checkpoint<AgentState>, _tid: TraceId| {
+            Box::pin(async { Ok::<(), CheckpointStoreError>(()) })
+        },
+        hash,
+    )
+}
+
+/// 收尾项 1：恢复失败原因按类型映射 — `GraphMismatch` / `UnsupportedFormat`
+/// 各得对应 reason（不是 `Other` 兜底），可供程序识别。
+#[tokio::test]
+async fn restore_validation_reasons_are_typed_not_other() {
+    // (a) graph_hash 不匹配 → GraphMismatch
+    {
+        let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
+        let model = ResolvedModel::new(provider, "test-model");
+        let agent = AgentBuilder::new(model).max_iterations(5).compile();
+        let hash = agent.graph().canonical_hash();
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        let mut cp = Checkpoint::new(Some(NodeId("budget_check".into())), &state, hash, 1);
+        cp.graph_hash = hash ^ 0xff; // 模拟图结构已变更
+        let err = agent
+            .invoke_with_restore(cp, TraceId::new(), no_store_config(hash))
+            .await
+            .unwrap_err();
+        match err {
+            LlmError::RestoreFailed { reason, .. } => assert_eq!(
+                reason,
+                RestoreFailureReason::GraphMismatch,
+                "hash 不匹配必须得 GraphMismatch（而非 Other）"
+            ),
+            other => panic!("expected RestoreFailed, got {other:?}"),
+        }
+    }
+
+    // (b) format_version 不支持 → UnsupportedFormat
+    {
+        let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
+        let model = ResolvedModel::new(provider, "test-model");
+        let agent = AgentBuilder::new(model).max_iterations(5).compile();
+        let hash = agent.graph().canonical_hash();
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        let mut cp = Checkpoint::new(Some(NodeId("budget_check".into())), &state, hash, 1);
+        cp.format_version = 999; // legacy / 未来版本
+        let err = agent
+            .invoke_with_restore(cp, TraceId::new(), no_store_config(hash))
+            .await
+            .unwrap_err();
+        match err {
+            LlmError::RestoreFailed { reason, .. } => assert_eq!(
+                reason,
+                RestoreFailureReason::UnsupportedFormat,
+                "format_version 不支持必须得 UnsupportedFormat（而非 Other）"
+            ),
+            other => panic!("expected RestoreFailed, got {other:?}"),
+        }
+    }
+}
+
+// ─── 条件核对：assert_fresh_trace 错误语义 ─────────────────────
+
+/// 条件核对：trace 已有检查点 → `InvalidRequest`（调用方用错入口，属用户输入错误）。
+#[tokio::test]
+async fn fresh_trace_existing_checkpoint_maps_to_invalid_request() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
+    let model = ResolvedModel::new(provider.clone(), "test-model");
+    let agent = AgentBuilder::new(model).max_iterations(5).compile();
+    let hash = agent.graph().canonical_hash();
+    let store = Arc::new(InMemoryBlobStore::new());
+    let codec = SerdeCheckpointCodec::<AgentState>::new();
+    let trace_id = TraceId::new();
+    // trace 已有检查点
+    let state = AgentState::from_messages(vec![Message::user_text("q")]);
+    let cp = Checkpoint::new(Some(NodeId("budget_check".into())), &state, hash, 1);
+    let blob = codec.serialize(&cp, hash).unwrap();
+    store.save_with_trace(&trace_id, &blob).await.unwrap();
+
+    let config = CheckpointConfig::for_store(store, codec, hash);
+    let err = agent
+        .invoke_with_checkpoint(vec![Message::user_text("q")], trace_id, config)
+        .await
+        .unwrap_err();
+    match err {
+        LlmError::InvalidRequest { .. } => {}
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+    // 新鲜度校验在 LLM 调用之前 — 未执行任何 LLM
+    assert_eq!(provider.call_count(), 0, "新鲜度校验失败后 LLM 未执行");
+}
+
+/// load_latest 总是失败的 store（其余操作委托内存 store）— 模拟存储读取故障。
+struct LoadFailingStore {
+    inner: InMemoryBlobStore,
+}
+
+#[async_trait]
+impl BlobCheckpointStore for LoadFailingStore {
+    async fn save_with_trace(
+        &self,
+        trace_id: &TraceId,
+        blob: &CheckpointBlob,
+    ) -> Result<(), CheckpointStoreError> {
+        self.inner.save_with_trace(trace_id, blob).await
+    }
+
+    async fn load(
+        &self,
+        id: &CheckpointId,
+    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
+        self.inner.load(id).await
+    }
+
+    async fn load_latest(
+        &self,
+        _trace_id: &TraceId,
+    ) -> Result<Option<CheckpointBlob>, CheckpointStoreError> {
+        Err(CheckpointStoreError::Storage(
+            "simulated load failure".into(),
+        ))
+    }
+
+    async fn list(&self, trace_id: &TraceId) -> Result<Vec<CheckpointId>, CheckpointStoreError> {
+        self.inner.list(trace_id).await
+    }
+
+    async fn delete(&self, id: &CheckpointId) -> Result<bool, CheckpointStoreError> {
+        self.inner.delete(id).await
+    }
+
+    async fn prune(&self, trace_id: &TraceId, keep: usize) -> Result<usize, CheckpointStoreError> {
+        self.inner.prune(trace_id, keep).await
+    }
+}
+
+/// 条件核对：assert_fresh_trace 存储读取失败 → `Provider`（存储故障语义），
+/// 不是 `InvalidRequest`（用户输入错误）；也不会被当作「没有检查点」继续执行。
+#[tokio::test]
+async fn fresh_trace_storage_failure_maps_to_provider() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
+    let model = ResolvedModel::new(provider.clone(), "test-model");
+    let agent = AgentBuilder::new(model).max_iterations(5).compile();
+    let hash = agent.graph().canonical_hash();
+    let store: Arc<dyn BlobCheckpointStore> = Arc::new(LoadFailingStore {
+        inner: InMemoryBlobStore::new(),
+    });
+    let codec = SerdeCheckpointCodec::<AgentState>::new();
+
+    let config = CheckpointConfig::for_store(store, codec, hash);
+    let err = agent
+        .invoke_with_checkpoint(vec![Message::user_text("q")], TraceId::new(), config)
+        .await
+        .unwrap_err();
+    match err {
+        LlmError::Provider { provider, .. } => {
+            assert_eq!(provider, "react_graph");
+        }
+        other => panic!("expected Provider（存储故障语义）, got {other:?}"),
+    }
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "存储读取失败后 LLM 未执行（未当作「没有检查点」继续）"
     );
 }
 

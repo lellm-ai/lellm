@@ -385,21 +385,17 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
         max_steps: usize,
     ) -> Result<(), GraphError> {
         if cp.format_version != crate::checkpoint::CHECKPOINT_FORMAT_VERSION {
-            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                reason: format!(
-                    "unsupported checkpoint format_version: {} (expected {})",
-                    cp.format_version,
-                    crate::checkpoint::CHECKPOINT_FORMAT_VERSION
-                ),
-            }));
+            return Err(GraphError::Terminal(
+                TerminalError::RestoreUnsupportedFormat {
+                    actual: cp.format_version,
+                    expected: crate::checkpoint::CHECKPOINT_FORMAT_VERSION,
+                },
+            ));
         }
         if cp.graph_hash != self.canonical_hash() {
-            return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                reason: format!(
-                    "graph hash mismatch: expected {:016x}, got {:016x}",
-                    self.canonical_hash(),
-                    cp.graph_hash
-                ),
+            return Err(GraphError::Terminal(TerminalError::RestoreGraphMismatch {
+                expected: self.canonical_hash(),
+                actual: cp.graph_hash,
             }));
         }
         if let Some(n) = &cp.next_node {
@@ -469,7 +465,20 @@ mod restore_validation_tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            GraphError::Terminal(TerminalError::RestoreFailed { .. })
+            GraphError::Terminal(TerminalError::RestoreGraphMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn format_version_mismatch_rejected() {
+        let g = single_node_graph();
+        let h = g.canonical_hash();
+        let mut c = cp(Some(NodeId("a".into())), h, 0);
+        c.format_version = 999; // legacy / 未来版本
+        let err = g.validate_restore_checkpoint(&c, 10).unwrap_err();
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::RestoreUnsupportedFormat { actual: 999, .. })
         ));
     }
 
