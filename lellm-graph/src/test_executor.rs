@@ -12,7 +12,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint::Checkpoint;
-use crate::error::{GraphError, TerminalError};
+use crate::error::GraphError;
 use crate::event::{GraphExecution, GraphHandle};
 use crate::exec::CheckpointConfig;
 use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, NextAction};
@@ -200,30 +200,10 @@ impl SimpleExecutor {
         graph.validate_persistable()?;
         graph.validate_restore_checkpoint(&restore_from, self.max_steps)?;
 
-        // 最新性检查（需 store I/O → 本方法 async）：
-        // 只接受该 trace 的最新检查点并续写原 trace，避免未定义的历史分叉
-        if let Some(store) = &config.store {
-            match store.load_latest(&trace_id).await {
-                Ok(Some(latest)) => {
-                    if latest.id != restore_from.checkpoint_id {
-                        return Err(GraphError::Terminal(TerminalError::RestoreNotLatest {
-                            checkpoint: restore_from.checkpoint_id.to_string(),
-                            latest: latest.id.to_string(),
-                        }));
-                    }
-                }
-                Ok(None) => {
-                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                        reason: format!("no checkpoints found for trace {trace_id}"),
-                    }));
-                }
-                Err(e) => {
-                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
-                        reason: format!("load latest checkpoint: {e}"),
-                    }));
-                }
-            }
-        }
+        // 最新性检查（需 store I/O → async）：只接受该 trace 最新检查点并续写原 trace
+        config
+            .check_restore_latest(&trace_id, &restore_from)
+            .await?;
 
         let state = State::restore(restore_from.state.clone());
         Ok(self.spawn(graph, state, trace_id, Some(config), Some(restore_from)))

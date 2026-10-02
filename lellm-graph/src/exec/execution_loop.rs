@@ -12,6 +12,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint::{Checkpoint, CheckpointSink, TraceId};
+use crate::error::{GraphError, TerminalError};
 use crate::event::{BarrierDecisionMessage, BarrierId, GraphEvent};
 use crate::exec::checkpoint_save_sink::CheckpointSaveSink;
 use crate::exec::execution_engine::ExecutionEngine;
@@ -117,6 +118,66 @@ impl<S: WorkflowState> CheckpointConfig<S> {
                 let pruned = store.prune(trace_id, keep).await?;
                 if pruned > 0 {
                     tracing::debug!(pruned, keep, "checkpoint pruned");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 恢复最新性校验 — 传入检查点必须是该 trace 的最新检查点。
+    ///
+    /// `store` 不存在时跳过（无持久化 → 无最新性概念）。
+    /// 只接受该 trace 的最新检查点并续写原 trace，避免未定义的历史分叉。
+    pub async fn check_restore_latest(
+        &self,
+        trace_id: &TraceId,
+        cp: &Checkpoint<S>,
+    ) -> Result<(), GraphError> {
+        if let Some(store) = &self.store {
+            match store.load_latest(trace_id).await {
+                Ok(Some(latest)) => {
+                    if latest.id != cp.checkpoint_id {
+                        return Err(GraphError::Terminal(TerminalError::RestoreNotLatest {
+                            checkpoint: cp.checkpoint_id.to_string(),
+                            latest: latest.id.to_string(),
+                        }));
+                    }
+                }
+                Ok(None) => {
+                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                        reason: format!("no checkpoints found for trace {trace_id}"),
+                    }));
+                }
+                Err(e) => {
+                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                        reason: format!("load latest checkpoint: {e}"),
+                    }));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 首次执行新鲜度校验 — 要求该 trace 无既有检查点。
+    ///
+    /// `store` 不存在时跳过（无持久化 → 无既有检查点）。
+    /// 已有检查点 → 报错（提示改用恢复入口），避免新状态接在旧执行历史后。
+    pub async fn assert_fresh_trace(&self, trace_id: &TraceId) -> Result<(), GraphError> {
+        if let Some(store) = &self.store {
+            match store.load_latest(trace_id).await {
+                Ok(Some(latest)) => {
+                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                        reason: format!(
+                            "trace {trace_id} already has checkpoint {} (use restore entry)",
+                            latest.id
+                        ),
+                    }));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(GraphError::Terminal(TerminalError::RestoreFailed {
+                        reason: format!("load latest checkpoint: {e}"),
+                    }));
                 }
             }
         }
@@ -364,4 +425,126 @@ pub(crate) fn send_complete<S: WorkflowState>(
         trace,
     };
     let _ = event_tx.try_send(GraphEvent::GraphComplete { result });
+}
+
+// ─── Tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod restore_latestness_tests {
+    use super::*;
+    use crate::checkpoint::{
+        BlobCheckpointStore, CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointCodec, CheckpointId,
+        NodeId,
+    };
+    use crate::error::TerminalError;
+    use crate::{
+        GraphBuilder, InMemoryBlobStore, NodeKind, SerdeCheckpointCodec, State, StateMerge,
+        TaskNode,
+    };
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    fn single_node_graph() -> (crate::Graph, u64) {
+        let mut b = GraphBuilder::<State, StateMerge>::new("t");
+        b.start("a");
+        b.node("a", NodeKind::Task(TaskNode::new("a", |_| Ok(()))));
+        b.end("a");
+        let g = b.build().expect("build");
+        let h = g.canonical_hash();
+        (g, h)
+    }
+
+    fn cp(id: CheckpointId, hash: u64) -> Checkpoint<State> {
+        Checkpoint {
+            format_version: CHECKPOINT_FORMAT_VERSION,
+            checkpoint_id: id,
+            next_node: Some(NodeId("a".into())),
+            state: State::new(),
+            graph_hash: hash,
+            steps_used: 0,
+            created_at: SystemTime::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_restore_latest_accepts_latest() {
+        let (_g, h) = single_node_graph();
+        let store = Arc::new(InMemoryBlobStore::new());
+        let codec = SerdeCheckpointCodec::<State>::new();
+        let tid = crate::TraceId::new();
+        let id = CheckpointId::new();
+        let blob = codec.serialize(&cp(id, h), h).unwrap();
+        store.save_with_trace(&tid, &blob).await.unwrap();
+
+        let cfg = CheckpointConfig::for_store(store, codec, h);
+        assert!(cfg.check_restore_latest(&tid, &cp(id, h)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_restore_latest_rejects_stale() {
+        let (_g, h) = single_node_graph();
+        let store = Arc::new(InMemoryBlobStore::new());
+        let codec = SerdeCheckpointCodec::<State>::new();
+        let tid = crate::TraceId::new();
+        let stale_id = CheckpointId::new();
+        let latest_id = CheckpointId::new();
+        // 先存 stale，再存 latest（latest 成为 load_latest 结果）
+        let b1 = codec.serialize(&cp(stale_id, h), h).unwrap();
+        store.save_with_trace(&tid, &b1).await.unwrap();
+        let b2 = codec.serialize(&cp(latest_id, h), h).unwrap();
+        store.save_with_trace(&tid, &b2).await.unwrap();
+
+        let cfg = CheckpointConfig::for_store(store, codec, h);
+        let err = cfg
+            .check_restore_latest(&tid, &cp(stale_id, h))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::RestoreNotLatest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn check_restore_latest_no_store_skips() {
+        let (_g, h) = single_node_graph();
+        let cfg = CheckpointConfig::new(
+            |_c: Checkpoint<State>, _t: crate::TraceId| {
+                Box::pin(async { Ok::<(), crate::checkpoint::CheckpointStoreError>(()) })
+            },
+            h,
+        );
+        // store=None → 跳过最新性校验
+        assert!(
+            cfg.check_restore_latest(&crate::TraceId::new(), &cp(CheckpointId::new(), h))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_fresh_trace_rejects_existing() {
+        let (_g, h) = single_node_graph();
+        let store = Arc::new(InMemoryBlobStore::new());
+        let codec = SerdeCheckpointCodec::<State>::new();
+        let tid = crate::TraceId::new();
+        let blob = codec.serialize(&cp(CheckpointId::new(), h), h).unwrap();
+        store.save_with_trace(&tid, &blob).await.unwrap();
+
+        let cfg = CheckpointConfig::for_store(store, codec, h);
+        let err = cfg.assert_fresh_trace(&tid).await.unwrap_err();
+        assert!(matches!(
+            err,
+            GraphError::Terminal(TerminalError::RestoreFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn assert_fresh_trace_accepts_empty() {
+        let (_g, h) = single_node_graph();
+        let store = Arc::new(InMemoryBlobStore::new());
+        let codec = SerdeCheckpointCodec::<State>::new();
+        let cfg = CheckpointConfig::for_store(store, codec, h);
+        assert!(cfg.assert_fresh_trace(&crate::TraceId::new()).await.is_ok());
+    }
 }
