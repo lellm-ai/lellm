@@ -193,10 +193,6 @@ pub enum CheckpointStoreError {
 /// 关联关系由存储层组织（如同一目录下的文件）。
 pub use crate::ids::TraceId;
 
-// ─── CheckpointPolicy 已迁移 ──────────────────────────────────
-
-/// 向后兼容 — CheckpointPolicy 已迁移至 checkpoint_policy 模块。
-/// v0.5 使用 TriggerPolicy + RetentionPolicy 替代。
 // ─── FrameInfo ─────────────────────────────────────────────────
 
 /// Checkpoint 边界描述 — Engine 传递给 Sink 的最小上下文。

@@ -26,8 +26,6 @@ use crate::state::{ExecutionEntry, GraphResult};
 /// Checkpoint 保存配置 — 传入 `run_execution_loop` 即可启用自动保存。
 #[derive(Clone)]
 pub struct CheckpointConfig<S: WorkflowState> {
-    /// 触发策略
-    pub trigger: crate::checkpoint::checkpoint_policy::TriggerPolicy,
     /// 保留策略
     pub retention: crate::checkpoint::checkpoint_policy::RetentionPolicy,
     /// 保存回调
@@ -56,19 +54,10 @@ impl<S: WorkflowState> CheckpointConfig<S> {
     ) -> Self {
         Self {
             save_fn: Arc::new(Box::new(save_fn)),
-            trigger: crate::checkpoint::checkpoint_policy::TriggerPolicy::default(),
             retention: crate::checkpoint::checkpoint_policy::RetentionPolicy::default(),
             graph_hash,
             store: None,
         }
-    }
-
-    pub fn with_trigger(
-        mut self,
-        trigger: crate::checkpoint::checkpoint_policy::TriggerPolicy,
-    ) -> Self {
-        self.trigger = trigger;
-        self
     }
 
     pub fn with_retention(
@@ -112,17 +101,10 @@ impl<S: WorkflowState> CheckpointConfig<S> {
             });
         Self {
             save_fn: Arc::new(save_fn),
-            trigger: crate::checkpoint::checkpoint_policy::TriggerPolicy::default(),
             retention: crate::checkpoint::checkpoint_policy::RetentionPolicy::default(),
             graph_hash,
             store: Some(config_store),
         }
-    }
-
-    #[allow(deprecated)]
-    pub fn with_policy(mut self, policy: crate::checkpoint::CheckpointPolicy) -> Self {
-        self.trigger = policy.into();
-        self
     }
 
     #[allow(clippy::collapsible_if)]

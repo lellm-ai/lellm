@@ -36,14 +36,10 @@ pub use state::{
 };
 
 // ─── Checkpoint ──────────────────────────────────────────────
-#[allow(deprecated)]
 pub use checkpoint::{
-    CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointBlob, CheckpointId, CheckpointPolicy,
-    CheckpointSink, CheckpointStoreError, FrameInfo, NodeId, NoopCheckpointSink,
+    CHECKPOINT_FORMAT_VERSION, Checkpoint, CheckpointBlob, CheckpointId, CheckpointSink,
+    CheckpointStoreError, FrameInfo, NodeId, NoopCheckpointSink, RetentionPolicy,
 };
-
-// ─── Checkpoint Policy ───────────────────────────────────────
-pub use checkpoint::{RetentionPolicy, TriggerPolicy};
 pub use exec::CheckpointConfig;
 
 // ─── Barrier Sink ────────────────────────────────────────────
