@@ -4,6 +4,7 @@
 //! （重试策略、Fallback 等）。
 
 pub mod builder;
+mod checkpoint;
 pub mod config;
 pub mod context;
 pub mod context_ext;
