@@ -20,6 +20,13 @@
   - `Checkpoint` `format_version=1`：`next_node` 游标 + `steps_used` + sparkid `CheckpointId`
   - `CheckpointConfig::for_store` 便捷构造（store + codec）
   - `GraphEvent::CheckpointSaved` 事件（尽力而为观测）
+- **Agent 检查点 Phase 2（非流式入口）**（`lellm-agent` + `lellm-core`）：Agent 非流式入口支持检查点保存与恢复。
+  - `ToolUseLoop::invoke_with_checkpoint` — 首次执行带检查点保存（trace 必须新鲜，已有检查点 → `InvalidRequest`）
+  - `ToolUseLoop::invoke_with_restore` — 从检查点恢复续跑（分层校验：可持久化 / 版本·指纹·节点·步数 / 最新性 / `last_response` 完整性；完成态零执行直接构造结果）
+  - `AgentCheckpoint` 新增 `last_response`（Pending Context，`#[serde(default)]` — 旧格式 JSON 字段真正缺失时反序列化为 `None`）
+  - `LlmError::RestoreFailed { reason: RestoreFailureReason, message }` + `RestoreFailureReason`（`#[non_exhaustive]`，7 变体）— 恢复**校验**失败原因，可供程序识别
+  - `CheckpointConfig::assert_fresh_trace` / `check_restore_latest`（`lellm-graph`，store-backed）
+  - 错误映射契约：恢复**校验**失败 → `RestoreFailed{reason}`（按类型映射，非字符串分类）；存储读取/保存失败 → `Provider { provider: "react_graph" }`（存储故障语义）
 
 ### Changed
 - **并行合并改为基于 base 的 delta 合并 + 冲突检测**（`lellm-graph`）：单分支改 base key 不再被其他分支的 base 值静默覆盖；并发写同一 key 返回 `MergeConflict` 而非 last-write-wins。
@@ -28,6 +35,7 @@
 - **Google Provider 流式工具往返修复**（`lellm-provider`）：并行工具 `index` / `id` 串号、tool-result 函数名 `"unknown"`。
 - **执行循环重排**（`lellm-graph`）：`run_inline_from` 统一入口 + 路由后**同步**保存检查点（移除 fire-and-forget 异步保存）；保存失败在边界停止并发 `GraphError`，不再产生「状态已前进但检查点缺失」的窗口。
 - **Codec 两段式严格加载**（`lellm-graph`）：Value 解析 → 结构校验 → 类型化；legacy 格式 / 缺 `next_node` 显式返回 `UnsupportedFormat`，不再静默兼容。
+- **恢复失败原因类型化**（`lellm-graph` + `lellm-agent`）：恢复**校验**失败原因由「两侧文案字符串分类」改为「graph 层结构化 `TerminalError` 变体按类型映射」——`format_version` / `graph_hash` 校验失败此前落入 `RestoreFailureReason::Other`，现分别得 `UnsupportedFormat` / `GraphMismatch`（恢复失败原因可供程序识别）。
 
 ### Fixed
 - 默认 feature 下 `lellm-provider` 集成测试编译失败（`MockProvider` 的 feature gate 与测试用法对齐：自引用 dev-dependency 启用 `mock`）。
@@ -40,7 +48,9 @@
 
 ### Compatibility
 - ⚠️ **破坏性（API）**：`MergeStrategy::merge` 签名改为 base-based —— `fn merge(base: &S, branches: Vec<S>)`。实现该 trait 的类型需同步更新签名。
+- ⚠️ **破坏性（API）**：`TerminalError`（`lellm-graph`）新增 4 个公开变体 — `RestoreUnsupportedFormat { actual, expected }` / `RestoreGraphMismatch { expected, actual }` / `TraceNotFresh { trace, latest }` / `CheckpointLoadFailed { error }`。对 `TerminalError` 做穷举 match 的调用方需处理新变体。Display 文案保持不变；**公开错误变体及匹配结果发生变化，属于 API 兼容性变更**（错误类型本身是调用方可观察的行为）。
 - ⚠️ **破坏性（格式）**：Checkpoint 序列化格式升级为 `format_version=1`（`next_node` 游标 + `steps_used`）。旧格式检查点不可加载（显式 `UnsupportedFormat`，不静默兼容）。
 - **行为**：并行合并从 last-write-wins 改为 delta + 冲突检测（并发写同一 key 现在返回 `MergeConflict` 而非静默覆盖）。
-- **第一阶段边界**：恢复仅支持串行图（含循环）；Parallel/Subgraph/Barrier 图入口显式拒绝；不承诺外部副作用 exactly-once（工具成功但保存前崩溃 → 恢复重跑该节点，需幂等键）；进程崩溃安全 ≠ 断电安全（无 fsync）；同一 trace 单写者约束；恢复只接受该 trace 最新检查点；agent runtime 未接入（phase 2+）。
+- **行为**：`assert_fresh_trace` 错误语义细分 — trace 已有检查点 → `InvalidRequest`（调用方用错入口，属用户输入错误）；存储读取失败 → `Provider`（存储故障语义，不归为用户输入错误，也不当「无检查点」继续执行）。
+- **第一阶段边界**：恢复仅支持串行图（含循环）；Parallel/Subgraph/Barrier 图入口显式拒绝；不承诺外部副作用 exactly-once（工具成功但保存前崩溃 → 恢复重跑该节点，需幂等键）；进程崩溃安全 ≠ 断电安全（无 fsync）；同一 trace 单写者约束；恢复只接受该 trace 最新检查点；agent runtime **非流式入口已接入**（Phase 2：`invoke_with_checkpoint` / `invoke_with_restore`），流式路径未接入（路线图）。
 - **兼容性（additive）**：`lellm-core` 的 `Message` / `ChatResponse` / `TokenUsage` 新增 `PartialEq`（纯新增，不破坏既有代码）。

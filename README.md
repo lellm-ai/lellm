@@ -70,7 +70,7 @@ START → budget_check ──(ok)──→ [llm] → [post_llm_check]
                                    │       no_tools  → [end]
 ```
 
-The ReAct loop is not a `while` — it's a real directed graph with typed nodes and edges. Graph features — barriers, parallel execution, tracing — work for agents; agent-path auto-checkpointing is on the roadmap.
+The ReAct loop is not a `while` — it's a real directed graph with typed nodes and edges. Graph features — barriers, parallel execution, tracing — work for agents; the agent's **non-streaming** entry points now support checkpoint save/restore (explicit calls, not automatic).
 
 ### State Checkpointing (Durable Execution)
 
@@ -91,7 +91,7 @@ let exec = executor
     .await?;
 ```
 
-> **Phase 1 scope**: serial graphs (including loops). Graphs containing Parallel / Subgraph / Barrier are rejected **at the persistence entry**, not after a crash. Checkpoint/restore is wired into the graph execution path only; the agent runtime (ToolUseLoop) is not yet wired (phase 2+).
+> **Scope**: serial graphs (including loops). Graphs containing Parallel / Subgraph / Barrier are rejected **at the persistence entry**, not after a crash. Checkpoint/restore is wired into the graph execution path and the agent's **non-streaming** entry points (`invoke_with_checkpoint` / `invoke_with_restore`); the streaming path and auto-checkpointing on `invoke()` remain on the roadmap.
 >
 > **Durability boundary**: flush + rename guarantees write completion and atomic visibility — **process-crash safe** (panic / SIGKILL). It does **not** guarantee visibility after power loss (requires file + directory fsync; phase 2).
 >
@@ -138,7 +138,7 @@ lellm = { version = "0.4", default-features = false, features = ["mcp-stdio"] }
 |---|---|
 | `provider` (default) | core + LLM adapters |
 | `graph` | standalone workflow engine — **zero LLM dependency** |
-| `agent` | full agent runtime — ReAct + tools (auto-checkpoint on roadmap) |
+| `agent` | full agent runtime — ReAct + tools (checkpoint save/restore on non-streaming entry; auto-checkpoint on roadmap) |
 | `mcp` | MCP client/server + agent integration (stdio/http/sse) |
 | `mcp-stdio` | lightweight MCP client/server — stdio only, **no agent/provider/reqwest** |
 | `derive` | `#[tool]` and `#[derive(Tool)]` macros |

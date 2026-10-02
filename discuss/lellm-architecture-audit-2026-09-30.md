@@ -2,7 +2,7 @@
 
 - **日期**：2026-09-30
 - **性质**：讨论/评审文档（`discuss/`），非正式交付文档
-- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**）、L1 AgentStateMerge base-delta 合并 ✅、R5 默认 feature 编译修复 ✅、发布前验证 ✅（P1：publish.sh/CI/CHANGELOG，实际发布·tag 待办）；持久恢复待单独排期
+- **状态**：分析完成；README 收紧 ✅、并行 delta 合并 ✅（P0-1）、HITL 拒绝/超时路由 ✅（P0-2，phase 1）、Google 工具往返 ✅（P0-3）、MCP 依赖瘦身 ✅（**P1 子项**）、L1 AgentStateMerge base-delta 合并 ✅、R5 默认 feature 编译修复 ✅、发布前验证 ✅（P1：publish.sh/CI/CHANGELOG，实际发布·tag 待办）；持久恢复第一阶段 ✅ + Agent 检查点 Phase 2（非流式入口）✅（2026-10-02，本地未推送；工具重放风险仍在，不承诺 exactly-once）
 
 ## 0. 审计基线（已锁定）
 
@@ -209,6 +209,12 @@
   - **R4 新进程恢复测试**：`restore_probe` 辅助二进制 + T8/T9/T10（kill -9 + 磁盘握手 + 预算延续 + 双重恢复 seq 延续），全过（套件 < 1s）。
   - **T1-T10 全绿**（`cargo test -p lellm-graph`，rustc 1.98.1）；workspace 全量回归 + `lellm-core --features tool` / `lellm-agent` / `lellm` 构建全过。
   - **边界（不承诺）**：仅串行图（含循环）；Parallel/Subgraph/Barrier 入口显式拒绝；非 exactly-once（工具成功但保存前崩溃 → 重跑该节点）；进程崩溃安全 ≠ 断电安全（无 fsync）；单写者约束；仅接受该 trace 最新检查点；agent runtime 未接入（phase 2+）。
+- [x] **Agent 检查点 Phase 2（非流式入口）** ✅ 2026-10-02（commit `9101a39`..`b00389b`，本地未推送）。
+  - `ToolUseLoop::invoke_with_checkpoint` / `invoke_with_restore`（trace_id 调用方预提供 + 绑定规则：首次执行要求 trace 新鲜 → `InvalidRequest`；恢复要求该 trace 最新检查点 → `NotLatest`；完成态零执行直接构造结果）。
+  - `AgentCheckpoint` 新增 `last_response`（Pending Context，`#[serde(default)]` — 旧格式 JSON 字段真正缺失 → None）；Agent 层按节点名校验 last_response 完整性（`post_llm_check`/`tool` 缺失 → `MissingExecutionContext`）。
+  - **错误映射契约**：恢复**校验**失败 → `LlmError::RestoreFailed{reason}`（graph 层结构化 `TerminalError` 变体**按类型映射**，非字符串分类：`RestoreUnsupportedFormat`→UnsupportedFormat、`RestoreGraphMismatch`→GraphMismatch、`RestoreNotLatest`→NotLatest 等）；存储读取/保存失败 → `Provider{provider:"react_graph"}`（存储故障语义）；`assert_fresh_trace` trace 已存在 → `InvalidRequest`（用户输入错误），存储读取失败 → `Provider`（不当「无检查点」继续）。
+  - **验收测试**：四组必测场景（G1 恢复正确性 / G2 预算延续+磁盘序号延续 / G3 MissingExecutionContext / G4 运行期保存失败映射）+ 完成态重建 + 旧格式 JSON 加载 + 新鲜度双向映射，全绿（`cargo test -p lellm-agent`，checkpoint_restore 11 用例）。
+  - **边界（不承诺）**：仅**非流式**入口（流式路径未接入，路线图）；**工具重放风险仍存在** —— 工具成功但检查点未落盘时崩溃 → 恢复重跑该节点，**不承诺 exactly-once**（幂等键方案仍暂缓）；其余边界继承第一阶段（串行图 / 单写者 / 最新检查点 / 无 fsync）。
 
 **P1（MCP 依赖瘦身 ✅；发布前验证 ✅，实际发布/tag 待办）**：
 - [x] **发布前验证** ✅：重写 `publish.sh`（默认仅验证 + `--publish` 显式发布 + 工作区干净检查 + 无 `rm -rf`/`--no-verify`/`--allow-dirty` + 针对性 feature 矩阵 + sparse index 三态版本检查 + 发布后可见性重试）；新增 `verify-package-build.sh`（打包+解包+构建本批包组合，≠ registry 验证）；新增 `.github/workflows/ci.yml`（provider 默认 + facade 四组合 + MCP SSE + mcp-stdio 边界 + workspace 回归）；新增 `CHANGELOG.md`（Unreleased）。**实际发布/tag 仍待办**（需 `CARGO_REGISTRY_TOKEN` + 显式 `--publish`）。

@@ -70,7 +70,7 @@ START → budget_check ──(充足)──→ [llm] → [post_llm_check]
                                    │       无工具 → [end]
 ```
 
-ReAct 循环不是 `while` —— 而是带有类型化节点和边的真实有向图。图功能 —— Barrier、并行执行、追踪 —— 对 Agent 生效；Agent 路径自动检查点见路线图。
+ReAct 循环不是 `while` —— 而是带有类型化节点和边的真实有向图。图功能 —— Barrier、并行执行、追踪 —— 对 Agent 生效；Agent **非流式**入口已支持检查点保存/恢复（显式调用，非自动）。
 
 ### 状态检查点（持久化执行）
 
@@ -91,7 +91,7 @@ let exec = executor
     .await?;
 ```
 
-> **第一阶段范围**：串行图（含循环）。含 Parallel / Subgraph / Barrier 的图在**持久化入口**即被拒绝，而不是崩溃后才报错。检查点/恢复仅接入图执行路径；Agent 运行时（ToolUseLoop）尚未接入（phase 2+）。
+> **范围**：串行图（含循环）。含 Parallel / Subgraph / Barrier 的图在**持久化入口**即被拒绝，而不是崩溃后才报错。检查点/恢复已接入图执行路径与 Agent **非流式**入口（`invoke_with_checkpoint` / `invoke_with_restore`）；流式路径与 `invoke()` 自动检查点见路线图。
 >
 > **落盘边界**：flush + rename 保证写入完成与原子可见 —— **进程崩溃安全**（panic / SIGKILL）。**不保证**断电/OS 崩溃后的数据可见（需文件 + 目录 fsync，phase 2 评估）。
 >
@@ -138,7 +138,7 @@ lellm = { version = "0.4", default-features = false, features = ["mcp-stdio"] }
 |---|---|
 | `provider`（默认） | core + LLM 适配器 |
 | `graph` | 独立工作流引擎 —— **零 LLM 依赖** |
-| `agent` | 完整 Agent 运行时 —— ReAct + 工具（自动检查点见路线图） |
+| `agent` | 完整 Agent 运行时 —— ReAct + 工具（非流式入口支持检查点保存/恢复；自动检查点见路线图） |
 | `mcp` | MCP 客户端/服务端 + agent 集成（stdio/http/sse） |
 | `mcp-stdio` | 轻量 MCP 客户端/服务端 —— 仅 stdio，**不含 agent/provider/reqwest** |
 | `derive` | `#[tool]` 和 `#[derive(Tool)]` 宏 |
