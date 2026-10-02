@@ -3,6 +3,9 @@
 
 set -e
 
+# shell 全局 DYLD_LIBRARY_PATH（Homebrew llvm/sqlite）会劫持 rustc 1.98+ 的 dylib 解析 → SIGABRT
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
+
 echo "=== MCP Server + Client Test ==="
 echo ""
 

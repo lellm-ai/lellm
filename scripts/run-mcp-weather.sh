@@ -1,6 +1,9 @@
 #!/bin/bash
 # 运行 MCP Geocoder 示例
 
+# shell 全局 DYLD_LIBRARY_PATH（Homebrew llvm/sqlite）会劫持 rustc 1.98+ 的 dylib 解析 → SIGABRT
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
+
 # 请在这里设置你的 API Key
 # export TENCENT_MAP_KEY="你的API_KEY"
 
