@@ -163,7 +163,8 @@ pub enum AgentMutation {
 
 /// Agent Checkpoint 投影 — 可序列化的快照。
 ///
-/// 只包含需要持久化的字段，不包含运行时字段（如 `last_response`）。
+/// 包含需要持久化的字段（含 `last_response` Pending Context），
+/// 不包含不可序列化字段（`Arc<dyn ...>`、`Sender` 等）。
 /// 这是 P0-1 Checkpoint Projection 的核心：Runtime State 可以包含
 /// 不可序列化字段，Checkpoint 只序列化必要字段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,7 +183,12 @@ pub struct AgentCheckpoint {
     pub compact_count: usize,
     /// 停止原因
     pub stop_reason: Option<StopReason>,
-    // 不包含: last_response（可重建）, Arc<dyn ...>, Sender 等
+    /// Pending Context — 最近一次 LLM 响应（恢复时 post_llm_check / tool 节点需要）。
+    ///
+    /// 旧检查点（本字段加入前创建）反序列化为 `None` → 完成态结果从 messages 重建（§5.4）。
+    #[serde(default)]
+    pub last_response: Option<lellm_core::ChatResponse>,
+    // 不包含: Arc<dyn ...>, Sender 等
 }
 
 // ─── WorkflowState for AgentState ───────────────────────────────
@@ -200,6 +206,7 @@ impl WorkflowState for AgentState {
             reasoning_tokens: self.reasoning_tokens,
             compact_count: self.compact_count,
             stop_reason: self.stop_reason.clone(),
+            last_response: self.last_response.clone(),
         }
     }
 
@@ -212,7 +219,7 @@ impl WorkflowState for AgentState {
             reasoning_tokens: checkpoint.reasoning_tokens,
             compact_count: checkpoint.compact_count,
             stop_reason: checkpoint.stop_reason,
-            last_response: None, // 重建时为空，下次 LLM 调用会填充
+            last_response: checkpoint.last_response,
         }
     }
 }
@@ -225,3 +232,43 @@ pub use super::typed_state_merge::AgentStateMerge;
 // to_value() / from_value() / apply_from_value() / AGENT_STATE_KEY
 // 已删除 — Graph 层只做 Node → Mutation → State 管道，不经过 JSON。
 // 如需 Checkpoint 持久化，由 Checkpoint 层直接序列化 AgentState。
+
+#[cfg(test)]
+mod checkpoint_last_response_tests {
+    use super::*;
+    use lellm_core::{ChatResponse, ContentBlock, Message, TokenUsage};
+
+    fn response_with(text: &str) -> ChatResponse {
+        ChatResponse::new(
+            lellm_core::text_block(text),
+            TokenUsage::default(),
+            serde_json::Value::Null,
+        )
+    }
+
+    #[test]
+    fn snapshot_preserves_last_response() {
+        let mut state = AgentState::from_messages(vec![Message::user_text("q")]);
+        state.last_response = Some(response_with("answer"));
+        let cp = state.snapshot();
+        assert!(cp.last_response.is_some(), "snapshot 应包含 last_response");
+        let restored = AgentState::restore(cp);
+        assert!(
+            restored.last_response.is_some(),
+            "restore 应恢复 last_response"
+        );
+        assert_eq!(
+            ContentBlock::flatten_text(&restored.last_response.as_ref().unwrap().content),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn snapshot_none_stays_none() {
+        let state = AgentState::from_messages(vec![Message::user_text("q")]);
+        let cp = state.snapshot();
+        assert!(cp.last_response.is_none(), "初始状态 last_response=None");
+        let restored = AgentState::restore(cp);
+        assert!(restored.last_response.is_none());
+    }
+}
