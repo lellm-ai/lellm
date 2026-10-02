@@ -14,8 +14,8 @@ pub mod response;
 pub mod tool;
 
 pub use error::{
-    IntoToolError, IntoToolResult, LellmError, LlmError, MemoryError, ParseError, ToolError,
-    ToolErrorKind, ToolResult,
+    IntoToolError, IntoToolResult, LellmError, LlmError, MemoryError, ParseError,
+    RestoreFailureReason, ToolError, ToolErrorKind, ToolResult,
 };
 pub use message::{
     CacheControl, ContentBlock, ImageSource, Message, TextBlock, ThinkingBlock, ToolCall,
