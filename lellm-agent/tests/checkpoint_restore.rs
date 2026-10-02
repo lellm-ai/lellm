@@ -416,6 +416,65 @@ async fn g2_budget_continues_and_disk_roundtrip() {
     assert!(tmp.path().exists());
 }
 
+/// G2b: 恢复后业务预算（max_iterations）实际触发上限 —
+/// 不仅「计数器未重置」，还证明预算机制在恢复后仍强制执行 cap。
+///
+/// max_iterations=2：阶段 A 消耗 1 轮（tool 后崩溃），阶段 B 恢复后仅再跑 1 轮，
+/// 第 2 轮 post_llm_check 命中 MaxIterationsReached。
+/// 若恢复后预算被重置，将发起第 3 次 LLM 调用（脚本耗尽 → 报错），本测试即失败。
+#[tokio::test]
+async fn g2b_max_iterations_triggers_after_restore() {
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    // 两轮均返回 tool_calls — 循环「想继续」，停止只能来自预算
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_call_response(),
+        tool_call_response(),
+    ]));
+    let model = ResolvedModel::new(provider.clone(), "test-model");
+    let agent = AgentBuilder::new(model)
+        .max_iterations(2)
+        .tools(vec![make_tool(tool_calls.clone())])
+        .compile();
+    let hash = agent.graph().canonical_hash();
+    let store = Arc::new(InMemoryBlobStore::new());
+    let codec = SerdeCheckpointCodec::<AgentState>::new();
+    let trace_id = TraceId::new();
+
+    // 阶段 A：崩溃在 next=budget_check（tool 后）→ latest = next=tool（已消耗 1 轮）
+    let config_a = crash_config(store.clone(), codec.clone(), hash, "budget_check");
+    let result_a = agent
+        .invoke_with_checkpoint(vec![Message::user_text("q")], trace_id, config_a)
+        .await;
+    assert!(result_a.is_err(), "阶段 A 应在 tool 边界崩溃");
+
+    let blob = store.load_latest(&trace_id).await.unwrap().expect("latest");
+    let cp = codec.deserialize(&blob, hash).unwrap();
+    assert_eq!(cp.next_node, Some(NodeId("tool".into())));
+    assert_eq!(cp.state.iterations, 1, "阶段 A 恰好消耗 1 轮迭代");
+
+    // 阶段 B：恢复续跑 — 预算必须在第 2 轮触发上限
+    tool_calls.store(0, Ordering::SeqCst);
+    let config_b = CheckpointConfig::for_store(store.clone(), codec.clone(), hash);
+    let result_b = agent
+        .invoke_with_restore(cp, trace_id, config_b)
+        .await
+        .unwrap();
+
+    // 预算机制在恢复后仍强制执行 cap（而非获得全新完整预算）
+    assert_eq!(
+        result_b.stop_reason,
+        StopReason::MaxIterationsReached,
+        "恢复后第 2 轮命中 max_iterations 上限"
+    );
+    assert_eq!(result_b.iterations, 2, "iterations 延续至上限（未重置）");
+    assert_eq!(
+        provider.call_count(),
+        2,
+        "LLM 恰好两次（阶段 A 1 次 + 阶段 B 1 次），无第 3 次"
+    );
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 1, "恢复后工具重放一次");
+}
+
 // ─── Group 4: 运行期保存失败接线 ─────────────────────────────────
 
 /// G4: 运行期 checkpoint 保存失败 → 执行在该边界停止，错误映射为 Provider（非 RestoreFailed）。
@@ -425,7 +484,7 @@ async fn g4_runtime_save_failure_maps_to_provider() {
         tool_call_response(),
         text_response("x"),
     ]));
-    let model = ResolvedModel::new(provider, "test-model");
+    let model = ResolvedModel::new(provider.clone(), "test-model");
     let agent = AgentBuilder::new(model).max_iterations(5).compile();
     let hash = agent.graph().canonical_hash();
 
@@ -447,13 +506,15 @@ async fn g4_runtime_save_failure_maps_to_provider() {
         }
         other => panic!("expected Provider, got {other:?}"),
     }
+    // spec §12 Group 4：执行在保存失败边界停止 — 边界后的 LLM（llm 节点）从未被调用
+    assert_eq!(provider.call_count(), 0, "保存失败边界后的 LLM 未执行");
 }
 
 /// G4b: 恢复入口运行期保存失败同样映射为 Provider。
 #[tokio::test]
 async fn g4b_restore_runtime_save_failure_maps_to_provider() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
-    let model = ResolvedModel::new(provider, "test-model");
+    let model = ResolvedModel::new(provider.clone(), "test-model");
     let agent = AgentBuilder::new(model).max_iterations(5).compile();
     let hash = agent.graph().canonical_hash();
     let state = AgentState::from_messages(vec![Message::user_text("q")]);
@@ -476,4 +537,63 @@ async fn g4b_restore_runtime_save_failure_maps_to_provider() {
         }
         other => panic!("expected Provider, got {other:?}"),
     }
+    // spec §12 Group 4：恢复入口同样在保存失败边界停止 — 边界后的 LLM 从未被调用
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "恢复入口保存失败边界后的 LLM 未执行"
+    );
+}
+
+// ─── 完成态重建：旧格式检查点（无 last_response，§5.4）──────────
+
+/// 完成态重建：恢复**完成态**检查点（next_node=None）且无 last_response（旧格式）时，
+/// 最终 response 必须从 messages 的最后一条 Assistant 消息重建 — 最终答案不丢失。
+///
+/// 四组必测场景均以真实 LLM 调用收尾（last_response=Some），未覆盖此分支；
+/// 本测试直接构造旧格式完成态检查点并经存储往返后恢复。
+#[tokio::test]
+async fn completed_checkpoint_reconstructs_response_from_messages() {
+    // 零执行 — provider 绝不应被调用（空脚本，误调即报错）
+    let provider = Arc::new(ScriptedProvider::new(vec![]));
+    let model = ResolvedModel::new(provider.clone(), "test-model");
+    let agent = AgentBuilder::new(model).max_iterations(5).compile();
+    let hash = agent.graph().canonical_hash();
+
+    // 旧格式完成态检查点：next_node=None、last_response=None，
+    // messages 最后一条为 Assistant 文本消息
+    let mut state = AgentState::from_messages(vec![
+        Message::user_text("q"),
+        Message::assistant_text("final answer text"),
+    ]);
+    state.iterations = 1;
+    state.stop_reason = Some(StopReason::Complete);
+    let cp = Checkpoint::new(None, &state, hash, 3);
+
+    // 存储往返 — 证明 last_response=None（旧格式）可序列化/反序列化
+    let store = Arc::new(InMemoryBlobStore::new());
+    let codec = SerdeCheckpointCodec::<AgentState>::new();
+    let trace_id = TraceId::new();
+    let blob = codec.serialize(&cp, hash).unwrap();
+    store.save_with_trace(&trace_id, &blob).await.unwrap();
+    let loaded = store.load_latest(&trace_id).await.unwrap().unwrap();
+    let cp_loaded = codec.deserialize(&loaded, hash).unwrap();
+    assert!(
+        cp_loaded.state.last_response.is_none(),
+        "旧格式检查点无 last_response"
+    );
+
+    let config = CheckpointConfig::for_store(store, codec, hash);
+    let result = agent
+        .invoke_with_restore(cp_loaded, trace_id, config)
+        .await
+        .unwrap();
+
+    // 完成态零执行：provider 从未被调用
+    assert_eq!(provider.call_count(), 0, "完成态恢复零执行");
+    assert_eq!(result.stop_reason, StopReason::Complete);
+    assert_eq!(result.iterations, 1);
+    // §5.4 契约：最终 response 从最后一条 Assistant 消息重建
+    let text = ContentBlock::flatten_text(&result.response.content);
+    assert_eq!(text, "final answer text", "最终答案未丢失");
 }
