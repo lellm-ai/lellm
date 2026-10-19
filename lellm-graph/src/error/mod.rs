@@ -28,6 +28,10 @@ pub enum GraphError {
 /// 终止错误 — Graph 执行不可恢复地停止。
 #[derive(Debug)]
 pub enum TerminalError {
+    /// 持久化运行协议错误或控制结果。
+    Durable(crate::durable::DurableError),
+    /// CollectAll 保留所有失败分支的信息；父状态没有部分提交。
+    ParallelFailures { errors: Vec<(String, String)> },
     /// 图结构无效（构建时校验遗漏的运行时问题）
     InvalidGraph(String),
     /// 节点不存在
@@ -50,6 +54,8 @@ pub enum TerminalError {
     },
     /// Barrier 被取消
     BarrierCancelled { node: String },
+    /// 审批节点缺少显式处理器。
+    BarrierHandlerMissing { node: String },
     /// 无匹配边 — 没有任何 outgoing edge 满足条件，且无 fallback
     Unrouted {
         /// 当前节点
@@ -141,6 +147,8 @@ impl fmt::Display for GraphError {
 impl fmt::Display for TerminalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Durable(error) => write!(f, "{error}"),
+            Self::ParallelFailures { errors } => write!(f, "parallel branches failed: {errors:?}"),
             Self::InvalidGraph(msg) => write!(f, "invalid graph: {msg}"),
             Self::NodeNotFound(name) => write!(f, "node not found: {name}"),
             Self::MissingEdge { from, to } => {
@@ -164,6 +172,12 @@ impl fmt::Display for TerminalError {
                 write!(
                     f,
                     "barrier '{node}' cancelled: consumer dropped the signal channel"
+                )
+            }
+            Self::BarrierHandlerMissing { node } => {
+                write!(
+                    f,
+                    "barrier '{node}' requires a handler; use NoopBarrierSink for explicit automatic approval"
                 )
             }
             Self::Unrouted {

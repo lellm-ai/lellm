@@ -74,7 +74,13 @@ impl LeafNode<AgentState> for ToolNode {
         }
 
         // 3. 统一执行入口 — ParallelSafety 分组调度
-        let batch = self.executor.execute_batch(&tool_calls).await;
+        let batch = if let Some(tasks) = lellm_graph::durable::TaskRuntime::current() {
+            self.executor
+                .execute_durable_batch(&tool_calls, tasks, ctx.cancel_token().clone())
+                .await?
+        } else {
+            self.executor.execute_batch(&tool_calls).await
+        };
 
         if batch.panicked {
             tracing::warn!("tool batch task panicked — error results filled");

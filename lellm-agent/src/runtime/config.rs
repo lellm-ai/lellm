@@ -86,6 +86,8 @@ pub struct ToolUseConfig {
     pub tool_cache_policy: ToolCachePolicy,
     /// 工具重试策略
     pub retry_policy: RetryPolicy,
+    /// 每轮工具调用前持久化审批；使用 invoke_durable / resume_durable。
+    pub require_tool_approval: bool,
 }
 
 /// 工具缓存策略。
@@ -117,6 +119,7 @@ impl Default for ToolUseConfig {
             stream_thinking: false,
             tool_cache_policy: ToolCachePolicy::default(),
             retry_policy: RetryPolicy::default(),
+            require_tool_approval: false,
         }
     }
 }

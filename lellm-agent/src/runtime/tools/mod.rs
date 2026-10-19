@@ -9,6 +9,7 @@
 //! - 运行时层（本模块）：`ToolExecutor`, `ToolCatalog`, `ToolSnapshot`
 //! - MCP 集成（可选）：`McpCatalog`, `McpServerRegistry` 等
 
+mod durable;
 mod executor;
 
 #[cfg(feature = "mcp")]

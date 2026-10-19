@@ -99,6 +99,15 @@ pub trait ExecutorOperation<S: WorkflowState = State>: Send + Sync {
 )]
 #[async_trait]
 pub trait FlowNode<S: WorkflowState = State>: Send + Sync {
+    fn validate_approval_handlers(&self) -> Result<(), GraphError> {
+        Ok(())
+    }
+    fn validate_durable(&self) -> Result<(), GraphError> {
+        Ok(())
+    }
+    fn durable_signature(&self) -> Option<String> {
+        None
+    }
     /// 执行节点逻辑。
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError>;
 }

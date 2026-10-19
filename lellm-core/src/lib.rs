@@ -12,6 +12,8 @@ pub mod prompt;
 pub mod request;
 pub mod response;
 pub mod tool;
+pub mod tool_context;
+pub use tool_context::{ContextToolFn, ToolExecutionContext, ToolReplayPolicy};
 
 pub use error::{
     IntoToolError, IntoToolResult, LellmError, LlmError, MemoryError, ParseError,

@@ -108,6 +108,206 @@ fn text_response(text: &str) -> ChatResponse {
     )
 }
 
+#[tokio::test]
+async fn durable_agent_approval_resumes_without_repeating_model_request() {
+    use lellm_graph::durable::*;
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_call_response(),
+        text_response("done"),
+    ]));
+    let agent = AgentBuilder::new(ResolvedModel::new(provider.clone(), "test"))
+        .tools(vec![make_tool(tool_calls.clone())])
+        .require_tool_approval(true)
+        .compile();
+    let rt = DurableRuntime::new(
+        Arc::new(MemoryRunStore::default()),
+        RunVersion::new("v1", "v1"),
+    );
+    let outcome = agent
+        .invoke_durable(
+            &rt,
+            "run",
+            vec![Message::user_text("q")],
+            lellm_graph::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let RunOutcome::Suspended(record) = outcome else {
+        panic!("expected approval")
+    };
+    assert_eq!(provider.call_count(), 1);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+    let request = record.approvals.values().next().unwrap();
+    rt.submit_decision(
+        "run",
+        &request.id,
+        &request.content_token,
+        "approve",
+        record.revision,
+        ApprovalDecision::Approve,
+    )
+    .unwrap();
+    let RunOutcome::Completed(result) = agent
+        .resume_durable(&rt, "run", lellm_graph::CancellationToken::new())
+        .await
+        .unwrap()
+    else {
+        panic!("expected completion")
+    };
+    assert_eq!(ContentBlock::flatten_text(&result.response.content), "done");
+    assert_eq!(provider.call_count(), 2);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn durable_batch_reuses_success_and_reconciles_unknown_without_duplicate_messages() {
+    use lellm_graph::durable::*;
+    let first_calls = Arc::new(AtomicUsize::new(0));
+    let uncertain_calls = Arc::new(AtomicUsize::new(0));
+    let uncertain = ToolCall {
+        id: "call_2".into(),
+        name: "uncertain".into(),
+        arguments: serde_json::json!({}),
+    };
+    let mut response = tool_call_response();
+    response
+        .content
+        .push(ContentBlock::ToolCall(uncertain.clone()));
+    let provider = Arc::new(ScriptedProvider::new(vec![response, text_response("done")]));
+    let calls = uncertain_calls.clone();
+    let tool = ExecutableTool::safe(
+        ToolDefinition {
+            name: "uncertain".into(),
+            description: "uncertain effect".into(),
+            parameters: ToolSchema::new(serde_json::json!({})),
+            cache_control: None,
+        },
+        move |_| {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(lellm_core::ToolError::invalid_input(
+                    "reply lost after effect",
+                ))
+            }
+        },
+    );
+    let agent = AgentBuilder::new(ResolvedModel::new(provider.clone(), "test"))
+        .tools(vec![make_tool(first_calls.clone()), tool])
+        .compile();
+    let rt = DurableRuntime::new(
+        Arc::new(MemoryRunStore::default()),
+        RunVersion::new("v1", "v1"),
+    );
+    let RunOutcome::Suspended(record) = agent
+        .invoke_durable(
+            &rt,
+            "run",
+            vec![Message::user_text("q")],
+            lellm_graph::CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected unknown task")
+    };
+    assert_eq!(
+        record
+            .tasks
+            .values()
+            .filter(|t| t.status == TaskStatus::Completed)
+            .count(),
+        1
+    );
+    let task = record
+        .tasks
+        .values()
+        .find(|t| t.status == TaskStatus::Unknown)
+        .unwrap();
+    let result = Message::tool_result(&uncertain, &Ok(serde_json::json!("confirmed")));
+    rt.resolve_task(
+        "run",
+        &task.id,
+        "reconcile",
+        record.revision,
+        TaskResolution::Completed(serde_json::to_value(result).unwrap()),
+    )
+    .unwrap();
+    let RunOutcome::Completed(result) = agent
+        .resume_durable(&rt, "run", lellm_graph::CancellationToken::new())
+        .await
+        .unwrap()
+    else {
+        panic!("expected completion")
+    };
+    assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(uncertain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.call_count(), 2);
+    assert_eq!(
+        result
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::ToolResult { .. }))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn durable_tool_retries_forward_the_same_idempotency_key() {
+    use lellm_core::{ToolError, ToolErrorKind, ToolReplayPolicy};
+    use lellm_graph::durable::*;
+    let keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = keys.clone();
+    let legacy_calls = Arc::new(AtomicUsize::new(0));
+    let tool = make_tool(legacy_calls.clone())
+        .with_replay_policy(ToolReplayPolicy::IdempotentWithKey, "v1")
+        .with_context_executor(Arc::new(move |_, context| {
+            let mut keys = seen.lock().unwrap();
+            keys.push(context.idempotency_key.clone());
+            let fail = keys.len() == 1;
+            Box::pin(async move {
+                if fail {
+                    Err(ToolError {
+                        kind: ToolErrorKind::Network,
+                        message: "lost reply".into(),
+                    })
+                } else {
+                    Ok(serde_json::json!(42))
+                }
+            })
+        }));
+    let provider = ScriptedProvider::new(vec![tool_call_response(), text_response("done")]);
+    let agent = AgentBuilder::new(ResolvedModel::new(provider, "test"))
+        .tools(vec![tool])
+        .retry_policy(lellm_agent::runtime::RetryPolicy::new(
+            2,
+            lellm_agent::runtime::BackoffStrategy::Fixed(std::time::Duration::ZERO),
+        ))
+        .compile();
+    let rt = DurableRuntime::new(
+        Arc::new(MemoryRunStore::default()),
+        RunVersion::new("v1", "v1"),
+    );
+    assert!(matches!(
+        agent
+            .invoke_durable(
+                &rt,
+                "run",
+                vec![Message::user_text("q")],
+                lellm_graph::CancellationToken::new()
+            )
+            .await
+            .unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    let keys = keys.lock().unwrap();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
+    assert_eq!(legacy_calls.load(Ordering::SeqCst), 0);
+}
+
 fn make_tool(counter: Arc<AtomicUsize>) -> ExecutableTool {
     let def = ToolDefinition {
         name: "calc".to_string(),
@@ -814,4 +1014,134 @@ async fn completed_checkpoint_reconstructs_response_from_messages() {
     // §5.4 契约：最终 response 从最后一条 Assistant 消息重建
     let text = ContentBlock::flatten_text(&result.response.content);
     assert_eq!(text, "final answer text", "最终答案未丢失");
+}
+
+#[tokio::test]
+async fn durable_team_reuses_workers_then_resumes_human_review() {
+    use lellm_agent::templates::PlannerWorkersReviewer;
+    use lellm_graph::{CancellationToken, durable::*};
+    let planner = Arc::new(ScriptedProvider::new(vec![text_response("the plan")]));
+    let worker_a = Arc::new(ScriptedProvider::new(vec![text_response("analysis A")]));
+    let worker_b = Arc::new(ScriptedProvider::new(vec![
+        tool_call_response(),
+        text_response("analysis B"),
+    ]));
+    let reviewer = Arc::new(ScriptedProvider::new(vec![text_response(
+        "reviewed answer",
+    )]));
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let uncertain = ExecutableTool::safe(
+        ToolDefinition {
+            name: "calc".into(),
+            description: "effect".into(),
+            parameters: ToolSchema::new(serde_json::json!({})),
+            cache_control: None,
+        },
+        move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(lellm_core::ToolError::invalid_input(
+                    "effect completed but reply lost",
+                ))
+            }
+        },
+    );
+    let agent = |provider: Arc<ScriptedProvider>| {
+        AgentBuilder::new(ResolvedModel::new(provider, "test")).compile()
+    };
+    let team = PlannerWorkersReviewer::new(
+        agent(planner.clone()),
+        vec![
+            ("analysis".into(), agent(worker_a.clone())),
+            (
+                "calculation".into(),
+                AgentBuilder::new(ResolvedModel::new(worker_b.clone(), "test"))
+                    .tools(vec![uncertain])
+                    .compile(),
+            ),
+        ],
+        agent(reviewer.clone()),
+        true,
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = || {
+        DurableRuntime::new(
+            Arc::new(FileRunStore::new(dir.path())),
+            RunVersion::new("team-v1", "team-v1"),
+        )
+    };
+    let rt = runtime();
+    let RunOutcome::Suspended(record) = rt
+        .start(
+            "team",
+            team.graph(),
+            team.initial_state(vec![Message::user_text("solve this")])
+                .unwrap(),
+            100,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("unknown worker task should suspend")
+    };
+    assert_eq!(planner.call_count(), 1);
+    assert_eq!(worker_a.call_count(), 1);
+    assert_eq!(reviewer.call_count(), 0);
+    let task = record
+        .tasks
+        .values()
+        .find(|t| t.status == TaskStatus::Unknown)
+        .unwrap();
+    let call = tool_call_response().tool_calls().next().unwrap().clone();
+    let result = Message::tool_result(&call, &Ok(serde_json::json!(42)));
+    rt.resolve_task(
+        "team",
+        &task.id,
+        "confirmed",
+        record.revision,
+        TaskResolution::Completed(serde_json::to_value(result).unwrap()),
+    )
+    .unwrap();
+    drop(rt);
+    let rt = runtime();
+    let RunOutcome::Suspended(record) = rt
+        .resume("team", team.graph(), CancellationToken::new())
+        .await
+        .unwrap()
+    else {
+        panic!("human review should suspend")
+    };
+    assert_eq!(planner.call_count(), 1);
+    assert_eq!(worker_a.call_count(), 1);
+    assert_eq!(worker_b.call_count(), 2);
+    assert_eq!(reviewer.call_count(), 1);
+    let approval = record.approvals.values().next().unwrap();
+    assert_eq!(approval.node, "human_review");
+    rt.submit_decision(
+        "team",
+        &approval.id,
+        &approval.content_token,
+        "approved",
+        record.revision,
+        ApprovalDecision::Approve,
+    )
+    .unwrap();
+    drop(rt);
+    let RunOutcome::Completed(state) = runtime()
+        .resume("team", team.graph(), CancellationToken::new())
+        .await
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        ContentBlock::flatten_text(&state.reviewer().last_response.as_ref().unwrap().content),
+        "reviewed answer"
+    );
+    assert_eq!(state.workers().len(), 2);
+    assert_eq!(reviewer.call_count(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }

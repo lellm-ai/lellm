@@ -1,7 +1,22 @@
-# LeLLM v0.5 产品蓝图
+# LeLLM 产品蓝图
 
-> 版本：v0.5 | 日期：2026-07-01 | 状态：Graph is Runtime, Agent is DSL
-> 设计决策详见 [v05-graph-as-runtime.md](./v05-graph-as-runtime.md)
+> 更新：2026-10-19 | 架构方向：Graph is Runtime, Agent is DSL
+> 原始 v0.5 设计见 [v05-graph-as-runtime.md](./v05-graph-as-runtime.md)；当前优化计划见 [运行时恢复能力计划](../discuss/lellm-runtime-reliability-plan.md)。
+
+## 当前优化主线
+
+**已确认顺序：审批可恢复 → 工具重放边界 → 子图和并行恢复 → 多 Agent 模板。** M1–M4 首个完整切片已实现，尚未发布；使用与迁移见 [可恢复执行](./durable-execution.md)。依据为 [LangGraph 当前调研及本项目源码对照](./langgraph-current-research.md)。
+
+| 阶段 | 交付目标 | 完成条件 |
+| --- | --- | --- |
+| M1 审批可恢复 | 持久化暂停、审批查询、决策去重与单写者保护 | 审批期间进程被终止，重启仍等待同一请求；重复决策不重复推进 |
+| M2 工具重放边界 | 稳定任务身份、逐工具完成收据、幂等键与未知结果策略 | 已保存结果不重做；外部成功但未保存的窗口按声明策略处理 |
+| M3 子图和并行恢复 | 子图身份与位置、能力继承、分支结果保存、父级一次提交 | 子图审批可恢复；成功分支复用；预算、取消、事件路径一致 |
+| M4 多 Agent 模板 | PlannerWorkersReviewer 固定拓扑模板 | Worker 工具对账后复用成功分支，Reviewer 人工审批可重开存储续跑 |
+
+新 `DurableRuntime` 复用 Graph 执行循环，支持审批、逐工具收据、嵌套子图和并行分支恢复。MemoryRunStore / FileRunStore 强制每个 run_id 独占执行；文件后端限定本机进程崩溃恢复。旧 format=1 checkpoint / restore 入口继续保留串行能力与原组合限制。
+
+保留类型化状态、Mutation 与借用式 ExecutionEngine。先完善同步持久化；异步保存、增量快照、Compiler InlinePass 和分布式调度按实际需求及测量结果另行规划。部署限制和普通图缺审批处理器时的行为变更见使用与迁移文档。
 
 ## 一、项目愿景
 
@@ -12,7 +27,9 @@
 - 支持节点 node, 边 edge, 图 graph, Multi-Agent Orchestration
 - 支持流式输出、持久化执行、短期记忆、人类介入（human-in-the-loop）
 
-## 二、v0.5 架构
+## 二、架构方向
+
+以下保留原始设计的分层与目标 API；PlannerBuilder、SupervisorBuilder、Compiler InlinePass 属于规划。示例用于说明设计，具体可用签名以源码与各阶段可编译示例为准。
 
 ### 核心论点
 
@@ -36,7 +53,7 @@
 | Crate | 领域 | 职责 | 依赖 |
 |-------|------|------|------|
 | `lellm-core` | Protocol | 纯协议层：Message, ToolCall, Request/Response, LlmError | serde, thiserror |
-| `lellm-graph` | Execution | 图编排引擎：Graph, Node, Edge, State, Checkpoint, ExecutionEngine, ExecutionSession | core |
+| `lellm-graph` | Execution | 图编排引擎：Graph, Node, Edge, State, Checkpoint, ExecutionEngine | core |
 | `lellm-provider` | Inference | LLM 调用：LlmProvider, CodecProvider, 三权分立 | core |
 | `lellm-agent` | Agent | 智能体：AgentBuilder, ToolUseLoop, AgentState | core, graph, provider |
 | `lellm-mcp` | Protocol | MCP 协议：McpClient, McpTransport | core |
@@ -69,7 +86,7 @@ lellm/
 ├── Cargo.toml                  # workspace root
 ├── lellm/                      # 门面 crate — feature-gated re-export
 ├── lellm-core/                 # 协议层，零运行时依赖
-├── lellm-graph/                # 图编排引擎 + State + Checkpoint + ExecutionSession
+├── lellm-graph/                # 图编排引擎 + State + Checkpoint + ExecutionEngine
 ├── lellm-provider/             # LLM Provider trait + 适配器
 ├── lellm-agent/                # Agent 运行时 (AgentBuilder, ToolUseLoop)
 ├── lellm-mcp/                  # MCP 协议实现
@@ -100,7 +117,7 @@ AgentBuilder  PlannerBuilder  SupervisorBuilder
 
 ──────────────────────────────────────
           Runtime (lellm-graph)
-ExecutionEngine  Node  Edge  State  Graph  ExecutionSession
+ExecutionEngine  Node  Edge  State  Graph  Checkpoint
 
 ──────────────────────────────────────
           Primitive (lellm-graph)
@@ -113,7 +130,7 @@ Inline Pass  (自动 merge Subgraph，用户不需要手动调用)
 
 ### 两层世界划分
 
-**世界一：Runtime DSL（稳定）**
+**世界一：Runtime DSL（目标接口）**
 - AgentBuilder
 - PlannerBuilder
 - SupervisorBuilder
@@ -203,22 +220,11 @@ let mut engine = ExecutionEngine::new(&mut state, None, CancellationToken::new()
 graph.run_inline(&mut engine, 100).await?;
 ```
 
-### 5.5 ExecutionSession
+### 5.5 持久化执行与恢复
 
-```rust
-// 创建 Session
-let mut session = ExecutionSession::new(state, graph.clone());
+当前恢复使用 `Checkpoint` 保存状态投影、`next_node`、累计步数和图指纹；Agent 提供 `invoke_with_checkpoint` / `invoke_with_restore`。完成态恢复不执行节点，恢复后的保存继续使用原 trace。
 
-// 创建 Checkpoint
-let checkpoint = session.checkpoint();
-
-// 从 Checkpoint 恢复
-let session = ExecutionSession::restore(checkpoint, graph);
-
-// 执行
-let mut engine = ExecutionEngine::new(&mut session.state, Some(stream), cancel);
-session.run_with(&mut engine).await?;
-```
+原蓝图中的 `ExecutionSession` / `FrameStack` 设计已由[串行恢复设计](../discuss/lellm-restore-phase1-design.md)调整，不作为当前可用 API。新 `DurableRuntime` 在共享 Graph 执行路径上提供 start / inspect / submit_decision / resume / resolve_task / cancel，format=2 信封保存审批、任务、嵌套帧与预算；与旧入口并存。
 
 ## 六、关键设计决策
 
@@ -226,13 +232,15 @@ session.run_with(&mut engine).await?;
 |------|------|
 | Graph is Runtime | Graph 是唯一的 Runtime，Agent 是 DSL |
 | Checkpoint Projection | `type Checkpoint` 关联类型，Runtime State 与 Checkpoint 分离 |
-| Graph Hash | 从 DSL canonical form 计算，保持输入顺序，不做语义归一化 |
-| ExecutionSession | 持有 State 所有权 + FrameStack + Arc\<Graph\> |
+| Graph Hash | 新协议指纹包含起止节点、有语义的边顺序与嵌套图，另用显式 workflow/schema 版本约束业务兼容性 |
+| 恢复位置 | 新协议保存每个 frame 的 next_node、steps_used、active 和状态投影；审批与任务身份包含路径和调用序号 |
 | StateLens | 零拷贝状态投影，用于 Subgraph 组合 |
 | Subgraph | Graph AST 的一种节点，Runtime 中递归执行 |
 | Engine 借用 State | `ExecutionEngine<'a, S>` 持有 `&'a mut S`，调用方持有所有权 |
 
-## 七、版本路线图
+## 七、历史版本规划
+
+本表记录原始版本意图，不代表这些版本或全部能力已交付。当前执行顺序与完成标准以本文顶部 M1–M4 及关联实施计划为准。
 
 | 版本 | 范围 |
 |------|------|
@@ -240,6 +248,6 @@ session.run_with(&mut engine).await?;
 | **v0.2** | Graph/Node/Edge + 有环图 + BarrierNode + 流式执行 + 错误二分法 |
 | **v0.3** | 6 crate 架构重构 + StateDelta + Checkpoint + ParallelNode + MCP |
 | **v0.4** | ReAct = 有环图 + Typed State + Mutation 事件溯源 |
-| **v0.5** | ✅ Graph is Runtime + Agent is DSL + Checkpoint Projection + ExecutionSession |
-| **v0.6** | Multi-Agent Orchestration + Durable Execution + Human-in-the-loop |
+| **v0.5** | Graph is Runtime + Agent is DSL + Checkpoint Projection；ExecutionSession 旧方案已调整 |
+| **v0.6** | 原计划包含 Multi-Agent / Durable Execution / Human-in-the-loop；现在按 M1–M4 分阶段验收 |
 | **v0.7** | Sampling |

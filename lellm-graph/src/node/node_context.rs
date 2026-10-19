@@ -36,7 +36,7 @@ pub struct LeafContext<'a, S: WorkflowState = State> {
     /// 类型化状态 — 只读引用
     pub(crate) state: &'a S,
     /// 数据面发射器 — 可选（阻塞模式 = None）
-    pub(crate) stream: Option<&'a dyn StreamSink>,
+    pub(crate) stream: Option<&'a std::sync::Arc<dyn StreamSink>>,
     /// 取消令牌
     pub(crate) cancel: &'a CancellationToken,
     /// 控制信号 — 节点写入，Executor 读取
@@ -138,7 +138,7 @@ pub struct NodeContext<'a, S: WorkflowState = State> {
     /// 类型化状态 — 可变引用（仅组合节点如 ParallelNode 需要写权限）
     pub(crate) state: &'a mut S,
     /// 数据面发射器 — 可选（阻塞模式 = None）
-    pub(crate) stream: Option<&'a dyn StreamSink>,
+    pub(crate) stream: Option<&'a std::sync::Arc<dyn StreamSink>>,
     /// 取消令牌
     pub(crate) cancel: &'a CancellationToken,
     /// 控制信号 — 节点写入，Executor 读取
@@ -150,6 +150,10 @@ pub struct NodeContext<'a, S: WorkflowState = State> {
 }
 
 impl<S: WorkflowState> NodeContext<'_, S> {
+    /// 组合节点向子图传递同一个数据流接收器。
+    pub fn stream_sink(&self) -> Option<std::sync::Arc<dyn StreamSink>> {
+        self.stream.cloned()
+    }
     // ─── 读 State ─────────────────────────────────────────────
 
     /// 获取类型化状态（只读）。

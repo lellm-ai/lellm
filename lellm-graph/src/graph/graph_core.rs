@@ -350,6 +350,39 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Graph<S, M> {
         .await
     }
 
+    /// 执行前检查已声明的审批节点；动态 Pause 仍由引擎兜底校验。
+    pub fn validate_approval_handlers(&self, has_handler: bool) -> Result<(), GraphError> {
+        for (name, node) in &self.nodes {
+            match node {
+                NodeKind::Barrier(_) if !has_handler => {
+                    return Err(GraphError::Terminal(TerminalError::BarrierHandlerMissing {
+                        node: name.clone(),
+                    }));
+                }
+                NodeKind::Subgraph(spec) => spec.projector.validate_approval_handlers()?,
+                NodeKind::Parallel(parallel) => parallel.validate_approval_handlers()?,
+                #[allow(deprecated)]
+                NodeKind::External(node) => node.validate_approval_handlers()?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// 新持久化协议的能力校验；逐阶段放开组合节点。
+    pub fn validate_durable(&self) -> Result<(), GraphError> {
+        for node in self.nodes.values() {
+            match node {
+                NodeKind::Subgraph(spec) => spec.projector.validate_durable()?,
+                NodeKind::Parallel(parallel) => parallel.validate_durable()?,
+                #[allow(deprecated)]
+                NodeKind::External(node) => node.validate_durable()?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// 持久化执行校验 — 拒绝含 Parallel/Subgraph/Barrier 的图。
     ///
     /// 第一阶段（串行含循环）在**启动持久化执行时**显式拒绝，

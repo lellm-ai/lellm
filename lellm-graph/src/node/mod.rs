@@ -3,8 +3,10 @@
 pub mod barrier_node;
 pub mod barrier_sink;
 pub mod compiled_subgraph;
+mod graph_branch;
 pub mod node_context;
 pub mod node_core;
+mod parallel_execute;
 pub mod parallel_node;
 pub mod subgraph_spec;
 

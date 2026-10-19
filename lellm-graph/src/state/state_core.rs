@@ -118,44 +118,43 @@ impl crate::state::workflow_state::MergeStrategy<State> for StateMerge {
         base: &State,
         branches: Vec<State>,
     ) -> Result<State, crate::state::workflow_state::WorkflowError> {
-        // Delta 合并：只合并各分支相对 base 实际变更的 key（新增/修改/删除）。
-        // 每个变更 key 记录各分支的新值（None = 删除）；多个分支改同一 key → 冲突。
-        let mut key_changes: std::collections::HashMap<String, Vec<Option<serde_json::Value>>> =
-            std::collections::HashMap::new();
+        // 直接消费分支中的值，避免为每个分支构造两份 key 集合并克隆变更值。
+        // None 表示删除；计数保留多分支写入时的冲突信息。
+        let mut key_changes: HashMap<String, (Option<Value>, usize)> = HashMap::new();
 
-        for branch in &branches {
-            let base_keys: std::collections::HashSet<&String> = base.inner.keys().collect();
-            let branch_keys: std::collections::HashSet<&String> = branch.inner.keys().collect();
-            for key in base_keys.union(&branch_keys) {
-                let key = *key; // union 迭代器产出 &&String，解引用为 &String
-                if branch.inner.get(key) != base.inner.get(key) {
-                    key_changes
-                        .entry(key.to_string())
-                        .or_default()
-                        .push(branch.inner.get(key).cloned());
+        for branch in branches {
+            for key in base.inner.keys() {
+                if !branch.inner.contains_key(key) {
+                    let change = key_changes.entry(key.clone()).or_insert((None, 0));
+                    change.1 += 1;
+                }
+            }
+            for (key, value) in branch.inner {
+                if base.inner.get(&key) != Some(&value) {
+                    let change = key_changes.entry(key).or_insert((None, 0));
+                    change.0 = Some(value);
+                    change.1 += 1;
                 }
             }
         }
 
         let mut merged = base.inner.clone();
-        for (key, changes) in key_changes {
-            if changes.len() > 1 {
+        for (key, (value, writers)) in key_changes {
+            if writers > 1 {
                 return Err(crate::state::workflow_state::WorkflowError::MergeConflict(
                     format!(
                         "parallel merge conflict: key '{}' modified by {} branches",
-                        key,
-                        changes.len()
+                        key, writers
                     ),
                 ));
             }
-            match changes.into_iter().next() {
-                Some(Some(value)) => {
+            match value {
+                Some(value) => {
                     merged.insert(key, value);
                 }
-                Some(None) => {
+                None => {
                     merged.remove(&key);
                 }
-                None => {}
             }
         }
 
@@ -164,6 +163,41 @@ impl crate::state::workflow_state::MergeStrategy<State> for StateMerge {
 
     fn default_instance() -> Self {
         StateMerge
+    }
+}
+
+#[cfg(test)]
+mod state_merge_tests {
+    use super::{State, StateMerge};
+    use crate::state::workflow_state::{MergeStrategy, WorkflowError};
+    use serde_json::json;
+
+    #[test]
+    fn merges_distinct_changes_while_ignoring_unchanged_values() {
+        let mut base = State::new();
+        base.insert("shared".into(), json!({"nested": [1, 2]}));
+        base.insert("removed".into(), json!(true));
+        let mut updated = base.clone();
+        updated.insert("added".into(), json!(42));
+        let mut deleted = base.clone();
+        deleted.remove("removed");
+
+        let merged = StateMerge::merge(&base, vec![updated, deleted]).unwrap();
+        assert_eq!(merged.get("shared"), base.get("shared"));
+        assert_eq!(merged.get("added"), Some(&json!(42)));
+        assert!(!merged.contains_key("removed"));
+    }
+
+    #[test]
+    fn rejects_delete_and_update_of_the_same_key() {
+        let mut base = State::new();
+        base.insert("key".into(), json!(1));
+        let deleted = State::new();
+        let mut updated = base.clone();
+        updated.insert("key".into(), json!(2));
+
+        let error = StateMerge::merge(&base, vec![deleted, updated]).unwrap_err();
+        assert!(matches!(error, WorkflowError::MergeConflict(_)));
     }
 }
 

@@ -89,7 +89,7 @@ impl<S: WorkflowState> ExecutorState<S> for OwnedExecutionEngine<S> {
     fn build_node_context(&mut self) -> NodeContext<'_, S> {
         NodeContext {
             state: &mut self.inner,
-            stream: self.stream.as_deref(),
+            stream: self.stream.as_ref(),
             cancel: &self.cancel,
             control: &mut self.control,
             metadata: &mut self.metadata,
@@ -100,7 +100,7 @@ impl<S: WorkflowState> ExecutorState<S> for OwnedExecutionEngine<S> {
     fn build_leaf_context(&mut self) -> LeafContext<'_, S> {
         LeafContext {
             state: &self.inner,
-            stream: self.stream.as_deref(),
+            stream: self.stream.as_ref(),
             cancel: &self.cancel,
             control: &mut self.control,
             metadata: &mut self.metadata,

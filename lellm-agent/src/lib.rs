@@ -5,6 +5,7 @@
 
 pub mod hook;
 pub mod runtime;
+pub use runtime::templates;
 
 // Re-export serde for compatibility.
 pub use serde;

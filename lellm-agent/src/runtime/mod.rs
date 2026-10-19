@@ -8,6 +8,7 @@ mod checkpoint;
 pub mod config;
 pub mod context;
 pub mod context_ext;
+mod durable;
 pub mod event;
 pub mod event_bridge;
 pub mod fallback;
@@ -18,6 +19,7 @@ pub mod retry;
 #[allow(clippy::module_inception)]
 pub mod runtime;
 pub mod stream_translation;
+pub mod templates;
 pub mod tools;
 pub mod typed_state;
 mod typed_state_merge;
@@ -50,6 +52,7 @@ pub use typed_state::{AgentMutation, AgentState};
 
 // 从 core 再导出，方便用户统一从 lellm::agent 引入
 pub use lellm_core::{IntoToolError, IntoToolResult, ToolError, ToolErrorKind, ToolResult};
+pub use lellm_core::{ToolExecutionContext, ToolReplayPolicy};
 
 // 流式事件翻译
 pub use stream_translation::{AgentStreamEvent, TranslationResult, translate_provider_event};

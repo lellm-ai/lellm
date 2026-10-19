@@ -46,7 +46,7 @@ pub struct BarrierNode<S: WorkflowState = State> {
     _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
+impl<S: WorkflowState> BarrierNode<S> {
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -86,7 +86,9 @@ impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
         self.reject_target = Some(target.into());
         self
     }
+}
 
+impl<S: WorkflowState<Mutation = StateMutation>> BarrierNode<S> {
     pub fn apply_decision_to_ctx(&self, ctx: &mut NodeContext<'_, S>, decision: BarrierDecision) {
         match decision {
             BarrierDecision::Approve => {
@@ -134,6 +136,19 @@ impl<S: WorkflowState> LeafNode<S> for BarrierNode<S> {
 #[allow(deprecated)]
 #[async_trait]
 impl<S: WorkflowState> FlowNode<S> for BarrierNode<S> {
+    fn validate_approval_handlers(&self) -> Result<(), GraphError> {
+        Err(GraphError::Terminal(
+            crate::TerminalError::BarrierHandlerMissing {
+                node: self.name.clone(),
+            },
+        ))
+    }
+    fn validate_durable(&self) -> Result<(), GraphError> {
+        Err(crate::durable::DurableError::Unsupported(
+            "use a graph branch for durable barriers".into(),
+        )
+        .into())
+    }
     async fn execute(&self, ctx: &mut NodeContext<'_, S>) -> Result<(), GraphError> {
         let occurrence = self
             .occurrence_counter

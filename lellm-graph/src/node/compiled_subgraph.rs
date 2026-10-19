@@ -48,6 +48,21 @@ use tokio_util::sync::CancellationToken;
 /// - 类型擦除：Inner/Lens/M 全部隐藏在实现内部
 /// - 可 introspection：提供 `graph_name()` 和 `node_count()`
 pub trait StateProjector<S: WorkflowState>: Send + Sync {
+    /// 持久化组合需要显式声明身份和恢复能力；旧自定义投影器默认拒绝。
+    fn durable_signature(&self) -> Option<String> {
+        None
+    }
+    fn validate_durable(&self) -> Result<(), GraphError> {
+        Err(crate::durable::DurableError::Unsupported(
+            "custom state projector does not declare durable support".into(),
+        )
+        .into())
+    }
+    /// 校验子图的审批配置；自定义执行器可覆写以提前报告配置问题。
+    fn validate_approval_handlers(&self) -> Result<(), GraphError> {
+        Ok(())
+    }
+
     /// 执行 Subgraph — 投影状态 + 递归执行内层 Graph。
     fn execute<'a>(
         &'a self,

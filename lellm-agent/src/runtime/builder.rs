@@ -343,6 +343,12 @@ impl AgentBuilder {
         self
     }
 
+    /// 工具调用前需要人工审批；通过持久化运行入口提交与恢复。
+    pub fn require_tool_approval(mut self, required: bool) -> Self {
+        self.config.require_tool_approval = required;
+        self
+    }
+
     /// 设置上下文预算（Token 上限 + 压缩策略）。
     /// 若要关闭限制，设置 `max_tokens = usize::MAX`。
     pub fn context_budget(mut self, budget: ContextBudget) -> Self {
@@ -395,6 +401,10 @@ impl AgentBuilder {
         self.config.max_output_tokens.hash(&mut hasher);
         self.config.max_total_output_tokens.hash(&mut hasher);
         self.config.max_total_reasoning_tokens.hash(&mut hasher);
+        // 默认 false 保持旧图 hash；启用时显式改变身份。
+        if self.config.require_tool_approval {
+            "require_tool_approval".hash(&mut hasher);
+        }
 
         hasher.finish()
     }

@@ -5,6 +5,7 @@
 // ─── Domain Modules ──────────────────────────────────────────
 pub mod checkpoint;
 pub mod compiler;
+pub mod durable;
 pub mod exec;
 pub mod graph;
 pub mod node;

@@ -19,12 +19,11 @@
 //! 所有分支完成后，变更通过 MergeStrategy 合并到 State。
 
 use std::sync::Arc;
-use std::time::Instant;
 
 #[allow(deprecated)]
 use super::FlowNode;
 use crate::error::GraphError;
-use crate::exec::execution_engine::{ExecutionEngine, ExecutorState, OwnedExecutionEngine};
+use crate::exec::execution_engine::ExecutionEngine;
 use crate::state::workflow_state::{MergeStrategy, WorkflowState};
 use crate::state::{State, StateMerge};
 
@@ -71,10 +70,10 @@ impl<S: WorkflowState, M: MergeStrategy<S>> Clone for ParallelNode<S, M> {
 /// 并行执行错误处理策略。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ParallelErrorStrategy {
-    /// 任一分支失败 → 立即返回错误（其余分支继续执行但结果被忽略）
+    /// 首个失败立即请求取消其余分支，等待协作退出后返回首个错误。
     #[default]
     FailFast,
-    /// 等待所有分支完成，至少一个失败 → 返回错误但包含成功分支的变更
+    /// 等待所有分支完成并返回聚合错误；成功结果保留，父状态不部分提交。
     CollectAll,
 }
 
@@ -85,7 +84,39 @@ impl ParallelNode {
     }
 }
 
+#[allow(deprecated)]
 impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
+    pub(crate) fn validate_approval_handlers(&self) -> Result<(), GraphError> {
+        for (_, node) in &self.branches {
+            node.validate_approval_handlers()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_durable(&self) -> Result<(), GraphError> {
+        let mut names = std::collections::HashSet::new();
+        for (name, node) in &self.branches {
+            if !names.insert(name) {
+                return Err(crate::durable::DurableError::Conflict(format!(
+                    "duplicate branch name {name}"
+                ))
+                .into());
+            }
+            node.validate_durable()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn durable_signature(&self) -> String {
+        serde_json::to_string(&(
+            format!("{:?}", self.error_strategy),
+            self.branches
+                .iter()
+                .map(|(name, node)| (name, node.durable_signature()))
+                .collect::<Vec<_>>(),
+        ))
+        .unwrap()
+    }
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
         self
@@ -116,10 +147,6 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
-
-    fn display_name(&self) -> String {
-        self.label.clone().unwrap_or_else(|| "parallel".to_string())
-    }
 }
 
 /// ParallelNode 构建器。
@@ -132,7 +159,7 @@ pub struct ParallelNodeBuilder<S: WorkflowState = State, M: MergeStrategy<S> = S
 }
 
 impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             label: None,
             branches: Vec::new(),
@@ -149,6 +176,24 @@ impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNodeBuilder<S, M> {
     #[allow(deprecated)]
     pub fn branch(mut self, name: impl Into<String>, node: Arc<dyn FlowNode<S>>) -> Self {
         self.branches.push((name.into(), node));
+        self
+    }
+
+    /// 添加支持嵌套审批与恢复的图分支；局部预算之外仍受根运行总预算限制。
+    pub fn graph_branch<IM>(
+        mut self,
+        name: impl Into<String>,
+        graph: Arc<crate::Graph<S, IM>>,
+        max_steps: usize,
+    ) -> Self
+    where
+        S: 'static,
+        IM: MergeStrategy<S> + 'static,
+    {
+        self.branches.push((
+            name.into(),
+            Arc::new(super::graph_branch::GraphBranch { graph, max_steps }),
+        ));
         self
     }
 
@@ -200,143 +245,13 @@ impl<S: WorkflowState, M: MergeStrategy<S>> std::fmt::Debug for ParallelNode<S, 
     }
 }
 
-impl<S: WorkflowState + Clone + Send + Sync, M: MergeStrategy<S>> ParallelNode<S, M> {
-    /// 执行并行分支 — 创建独立的 OwnedExecutionEngine 给每个分支。
-    #[allow(deprecated)]
-    pub async fn execute(&self, engine: &mut ExecutionEngine<'_, S>) -> Result<(), GraphError> {
-        let start_time = Instant::now();
-        let branch_count = self.branches.len();
-        let display_name = self.display_name();
-
-        tracing::debug!(
-            parallel = %display_name,
-            branches = branch_count,
-            "parallel node started"
-        );
-
-        // Clone typed state for each branch — each branch works on its own copy
-        let base_state = engine.clone_state();
-
-        // Inherit parent's cancel token and stream (fan-out via Arc clone)
-        let parent_cancel = engine.cancel_token().clone();
-        let parent_stream = engine.stream_sink();
-
-        // Clone branch data so async blocks own everything they need
-        let branches: Vec<(String, Arc<dyn super::FlowNode<S>>)> = self
-            .branches
-            .iter()
-            .map(|(n, nd)| (n.clone(), nd.clone()))
-            .collect();
-
-        // Create a future for each branch — no spawn, no 'static required
-        let branch_futures: Vec<_> = branches
-            .into_iter()
-            .map(|(branch_name, node)| {
-                let state = base_state.clone();
-                let child_cancel = parent_cancel.child_token();
-                let child_stream = parent_stream.clone();
-                async move {
-                    let branch_start = Instant::now();
-
-                    // Each branch gets its own OwnedExecutionEngine (child engine)
-                    let mut child_engine =
-                        OwnedExecutionEngine::new(state, child_stream, child_cancel);
-
-                    let mut branch_ctx = child_engine.build_node_context();
-                    let exec_result = node.execute(&mut branch_ctx).await;
-                    // branch_ctx goes out of scope here; explicit drop removed
-                    // (NodeContext only holds references, drop() is a no-op)
-
-                    if let Err(ref e) = exec_result {
-                        return (branch_name, Err(format!("branch execution failed: {e}")));
-                    }
-
-                    // Commit mutations to child engine
-                    child_engine.commit();
-
-                    let duration = branch_start.elapsed();
-
-                    (branch_name, Ok((child_engine.into_state(), duration)))
-                }
-            })
-            .collect();
-
-        // Execute all branches concurrently (no spawn, just concurrent polling)
-        type BranchResult<S> = (String, Result<(S, std::time::Duration), String>);
-        let raw_results: Vec<BranchResult<S>> = futures::future::join_all(branch_futures).await;
-
-        // Process results in branch order
-        let mut branch_states: Vec<S> = Vec::with_capacity(branch_count);
-        let mut errors: Vec<(String, String)> = Vec::new();
-
-        for (branch_name, result) in raw_results {
-            match result {
-                Ok((state, branch_duration)) => {
-                    tracing::debug!(
-                        parallel = %display_name,
-                        branch = %branch_name,
-                        duration_ms = branch_duration.as_millis(),
-                        "branch completed"
-                    );
-                    branch_states.push(state);
-                }
-                Err(reason) => {
-                    errors.push((branch_name, reason));
-                }
-            }
-        }
-
-        // Error handling based on strategy
-        if !errors.is_empty() {
-            match self.error_strategy {
-                ParallelErrorStrategy::FailFast => {
-                    let (name, reason) = &errors[0];
-                    return Err(GraphError::Terminal(
-                        crate::error::TerminalError::NodeExecutionFailed {
-                            node: format!("{}/{}", display_name, name),
-                            source: reason.clone().into(),
-                        },
-                    ));
-                }
-                ParallelErrorStrategy::CollectAll => {
-                    if !branch_states.is_empty() {
-                        for (name, reason) in &errors {
-                            tracing::warn!(
-                                parallel = %display_name,
-                                branch = %name,
-                                error = %reason,
-                                "branch failed (CollectAll strategy)"
-                            );
-                        }
-                    }
-                    let (name, reason) = &errors[0];
-                    return Err(GraphError::Terminal(
-                        crate::error::TerminalError::NodeExecutionFailed {
-                            node: format!("{}/{}", display_name, name),
-                            source: reason.clone().into(),
-                        },
-                    ));
-                }
-            }
-        }
-
-        // Merge all branch states using MergeStrategy — Graph 层并行语义
-        // 传入 base（分支执行前的父状态），策略据此计算各分支 delta，只合并实际变更的 key
-        let merged = M::merge(&base_state, branch_states).map_err(|e| {
-            GraphError::Terminal(crate::error::TerminalError::StateError(format!(
-                "parallel merge conflict: {e}",
-            )))
-        })?;
-
-        // Replace parent state with merged result
-        engine.replace_state(merged);
-
-        tracing::debug!(
-            parallel = %display_name,
-            duration_ms = start_time.elapsed().as_millis(),
-            "parallel node completed"
-        );
-
-        Ok(())
+impl<S: WorkflowState, M: MergeStrategy<S>> ParallelNode<S, M> {
+    /// 并行执行；完成结果按声明顺序合并，错误时不修改父状态。
+    pub fn execute<'a>(
+        &'a self,
+        engine: &'a mut ExecutionEngine<'_, S>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), GraphError>> + Send + 'a>>
+    {
+        Box::pin(super::parallel_execute::execute(self, engine))
     }
 }

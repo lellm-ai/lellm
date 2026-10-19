@@ -38,6 +38,7 @@ pub(crate) fn build_react_graph(
     let llm_name = llm_node.name.clone();
     let budget = llm_node.config.context_budget.clone();
     let stop_config = StopConfig::from_tool_use_config(&llm_node.config);
+    let require_approval = llm_node.config.require_tool_approval;
 
     let mut builder =
         GraphBuilder::<AgentState, AgentStateMerge>::new(format!("react_{}", llm_name));
@@ -46,7 +47,18 @@ pub(crate) fn build_react_graph(
 
     // 节点注册 — 全部迁移到 ExternalLeaf（LeafNode + LeafContext）
     builder.node("llm", NodeKind::ExternalLeaf(Arc::new(llm_node)));
-    builder.node("tool", NodeKind::ExternalLeaf(Arc::new(tool_node)));
+    if require_approval {
+        builder.node(
+            "tool",
+            NodeKind::Barrier(lellm_graph::BarrierNode::new("tool_approval")),
+        );
+        builder.node("tool_execute", NodeKind::ExternalLeaf(Arc::new(tool_node)));
+        builder.edge("tool", "tool_execute");
+        builder.edge("tool_execute", "budget_check");
+    } else {
+        builder.node("tool", NodeKind::ExternalLeaf(Arc::new(tool_node)));
+        builder.edge("tool", "budget_check");
+    }
     builder.node(
         "post_llm_check",
         NodeKind::ExternalLeaf(Arc::new(PostLLMGuard::new(
@@ -88,7 +100,6 @@ pub(crate) fn build_react_graph(
     builder.edge("llm", "post_llm_check");
     builder.edge("post_llm_check", "tool");
     builder.edge_fallback("post_llm_check", "end");
-    builder.edge("tool", "budget_check");
 
     // P0-2: 设置 canonical hash — 从 DSL 层计算，不依赖 compiled graph
     builder.canonical_hash(canonical_hash);

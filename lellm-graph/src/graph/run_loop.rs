@@ -38,14 +38,38 @@ where
     S: WorkflowState,
     M: MergeStrategy<S>,
 {
+    let durable = crate::durable::FrameScope::current();
+    if durable.is_some() {
+        graph.validate_durable()?;
+    } else {
+        graph.validate_approval_handlers(exec_ctx.has_barrier_handler())?;
+    }
     let mut current = start_node.to_string();
     let mut step = steps_used;
+    if let Some(scope) = &durable {
+        let frame = scope.enter(graph, exec_ctx.state_mut(), max_steps)?;
+        let Some(node) = frame.next_node else {
+            return Ok(());
+        };
+        current = node;
+        step = frame.steps_used;
+    }
 
     loop {
+        if let Some(scope) = &durable {
+            if exec_ctx.cancel_token().is_cancelled() {
+                return scope.cancel();
+            }
+        }
+        let durable_node = durable.as_ref().map(|s| s.begin(&current)).transpose()?;
         // 溢出安全预算检查（max_steps = 总预算；恢复时从 steps_used 延续）
-        step = step.checked_add(1).ok_or_else(|| {
-            GraphError::Terminal(TerminalError::StepsExceeded { limit: max_steps })
-        })?;
+        step = if let Some(node) = &durable_node {
+            node.invocation
+        } else {
+            step.checked_add(1).ok_or_else(|| {
+                GraphError::Terminal(TerminalError::StepsExceeded { limit: max_steps })
+            })?
+        };
         if step > max_steps {
             return Err(GraphError::Terminal(TerminalError::StepsExceeded {
                 limit: max_steps,
@@ -61,33 +85,44 @@ where
         let span_id = SpanId::new();
         step_cb.on_node_start(&current, span_id, step);
 
-        let exec_result = match node {
-            NodeKind::Task(n) => {
-                let mut ctx = exec_ctx.build_node_context();
-                n.execute(&mut ctx).await
+        let execute = async {
+            match node {
+                NodeKind::Task(n) => {
+                    let mut ctx = exec_ctx.build_node_context();
+                    n.execute(&mut ctx).await
+                }
+                NodeKind::Condition(n) => {
+                    let mut ctx = exec_ctx.build_leaf_context();
+                    <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
+                }
+                NodeKind::Barrier(n) => {
+                    if let Some(scope) = &durable_node {
+                        scope.approve(n.timeout)
+                    } else {
+                        let mut ctx = exec_ctx.build_leaf_context();
+                        <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
+                    }
+                }
+                NodeKind::External(n) => {
+                    let mut ctx = exec_ctx.build_node_context();
+                    n.execute(&mut ctx).await
+                }
+                NodeKind::ExternalLeaf(n) => {
+                    let mut ctx = exec_ctx.build_leaf_context();
+                    n.execute(&mut ctx).await
+                }
+                NodeKind::Parallel(p) => p.execute(exec_ctx).await,
+                NodeKind::Subgraph(spec) => {
+                    let stream = exec_ctx.stream_sink();
+                    let cancel = exec_ctx.cancel_token().clone();
+                    spec.execute(exec_ctx.state_mut(), stream, cancel).await
+                }
             }
-            NodeKind::Condition(n) => {
-                let mut ctx = exec_ctx.build_leaf_context();
-                <ConditionNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
-            }
-            NodeKind::Barrier(n) => {
-                let mut ctx = exec_ctx.build_leaf_context();
-                <BarrierNode<S> as LeafNode<S>>::execute(n, &mut ctx).await
-            }
-            NodeKind::External(n) => {
-                let mut ctx = exec_ctx.build_node_context();
-                n.execute(&mut ctx).await
-            }
-            NodeKind::ExternalLeaf(n) => {
-                let mut ctx = exec_ctx.build_leaf_context();
-                n.execute(&mut ctx).await
-            }
-            NodeKind::Parallel(p) => p.execute(exec_ctx).await,
-            NodeKind::Subgraph(spec) => {
-                let stream = exec_ctx.stream_sink();
-                let cancel = exec_ctx.cancel_token().clone();
-                spec.execute(exec_ctx.state_mut(), stream, cancel).await
-            }
+        };
+        let exec_result = if let Some(scope) = &durable_node {
+            scope.within(execute).await
+        } else {
+            execute.await
         };
 
         let node_duration = node_start.elapsed();
@@ -106,11 +141,16 @@ where
         {
             let span_id = SpanId::new();
             step_cb.on_barrier_waiting(&barrier_id, &current, span_id);
-            let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await;
+            let outcome = exec_ctx.wait_barrier(&barrier_id, timeout).await?;
 
             let barrier = match node {
                 NodeKind::Barrier(b) => b,
-                _ => unreachable!("Pause 信号仅由 Barrier 节点产生"),
+                _ => {
+                    return Err(crate::durable::DurableError::Unsupported(
+                        "Pause must be represented by a Barrier node".into(),
+                    )
+                    .into());
+                }
             };
 
             // 归约「是否拒绝」：显式 Reject，或超时且 default_action=Reject
@@ -148,6 +188,9 @@ where
 
         // ★ 同步保存检查点：失败 → 错误，不越过边界
         exec_ctx.emit_checkpoint(next.clone(), step).await?;
+        if let Some(scope) = &durable {
+            scope.commit(exec_ctx.state(), next.as_ref().map(|n| n.0.clone()))?;
+        }
 
         match next {
             None => return Ok(()),

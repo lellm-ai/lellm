@@ -198,9 +198,42 @@ pub struct ExecutableTool {
     pub category: Option<ToolCategory>,
     /// 执行函数（运行时，不被序列化）
     executor: ToolFn,
+    context_executor: Option<crate::ContextToolFn>,
+    pub replay_policy: crate::ToolReplayPolicy,
+    pub replay_version: String,
 }
 
 impl ExecutableTool {
+    /// 声明工具行为版本与重放策略。修改副作用语义时升级 version。
+    pub fn with_replay_policy(
+        mut self,
+        policy: crate::ToolReplayPolicy,
+        version: impl Into<String>,
+    ) -> Self {
+        self.replay_policy = policy;
+        self.replay_version = version.into();
+        self
+    }
+
+    pub fn with_context_executor(mut self, executor: crate::ContextToolFn) -> Self {
+        self.context_executor = Some(executor);
+        self
+    }
+
+    pub fn supports_execution_context(&self) -> bool {
+        self.context_executor.is_some()
+    }
+
+    pub fn execute_with_context(
+        &self,
+        args: &serde_json::Value,
+        context: &crate::ToolExecutionContext,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send>> {
+        match &self.context_executor {
+            Some(executor) => executor(args, context),
+            None => self.execute(args),
+        }
+    }
     // ─── 访问器 ───────────────────────────────────────────────
 
     /// 获取工具定义的引用。
@@ -242,6 +275,9 @@ impl ExecutableTool {
             safety,
             category,
             executor: f,
+            context_executor: None,
+            replay_policy: crate::ToolReplayPolicy::default(),
+            replay_version: "unversioned".into(),
         }
     }
 
@@ -258,6 +294,9 @@ impl ExecutableTool {
             safety: ParallelSafety::Safe,
             category: None,
             executor: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
+            context_executor: None,
+            replay_policy: crate::ToolReplayPolicy::default(),
+            replay_version: "unversioned".into(),
         }
     }
 
@@ -272,6 +311,9 @@ impl ExecutableTool {
             safety: ParallelSafety::CategoryExclusive,
             category: Some(category),
             executor: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
+            context_executor: None,
+            replay_policy: crate::ToolReplayPolicy::default(),
+            replay_version: "unversioned".into(),
         }
     }
 
@@ -286,6 +328,9 @@ impl ExecutableTool {
             safety: ParallelSafety::Exclusive,
             category: None,
             executor: Arc::new(move |args: &serde_json::Value| Box::pin(f(args))),
+            context_executor: None,
+            replay_policy: crate::ToolReplayPolicy::default(),
+            replay_version: "unversioned".into(),
         }
     }
 }

@@ -169,15 +169,25 @@ where
             let inner_ref = self.lens.get(outer);
 
             // 2. 创建内层 ExecutionEngine（借用 inner_ref）
-            // Subgraph 内部不需要自动 checkpoint/barrier，传 None
+            // 普通子图暂未传递 checkpoint/barrier；审批由入口校验明确拒绝。
             let mut inner_engine =
                 crate::ExecutionEngine::new(inner_ref, stream, cancel, None, None);
 
             // 3. 执行内层 Graph（Subgraph 内部不需要 step 回调）
             let mut cb = crate::graph::NoopStepCallback;
-            self.graph
-                .run_inline(&mut inner_engine, self.max_steps, &mut cb)
-                .await?;
+            if let Some(parent) = crate::durable::NodeScope::current() {
+                parent
+                    .child("subgraph")
+                    .within(
+                        self.graph
+                            .run_inline(&mut inner_engine, self.max_steps, &mut cb),
+                    )
+                    .await?;
+            } else {
+                self.graph
+                    .run_inline(&mut inner_engine, self.max_steps, &mut cb)
+                    .await?;
+            }
 
             // 4. inner_engine drop → 借用释放 → outer 可继续使用
             Ok(())
@@ -186,6 +196,22 @@ where
 
     fn graph_name(&self) -> &str {
         self.graph.name()
+    }
+
+    fn validate_approval_handlers(&self) -> Result<(), GraphError> {
+        self.graph.validate_approval_handlers(false)
+    }
+
+    fn durable_signature(&self) -> Option<String> {
+        Some(format!(
+            "{}:{}",
+            self.max_steps,
+            crate::durable::scope_signature(&self.graph)
+        ))
+    }
+
+    fn validate_durable(&self) -> Result<(), GraphError> {
+        self.graph.validate_durable()
     }
 
     fn node_count(&self) -> usize {

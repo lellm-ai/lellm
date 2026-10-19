@@ -224,7 +224,7 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
     /// Engine 借用 `state`，不拥有它。调用方在 Engine 外保持所有权。
     ///
     /// - `checkpoint` — 可选的 Checkpoint Sink（`None` = 不需要自动 checkpoint）
-    /// - `barrier` — 可选的 Barrier Sink（`None` = 遇到 Barrier 直接 Approve）
+    /// - `barrier` — 审批处理器；含审批节点时必须显式提供。
     pub fn new(
         state: &'a mut S,
         stream: Option<Arc<dyn StreamSink>>,
@@ -268,19 +268,25 @@ impl<'a, S: WorkflowState> ExecutionEngine<'a, S> {
     /// 等待 Barrier 决策（crate 内部使用）。
     ///
     /// 由 Graph::run_inline() 在检测到 Pause 信号时调用。
-    /// 无 BarrierSink 时，直接返回 Approve。
+    /// 无 BarrierSink 时返回配置错误；自动批准需显式提供 NoopBarrierSink。
     pub(crate) async fn wait_barrier(
         &mut self,
         barrier_id: &crate::event::BarrierId,
         timeout: Option<std::time::Duration>,
-    ) -> crate::node::barrier_sink::BarrierOutcome {
+    ) -> Result<crate::node::barrier_sink::BarrierOutcome, GraphError> {
         if let Some(ref mut sink) = self.barrier {
-            sink.wait_decision(barrier_id, timeout).await
+            Ok(sink.wait_decision(barrier_id, timeout).await)
         } else {
-            crate::node::barrier_sink::BarrierOutcome::Decision(
-                crate::event::BarrierDecision::Approve,
-            )
+            Err(GraphError::Terminal(
+                crate::TerminalError::BarrierHandlerMissing {
+                    node: barrier_id.node_id.clone(),
+                },
+            ))
         }
+    }
+
+    pub(crate) fn has_barrier_handler(&self) -> bool {
+        self.barrier.is_some()
     }
 
     // ─── Executor API ─────────────────────────────────────────
@@ -386,7 +392,7 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
     fn build_node_context(&mut self) -> crate::node::node_context::NodeContext<'_, S> {
         crate::node::node_context::NodeContext {
             state: self.state,
-            stream: self.stream.as_deref(),
+            stream: self.stream.as_ref(),
             cancel: &self.cancel,
             control: &mut self.control,
             metadata: &mut self.metadata,
@@ -397,7 +403,7 @@ impl<'a, S: WorkflowState> ExecutorState<S> for ExecutionEngine<'a, S> {
     fn build_leaf_context(&mut self) -> crate::node::node_context::LeafContext<'_, S> {
         crate::node::node_context::LeafContext {
             state: self.state,
-            stream: self.stream.as_deref(),
+            stream: self.stream.as_ref(),
             cancel: &self.cancel,
             control: &mut self.control,
             metadata: &mut self.metadata,
@@ -438,4 +444,5 @@ pub type ExecutionContext<'a, S> = ExecutionEngine<'a, S>;
 /// 与 `ExecutionEngine<'a, S>` 的区别：
 /// - `ExecutionEngine<'a, S>` 借用 `&'a mut S`，用于主执行路径
 /// - `OwnedExecutionEngine<S>` 拥有 `S`，用于需要独立 State 副本的场景（如 Parallel 分支）
+#[allow(unused_imports)]
 pub use crate::exec::owned_execution_engine::OwnedExecutionEngine;
